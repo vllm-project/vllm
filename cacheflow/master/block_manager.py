@@ -119,10 +119,10 @@ class BlockSpaceManager:
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
-            block = self.gpu_allocator.allocate()
-            block_table.append(block)
+            new_block = self.gpu_allocator.allocate()
+            block_table.append(new_block)
             self.gpu_allocator.free(last_block)
-            return last_block.block_number, block.block_number
+            return last_block.block_number, new_block.block_number
 
     def fork(self, src_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
