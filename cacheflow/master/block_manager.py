@@ -7,7 +7,7 @@ from cacheflow.sequence import SequenceStatus
 from cacheflow.utils import Device
 
 
-class BlockAllocator:
+class BlockManager:
 
     def __init__(
         self,
@@ -63,8 +63,8 @@ class BlockSpaceManager:
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
 
-        self.gpu_allocator = BlockAllocator(Device.GPU, block_size, num_gpu_blocks)
-        self.cpu_allocator = BlockAllocator(Device.CPU, block_size, num_cpu_blocks)
+        self.gpu_allocator = BlockManager(Device.GPU, block_size, num_gpu_blocks)
+        self.cpu_allocator = BlockManager(Device.CPU, block_size, num_cpu_blocks)
 
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
