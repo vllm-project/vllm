@@ -95,7 +95,7 @@ class BlockSpaceManager:
         # Simple heuristic: If there is at least one free block
         # for each sequence, we can append.
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
-        num_seqs = seq_group.num_seqs(status=SequenceStatus.SERVING)
+        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
         return num_seqs <= num_free_gpu_blocks
 
     def append(self, seq: Sequence) -> Optional[Tuple[int, int]]:

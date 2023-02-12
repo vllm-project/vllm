@@ -7,7 +7,7 @@ from cacheflow.decoding import DecodingParams
 
 class SequenceStatus(enum.Enum):
     PENDING = enum.auto()
-    SERVING = enum.auto()
+    RUNNING = enum.auto()
     SWAPPED = enum.auto()
     FINISHED = enum.auto()
 
