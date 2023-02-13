@@ -1,5 +1,7 @@
-from cacheflow.worker.models.opt import OPTForCausalLM
+from cacheflow.worker.models.model_utils import get_model
+
 
 __all__ = [
-    'OPTForCausalLM',
+    'get_model',
+    
 ]
