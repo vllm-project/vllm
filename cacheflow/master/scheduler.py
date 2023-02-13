@@ -8,7 +8,7 @@ from cacheflow.sequence import SequenceStatus
 
 class Scheduler:
 
-    def __int__(
+    def __init__(
         self,
         controllers: List,
         block_size: int,
