@@ -115,13 +115,13 @@ class BlockSpaceManager:
         last_block = block_table[-1]
         assert last_block.device == Device.GPU
         if last_block.ref_count == 1:
-            # Append.
+            # Not shared with other sequences. Appendable.
             return None
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
             new_block = self.gpu_allocator.allocate()
-            block_table.append(new_block)
+            block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
             return last_block.block_number, new_block.block_number
 
