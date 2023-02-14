@@ -147,12 +147,12 @@ class BlockSpaceManager:
 
     def can_swap_in(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
-        num_running_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
+        num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
         # NOTE: Conservatively, we assume that every sequence will allocate
         # at least one free block right after the swap-in.
         # NOTE: This should match the logic in can_append().
-        return len(blocks) + num_running_seqs <= num_free_blocks
+        return len(blocks) + num_swapped_seqs <= num_free_blocks
 
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # src_block_number -> dst_block_number
