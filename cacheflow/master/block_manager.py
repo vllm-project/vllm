@@ -166,6 +166,7 @@ class BlockSpaceManager:
             for cpu_block in block_table:
                 if cpu_block in mapping:
                     gpu_block = mapping[cpu_block]
+                    gpu_block.ref_count += 1
                 else:
                     gpu_block = self.gpu_allocator.allocate()
                     mapping[cpu_block] = gpu_block
@@ -196,6 +197,7 @@ class BlockSpaceManager:
             for gpu_block in block_table:
                 if gpu_block in mapping:
                     cpu_block = mapping[gpu_block]
+                    cpu_block.ref_count += 1
                 else:
                     cpu_block = self.cpu_allocator.allocate()
                     mapping[gpu_block] = cpu_block
