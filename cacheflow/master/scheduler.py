@@ -42,9 +42,9 @@ class Scheduler:
         self.pending: List[SequenceGroup] = []
 
         # Blocks that need to be swaped or copied before model execution.
-        self.blocks_to_swap_in: Dict[int, int] = []
-        self.blocks_to_swap_out: Dict[int, int] = []
-        self.blocks_to_copy: Dict[int, int] = []
+        self.blocks_to_swap_in: Dict[int, int] = {}
+        self.blocks_to_swap_out: Dict[int, int] = {}
+        self.blocks_to_copy: Dict[int, int] = {}
 
     def _free_seq(self, seq: Sequence) -> None:
         seq.status = SequenceStatus.FINISHED
@@ -55,6 +55,8 @@ class Scheduler:
         for seq in seq_group.seqs:
             seq.status = SequenceStatus.RUNNING
         self.serving.append(seq_group)
+        # FIXME
+        self.num_steps[seq_group.group_id] = 0
 
     def _append(self, seq_group: SequenceGroup) -> None:
         for seq in seq_group.seqs:
@@ -123,6 +125,7 @@ class Scheduler:
         # NOTE: Here we implicitly assume FCFS scheduling.
         # TODO(woosuk): Add a heuristic to control the maximum batch size.
         if not self.swapped:
+            # FIXME: Acquire a lock.
             for i, seq_group in enumerate(self.pending):
                 if self.block_manager.can_allocate(seq_group):
                     self._allocate(seq_group)
@@ -130,11 +133,13 @@ class Scheduler:
                     # FIXME: Consider the race condition.
                     self.pending = self.pending[i:]
                     break
+            else:
+                self.pending.clear()
 
     def step(self) -> None:
         # Ensure that either swap-in or swap-out is performed.
-        if self.blocks_to_swap_in is not None:
-            assert self.blocks_to_swap_out is None
+        if self.blocks_to_swap_in:
+            assert not self.blocks_to_swap_out
 
         # Execute the first stage of the pipeline.
         self.controllers[0].execute_stage(
@@ -142,6 +147,7 @@ class Scheduler:
             self.blocks_to_swap_out.copy(),
             self.blocks_to_copy.copy(),
         )
+
         # Clear for the next step.
         self.blocks_to_swap_in.clear()
         self.blocks_to_swap_out.clear()
@@ -187,7 +193,7 @@ class Scheduler:
         # Update the serving states.
         serving: List[SequenceGroup] = []
         for seq_group in self.serving:
-            if seq_group.num_seqs(status=SequenceStatus.RUNNING) == 0:
+            if all(seq.status == SequenceStatus.FINISHED for seq in seq_group.seqs):
                 del self.num_steps[seq_group.group_id]
                 del self.max_num_steps[seq_group.group_id]
                 del self.stop_token_ids[seq_group.group_id]
