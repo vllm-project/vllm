@@ -7,7 +7,7 @@ BLANK_TOKEN_ID = -1
 
 class LogicalTokenBlock:
 
-    def __int__(
+    def __init__(
         self,
         block_number: int,
         block_size: int,
