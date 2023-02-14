@@ -1,4 +1,4 @@
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from cacheflow.block import PhysicalTokenBlock
 from cacheflow.sequence import Sequence
