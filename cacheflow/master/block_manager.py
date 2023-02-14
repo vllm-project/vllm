@@ -210,8 +210,8 @@ class BlockSpaceManager:
         }
         return block_number_mapping
 
-    def _free_blocks(self, blocks: Iterable[PhysicalTokenBlock]) -> None:
-        for block in blocks:
+    def _free_block_table(self, block_table: BlockTable) -> None:
+        for block in block_table:
             if block.device == Device.GPU:
                 self.gpu_allocator.free(block)
             else:
@@ -219,10 +219,10 @@ class BlockSpaceManager:
 
     def free(self, seq: Sequence) -> None:
         block_table = self.block_tables[seq.seq_id]
-        self._free_blocks(block_table)
+        self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]
 
     def reset(self) -> None:
         for block_table in self.block_tables.values():
-            self._free_blocks(block_table)
+            self._free_block_table(block_table)
         self.block_tables.clear()
