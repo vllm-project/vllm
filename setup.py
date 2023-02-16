@@ -10,7 +10,7 @@ ext_modules = []
 # Cache operations.
 cache_extension = cpp_extension.CUDAExtension(
     name='cacheflow.ops',
-    sources=['csrc/cache.cpp', 'csrc/cache_kernel.cu'],
+    sources=['csrc/cache.cpp', 'csrc/cache_kernels.cu'],
     extra_compile_args={'cxx': CXX_FLAGS, 'nvcc': NVCC_FLAGS},
 )
 ext_modules.append(cache_extension)
