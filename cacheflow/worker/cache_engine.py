@@ -1,6 +1,7 @@
 from typing import Dict, List, Tuple
 
 import torch
+from cacheflow import ops
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -92,14 +93,30 @@ class CacheEngine:
             cpu_cache.append((key_blocks, value_blocks))
         return cpu_cache
 
+    def _copy_blocks(
+        self,
+        src: List[KVCache],
+        dst: List[KVCache],
+        src_to_dst: Dict[int, int],
+    ) -> None:
+        with torch.cuda.stream(self.cache_stream):
+            for i in range(self.num_layers):
+                src_key_cache, src_value_cache = src[i]
+                dst_key_cache, dst_value_cache = dst[i]
+                # Copy the key blocks.
+                ops.copy_cache_blocks(
+                    src_key_cache, dst_key_cache, src_to_dst)
+                # Copy the value blocks.
+                ops.copy_cache_blocks(
+                    src_value_cache, dst_value_cache, src_to_dst)
+                event = self.events[i]
+                event.record(stream=self.cache_stream)
+
     def copy(self, src_to_dst: Dict[int, int]) -> None:
-        for event in self.events:
-            pass
+        self._copy_blocks(self.gpu_cache, self.gpu_cache, src_to_dst)
 
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:
-        for event in self.events:
-            pass
+        self._copy_blocks(self.cpu_cache, self.gpu_cache, src_to_dst)
 
     def swap_out(self, src_to_dst: Dict[int, int]) -> None:
-        for event in self.events:
-            pass
+        self._copy_blocks(self.gpu_cache, self.cpu_cache, src_to_dst)
