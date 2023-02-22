@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from cacheflow.worker.models.opt import OPTForCausalLM
+from cacheflow.models.opt import OPTForCausalLM
 
 MODEL_CLASSES = {
     'opt': OPTForCausalLM,
