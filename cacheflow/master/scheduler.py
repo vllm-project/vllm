@@ -216,7 +216,7 @@ class Scheduler:
                     self.block_manager.fork(parent_seq, seq)
 
                 # Append a new token to the sequence.
-                seq.append(next_token)
+                seq.append([next_token])
 
                 # Check if the sequence has generated a stop token.
                 if next_token in stop_token_ids:

@@ -165,6 +165,7 @@ class Worker:
         output = self.model(
             input_ids=input_tokens,
             positions=input_positions,
+            kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
             cache_events=cache_events,
         )
