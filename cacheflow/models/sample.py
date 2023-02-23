@@ -8,15 +8,12 @@ from cacheflow.models import InputMetadata
 
 class Sampler(nn.Module):
 
-    def __init__(
-        self,
-        embedding: torch.Tensor,
-    ) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.embedding = embedding  # [vocab_size, hidden_size]
 
     def forward(
         self,
+        embedding: torch.Tensor,
         hidden_states: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> Dict[int, Tuple[int, int]]:
@@ -31,7 +28,7 @@ class Sampler(nn.Module):
         hidden_states = hidden_states[last_token_indicies]
 
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, self.embedding.t())
+        logits = torch.matmul(hidden_states, embedding.t())
 
         # Sample the next tokens.
         # TODO(woosuk): Implement other sampling methods.

@@ -227,7 +227,7 @@ class OPTForCausalLM(OPTPreTrainedModel):
         self.model = OPTModel(config)
         # the lm_head weight is automatically tied to the embed tokens weight
         self.lm_head = nn.Linear(config.word_embed_proj_dim, config.vocab_size, bias=False)
-        self.sampler = Sampler(embedding=self.lm_head.weight)
+        self.sampler = Sampler()
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -242,5 +242,6 @@ class OPTForCausalLM(OPTPreTrainedModel):
     ) -> Dict[int, Tuple[int, int]]:
         hidden_states = self.model(
             input_ids, positions, kv_caches, input_metadata, cache_events)
-        next_tokens = self.sampler(hidden_states, input_metadata)
+        next_tokens = self.sampler(
+            self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
