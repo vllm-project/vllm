@@ -14,7 +14,7 @@ class InputMetadata:
         block_tables: torch.Tensor,
     ) -> None:
         self.prompt_lens = prompt_lens
-        self.prompt_block_table = slot_mapping
+        self.slot_mapping = slot_mapping
         self.context_lens = context_lens
         self.max_context_len = max_context_len
         self.block_tables = block_tables
