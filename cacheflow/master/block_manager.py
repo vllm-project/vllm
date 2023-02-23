@@ -228,3 +228,7 @@ class BlockSpaceManager:
         for block_table in self.block_tables.values():
             self._free_block_table(block_table)
         self.block_tables.clear()
+
+    def get_block_table(self, seq: Sequence) -> List[int]:
+        block_table = self.block_tables[seq.seq_id]
+        return [block.block_number for block in block_table]
