@@ -17,11 +17,9 @@ class Sequence:
         self,
         seq_id: int,
         token_ids: List[int],
-        max_context_len: int,
         block_size: int,
     ) -> None:
         self.seq_id = seq_id
-        self.max_context_len = max_context_len
         self.block_size = block_size
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
