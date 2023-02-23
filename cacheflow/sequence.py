@@ -49,6 +49,9 @@ class Sequence:
             last_block.append(token_ids[:num_empty_slots])
             token_ids = token_ids[num_empty_slots:]
 
+    def get_len(self) -> int:
+        return sum(block.num_tokens for block in self.logical_token_blocks)
+
     def get_token_ids(self) -> List[int]:
         token_ids: List[int] = []
         for block in self.logical_token_blocks:
