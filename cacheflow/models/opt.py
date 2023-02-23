@@ -179,7 +179,6 @@ class OPTDecoder(OPTPreTrainedModel):
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
         pos_embeds = self.embed_positions(positions)
-        pos_embeds = None
         if self.project_in is not None:
             inputs_embeds = self.project_in(inputs_embeds)
         hidden_states = inputs_embeds + pos_embeds
