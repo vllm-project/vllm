@@ -1,7 +1,7 @@
 from typing import Optional, Set
 
 
-class DecodingParams:
+class SamplingParams:
 
     def __init__(
         self,
