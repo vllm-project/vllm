@@ -13,7 +13,7 @@ class Sampler(nn.Module):
         embedding: torch.Tensor,
     ) -> None:
         super().__init__()
-        self.embedding = embedding.t()  # [hidden_size, vocab_size]
+        self.embedding = embedding  # [vocab_size, hidden_size]
 
     def forward(
         self,
@@ -31,7 +31,7 @@ class Sampler(nn.Module):
         hidden_states = hidden_states[last_token_indicies]
 
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, self.embedding)
+        logits = torch.matmul(hidden_states, self.embedding.t())
 
         # Sample the next tokens.
         # TODO(woosuk): Implement other sampling methods.
