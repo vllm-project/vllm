@@ -236,6 +236,12 @@ class Scheduler:
                 del self.max_num_steps[seq_group.group_id]
                 del self.stop_token_ids[seq_group.group_id]
                 # TODO: Return the seq_group to the client.
+                from transformers import AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained('facebook/opt-125m')
+                for seq in seq_group.seqs:
+                    token_ids = seq.get_token_ids()
+                    output = tokenizer.decode(token_ids, skip_special_tokens=True)
+                    print(f'Seq {seq.seq_id}: {output}')
             else:
                 running.append(seq_group)
         self.running = running
