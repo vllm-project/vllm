@@ -93,13 +93,13 @@ class Scheduler:
                 seq.status = SequenceStatus.SWAPPED
         self.swapped.append(seq_group)
 
-    def pre_step(self) -> None:
+    def step(self) -> None:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, int] = {}
 
-        # 1. Prepare new slots for the running sequences.
+        # 1. Reserve new slots for the running sequences.
         # NOTE: Here we implicitly assume FCFS scheduling.
         # That is, the most recently added sequence group is the first
         # to be swapped out.
@@ -159,20 +159,11 @@ class Scheduler:
             else:
                 self.pending.clear()
 
-        # Execute step.
-        self.step(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
-
-    def step(
-        self,
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, int],
-    ) -> None:
         # Ensure that swap-in and swap-out never happen at the same timestep.
         if blocks_to_swap_in:
             assert not blocks_to_swap_out
 
-        # Create input data structures.
+        # 4. Create input data structures.
         prompt_tokens: Dict[int, List[int]] = {}
         generation_tokens: Dict[int, int] = {}
         context_lens: Dict[int, int] = {}
@@ -195,7 +186,7 @@ class Scheduler:
                     generation_tokens[seq_id] = seq.get_token_ids()[-1]
                     context_lens[seq_id] = seq.get_len()
 
-        # Execute the first stage of the pipeline.
+        # 5. Execute the first stage of the pipeline.
         self.controllers[0].execute_stage(
             prompt_tokens,
             generation_tokens,
