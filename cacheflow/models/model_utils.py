@@ -25,7 +25,8 @@ def get_model(
         torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype.lower()]
     else:
         torch_dtype = dtype
-    for model_class, model in MODEL_CLASSES.items():
+    for model_class, hf_model in MODEL_CLASSES.items():
         if model_class in model_name:
-            return model.from_pretrained(model_name, torch_dtype=torch_dtype)
+            model = hf_model.from_pretrained(model_name, torch_dtype=torch_dtype)
+            return model.eval()
     raise ValueError(f'Invalid model name: {model_name}')
