@@ -5,25 +5,36 @@ import torch
 from cacheflow.models import get_model
 from cacheflow.models import InputMetadata
 from cacheflow.worker.cache_engine import CacheEngine
-
-
+from cacheflow.parallel_utils.tensor_parallel import model_parallel_cuda_manual_seed
+from cacheflow.parallel_utils.parallel_state import initialize_model_parallel
+from cacheflow.utils import set_random_seed
 class Worker:
 
     def __init__(
         self,
-        worker_id: int,
-        gpu_id: int,
         model_name: str,
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         dtype: str,
+        distributed_init_method: str,
+        rank: int,
+        local_rank: int,
+        world_size: int,
+        tensor_parallel_size: int = 1,
+        pipeline_parallel_size: int = 1,
     ) -> None:
-        self.worker_id = worker_id
-        self.gpu_id = gpu_id
+        self.init_distributed_environment(distributed_init_method,
+                                          rank,
+                                          local_rank,
+                                          world_size,
+                                          tensor_parallel_size,
+                                          pipeline_parallel_size)
+        self.worker_id = rank
+        self.gpu_id = local_rank
         self.block_size = block_size
 
-        self.device = torch.device('cuda', index=gpu_id)
+        self.device = torch.device('cuda', index=self.gpu_id)
 
         # Initialize the model.
         # FIXME(woosuk): This is a hack.
@@ -34,8 +45,8 @@ class Worker:
         self.dtype = self.model.dtype
 
         self.cache_engine = CacheEngine(
-            worker_id=worker_id,
-            gpu_id=gpu_id,
+            worker_id=self.worker_id,
+            gpu_id=self.gpu_id,
             num_layers=self.num_layers,
             num_heads=self.num_heads,
             head_size=self.head_size,
@@ -46,6 +57,31 @@ class Worker:
         )
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
+
+
+    def init_distributed_environment(self,
+                                     distributed_init_method: str,
+                                     rank: int,
+                                     local_rank: int,
+                                     world_size: int,
+                                     tensor_parallel_size: int = 1,
+                                     pipeline_parallel_size: int = 1,
+        ):
+        """Initialize the distributed environment."""
+        torch.cuda.set_device(local_rank)
+        torch.distributed.init_process_group(
+            backend='nccl',
+            init_method=distributed_init_method,
+            world_size=world_size,
+            rank=rank,
+        )
+        # A small all_reduce for warmup.
+        torch.distributed.all_reduce(torch.zeros(1).cuda())
+        initialize_model_parallel(tensor_parallel_size,
+                                  pipeline_parallel_size)
+        set_random_seed(0)
+        model_parallel_cuda_manual_seed(0)
+
 
     def prepare_inputs(
         self,

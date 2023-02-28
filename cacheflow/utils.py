@@ -1,5 +1,9 @@
 import enum
+import random
 
+import numpy as np
+import torch
+import ray
 
 class Device(enum.Enum):
     GPU = enum.auto()
@@ -18,3 +22,8 @@ class Counter:
 
     def reset(self) -> None:
         self.counter = 0
+
+def set_random_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
