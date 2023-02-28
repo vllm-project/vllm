@@ -1,0 +1,1 @@
+The files in this folder are ported from the [fairscale](https://github.com/facebookresearch/fairscale/tree/main/fairscale/nn/model_parallel) and originally from [Megatron-LM](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core/tensor_parallel).
