@@ -15,7 +15,9 @@ class BlockManager:
         block_size: int,
         num_blocks: int,
     ) -> None:
-        assert block_size in [8, 16, 32]
+        if block_size not in [8, 16]:
+            raise ValueError(f'Unsupported block size: {block_size}'
+                             'The block size must be either 8 or 16.')
         self.device = device
         self.block_size = block_size
         self.num_blocks = num_blocks
