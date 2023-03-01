@@ -9,15 +9,22 @@ ext_modules = []
 
 # Cache operations.
 cache_extension = cpp_extension.CUDAExtension(
-    name='cacheflow.ops',
+    name='cacheflow.cache_ops',
     sources=['csrc/cache.cpp', 'csrc/cache_kernels.cu'],
     extra_compile_args={'cxx': CXX_FLAGS, 'nvcc': NVCC_FLAGS},
 )
 ext_modules.append(cache_extension)
 
+# Attention kernels.
+attention_extension = cpp_extension.CUDAExtension(
+    name='cacheflow.attention_ops',
+    sources=['csrc/attention.cpp', 'csrc/attention_kernels.cu'],
+    extra_compile_args={'cxx': CXX_FLAGS, 'nvcc': NVCC_FLAGS},
+)
+ext_modules.append(attention_extension)
+
 setuptools.setup(
     name='cacheflow',
-    requires_python='>=3.9',
     ext_modules=ext_modules,
     cmdclass={'build_ext': cpp_extension.BuildExtension},
 )

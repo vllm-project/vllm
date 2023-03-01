@@ -20,7 +20,7 @@ __global__ void single_query_cached_kv_attention_kernel(
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
-  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, block_size, head_size]
+  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
   const float scale,
   const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
   const int* __restrict__ context_lens,   // [num_seqs]
@@ -110,11 +110,12 @@ __global__ void single_query_cached_kv_attention_kernel(
     const float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs, k_vecs);
     const bool mask = token_idx >= context_len;
   
-    if (!mask && thread_group_offset == 0) {
+    if (thread_group_offset == 0) {
       // Store the partial reductions to shared memory.
-      logits[token_idx] = qk;
+      // NOTE(woosuk): It is required to zero out the masked logits.
+      logits[token_idx] = mask ? 0.f : qk;
       // Update the max value.
-      qk_max = fmaxf(qk_max, qk);
+      qk_max = mask ? qk_max : fmaxf(qk_max, qk);
     }
   }
 
@@ -125,11 +126,13 @@ __global__ void single_query_cached_kv_attention_kernel(
   for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
     qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
   }
-  // Perform reduction across the warps to get the max qk value for the sequence.
   if (lane == 0) {
     red_smem[warp_idx] = qk_max;
   }
   __syncthreads();
+
+  // TODO(woosuk): Refactor this part.
+  // Get the max qk value for the sequence.
   qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
@@ -139,72 +142,98 @@ __global__ void single_query_cached_kv_attention_kernel(
   qk_max = __shfl_sync(uint32_t(-1), qk_max, 0);
 
   // Get the sum of the exp values.
-  float sum = 0.0f;
+  float exp_sum = 0.f;
   for (int i = thread_idx; i < context_len; i += NUM_THREADS) {
     float val = __expf(logits[i] - qk_max);
     logits[i] = val;
-    sum += val;
+    exp_sum += val;
   }
-  sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], sum);
+  exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
 
   // Compute softmax.
-  const float inv_sum = __fdividef(1.f, sum + 1e-6f);
+  const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
   for (int i = thread_idx; i < context_len; i += NUM_THREADS) {
     logits[i] *= inv_sum;
   }
   __syncthreads();
 
-  // FIXME(woosuk)
-  static_assert(HEAD_SIZE == 2 * WARP_SIZE || HEAD_SIZE == 4 * WARP_SIZE ||
-                HEAD_SIZE == 8 * WARP_SIZE,
-                "HEAD_SIZE must be one of 64, 128, and 256.");
-  constexpr int V_VEC_SIZE = HEAD_SIZE / WARP_SIZE;
+  // Each thread will fetch 16 bytes from the value cache at a time.
+  constexpr int V_VEC_SIZE = 16 / sizeof(scalar_t);
   using V_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
-  // The type of A_vec can be different from the type of K_vec.
-  // 1. When the actual type of Q, K, V is half, the QKV vectors use uint types.
-  //    However, A_vec always has a floating point type.
-  // 2. Each element of A_vec is always a float, because we use FP32 accumulation.
-  using A_vec = typename FloatVec<V_vec>::Type;
-  A_vec out_vec;
+  using L_vec = typename FloatVec<V_vec>::Type;
+
+  constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;
+  constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
+  constexpr int NUM_ROWS_PER_THREAD = (HEAD_SIZE + NUM_ROWS_PER_ITER - 1) / NUM_ROWS_PER_ITER;
+
+  float accs[NUM_ROWS_PER_THREAD];
+#pragma unroll
+  for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+    accs[i] = 0.f;
+  }
 
   for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
     const int physical_block_number = block_table[block_idx];
-#pragma unroll
-    for (int i = 0; i < BLOCK_SIZE; i++) {
-      const int physical_block_offset = i;
-      const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
-      const bool mask = token_idx >= context_len;
-      const float logit = mask ? 0.f : logits[token_idx];
+    const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
+    const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
+    L_vec logits_vec = *reinterpret_cast<L_vec*>(logits + token_idx);
 
-      const scalar_t* v_ptr = v_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
-                                      + head_idx * HEAD_SIZE * BLOCK_SIZE
-                                      + physical_block_offset * HEAD_SIZE;
-      V_vec v_vec = *reinterpret_cast<const V_vec*>(v_ptr + lane * V_VEC_SIZE);
-      // Compute acc += logit * v.
-      out_vec = fma(logit, cast_to_float(v_vec), out_vec);
+    const scalar_t* v_ptr = v_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
+                                    + head_idx * HEAD_SIZE * BLOCK_SIZE;
+#pragma unroll
+    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+      const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
+      if (row_idx < HEAD_SIZE) {
+        const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
+        V_vec v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
+        accs[i] += dot(logits_vec, cast_to_float(v_vec));
+      }
     }
+  }
+
+  // Perform reduction within each warp.
+#pragma unroll
+  for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+    float acc = accs[i];
+#pragma unroll
+    for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
+      acc += __shfl_xor_sync(uint32_t(-1), acc, mask);
+    }
+    accs[i] = acc;
   }
 
   // NOTE(woosuk): A barrier is required because the shared memory space for logits
   // is reused for the output.
   __syncthreads();
 
-  // Run final reduction.
-  scalar_t* out_smem = reinterpret_cast<scalar_t*>(shared_mem);
+  // Perform reduction across warps.
+  float* out_smem = reinterpret_cast<float*>(shared_mem);
 #pragma unroll
   for (int i = NUM_WARPS; i > 1; i /= 2) {
     int mid = i / 2;
     // Upper warps write to shared memory.
     if (warp_idx >= mid && warp_idx < i) {
-      scalar_t* dst = &out_smem[(warp_idx - mid) * HEAD_SIZE];
-      convert_from_float(*reinterpret_cast<V_vec*>(dst + lane * V_VEC_SIZE), out_vec);
+      float* dst = &out_smem[(warp_idx - mid) * HEAD_SIZE];
+#pragma unroll
+      for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+        const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
+        if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
+          dst[row_idx] = accs[i];
+        }
+      }
     }
     __syncthreads();
 
-    // Lower thread groups update the output.
+    // Lower warps update the output.
     if (warp_idx < mid) {
-      scalar_t* src = &out_smem[warp_idx * HEAD_SIZE];
-      out_vec = add(*reinterpret_cast<const V_vec*>(src + lane * V_VEC_SIZE), out_vec);
+      const float* src = &out_smem[warp_idx * HEAD_SIZE];
+#pragma unroll
+      for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+        const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
+        if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
+          accs[i] += src[row_idx];
+        }
+      }
     }
     __syncthreads();
   }
@@ -212,7 +241,13 @@ __global__ void single_query_cached_kv_attention_kernel(
   // Write the final output.
   if (warp_idx == 0) {
     scalar_t* out_ptr = out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
-    convert_from_float(*reinterpret_cast<V_vec*>(out_ptr + lane * V_VEC_SIZE), out_vec);
+#pragma unroll
+    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+      const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
+      if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
+        convert_from_float(*(out_ptr + row_idx), accs[i]);
+      }
+    }
   }
 }
 
@@ -221,53 +256,73 @@ __global__ void single_query_cached_kv_attention_kernel(
 #define LAUNCH_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
   cacheflow::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>   \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
-    out,                                                                                      \
-    query,                                                                                    \
-    key_cache,                                                                                \
-    value_cache,                                                                              \
+    out_ptr,                                                                                  \
+    query_ptr,                                                                                \
+    key_cache_ptr,                                                                            \
+    value_cache_ptr,                                                                          \
     scale,                                                                                    \
-    block_tables,                                                                             \
-    context_lens,                                                                             \
+    block_tables_ptr,                                                                         \
+    context_lens_ptr,                                                                         \
     max_num_blocks_per_seq);
 
-
-template<typename T>
+template<
+  typename T,
+  int BLOCK_SIZE,
+  int NUM_THREADS = 128>
 void single_query_cached_kv_attention_launcher(
-  T* out,
-  T* query,
-  T* key_cache,
-  T* value_cache,
+  torch::Tensor& out,
+  torch::Tensor& query,
+  torch::Tensor& key_cache,
+  torch::Tensor& value_cache,
   float scale,
-  int* block_tables,
-  int* context_lens,
-  int num_seqs,
-  int num_heads,
-  int head_size,
-  int max_num_blocks_per_seq,
-  int block_size,
-  int max_context_len,
-  cudaStream_t stream) {
-  constexpr int NUM_THREADS = 128;
+  torch::Tensor& block_tables,
+  torch::Tensor& context_lens,
+  int max_context_len) {
+  int num_seqs = query.size(0);
+  int num_heads = query.size(1);
+  int head_size = query.size(2);
+  int max_num_blocks_per_seq = block_tables.size(1);
+
+  T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
+  T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
+  T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
+  T* value_cache_ptr = reinterpret_cast<T*>(value_cache.data_ptr());
+  int* block_tables_ptr = block_tables.data_ptr<int>();
+  int* context_lens_ptr = context_lens.data_ptr<int>();
+
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
-  int logits_size = max_context_len * sizeof(float);
-  int outputs_size = NUM_WARPS / 2 * head_size * sizeof(T);
+  int padded_max_context_len = ((max_context_len + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+  int logits_size = padded_max_context_len * sizeof(float);
+  int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
   int shared_mem_size = std::max(logits_size, outputs_size);
 
   dim3 grid(num_heads, num_seqs);
   dim3 block(NUM_THREADS);
-  assert(block_size == 8);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   switch (head_size) {
-    // case 32:
-    //   LAUNCH_ATTENTION_KERNEL(T, 32, 8, NUM_THREADS);
-    //   break;
+    case 32:
+      LAUNCH_ATTENTION_KERNEL(T, 32, BLOCK_SIZE, NUM_THREADS);
+      break;
     case 64:
-      LAUNCH_ATTENTION_KERNEL(T, 64, 8, NUM_THREADS);
+      LAUNCH_ATTENTION_KERNEL(T, 64, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 80:
+      LAUNCH_ATTENTION_KERNEL(T, 80, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 96:
+      LAUNCH_ATTENTION_KERNEL(T, 96, BLOCK_SIZE, NUM_THREADS);
       break;
     case 128:
-      LAUNCH_ATTENTION_KERNEL(T, 128, 8, NUM_THREADS);
+      LAUNCH_ATTENTION_KERNEL(T, 128, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 160:
+      LAUNCH_ATTENTION_KERNEL(T, 160, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 192:
+      LAUNCH_ATTENTION_KERNEL(T, 192, BLOCK_SIZE, NUM_THREADS);
       break;
     case 256:
-      LAUNCH_ATTENTION_KERNEL(T, 256, 8, NUM_THREADS);
+      LAUNCH_ATTENTION_KERNEL(T, 256, BLOCK_SIZE, NUM_THREADS);
       break;
     default:
       assert(false);
@@ -285,29 +340,60 @@ void single_query_cached_kv_attention(
   torch::Tensor& context_lens,
   int block_size,
   int max_context_len) {
-  int num_seqs = query.size(0);
-  int num_heads = query.size(1);
-  int head_size = query.size(2);
-  int max_num_blocks_per_seq = block_tables.size(1);
-
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  // FIXME
-  assert(query.element_size() == 2);
-  single_query_cached_kv_attention_launcher<uint16_t>(
-    reinterpret_cast<uint16_t*>(out.data_ptr()),
-    reinterpret_cast<uint16_t*>(query.data_ptr()),
-    reinterpret_cast<uint16_t*>(key_cache.data_ptr()),
-    reinterpret_cast<uint16_t*>(value_cache.data_ptr()),
-    scale,
-    block_tables.data_ptr<int>(),
-    context_lens.data_ptr<int>(),
-    num_seqs,
-    num_heads,
-    head_size,
-    max_num_blocks_per_seq,
-    block_size,
-    max_context_len,
-    stream);
+  // TODO(woosuk): Support BF16.
+  if (query.element_size() == 2) {
+    // Half.
+    if (block_size == 8) {
+      single_query_cached_kv_attention_launcher<uint16_t, 8>(
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else if (block_size == 16) {
+      single_query_cached_kv_attention_launcher<uint16_t, 16>(
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else {
+      assert(false);
+    }
+  } else if (query.element_size() == 4) {
+    // Float.
+    if (block_size == 8) {
+      single_query_cached_kv_attention_launcher<float, 8>(
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else if (block_size == 16) {
+      single_query_cached_kv_attention_launcher<float, 16>(
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else {
+      assert(false);
+    }
+  } else {
+    assert(false);
+  }
 }
 
 #undef WARP_SIZE

@@ -1074,6 +1074,26 @@ inline __device__ float sum(Float8_ v)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+inline __device__ float dot(Float4_ a, Float4_ b)
+{
+    float2 acc = mul<float2, float2, float2>(a.x, b.x);
+    acc = fma(a.y, b.y, acc);
+    return acc.x + acc.y;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+inline __device__ float dot(Float8_ a, Float8_ b)
+{
+    float2 acc = mul<float2, float2, float2>(a.x, b.x);
+    acc = fma(a.y, b.y, acc);
+    acc = fma(a.z, b.z, acc);
+    acc = fma(a.w, b.w, acc);
+    return acc.x + acc.y;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 template<typename T>
 inline __device__ float dot(T a, T b)
 {
