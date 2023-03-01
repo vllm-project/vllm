@@ -116,9 +116,10 @@ def test_single_query_cached_kv_attention(
         block_tables,
         context_lens,
     )
-    # NOTE(woosuk): Due to the difference in the data types we use for
-    # softmax logits and the attention outputs, there is a small difference
-    # in the outputs. Thus, we should use a relaxed tolerance for the test.
+    # NOTE(woosuk): Due to the difference in the data types the two
+    # implementations use for attention softmax logits and accumulation,
+    # there is a small difference in the final outputs.
+    # We should use a relaxed tolerance for the test.
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
