@@ -59,7 +59,8 @@ __global__ void single_query_cached_kv_attention_kernel(
   Q_vec q_vecs[NUM_VECS_PER_THREAD];
 #pragma unroll
   for (int i = 0; i < NUM_VECS_PER_THREAD; i++) {
-    q_vecs[i] = *reinterpret_cast<const Q_vec*>(q_ptr + (thread_group_offset + i) * VEC_SIZE);
+    const int vec_idx = thread_group_offset + i * THREAD_GROUP_SIZE;
+    q_vecs[i] = *reinterpret_cast<const Q_vec*>(q_ptr + vec_idx * VEC_SIZE);
   }
 
   // Memory planning.
@@ -90,16 +91,17 @@ __global__ void single_query_cached_kv_attention_kernel(
     // Load a key to registers.
     // Each thread in a thread group has a different part of the key.
     // For example, if the the thread group size is 4, then the first thread in the group
-    // has 0, 4, 8, ... th vectors of the key, and the second thread has 1, 5, 9, ...
-    // th vectors of the key, and so on.
+    // has 0, 4, 8, ... th vectors of the key, and the second thread has 1, 5, 9, ... th
+    // vectors of the key, and so on.
     K_vec k_vecs[NUM_VECS_PER_THREAD];
 #pragma unroll
     for (int i = 0; i < NUM_VECS_PER_THREAD; i++) {
       const scalar_t* k_ptr = k_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
                                       + head_idx * HEAD_SIZE * BLOCK_SIZE
                                       + physical_block_offset * x;
-      const int offset1 = (thread_group_offset + i * VEC_SIZE) / x;
-      const int offset2 = (thread_group_offset + i * VEC_SIZE) % x;
+      const int vec_idx = thread_group_offset + i * THREAD_GROUP_SIZE;
+      const int offset1 = (vec_idx * VEC_SIZE) / x;
+      const int offset2 = (vec_idx * VEC_SIZE) % x;
       k_vecs[i] = *reinterpret_cast<const K_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
     }
 
