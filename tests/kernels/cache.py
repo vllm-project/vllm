@@ -45,11 +45,11 @@ def test_reshape_and_cache(
 
 
 @torch.inference_mode()
-def test_kernels():
+def test_cache():
     test_reshape_and_cache(
         num_tokens=3, num_heads=2, head_size=16, block_size=8, num_blocks=2,
         dtype=torch.half)
 
 
 if __name__ == '__main__':
-    test_kernels()
+    test_cache()
