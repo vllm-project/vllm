@@ -5,6 +5,9 @@
 #include <float.h>
 #include <type_traits>
 
+#define MMHA_USE_FP32_ACUM_FOR_FMA
+#define MMHA_USE_FP32_ACUM_FOR_OUT
+
 namespace cacheflow {
 
 // A vector type to store Q, K, V elements.
@@ -196,3 +199,6 @@ inline __device__ float block_sum(float* red_smem, float sum)
 }
 
 } // namespace cacheflow
+
+#undef MMHA_USE_FP32_ACUM_FOR_FMA
+#undef MMHA_USE_FP32_ACUM_FOR_OUT
