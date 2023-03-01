@@ -118,7 +118,7 @@ class Worker:
             _pad_to_max(block_table, max_num_blocks_per_seq)
             for block_table in generation_block_tables]
         block_tables_tensor = torch.tensor(
-            padded_block_tables, dtype=int, device=self.device)
+            padded_block_tables, dtype=torch.int, device=self.device)
 
         input_metadata = InputMetadata(
             seq_ids=prompt_seq_ids + generation_seq_ids,
