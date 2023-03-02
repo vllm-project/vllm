@@ -1,5 +1,6 @@
 from typing import List, Optional
 
+from flash_attn.flash_attention import FlashAttention
 import torch
 import torch.nn as nn
 
@@ -13,6 +14,8 @@ class OPTCacheFlowAttention(nn.Module):
     def __init__(self, scale: float) -> None:
         super().__init__()
         self.scale = float(scale)
+
+        self.flash_attn = FlashAttention(softmax_scale=self.scale)
 
     def _masked_attention(
         self,
@@ -37,21 +40,24 @@ class OPTCacheFlowAttention(nn.Module):
         value: torch.Tensor,        # [num_prompt_tokens, num_heads, head_size]
         prompt_lens: List[int],
     ) -> None:
-        # FIXME(woosuk): Replace the following with a custom op.
-        start_idx = 0
+        device = query.device
+        prefix_sum = [0]
         for prompt_len in prompt_lens:
-            out = output[start_idx:start_idx + prompt_len]
-            q = query[start_idx:start_idx + prompt_len]
-            k = key[start_idx:start_idx + prompt_len]
-            v = value[start_idx:start_idx + prompt_len]
+            prefix_sum.append(prefix_sum[-1] + prompt_len)
+        prefix_sum = torch.tensor(prefix_sum, dtype=torch.int, device=device)
+        max_prompt_len = max(prompt_lens)
 
-            attention_mask = torch.triu(
-                torch.ones(q.shape[0], k.shape[0]), diagonal=1) * -1e5
-            attention_mask = attention_mask.to(dtype=q.dtype, device=q.device)
-            attention_out = self._masked_attention(q, k, v, attention_mask)
-            out.copy_(attention_out, non_blocking=True)
-
-            start_idx += prompt_len
+        # FIXME(woosuk): Unnecessary copy. Optimize this.
+        qkv = torch.stack([query, key, value], dim=1)
+        out = self.flash_attn(
+            qkv,
+            cu_seqlens=prefix_sum,
+            max_s=max_prompt_len,
+            causal=True,
+        )[0]
+        num_tokens = prefix_sum[-1]
+        # FIXME(woosuk): Unnecessary copy. Optimize this.
+        output[:num_tokens].copy_(out, non_blocking=True)
 
     def single_query_cached_kv_attention(
         self,
@@ -101,8 +107,9 @@ class OPTCacheFlowAttention(nn.Module):
         output = output.view(-1, num_heads, head_size)
 
         # Compute the attention op for prompts.
-        self.multi_query_kv_attention(
-            output, query, key, value, input_metadata.prompt_lens)
+        if input_metadata.num_prompts > 0:
+            self.multi_query_kv_attention(
+                output, query, key, value, input_metadata.prompt_lens)
 
         # Wait until the cache op is done.
         if cache_event is not None:
