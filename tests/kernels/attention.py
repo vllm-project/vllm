@@ -179,7 +179,7 @@ def test_multi_query_kv_attention(
 def test_attention() -> None:
     for dtype in [torch.half, torch.float]:
         for block_size in [8, 16]:
-            for head_size in [64, 80, 96, 128, 256]:
+            for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
                 test_single_query_cached_kv_attention(
                     num_tokens=37,
                     num_heads=3,
