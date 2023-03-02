@@ -17,21 +17,6 @@ class OPTCacheFlowAttention(nn.Module):
 
         self.flash_attn = FlashAttention(softmax_scale=self.scale)
 
-    def _masked_attention(
-        self,
-        query: torch.Tensor,                        # [num_queries, num_heads, head_size]
-        key: torch.Tensor,                          # [num_keys, num_heads, head_size]
-        value: torch.Tensor,                        # [num_keys, num_heads, head_size]
-        attn_mask: Optional[torch.Tensor] = None,   # [num_queries, num_keys]
-    ) -> torch.Tensor:                              # [num_queries, num_heads, head_size]
-        query = query * self.scale
-        attn = torch.einsum('qhd,khd->hqk', query, key)
-        if attn_mask is not None:
-            attn = attn + attn_mask
-        attn = torch.softmax(attn, dim=-1)
-        out = torch.einsum('hqk,khd->qhd', attn, value)
-        return out
-
     def multi_query_kv_attention(
         self,
         output: torch.Tensor,       # [num_prompt_tokens, num_heads, head_size]
@@ -40,6 +25,13 @@ class OPTCacheFlowAttention(nn.Module):
         value: torch.Tensor,        # [num_prompt_tokens, num_heads, head_size]
         prompt_lens: List[int],
     ) -> None:
+        if query.dtype == torch.float:
+            raise ValueError('The float data type is not supported by '
+                             'FlashAttention. Use the half data type instead.')
+        head_size = query.shape[2]
+        if head_size > 128:
+            raise ValueError('FlashAttention does not support head_size > 128.')
+
         device = query.device
         prefix_sum = [0]
         for prompt_len in prompt_lens:
@@ -67,6 +59,14 @@ class OPTCacheFlowAttention(nn.Module):
         value_cache: torch.Tensor,      # [num_blocks, num_heads, head_size, block_size]
         input_metadata: InputMetadata,
     ) -> None:
+        head_size = value_cache.shape[2]
+        supported_head_sizes = [32, 64, 80, 96, 128, 160, 192, 256]
+        if head_size not in supported_head_sizes:
+            raise ValueError(f'head_size ({head_size}) is not supported by '
+                             'the single_query_cached_kv_attention kernel. '
+                             'Use one of the following head sizes: '
+                             f'{supported_head_sizes}.')
+
         block_size = value_cache.shape[3]
         attention_ops.single_query_cached_kv_attention(
             output,
