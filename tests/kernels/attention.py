@@ -148,7 +148,7 @@ def test_multi_query_kv_attention(
     value = torch.rand_like(query)
 
     qkv = torch.stack([query, key, value], dim=1)
-    flash_attn = FlashAttention(softmax_scale=scale, device='cuda')
+    flash_attn = FlashAttention(softmax_scale=scale)
     output = flash_attn(
         qkv,
         cu_seqlens=cu_seq_lens,
