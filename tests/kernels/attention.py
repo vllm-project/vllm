@@ -1,6 +1,7 @@
 import random
 from typing import Optional
 
+from flash_attn.flash_attention import FlashAttention
 import torch
 
 from cacheflow import attention_ops
@@ -123,6 +124,55 @@ def test_single_query_cached_kv_attention(
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
+def test_multi_query_kv_attention(
+    num_seqs: int,
+    num_heads: int,
+    head_size: int,
+    dtype: torch.dtype,
+) -> None:
+    seq_lens = random.sample(range(1, 4096), num_seqs)
+    max_seq_len = max(seq_lens)
+    num_tokens = sum(seq_lens)
+
+    cu_seq_lens = [0]
+    for seq_len in seq_lens:
+        cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
+    cu_seq_lens = torch.tensor(cu_seq_lens, dtype=torch.int, device='cuda')
+
+    scale = float(1.0 / (head_size ** 0.5))
+    query = torch.randn(
+        num_tokens, num_heads, head_size, dtype=dtype, device='cuda')
+    key = torch.rand_like(query)
+    value = torch.rand_like(query)
+
+    qkv = torch.stack([query, key, value], dim=1)
+    flash_attn = FlashAttention(softmax_scale=scale, device='cuda')
+    output = flash_attn(
+        qkv,
+        cu_seqlens=cu_seq_lens,
+        max_s=max_seq_len,
+        causal=True,
+    )[0]
+
+    ref_outputs = []
+    for i, seq_len in enumerate(seq_lens):
+        attn_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1) * -1e5
+        attn_mask = attn_mask.to(dtype=dtype, device='cuda')
+        start_idx = cu_seq_lens[i]
+        end_idx = cu_seq_lens[i + 1]
+        ref_output = ref_masked_attention(
+            query[start_idx:end_idx],
+            key[start_idx:end_idx],
+            value[start_idx:end_idx],
+            scale,
+            attn_mask=attn_mask,
+        )
+        ref_outputs.append(ref_output)
+    ref_output = torch.cat(ref_outputs, dim=0)
+
+    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+
+
 @torch.inference_mode()
 def test_attention() -> None:
     for dtype in [torch.half, torch.float]:
@@ -136,6 +186,17 @@ def test_attention() -> None:
                     num_blocks=1024,
                     dtype=dtype,
                 )
+
+    # NOTE(woosuk): FlashAttention does not support FP32.
+    for dtype in [torch.half]:
+        # NOTE(woosuk): FlashAttention does not support head_size > 128.
+        for head_size in [64, 80, 96, 128]:
+            test_multi_query_kv_attention(
+                num_seqs=11,
+                num_heads=3,
+                head_size=head_size,
+                dtype=dtype,
+            )
 
 
 if __name__ == '__main__':
