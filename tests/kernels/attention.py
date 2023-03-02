@@ -6,6 +6,8 @@ import torch
 
 from cacheflow import attention_ops
 
+MAX_SEQ_LEN = 4096
+
 
 def ref_masked_attention(
     query: torch.Tensor,
@@ -80,7 +82,7 @@ def test_single_query_cached_kv_attention(
     value_cache = torch.randn(
         size=(num_blocks, *value_block_shape), dtype=dtype, device='cuda')
 
-    context_lens = [random.randint(1, 4096) for _ in range(num_tokens)] 
+    context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_tokens)] 
     max_context_len = max(context_lens)
     context_lens = torch.tensor(context_lens, dtype=torch.int, device='cuda')
 
@@ -130,7 +132,7 @@ def test_multi_query_kv_attention(
     head_size: int,
     dtype: torch.dtype,
 ) -> None:
-    seq_lens = random.sample(range(1, 4096), num_seqs)
+    seq_lens = random.sample(range(1, MAX_SEQ_LEN), num_seqs)
     max_seq_len = max(seq_lens)
     num_tokens = sum(seq_lens)
 
