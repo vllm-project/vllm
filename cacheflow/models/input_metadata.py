@@ -24,7 +24,7 @@ class InputMetadata:
 
         self.num_prompts = len(prompt_lens)
         self.num_generation_tokens = context_lens.shape[0]
-        self.num_valid_tokens = len(slot_mapping)
+        self.num_valid_tokens = slot_mapping.shape[0]
         if block_tables.numel() > 0:
             self.max_num_blocks_per_seq = block_tables.shape[1]
         else:
