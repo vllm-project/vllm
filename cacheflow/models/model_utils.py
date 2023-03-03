@@ -17,14 +17,19 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 
-def get_model(
-    model_name: str,
-    dtype: Union[torch.dtype, str],
-) -> nn.Module:
+def get_torch_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
     if isinstance(dtype, str):
         torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype.lower()]
     else:
         torch_dtype = dtype
+    return torch_dtype
+
+
+def get_model(
+    model_name: str,
+    dtype: Union[torch.dtype, str],
+) -> nn.Module:
+    torch_dtype = get_torch_dtype(dtype)
     for model_class, hf_model in MODEL_CLASSES.items():
         if model_class in model_name:
             model = hf_model.from_pretrained(model_name, torch_dtype=torch_dtype)
