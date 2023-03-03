@@ -12,7 +12,6 @@ parser.add_argument('--model', type=str, default='facebook/opt-125m', help='mode
 parser.add_argument('--num-nodes', type=int, default=1, help='number of nodes')
 parser.add_argument('--num-workers', type=int, default=1, help='number of workers per node')
 parser.add_argument('--block-size', type=int, default=8, choices=[8, 16], help='token block size')
-# TODO(woosuk): Add an analytical model to determine the maximum number of GPU/CPU blocks.
 parser.add_argument('--swap-space', type=int, default=16,
                     help='The CPU memory space in GiB pinned for swapping (per GPU)')
 # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
