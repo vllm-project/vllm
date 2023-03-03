@@ -113,7 +113,8 @@ class OPTCacheFlowAttention(nn.Module):
                 query[:num_prompt_tokens],
                 key[:num_prompt_tokens],
                 value[:num_prompt_tokens],               
-                input_metadata.prompt_lens)
+                input_metadata.prompt_lens,
+            )
 
         # Wait until the cache op is done.
         if cache_event is not None:
