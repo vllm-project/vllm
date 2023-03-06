@@ -83,9 +83,8 @@ class Scheduler:
     ) -> None:
         mapping = self.block_manager.swap_in(seq_group)
         blocks_to_swap_in.update(mapping)
-        for seq in seq_group.seqs:
-            if seq.status == SequenceStatus.SWAPPED:
-                seq.status = SequenceStatus.RUNNING
+        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+            seq.status = SequenceStatus.RUNNING
         self.running.append(seq_group)
 
     def _swap_out(
@@ -96,9 +95,8 @@ class Scheduler:
         assert self.block_manager.can_swap_out(seq_group)
         mapping = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.update(mapping)
-        for seq in seq_group.seqs:
-            if seq.status == SequenceStatus.RUNNING:
-                seq.status = SequenceStatus.SWAPPED
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            seq.status = SequenceStatus.SWAPPED
         self.swapped.append(seq_group)
 
     def step(self) -> None:
@@ -182,10 +180,7 @@ class Scheduler:
             # NOTE(woosuk): We assume that the number of steps is 0
             # for the prompt sequences.
             is_prompt = num_steps == 0
-            for seq in seq_group.seqs:
-                if seq.status != SequenceStatus.RUNNING:
-                    continue
-
+            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 if is_prompt:

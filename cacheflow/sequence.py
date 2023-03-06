@@ -74,11 +74,14 @@ class SequenceGroup:
         self.group_id = group_id
         self.seqs = seqs
 
-    def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
+    def get_seqs(self, status: Optional[SequenceStatus] = None) -> List[Sequence]:
         if status is None:
-            return len(self.seqs)
+            return self.seqs
         else:
-            return len([seq for seq in self.seqs if seq.status == status])
+            return [seq for seq in self.seqs if seq.status == status]
+
+    def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
+        return len(self.get_seqs(status))
 
     def find(self, seq_id: int) -> Sequence:
         for seq in self.seqs:
