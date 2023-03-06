@@ -9,6 +9,10 @@ from transformers import PreTrainedModel
 from cacheflow.models import InputMetadata
 from cacheflow.models.attention import OPTCacheFlowAttention
 from cacheflow.models.sample import Sampler
+from cacheflow.parallel_utils.parallel_state import get_tensor_model_parallel_world_size
+from cacheflow.parallel_utils.tensor_parallel import (VocabParallelEmbedding,
+                                                      ColumnParallelLinear,
+                                                      RowParallelLinear)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -35,15 +39,17 @@ class OPTAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
-        self.num_heads = num_heads
+        world_size = get_tensor_model_parallel_world_size()
+        assert num_heads % world_size == 0
+        self.num_heads = num_heads // world_size
         self.head_dim = embed_dim // num_heads
         self.scaling = self.head_dim**-0.5
 
         # TODO(woosuk): Fuse the three linear layers into one QKV linear layer.
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.k_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias)
+        self.v_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias)
+        self.q_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias)
+        self.out_proj = RowParallelLinear(embed_dim, embed_dim, bias=bias)
 
         self.attn = OPTCacheFlowAttention(scale=self.scaling)
 
@@ -80,8 +86,8 @@ class OPTDecoderLayer(nn.Module):
 
         self.self_attn_layer_norm = nn.LayerNorm(
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
-        self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
-        self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
+        self.fc1 = ColumnParallelLinear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
+        self.fc2 = RowParallelLinear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
 
     def forward(
@@ -141,18 +147,10 @@ class OPTDecoder(OPTPreTrainedModel):
         self.max_target_positions = config.max_position_embeddings
         self.vocab_size = config.vocab_size
 
+        assert config.word_embed_proj_dim == config.hidden_size
+
         self.embed_tokens = nn.Embedding(config.vocab_size, config.word_embed_proj_dim, self.padding_idx)
         self.embed_positions = OPTLearnedPositionalEmbedding(config.max_position_embeddings, config.hidden_size)
-
-        if config.word_embed_proj_dim != config.hidden_size:
-            self.project_out = nn.Linear(config.hidden_size, config.word_embed_proj_dim, bias=False)
-        else:
-            self.project_out = None
-
-        if config.word_embed_proj_dim != config.hidden_size:
-            self.project_in = nn.Linear(config.word_embed_proj_dim, config.hidden_size, bias=False)
-        else:
-            self.project_in = None
 
         # Note that the only purpose of `config._remove_final_layer_norm` is to keep backward compatibility
         # with checkpoints that have been fine-tuned before transformers v4.20.1
@@ -179,8 +177,6 @@ class OPTDecoder(OPTPreTrainedModel):
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
         pos_embeds = self.embed_positions(positions)
-        if self.project_in is not None:
-            inputs_embeds = self.project_in(inputs_embeds)
         hidden_states = inputs_embeds + pos_embeds
 
         for i in range(len(self.layers)):
@@ -194,8 +190,6 @@ class OPTDecoder(OPTPreTrainedModel):
 
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
-        if self.project_out is not None:
-            hidden_states = self.project_out(hidden_states)
         return hidden_states
 
 
