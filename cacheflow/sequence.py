@@ -74,7 +74,10 @@ class SequenceGroup:
         self.group_id = group_id
         self.seqs = seqs
 
-    def get_seqs(self, status: Optional[SequenceStatus] = None) -> List[Sequence]:
+    def get_seqs(
+        self,
+        status: Optional[SequenceStatus] = None,
+    ) -> List[Sequence]:
         if status is None:
             return self.seqs
         else:
