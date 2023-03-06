@@ -143,6 +143,10 @@ class Scheduler:
             # All swapped sequences are swapped in.
             self.swapped.clear()
 
+        # Ensure that swap-in and swap-out never happen at the same timestep.
+        if blocks_to_swap_in:
+            assert not blocks_to_swap_out
+
         num_batched_tokens = sum(
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
             for seq_group in self.running
@@ -152,7 +156,6 @@ class Scheduler:
         # NOTE: Here we implicitly assume FCFS scheduling.
         # TODO(woosuk): Add a batching policy to control the batch size.
         if not self.swapped:
-            # FIXME(woosuk): Acquire a lock to protect pending.
             self._fetch_inputs()
             for i, seq_group in enumerate(self.pending):
                 num_prompt_tokens = seq_group.seqs[0].get_len()
@@ -167,10 +170,6 @@ class Scheduler:
                 break
             else:
                 self.pending.clear()
-
-        # Ensure that swap-in and swap-out never happen at the same timestep.
-        if blocks_to_swap_in:
-            assert not blocks_to_swap_out
 
         # 4. Create input data structures.
         prompt_tokens: Dict[int, List[int]] = {}
