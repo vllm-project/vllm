@@ -57,11 +57,11 @@ def main():
         'UC Berkeley is',
         'The future of cloud computing is',
     ]
-    for prompt in test_inputs:
-        frontend.query(prompt)
 
     # FIXME
     while True:
+        if test_inputs:
+            frontend.query(test_inputs.pop())
         scheduler.step()
         if not scheduler.pending and not scheduler.running:
             break

@@ -47,9 +47,8 @@ class OPTCacheFlowAttention(nn.Module):
             max_s=max_prompt_len,
             causal=True,
         )[0]
-        num_tokens = prefix_sum[-1]
         # FIXME(woosuk): Unnecessary copy. Optimize this.
-        output[:num_tokens].copy_(out, non_blocking=True)
+        output.copy_(out, non_blocking=True)
 
     def single_query_cached_kv_attention(
         self,
@@ -108,8 +107,14 @@ class OPTCacheFlowAttention(nn.Module):
 
         # Compute the attention op for prompts.
         if input_metadata.num_prompts > 0:
+            num_prompt_tokens = sum(input_metadata.prompt_lens)
             self.multi_query_kv_attention(
-                output, query, key, value, input_metadata.prompt_lens)
+                output[:num_prompt_tokens],
+                query[:num_prompt_tokens],
+                key[:num_prompt_tokens],
+                value[:num_prompt_tokens],               
+                input_metadata.prompt_lens,
+            )
 
         # Wait until the cache op is done.
         if cache_event is not None:
