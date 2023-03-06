@@ -11,7 +11,7 @@ class SamplingParams:
         use_beam_search: bool = False,
         stop_token_ids: Set[int] = [],
         max_num_steps: int = 16,  # From OpenAI API.
-        max_context_len: Optional[int] = None,
+        context_window_size: Optional[int] = None,
     ) -> None:
         assert n >= 1
         assert temperature >= 0.0
@@ -25,7 +25,7 @@ class SamplingParams:
             assert n == 1
             assert top_p == 1.0
         assert max_num_steps >= 1
-        assert max_context_len is None or max_context_len >= 0
+        assert context_window_size is None or context_window_size >= 0
 
         self.n = n
         self.temperature = temperature
@@ -33,4 +33,4 @@ class SamplingParams:
         self.use_beam_search = use_beam_search
         self.stop_token_ids = stop_token_ids
         self.max_num_steps = max_num_steps
-        self.max_context_len = max_context_len
+        self.context_window_size = context_window_size

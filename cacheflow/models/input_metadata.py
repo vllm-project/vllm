@@ -11,7 +11,6 @@ class InputMetadata:
         prompt_lens: List[int],
         slot_mapping: torch.Tensor,
         context_lens: torch.Tensor,
-        # FIXME: Rename
         max_context_len: int,
         block_tables: torch.Tensor,
     ) -> None:
