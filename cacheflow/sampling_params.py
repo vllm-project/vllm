@@ -34,3 +34,12 @@ class SamplingParams:
         self.stop_token_ids = stop_token_ids
         self.max_num_steps = max_num_steps
         self.context_window_size = context_window_size
+
+    def __repr__(self) -> str:
+        return (f'SamplingParams(n={self.n}, '
+                f'temperature={self.temperature}, '
+                f'top_p={self.top_p}, '
+                f'use_beam_search={self.use_beam_search}, '
+                f'stop_token_ids={self.stop_token_ids}, '
+                f'max_num_steps={self.max_num_steps}, '
+                f'context_window_size={self.context_window_size})')
