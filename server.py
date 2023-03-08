@@ -61,7 +61,7 @@ def main():
     # FIXME
     while True:
         if test_inputs:
-            frontend.query(test_inputs.pop())
+            frontend.query(test_inputs.pop(0), n=2, temperature=0.8)
         scheduler.step()
         if not scheduler.pending and not scheduler.running:
             break
