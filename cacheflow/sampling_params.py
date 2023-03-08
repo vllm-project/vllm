@@ -21,7 +21,7 @@ class SamplingParams:
             assert temperature > 0.0
             assert top_p == 1.0
         elif temperature == 0.0:
-            # Zero temperature means greedy decoding.
+            # Zero temperature means greedy sampling.
             assert n == 1
             assert top_p == 1.0
         assert max_num_steps >= 1
