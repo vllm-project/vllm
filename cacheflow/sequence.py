@@ -1,7 +1,8 @@
 import enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from cacheflow.block import LogicalTokenBlock
+from cacheflow.sampling_params import SamplingParams
 
 
 class SequenceStatus(enum.Enum):
@@ -58,6 +59,9 @@ class Sequence:
             token_ids.extend(block.get_token_ids())
         return token_ids
 
+    def get_last_token_id(self) -> int:
+        return self.logical_token_blocks[-1].get_last_token_id()
+
     def __repr__(self) -> str:
         return (f'Sequence(seq_id={self.seq_id}, '
                 f'status={self.status.name}, '
@@ -98,3 +102,22 @@ class SequenceGroup:
     def __repr__(self) -> str:
         return (f'SequenceGroup(group_id={self.group_id}, '
                 f'num_seqs={len(self.seqs)})')
+
+
+class InputSequenceGroup:
+
+    def __init__(
+        self,
+        group_id: int,
+        is_prompt: bool,
+        input_tokens: Dict[int, List[int]],     # Seq id -> token ids.
+        context_len: int,
+        sampling_params: SamplingParams,
+        block_tables: Dict[int, List[int]],     # Seq id -> List of physical block numbers.
+    ) -> None:
+        self.group_id = group_id
+        self.is_prompt = is_prompt
+        self.input_tokens = input_tokens
+        self.context_len = context_len
+        self.sampling_params = sampling_params
+        self.block_tables = block_tables
