@@ -5,27 +5,49 @@ class SamplingParams:
 
     def __init__(
         self,
-        n: int = 1,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        use_beam_search: bool = False,
-        stop_token_ids: Set[int] = [],
-        max_num_steps: int = 16,  # From OpenAI API.
-        context_window_size: Optional[int] = None,
+        n: int,
+        temperature: float,
+        top_p: float,
+        use_beam_search: bool,
+        stop_token_ids: Set[int],
+        max_num_steps: int,
+        context_window_size: Optional[int],
     ) -> None:
-        assert n >= 1
-        assert temperature >= 0.0
-        assert 0.0 < top_p <= 1.0
+        if n < 1:
+            raise ValueError(f'n must be at least 1, got {n}.')
+        if temperature < 0.0:
+            raise ValueError(
+                f'temperature must be non-negative, got {temperature}.')
+        if not 0.0 < top_p <= 1.0:
+            raise ValueError(f'top_p must be in (0, 1], got {top_p}.')
+        if max_num_steps < 1:
+            raise ValueError(
+                f'max_num_steps must be at least 1, got {max_num_steps}.')
+        if context_window_size is not None and context_window_size < 0:
+            raise ValueError(
+                'context_window_size must be non-negative, '
+                f'got {context_window_size}.')
+
         if use_beam_search:
-            assert n > 1
-            assert temperature > 0.0
-            assert top_p == 1.0
+            if n == 1:
+                raise ValueError(
+                    'n must be greater than 1 when using beam search.')
+            if temperature == 0.0:
+                raise ValueError(
+                    'temperature must be greater than 0 when using beam search.')
+            if top_p != 1.0:
+                raise ValueError(
+                    'top_p must be 1 when using beam search.')
         elif temperature == 0.0:
             # Zero temperature means greedy sampling.
-            assert n == 1
-            assert top_p == 1.0
-        assert max_num_steps >= 1
-        assert context_window_size is None or context_window_size >= 0
+            if n > 1:
+                raise ValueError(
+                    'n must be 1 when using greedy sampling '
+                    '(i.e., with zero temperature).')
+            if top_p != 1.0:
+                raise ValueError(
+                    'top_p must be 1 when using greedy sampling '
+                    '(i.e., with zero temperature).')
 
         self.n = n
         self.temperature = temperature
