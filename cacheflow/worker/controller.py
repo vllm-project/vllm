@@ -1,6 +1,7 @@
 from typing import Dict, List, Union
 
 from cacheflow.master.scheduler import Scheduler
+from cacheflow.sequence import InputSequenceGroup
 from cacheflow.worker.worker import Worker
 
 
@@ -49,10 +50,7 @@ class Controller:
 
     def execute_stage(
         self,
-        prompt_tokens: Dict[int, List[int]],
-        generation_tokens: Dict[int, int],
-        context_lens: Dict[int, int],
-        block_tables: Dict[int, List[int]],
+        input_seq_groups: List[InputSequenceGroup],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, int],
@@ -61,10 +59,7 @@ class Controller:
         assert len(self.workers) == 1
         worker = self.workers[0]
         output = worker.execute_stage(
-            prompt_tokens,
-            generation_tokens,
-            context_lens,
-            block_tables,
+            input_seq_groups,
             blocks_to_swap_in,
             blocks_to_swap_out,
             blocks_to_copy,

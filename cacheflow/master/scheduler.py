@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple
 from cacheflow.master.block_manager import BlockSpaceManager
 from cacheflow.master.frontend import Frontend
 from cacheflow.sampling_params import SamplingParams
+from cacheflow.sequence import InputSequenceGroup
 from cacheflow.sequence import Sequence
 from cacheflow.sequence import SequenceGroup
 from cacheflow.sequence import SequenceStatus
@@ -170,31 +171,41 @@ class Scheduler:
                 self.pending.clear()
 
         # 4. Create input data structures.
-        prompt_tokens: Dict[int, List[int]] = {}
-        generation_tokens: Dict[int, int] = {}
-        context_lens: Dict[int, int] = {}
-        block_tables: Dict[int, List[int]] = {}
+        input_seq_groups: List[InputSequenceGroup] = []
         for seq_group in self.running:
             group_id = seq_group.group_id
             num_steps = self.num_steps[group_id]
+
             # NOTE(woosuk): We assume that the number of steps is 0
             # for the prompt sequences.
             is_prompt = num_steps == 0
+
+            input_tokens: Dict[int, List[int]] = {}
+            block_tables: Dict[int, List[int]] = {}
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 if is_prompt:
-                    prompt_tokens[seq_id] = seq.get_token_ids()
+                    input_tokens[seq_id] = seq.get_token_ids()
                 else:
-                    generation_tokens[seq_id] = seq.get_token_ids()[-1]
-                    context_lens[seq_id] = seq.get_len()
+                    input_tokens[seq_id] = [seq.get_last_token_id()]
+                # NOTE(woosuk): Sequences in the same group have the same
+                # sequence length
+                seq_len = seq.get_len()
+
+            input_seq_group = InputSequenceGroup(
+                group_id=group_id,
+                is_prompt=is_prompt,
+                input_tokens=input_tokens,
+                context_len=seq_len,
+                sampling_params=self.sampling_params[group_id],
+                block_tables=block_tables,
+            )
+            input_seq_groups.append(input_seq_group)
 
         # 5. Execute the first stage of the pipeline.
         self.controllers[0].execute_stage(
-            prompt_tokens,
-            generation_tokens,
-            context_lens,
-            block_tables,
+            input_seq_groups,
             blocks_to_swap_in,
             blocks_to_swap_out,
             blocks_to_copy,
@@ -202,7 +213,7 @@ class Scheduler:
 
     def post_step(
         self,
-        next_tokens: Dict[int, Tuple[int, int]],
+        seq_outputs: Dict[int, Tuple[int, int]],
     ) -> None:
         # Update the running sequences and free blocks.
         for seq_group in self.running:
@@ -214,7 +225,7 @@ class Scheduler:
                 if seq.status == SequenceStatus.FINISHED:
                     continue
 
-                parent_seq_id, next_token = next_tokens[seq.seq_id]
+                parent_seq_id, next_token = seq_outputs[seq.seq_id]
                 if seq.seq_id != parent_seq_id:
                     # The sequence is a fork of the parent sequence (beam search).
                     # Free the current sequence.
