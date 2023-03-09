@@ -83,7 +83,8 @@ class Sampler(nn.Module):
                 else:
                     # Neucleus sampling.
                     n = len(seq_ids)
-                    next_token_ids = torch.multinomial(prob, num_samples=n)
+                    next_token_ids = torch.multinomial(
+                        prob, num_samples=n, replacement=True)
                     next_token_ids = next_token_ids.tolist()
 
                 # Build the output.
@@ -110,7 +111,8 @@ class Sampler(nn.Module):
                     else:
                         # Neucleus sampling.
                         # Sample 1 token for each sequence.
-                        next_tokens = torch.multinomial(prob, num_samples=1)
+                        next_tokens = torch.multinomial(
+                            prob, num_samples=1, replacement=True)
                         next_token_ids = next_tokens.squeeze(dim=-1).tolist()
 
                     # Build the output.
