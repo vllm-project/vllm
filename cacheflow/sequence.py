@@ -146,7 +146,7 @@ class SequenceOutputs:
         seq_id: int,
         parent_seq_id: int,
         output_token: int,
-        logprobs: Dict[int, float],         # Token id -> logprob.
+        logprobs: Dict[int, float],         # Token id -> logP(x_i+1 | x_0, ..., x_i).
     ) -> None:
         self.seq_id = seq_id
         self.parent_seq_id = parent_seq_id

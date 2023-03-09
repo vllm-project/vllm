@@ -30,7 +30,7 @@ class Frontend:
         top_p: float = 1.0,
         use_beam_search: bool = False,
         stop_token_ids: Set[int] = set(),
-        max_num_steps: int = 16,                    # From OpenAI API.
+        max_num_steps: int = 16,  # From OpenAI API.
         num_logprobs: int = 0,
         context_window_size: Optional[int] = None,
     ) -> None:
