@@ -185,6 +185,7 @@ def _sample_from_generation_tokens(
         seq_idx = torch.div(topk_ids, vocab_size, rounding_mode='floor').tolist()
         token_idx = (topk_ids % vocab_size).tolist()
 
+        # TODO(woosuk): This is a bit hacky. Improve this.
         parent_seq_ids = [-1] * len(seq_ids)
         next_token_ids = [-1] * len(seq_ids)
         for i, seq_id in enumerate(seq_ids):
@@ -199,7 +200,6 @@ def _sample_from_generation_tokens(
             if parent_seq_ids[i] == -1:
                 parent_seq_ids[i] = seq_ids[seq_idx.pop(0)]
                 next_token_ids[i] = token_idx.pop(0)
-        print(seq_ids, parent_seq_ids, next_token_ids)
     elif sampling_params.temperature == 0.0:
         # Greedy sampling.
         assert len(seq_ids) == 1
