@@ -67,7 +67,7 @@ class Scheduler:
     def _append(
         self,
         seq_group: SequenceGroup,
-        blocks_to_copy: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
     ) -> None:
         for seq in seq_group.seqs:
             if seq.status == SequenceStatus.FINISHED:
@@ -75,7 +75,10 @@ class Scheduler:
             ret = self.block_manager.append(seq)
             if ret is not None:
                 src_block, dst_block = ret
-                blocks_to_copy[src_block] = dst_block
+                if src_block in blocks_to_copy:
+                    blocks_to_copy[src_block].append(dst_block)
+                else:
+                    blocks_to_copy[src_block] = [dst_block]
 
     def _swap_in(
         self,
@@ -104,7 +107,7 @@ class Scheduler:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
-        blocks_to_copy: Dict[int, int] = {}
+        blocks_to_copy: Dict[int, List[int]] = {}
 
         # 1. Reserve new slots for the running sequences.
         # NOTE: Here we implicitly assume FCFS scheduling.

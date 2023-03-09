@@ -160,7 +160,7 @@ class Worker:
         input_seq_groups: List[InputSequenceGroup],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
     ) -> Union[torch.Tensor, Dict[int, Tuple[int, int]]]:
         # Issue cache operations.
         command_issued = False

@@ -53,7 +53,7 @@ class Controller:
         input_seq_groups: List[InputSequenceGroup],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
     ) -> None:
         # FIXME: Support tensor parallelism.
         assert len(self.workers) == 1
