@@ -34,6 +34,7 @@ class Frontend:
         num_logprobs: int = 0,
         context_window_size: Optional[int] = None,
     ) -> None:
+        # Stop when we see an EOS token.
         stop_token_ids.add(self.tokenizer.eos_token_id)
         sampling_params = SamplingParams(
             n=n,
