@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from cacheflow.master.block_manager import BlockSpaceManager
 from cacheflow.master.frontend import Frontend
