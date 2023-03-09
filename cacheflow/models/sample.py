@@ -179,21 +179,41 @@ def _sample_from_generation_tokens(
             seq_logprobs, dtype=torch.float, device=logprobs.device)
         logprobs += seq_logprobs.unsqueeze(dim=1)
 
+        vocab_size = logprobs.size(-1)
         beam_width = len(seq_ids)
-        raise NotImplementedError()
+        _, topk_ids = torch.topk(logprobs.flatten(), beam_width)
+        seq_idx = torch.div(topk_ids, vocab_size, rounding_mode='floor').tolist()
+        token_idx = (topk_ids % vocab_size).tolist()
+
+        parent_seq_ids = [-1] * len(seq_ids)
+        next_token_ids = [-1] * len(seq_ids)
+        for i, seq_id in enumerate(seq_ids):
+            if i in seq_idx:
+                pos = seq_idx.index(i)
+                next_token_id = token_idx[pos]
+                parent_seq_ids[i] = seq_id
+                next_token_ids[i] = next_token_id
+                seq_idx.pop(pos)
+                token_idx.pop(pos)
+        for i, seq_id in enumerate(seq_ids):
+            if parent_seq_ids[i] == -1:
+                parent_seq_ids[i] = seq_ids[seq_idx.pop(0)]
+                next_token_ids[i] = token_idx.pop(0)
+        print(seq_ids, parent_seq_ids, next_token_ids)
     elif sampling_params.temperature == 0.0:
         # Greedy sampling.
         assert len(seq_ids) == 1
         next_token_id = torch.argmax(probs, dim=-1)
         next_token_ids = [next_token_id.item()]
-        return seq_ids, next_token_ids
+        parent_seq_ids = seq_ids
     else:
         # Neucleus sampling.
         # Sample 1 token for each sequence in the group.
         next_token_ids = torch.multinomial(
             probs, num_samples=1, replacement=True)
         next_token_ids = next_token_ids.squeeze(dim=-1).tolist()
-        return seq_ids, next_token_ids
+        parent_seq_ids = seq_ids
+    return parent_seq_ids, next_token_ids
 
 
 def _sample(
@@ -239,22 +259,22 @@ def _sample(
                 seq_ids, prob, logprob, seq_logprobs, sampling_params)
 
             # Get top-k log probabilities for the next tokens.
-            output_logprobs: Dict[int, Dict[int, float]] = {}
+            next_logprobs: Dict[int, Dict[int, float]] = {}
             for i, seq_id in enumerate(seq_ids):
-                next_logprobs = _get_topk_logprobs(
+                next_logprobs[seq_id] = _get_topk_logprobs(
                     logprob[i], sampling_params.num_logprobs)
-                token_id = next_token_ids[i]
-                next_logprobs[token_id] = logprob[i, token_id].item()
-                output_logprobs[seq_id] = next_logprobs
 
             # Build the output.
             for seq_id, parent_seq_id, next_token_id in zip(
                 seq_ids, parent_seq_ids, next_token_ids):
+                i = seq_ids.index(parent_seq_id)
+                output_logprobs = next_logprobs[parent_seq_id].copy()
+                output_logprobs[next_token_id] = logprob[i, next_token_id].item()
                 seq_outputs[seq_id] = SequenceOutputs(
                     seq_id,
                     parent_seq_id,
                     next_token_id,
-                    output_logprobs[parent_seq_id],
+                    output_logprobs,
                 )
 
     return seq_outputs
