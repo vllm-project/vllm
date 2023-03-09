@@ -1,5 +1,8 @@
 """1D OPT model compatible with HuggingFace weights."""
 import os
+import glob
+import shutil
+from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -7,11 +10,13 @@ import torch
 from torch import nn
 from transformers import OPTConfig
 from transformers import PreTrainedModel
+from huggingface_hub import snapshot_download
 
 from cacheflow.models import InputMetadata
 from cacheflow.models.attention import OPTCacheFlowAttention
 from cacheflow.models.sample import Sampler
-from cacheflow.parallel_utils.parallel_state import get_tensor_model_parallel_world_size
+from cacheflow.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from cacheflow.parallel_utils.tensor_parallel import (VocabParallelEmbedding,
                                                       ColumnParallelLinear,
                                                       RowParallelLinear)
@@ -233,11 +238,63 @@ class OPTForCausalLM(nn.Module):
             self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
 
+    _column_parallel_weights = ["q_proj.weight", "k_proj.weight",
+                                "v_proj.weight", "fc1.weight"]
+    _column_parallel_biases = ["q_proj.bias", "k_proj.bias",
+                                "v_proj.bias", "fc1.bias"]
+    _row_parallel_weights = ["out_proj.weight", "fc2.weight"]
+
     def load_weights(self, weights_path: str):
+        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, param in state_dict.items():
-            loaded_full_weight = torch.from_numpy(np.load(os.path.join(weights_path, name)))
-            print(name, loaded_full_weight.shape, loaded_full_weight.dtype, param.dtype)
-            # TODO(zhuohan): handle tensor parallelized weights
-            assert param.shape == loaded_full_weight.shape
-            param.data.copy_(loaded_full_weight)
+            loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path,
+                                                                  name)))
+            for p in (self._column_parallel_weights
+                      + self._column_parallel_biases):
+                if p in name:
+                    shard_size = param.shape[0]
+                    loaded_weight = loaded_weight[
+                        shard_size * tensor_model_parallel_rank
+                        :shard_size * (tensor_model_parallel_rank + 1)]
+                    break
+            for p in self._row_parallel_weights:
+                if p in name:
+                    shard_size = param.shape[1]
+                    loaded_weight = loaded_weight[
+                        :,
+                        shard_size * tensor_model_parallel_rank
+                        :shard_size * (tensor_model_parallel_rank + 1)]
+
+            assert param.shape == loaded_weight.shape
+            param.data.copy_(loaded_weight)
+
+    @staticmethod
+    def download_weights(model_name: str, path: str = "/tmp/transformers"):
+        path = os.path.join(path, f"{model_name}-np")
+        path = os.path.abspath(os.path.expanduser(path))
+        test_weight_path = os.path.join(path,
+                                        "model.decoder.embed_positions.weight")
+        if os.path.exists(test_weight_path):
+            return path
+
+        folder = snapshot_download(model_name, allow_patterns="*.bin")
+        bin_files = glob.glob(os.path.join(folder, "*.bin"))
+
+        if "/" in model_name:
+            model_name = model_name.split("/")[1].lower()
+        os.makedirs(path, exist_ok=True)
+
+        for bin_file in tqdm(bin_files, desc="Convert format"):
+            state = torch.load(bin_file)
+            for name, param in tqdm(state.items(), leave=False):
+                param_path = os.path.join(path, name)
+                with open(param_path, "wb") as f:
+                    np.save(f, param.cpu().detach().numpy())
+
+                # shared embedding
+                if "model.decoder.embed_tokens.weight" in name:
+                    shutil.copy(param_path, param_path.replace(
+                        "model.decoder.embed_tokens.weight", "lm_head.weight"))
+
+        return path

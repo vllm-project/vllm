@@ -46,7 +46,6 @@ class Controller:
                 dtype=dtype,
                 distributed_init_method=distributed_init_method,
                 rank=rank,
-                local_rank=device_id,
                 world_size=world_size,
                 tensor_parallel_size=tensor_parallel_size,
                 pipeline_parallel_size=pipeline_parallel_size,
@@ -70,8 +69,9 @@ class Controller:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, int],
     ) -> None:
+        futures = []
         for worker in self.workers:
-            output = worker.execute_stage.remote(
+            future = worker.execute_stage.remote(
                 prompt_tokens,
                 generation_tokens,
                 context_lens,
@@ -80,7 +80,12 @@ class Controller:
                 blocks_to_swap_out,
                 blocks_to_copy,
             )
-            output = ray.get(output)
+            futures.append(future)
+
+        all_outputs = ray.get(futures)
+        output = all_outputs[0]
+        for other_output in all_outputs[1:]:
+            assert output == other_output
 
         if self.is_last_stage:
             self.next_node.post_step(output)

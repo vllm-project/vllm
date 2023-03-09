@@ -20,27 +20,21 @@ class Worker:
         dtype: str,
         distributed_init_method: str,
         rank: int,
-        local_rank: int,
         world_size: int,
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
     ) -> None:
-        # FIXME (zhuohan): Might not need local_rank since ray handles it.
         self.init_distributed_environment(distributed_init_method,
                                           rank,
-                                          local_rank,
                                           world_size,
                                           tensor_parallel_size,
                                           pipeline_parallel_size)
         self.worker_id = rank
-        self.gpu_id = local_rank
         self.block_size = block_size
-
-        self.device = torch.device('cuda', index=self.gpu_id)
 
         # Initialize the model.
         self.model, self.dtype = get_model(model_name, dtype=dtype)
-        self.model = self.model.to(self.device)
+        self.model = self.model.cuda()
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
         self.num_layers = self.model.config.num_hidden_layers
@@ -50,7 +44,6 @@ class Worker:
 
         self.cache_engine = CacheEngine(
             worker_id=self.worker_id,
-            gpu_id=self.gpu_id,
             num_layers=self.num_layers,
             num_heads=self.num_heads,
             head_size=self.head_size,
@@ -66,13 +59,11 @@ class Worker:
     def init_distributed_environment(self,
                                      distributed_init_method: str,
                                      rank: int,
-                                     local_rank: int,
                                      world_size: int,
                                      tensor_parallel_size: int = 1,
                                      pipeline_parallel_size: int = 1,
         ):
         """Initialize the distributed environment."""
-        torch.cuda.set_device(local_rank)
         torch.distributed.init_process_group(
             backend='nccl',
             init_method=distributed_init_method,
@@ -146,19 +137,19 @@ class Worker:
 
         # Convert to tensors.
         tokens_tensor = torch.tensor(
-            input_tokens, dtype=torch.long, device=self.device)
+            input_tokens, dtype=torch.long, device='cuda')
         positions_tensor = torch.tensor(
-            input_positions, dtype=torch.long, device=self.device)
+            input_positions, dtype=torch.long, device='cuda')
         slot_mapping_tensor = torch.tensor(
-            slot_mapping, dtype=torch.int, device=self.device)
+            slot_mapping, dtype=torch.int, device='cuda')
         context_lens_tensor = torch.tensor(
             [context_lens[seq_id] for seq_id in generation_seq_ids],
-            dtype=torch.int, device=self.device)
+            dtype=torch.int, device='cuda')
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq)
             for block_table in generation_block_tables]
         block_tables_tensor = torch.tensor(
-            padded_block_tables, dtype=int, device=self.device)
+            padded_block_tables, dtype=int, device='cuda')
 
         input_metadata = InputMetadata(
             seq_ids=prompt_seq_ids + generation_seq_ids,
