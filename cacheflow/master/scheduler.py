@@ -6,6 +6,7 @@ from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence
 from cacheflow.sequence import SequenceGroup
 from cacheflow.sequence import SequenceGroupInputs
+from cacheflow.sequence import SequenceOutputs
 from cacheflow.sequence import SequenceStatus
 
 _MAX_NUM_BATCHED_TOKENS = 2048
@@ -184,6 +185,7 @@ class Scheduler:
             is_prompt = num_steps == 0
 
             input_tokens: Dict[int, List[int]] = {}
+            seq_logprobs: Dict[int, float] = {}
             block_tables: Dict[int, List[int]] = {}
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
@@ -192,6 +194,7 @@ class Scheduler:
                     input_tokens[seq_id] = seq.get_token_ids()
                 else:
                     input_tokens[seq_id] = [seq.get_last_token_id()]
+                seq_logprobs[seq_id] = seq.cumulative_logprobs
                 # NOTE(woosuk): Sequences in the same group have the same
                 # sequence length
                 seq_len = seq.get_len()
@@ -201,6 +204,7 @@ class Scheduler:
                 is_prompt=is_prompt,
                 input_tokens=input_tokens,
                 context_len=seq_len,
+                seq_logprobs=seq_logprobs,
                 sampling_params=self.sampling_params[group_id],
                 block_tables=block_tables,
             )
@@ -216,7 +220,7 @@ class Scheduler:
 
     def post_step(
         self,
-        seq_outputs: Dict[int, Tuple[int, int]],
+        seq_outputs: Dict[int, SequenceOutputs],
     ) -> None:
         # Update the running sequences and free blocks.
         for seq_group in self.running:
@@ -228,21 +232,21 @@ class Scheduler:
                 if seq.status == SequenceStatus.FINISHED:
                     continue
 
-                parent_seq_id, next_token = seq_outputs[seq.seq_id]
-                if seq.seq_id != parent_seq_id:
+                output = seq_outputs[seq.seq_id]
+                if seq.seq_id != output.parent_seq_id:
                     # The sequence is a fork of the parent sequence (beam search).
                     # Free the current sequence.
                     self.block_manager.free(seq)
                     # Fork the parent sequence.
-                    parent_seq = seq_group.find(parent_seq_id)
-                    seq.logical_token_blocks = parent_seq.logical_token_blocks.copy()
+                    parent_seq = seq_group.find(output.parent_seq_id)
+                    parent_seq.fork(seq)
                     self.block_manager.fork(parent_seq, seq)
 
                 # Append a new token to the sequence.
-                seq.append(next_token, )
+                seq.append(output.output_token, output.logprobs)
 
                 # Check if the sequence has generated a stop token.
-                if next_token in stop_token_ids:
+                if output.output_token in stop_token_ids:
                     self._free_seq(seq)
                     continue
 

@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Dict, Tuple
 
 import torch
 
@@ -10,6 +10,7 @@ class InputMetadata:
     def __init__(
         self,
         seq_groups: List[Tuple[List[int], SamplingParams]],
+        seq_logprobs: Dict[int, float],                         # Seq id -> cumulative logprobs.
         prompt_lens: List[int],
         slot_mapping: torch.Tensor,
         context_lens: torch.Tensor,
@@ -17,6 +18,7 @@ class InputMetadata:
         block_tables: torch.Tensor,
     ) -> None:
         self.seq_groups = seq_groups
+        self.seq_logprobs = seq_logprobs
         self.prompt_lens = prompt_lens
         self.slot_mapping = slot_mapping
         self.context_lens = context_lens

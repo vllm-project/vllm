@@ -4,20 +4,26 @@ import torch
 import torch.nn as nn
 
 from cacheflow.models import InputMetadata
+from cacheflow.sequence import SequenceOutputs
+
+_DEFAULT_NUM_LOGPROBS = 5
 
 
 class Sampler(nn.Module):
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        num_logprobs: int = _DEFAULT_NUM_LOGPROBS,
+    ) -> None:
         super().__init__()
-        self.seq_probs: Dict[int, float] = {}
+        self.num_logprobs = num_logprobs
 
     def forward(
         self,
         embedding: torch.Tensor,
         hidden_states: torch.Tensor,
         input_metadata: InputMetadata,
-    ) -> Dict[int, Tuple[int, int]]:
+    ) -> Dict[int, SequenceOutputs]:
         # Get the hidden states of the last tokens.
         start_idx = 0
         last_token_indicies: List[int] = []
@@ -35,30 +41,34 @@ class Sampler(nn.Module):
         temperatures = _get_temperatures(input_metadata)
         assert len(temperatures) == logits.shape[0]
         if any(t != 1.0 for t in temperatures):
-            t = torch.tensor(temperatures, device=logits.device)
+            t = torch.tensor(
+                temperatures, dtype=logits.dtype, device=logits.device)
             # Use in-place division to avoid creating a new tensor.
             logits.div_(t.unsqueeze(dim=1))
 
         # Compute the probabilities.
-        probs = torch.softmax(logits, dim=-1)
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+        # Compute the log probabilities (before applying top-p).
+        logprobs = torch.log(probs)
 
         # Apply top-p.
         top_ps = _get_top_ps(input_metadata)
         assert len(top_ps) == probs.shape[0]
         if any(p < 1.0 for p in top_ps):
-            p = torch.tensor(top_ps, device=probs.device)
+            p = torch.tensor(top_ps, dtype=probs.dtype, device=probs.device)
             probs = _apply_top_p(probs, p)
 
         # Sample the next tokens.
-        output = self._sample(probs, input_metadata)
+        output = self._sample(probs, logprobs, input_metadata)
         return output
 
     def _sample(
         self,
         probs: torch.Tensor,
+        logprobs: torch.Tensor,
         input_metadata: InputMetadata,
-    ) -> Dict[int, Tuple[int, int]]:
-        seq_outputs: Dict[int, Tuple[int, int]] = {}
+    ) -> Dict[int, SequenceOutputs]:
+        seq_outputs: Dict[int, SequenceOutputs] = {}
 
         # TODO(woosuk): Optimize.
         idx = 0
@@ -68,6 +78,7 @@ class Sampler(nn.Module):
                 # Generate the next tokens for a prompt input.
                 assert len(seq_ids) == sampling_params.n
                 prob = probs[idx]
+                logprob = logprobs[idx]
                 idx += 1
 
                 if sampling_params.use_beam_search:
@@ -87,12 +98,19 @@ class Sampler(nn.Module):
                         prob, num_samples=n, replacement=True)
                     next_token_ids = next_token_ids.tolist()
 
+                # Get top-k log probabilities for the next tokens.
+                next_logprobs = _get_topk_logprobs(logprob, self.num_logprobs)
+
                 # Build the output.
                 for seq_id, next_token_id in zip(seq_ids, next_token_ids):
-                    seq_outputs[seq_id] = (seq_id, next_token_id)
+                    output_logprobs = next_logprobs.copy()
+                    output_logprobs[next_token_id] = logprob[next_token_id].item()
+                    seq_outputs[seq_id] = SequenceOutputs(
+                        seq_id, seq_id, next_token_id, output_logprobs)
             else:
                 # Generate the next tokens for generation tokens.
                 prob = probs[idx:idx + len(seq_ids)]
+                logprob = logprobs[idx:idx + len(seq_ids)]
                 idx += len(seq_ids)
 
                 # NOTE(woosuk): sampling_params.n can be greater than
@@ -100,24 +118,35 @@ class Sampler(nn.Module):
                 if sampling_params.use_beam_search:
                     # Beam search.
                     beam_width = len(seq_ids)
-                    # FIXME
                     raise NotImplementedError()
                 else:
+                    seq_to_logprobs: Dict[int, Dict[int, float]] = {}
                     if sampling_params.temperature == 0.0:
                         # Greedy sampling.
                         assert len(seq_ids) == 1
                         next_token_id = torch.argmax(prob, dim=-1)
                         next_token_ids = [next_token_id.item()]
+                        output_logprobs = _get_topk_logprobs(logprob, self.num_logprobs)
+                        output_logprobs[next_token_id] = logprob[next_token_id].item()
+                        seq_to_logprobs[seq_ids[0]] = output_logprobs
                     else:
                         # Neucleus sampling.
                         # Sample 1 token for each sequence.
                         next_tokens = torch.multinomial(
                             prob, num_samples=1, replacement=True)
                         next_token_ids = next_tokens.squeeze(dim=-1).tolist()
+                        for i, seq_id in enumerate(seq_ids):
+                            output_logprobs = _get_topk_logprobs(
+                                logprob[i], self.num_logprobs)
+                            token_id = next_token_ids[i]
+                            output_logprobs[token_id] = logprob[i, token_id].item()
+                            seq_to_logprobs[seq_id] = output_logprobs
+
 
                     # Build the output.
                     for seq_id, next_token_id in zip(seq_ids, next_token_ids):
-                        seq_outputs[seq_id] = (seq_id, next_token_id)
+                        seq_outputs[seq_id] = SequenceOutputs(
+                            seq_id, seq_id, next_token_id, seq_to_logprobs[seq_id])
 
         return seq_outputs
 
@@ -137,10 +166,10 @@ def _get_temperatures(
             temperature = 1.0
 
         if i < input_metadata.num_prompts:
-            # Logits for a prompt input.
+            # A prompt input.
             temperatures.append(temperature)
         else:
-            # Logits for a generation token.
+            # A generation token.
             temperatures += [temperature] * len(seq_ids)
     return temperatures
 
@@ -152,10 +181,10 @@ def _get_top_ps(
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
         if i < input_metadata.num_prompts:
-            # Logits for a prompt input.
+            # A prompt input.
             top_ps.append(sampling_params.top_p)
         else:
-            # Logits for a generation token.
+            # A generation token.
             top_ps += [sampling_params.top_p] * len(seq_ids)
     return top_ps
 
@@ -173,3 +202,24 @@ def _apply_top_p(
     probs = torch.gather(
         probs_sort, dim=-1, index=torch.argsort(probs_idx, dim=-1))
     return probs
+
+
+def _get_topk_logprobs(
+    logprobs: torch.Tensor,
+    num_logprobs: int,
+) -> Dict[int, float]:
+    if num_logprobs == 0:
+        return {}
+
+    topk_logprobs, topk_ids = torch.topk(logprobs, num_logprobs)
+    if num_logprobs == 1:
+        topk_logprobs = [topk_logprobs.item()]
+        topk_ids = [topk_ids.item()]
+    else:
+        topk_logprobs = topk_logprobs.tolist()
+        topk_ids = topk_ids.tolist()
+
+    token_to_logprob: Dict[int, float] = {}
+    for token_id, logprob in zip(topk_ids, topk_logprobs):
+        token_to_logprob[token_id] = logprob
+    return token_to_logprob

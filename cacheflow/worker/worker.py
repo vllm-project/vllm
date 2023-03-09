@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -6,6 +6,7 @@ from cacheflow.models import get_model
 from cacheflow.models import InputMetadata
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceGroupInputs
+from cacheflow.sequence import SequenceOutputs
 from cacheflow.worker.cache_engine import CacheEngine
 
 
@@ -54,6 +55,7 @@ class Worker:
         input_seq_groups: List[SequenceGroupInputs],
     ) -> Tuple[torch.LongTensor, torch.LongTensor, InputMetadata]:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
+        seq_logprobs: Dict[int, float] = {}
         sampling_params: Dict[int, SamplingParams] = {}
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -68,6 +70,7 @@ class Worker:
             seq_ids = list(input_seq_group.input_tokens.keys())
             sampling_params = input_seq_group.sampling_params
             seq_groups.append((seq_ids, sampling_params))
+            seq_logprobs.update(input_seq_group.seq_logprobs)
 
             # Use any sequence in the group.
             seq_id = seq_ids[0]
@@ -101,6 +104,7 @@ class Worker:
             seq_ids = list(input_seq_group.input_tokens.keys())
             sampling_params = input_seq_group.sampling_params
             seq_groups.append((seq_ids, sampling_params))
+            seq_logprobs.update(input_seq_group.seq_logprobs)
 
             for seq_id in seq_ids:
                 assert len(input_seq_group.input_tokens[seq_id]) == 1
@@ -146,6 +150,7 @@ class Worker:
 
         input_metadata = InputMetadata(
             seq_groups=seq_groups,
+            seq_logprobs=seq_logprobs,
             prompt_lens=prompt_lens,
             slot_mapping=slot_mapping_tensor,
             context_lens=context_lens_tensor,
@@ -161,7 +166,7 @@ class Worker:
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
-    ) -> Union[torch.Tensor, Dict[int, Tuple[int, int]]]:
+    ) -> Dict[int, SequenceOutputs]:
         # Issue cache operations.
         command_issued = False
         if blocks_to_swap_in:

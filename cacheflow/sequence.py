@@ -25,9 +25,11 @@ class Sequence:
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the given token ids.
-        self.append(token_ids)
+        self.add(token_ids)
 
         self.status = SequenceStatus.PENDING
+        self.output_logprobs: List[Dict[int, float]] = []
+        self.cumulative_logprobs = 1.0
 
     def add_block(self) -> None:
         block = LogicalTokenBlock(
@@ -36,7 +38,7 @@ class Sequence:
         )
         self.logical_token_blocks.append(block)
 
-    def append(self, token_ids: List[int]) -> None:
+    def add(self, token_ids: List[int]) -> None:
         while token_ids:
             if not self.logical_token_blocks:
                 self.add_block()
@@ -50,6 +52,12 @@ class Sequence:
             last_block.append(token_ids[:num_empty_slots])
             token_ids = token_ids[num_empty_slots:]
 
+    def append(self, token_id: int, logprobs: Dict[int, float]) -> None:
+        assert token_id in logprobs
+        self.add([token_id])
+        self.output_logprobs.append(logprobs)
+        self.cumulative_logprobs += logprobs[token_id]
+
     def get_len(self) -> int:
         return sum(block.num_tokens for block in self.logical_token_blocks)
 
@@ -61,6 +69,12 @@ class Sequence:
 
     def get_last_token_id(self) -> int:
         return self.logical_token_blocks[-1].get_last_token_id()
+
+    def fork(self, child_seq: 'Sequence') -> 'Sequence':
+        child_seq.status = self.status
+        child_seq.logical_token_blocks = self.logical_token_blocks.copy()
+        child_seq.output_logprobs = self.output_logprobs.copy()
+        child_seq.cumulative_logprobs = self.cumulative_logprobs
 
     def __repr__(self) -> str:
         return (f'Sequence(seq_id={self.seq_id}, '
@@ -104,7 +118,7 @@ class SequenceGroup:
                 f'num_seqs={len(self.seqs)})')
 
 
-class InputSequenceGroup:
+class SequenceGroupInputs:
 
     def __init__(
         self,
@@ -112,6 +126,7 @@ class InputSequenceGroup:
         is_prompt: bool,
         input_tokens: Dict[int, List[int]],     # Seq id -> token ids.
         context_len: int,
+        seq_logprobs: Dict[int, float],         # Seq id -> cumulative logprobs.
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],     # Seq id -> List of physical block numbers.
     ) -> None:
@@ -119,5 +134,21 @@ class InputSequenceGroup:
         self.is_prompt = is_prompt
         self.input_tokens = input_tokens
         self.context_len = context_len
+        self.seq_logprobs = seq_logprobs
         self.sampling_params = sampling_params
         self.block_tables = block_tables
+
+
+class SequenceOutputs:
+
+    def __init__(
+        self,
+        seq_id: int,
+        parent_seq_id: int,
+        output_token: int,
+        logprobs: Dict[int, float],         # Token id -> logprob.
+    ) -> None:
+        self.seq_id = seq_id
+        self.parent_seq_id = parent_seq_id
+        self.output_token = output_token
+        self.logprobs = logprobs
