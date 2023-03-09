@@ -5,7 +5,7 @@ from cacheflow.master.frontend import Frontend
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence
 from cacheflow.sequence import SequenceGroup
-from cacheflow.sequence import SequenceGroupInput
+from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.sequence import SequenceStatus
 
 _MAX_NUM_BATCHED_TOKENS = 2048
@@ -174,7 +174,7 @@ class Scheduler:
                 self.pending.clear()
 
         # 4. Create input data structures.
-        input_seq_groups: List[SequenceGroupInput] = []
+        input_seq_groups: List[SequenceGroupInputs] = []
         for seq_group in self.running:
             group_id = seq_group.group_id
             num_steps = self.num_steps[group_id]
@@ -196,7 +196,7 @@ class Scheduler:
                 # sequence length
                 seq_len = seq.get_len()
 
-            input_seq_group = SequenceGroupInput(
+            input_seq_group = SequenceGroupInputs(
                 group_id=group_id,
                 is_prompt=is_prompt,
                 input_tokens=input_tokens,
