@@ -183,23 +183,26 @@ def _sample_from_generation_tokens(
         beam_width = len(seq_ids)
         _, topk_ids = torch.topk(logprobs.flatten(), beam_width)
         seq_idx = torch.div(topk_ids, vocab_size, rounding_mode='floor').tolist()
-        token_idx = (topk_ids % vocab_size).tolist()
+        beam_seq_ids = [seq_ids[i] for i in seq_idx]
+        token_ids = (topk_ids % vocab_size).tolist()
 
-        # TODO(woosuk): This is a bit hacky. Improve this.
-        parent_seq_ids = [-1] * len(seq_ids)
-        next_token_ids = [-1] * len(seq_ids)
-        for i, seq_id in enumerate(seq_ids):
-            if i in seq_idx:
-                pos = seq_idx.index(i)
-                next_token_id = token_idx[pos]
-                parent_seq_ids[i] = seq_id
-                next_token_ids[i] = next_token_id
-                seq_idx.pop(pos)
-                token_idx.pop(pos)
-        for i, seq_id in enumerate(seq_ids):
-            if parent_seq_ids[i] == -1:
-                parent_seq_ids[i] = seq_ids[seq_idx.pop(0)]
-                next_token_ids[i] = token_idx.pop(0)
+        beam_outputs: Dict[int, Tuple[int, int]] = {}
+        outstanding_beams: List[Tuple[int, int]] = []
+        # If a beam survives, continue with it.
+        for seq_id, token_id in zip(beam_seq_ids, token_ids):
+            if seq_id not in beam_outputs:
+                beam_outputs[seq_id] = (seq_id, token_id)
+            else:
+                outstanding_beams.append((seq_id, token_id))
+
+        # If a beam is terminated, continue with another beam.
+        for seq_id in seq_ids:
+            if seq_id not in beam_outputs:
+                beam_outputs[seq_id] = outstanding_beams.pop()
+        assert not outstanding_beams
+
+        parent_seq_ids = [beam_outputs[seq_id][0] for seq_id in seq_ids]
+        next_token_ids = [beam_outputs[seq_id][1] for seq_id in seq_ids]
     elif sampling_params.temperature == 0.0:
         # Greedy sampling.
         assert len(seq_ids) == 1
