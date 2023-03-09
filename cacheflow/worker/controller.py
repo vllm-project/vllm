@@ -70,18 +70,17 @@ class Controller:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, int],
     ) -> None:
-        # FIXME: Support tensor parallelism.
-        assert len(self.workers) == 1
-        worker = self.workers[0]
-        output = worker.execute_stage(
-            prompt_tokens,
-            generation_tokens,
-            context_lens,
-            block_tables,
-            blocks_to_swap_in,
-            blocks_to_swap_out,
-            blocks_to_copy,
-        )
+        for worker in self.workers:
+            output = worker.execute_stage.remote(
+                prompt_tokens,
+                generation_tokens,
+                context_lens,
+                block_tables,
+                blocks_to_swap_in,
+                blocks_to_swap_out,
+                blocks_to_copy,
+            )
+            output = ray.get(output)
 
         if self.is_last_stage:
             self.next_node.post_step(output)

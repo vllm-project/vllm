@@ -45,7 +45,8 @@ class OPTCacheFlowAttention(nn.Module):
             v = value[start_idx:start_idx + prompt_len]
 
             attention_mask = torch.triu(
-                torch.ones(q.shape[0], k.shape[0]), diagonal=1) * -1e5
+                torch.ones(q.shape[0], k.shape[0]), diagonal=1)
+            attention_mask = attention_mask * -1e3
             attention_mask = attention_mask.to(dtype=q.dtype, device=q.device)
             attention_out = self._masked_attention(q, k, v, attention_mask)
             out.copy_(attention_out, non_blocking=True)

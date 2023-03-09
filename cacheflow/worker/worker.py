@@ -6,7 +6,8 @@ from cacheflow.models import get_model
 from cacheflow.models import InputMetadata
 from cacheflow.worker.cache_engine import CacheEngine
 from cacheflow.parallel_utils.tensor_parallel import model_parallel_cuda_manual_seed
-from cacheflow.parallel_utils.parallel_state import initialize_model_parallel
+from cacheflow.parallel_utils.parallel_state import (
+    initialize_model_parallel, get_tensor_model_parallel_world_size)
 from cacheflow.utils import set_random_seed
 class Worker:
 
@@ -24,6 +25,7 @@ class Worker:
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
     ) -> None:
+        # FIXME (zhuohan): Might not need local_rank since ray handles it.
         self.init_distributed_environment(distributed_init_method,
                                           rank,
                                           local_rank,
@@ -37,12 +39,14 @@ class Worker:
         self.device = torch.device('cuda', index=self.gpu_id)
 
         # Initialize the model.
-        # FIXME(woosuk): This is a hack.
-        self.model = get_model(model_name, dtype=dtype).to(device=self.device)
+        self.model, self.dtype = get_model(model_name, dtype=dtype)
+        self.model = self.model.to(self.device)
+        tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
         self.num_layers = self.model.config.num_hidden_layers
-        self.num_heads = self.model.config.num_attention_heads
+        assert self.model.config.num_attention_heads % tensor_model_parallel_world_size == 0
+        self.num_heads = self.model.config.num_attention_heads // tensor_model_parallel_world_size
         self.head_size = self.model.config.hidden_size // self.num_heads
-        self.dtype = self.model.dtype
 
         self.cache_engine = CacheEngine(
             worker_id=self.worker_id,

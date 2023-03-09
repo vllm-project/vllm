@@ -61,7 +61,7 @@ def initialize_ray_cluster(
             node_resource = valid_node_resources[current_node_id]
             stage_devices.append((rank, node_resource, current_device_id))
             if distributed_init_method is None:
-                ip = "node:".split(node_resource)[-1]
+                ip = node_resource.split("node:")[-1]
                 port = random.randint(10000, 20000)
                 distributed_init_method = f"tcp://{ip}:{port}"
             rank += 1

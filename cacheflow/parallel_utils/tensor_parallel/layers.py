@@ -95,7 +95,7 @@ def _initialize_affine_weight_cpu(weight, output_size, input_size,
                                   per_partition_size, partition_dim,
                                   init_method, stride=1,
                                   return_master_weight=False,
-                                  *, params_dtype=torch.float32):
+                                  *, params_dtype=None):
     """Initialize affine weight for model parallel.
 
     Build the master weight on all processes and scatter
@@ -105,6 +105,9 @@ def _initialize_affine_weight_cpu(weight, output_size, input_size,
                                          is_parallel=True,
                                          dim=partition_dim,
                                          stride=stride)
+
+    if params_dtype is None:
+        params_dtype = torch.get_default_dtype()
 
     # Initialize master weight
     master_weight = torch.empty(output_size, input_size,
@@ -147,7 +150,7 @@ class VocabParallelEmbedding(torch.nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int,
                  padding_idx: int=None, *,
                  init_method=init.xavier_normal_,
-                 params_dtype: torch.dtype=torch.float32,
+                 params_dtype: torch.dtype=None,
                  use_cpu_initialization: bool=False,
                  perform_initialization: bool=True):
         super(VocabParallelEmbedding, self).__init__()
@@ -155,6 +158,9 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.padding_idx = padding_idx
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+
         # Set the detaults for compatibility.
         self.max_norm = None
         self.norm_type = 2.
@@ -444,7 +450,7 @@ class ColumnParallelLinear(torch.nn.Module):
                  keep_master_weight_for_test=False,
                  skip_bias_add=False,
                  async_tensor_model_parallel_allreduce=True,
-                 params_dtype=torch.float32,
+                 params_dtype=None,
                  use_cpu_initialization=False,
                  perform_initialization=True,
                  gradient_accumulation_fusion=False,
@@ -460,6 +466,9 @@ class ColumnParallelLinear(torch.nn.Module):
         world_size = get_tensor_model_parallel_world_size()
         self.output_size_per_partition = divide(output_size, world_size)
         self.skip_bias_add = skip_bias_add
+
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
 
         # Parameters.
         # Note: torch.nn.functional.linear performs XA^T + b and as a result
@@ -608,7 +617,7 @@ class RowParallelLinear(torch.nn.Module):
                  init_method=init.xavier_normal_, stride=1,
                  keep_master_weight_for_test=False,
                  skip_bias_add=False,
-                 params_dtype=torch.float32,
+                 params_dtype=None,
                  use_cpu_initialization=False,
                  perform_initialization=True,
                  gradient_accumulation_fusion=False,
@@ -620,6 +629,9 @@ class RowParallelLinear(torch.nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.input_is_parallel = input_is_parallel
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+
         # Divide the weight matrix along the last dimension.
         world_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = divide(input_size, world_size)
