@@ -53,15 +53,16 @@ def main():
     controllers[-1].set_next(scheduler)
 
     test_inputs = [
-        'Ion Stoica is a',
-        'UC Berkeley is',
-        'The future of cloud computing is',
+        ('Ion Stoica is a', {'n': 4, 'use_beam_search': True, 'temperature': 0.0}),
+        ('UC Berkeley is', {'n': 3, 'temperature': 0.8, 'top_p': 0.99}),
+        ('The future of cloud computing is', {}),
     ]
 
-    # FIXME
+    # Use iteration-level scheduling.
     while True:
         if test_inputs:
-            frontend.query(test_inputs.pop(0), n=2, temperature=0.8)
+            text, sampling_params = test_inputs.pop(0)
+            frontend.query(text, **sampling_params)
         scheduler.step()
         if not scheduler.pending and not scheduler.running:
             break
