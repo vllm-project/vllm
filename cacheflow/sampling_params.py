@@ -11,6 +11,7 @@ class SamplingParams:
         use_beam_search: bool,
         stop_token_ids: Set[int],
         max_num_steps: int,
+        num_logprobs: int,
         context_window_size: Optional[int],
     ) -> None:
         if n < 1:
@@ -23,6 +24,9 @@ class SamplingParams:
         if max_num_steps < 1:
             raise ValueError(
                 f'max_num_steps must be at least 1, got {max_num_steps}.')
+        if num_logprobs < 0:
+            raise ValueError(
+                f'num_logprobs must be non-negative, got {num_logprobs}.')
         if context_window_size is not None and context_window_size < 0:
             raise ValueError(
                 'context_window_size must be non-negative, '
@@ -53,6 +57,7 @@ class SamplingParams:
         self.use_beam_search = use_beam_search
         self.stop_token_ids = stop_token_ids
         self.max_num_steps = max_num_steps
+        self.num_logprobs = num_logprobs
         self.context_window_size = context_window_size
 
     def __repr__(self) -> str:
@@ -62,4 +67,5 @@ class SamplingParams:
                 f'use_beam_search={self.use_beam_search}, '
                 f'stop_token_ids={self.stop_token_ids}, '
                 f'max_num_steps={self.max_num_steps}, '
+                f'num_logprobs={self.num_logprobs}, '
                 f'context_window_size={self.context_window_size})')

@@ -31,6 +31,7 @@ class Frontend:
         use_beam_search: bool = False,
         stop_token_ids: Set[int] = set(),
         max_num_steps: int = 16,                    # From OpenAI API.
+        num_logprobs: int = 0,
         context_window_size: Optional[int] = None,
     ) -> None:
         stop_token_ids.add(self.tokenizer.eos_token_id)
@@ -41,6 +42,7 @@ class Frontend:
             use_beam_search=use_beam_search,
             stop_token_ids=stop_token_ids,
             max_num_steps=max_num_steps,
+            num_logprobs=num_logprobs,
             context_window_size=context_window_size,
         )
         self._query(prompt, sampling_params)
