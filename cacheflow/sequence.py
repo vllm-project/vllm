@@ -1,3 +1,4 @@
+import copy
 import enum
 from typing import Dict, List, Optional
 
@@ -71,9 +72,8 @@ class Sequence:
         return self.logical_token_blocks[-1].get_last_token_id()
 
     def fork(self, child_seq: 'Sequence') -> 'Sequence':
-        child_seq.status = self.status
-        child_seq.logical_token_blocks = self.logical_token_blocks.copy()
-        child_seq.output_logprobs = self.output_logprobs.copy()
+        child_seq.logical_token_blocks = copy.deepcopy(self.logical_token_blocks)
+        child_seq.output_logprobs = copy.deepcopy(self.output_logprobs)
         child_seq.cumulative_logprobs = self.cumulative_logprobs
 
     def __repr__(self) -> str:
