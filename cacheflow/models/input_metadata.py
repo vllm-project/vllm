@@ -9,7 +9,7 @@ class InputMetadata:
 
     def __init__(
         self,
-        seq_groups: List[Tuple[int, List[int], SamplingParams]],
+        seq_groups: List[Tuple[List[int], SamplingParams]],
         prompt_lens: List[int],
         slot_mapping: torch.Tensor,
         context_lens: torch.Tensor,

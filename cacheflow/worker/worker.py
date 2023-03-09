@@ -53,7 +53,7 @@ class Worker:
         self,
         input_seq_groups: List[InputSequenceGroup],
     ) -> Tuple[torch.LongTensor, torch.LongTensor, InputMetadata]:
-        seq_groups: List[Tuple[int, List[int], SamplingParams]] = []
+        seq_groups: List[Tuple[List[int], SamplingParams]] = []
         sampling_params: Dict[int, SamplingParams] = {}
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -65,10 +65,9 @@ class Worker:
             if not input_seq_group.is_prompt:
                 continue
 
-            group_id = input_seq_group.group_id
             seq_ids = list(input_seq_group.input_tokens.keys())
             sampling_params = input_seq_group.sampling_params
-            seq_groups.append((group_id, seq_ids, sampling_params))
+            seq_groups.append((seq_ids, sampling_params))
 
             # Use any sequence in the group.
             seq_id = seq_ids[0]
@@ -99,10 +98,9 @@ class Worker:
             if input_seq_group.is_prompt:
                 continue
 
-            group_id = input_seq_group.group_id
             seq_ids = list(input_seq_group.input_tokens.keys())
             sampling_params = input_seq_group.sampling_params
-            seq_groups.append((group_id, seq_ids, sampling_params))
+            seq_groups.append((seq_ids, sampling_params))
 
             for seq_id in seq_ids:
                 assert len(input_seq_group.input_tokens[seq_id]) == 1
