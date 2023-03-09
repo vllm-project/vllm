@@ -10,69 +10,8 @@ class Sampler(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-
-    def _compute_prob(
-        self,
-        logits: torch.Tensor,
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        # Collect the temperatures for the logits.
-        temperatures: List[float] = []
-        for i, seq_group in enumerate(input_metadata.seq_groups):
-            _, seq_ids, sampling_params = seq_group
-            temperature = sampling_params.temperature
-            if temperature == 0.0:
-                # NOTE: Zero temperature means deterministic sampling
-                # (i.e., greedy sampling or beam search).
-                # Set the temperature to 1 to avoid division by zero.
-                temperature = 1.0
-
-            if i < input_metadata.num_prompts:
-                # Logits for a prompt input.
-                temperatures.append(temperature)
-            else:
-                # Logits for a generation token.
-                temperatures += [temperature] * len(seq_ids)
-        assert len(temperatures) == logits.shape[0]
-
-        if all(t == 1.0 for t in temperatures):
-            return torch.softmax(logits, dim=-1)
-
-        t = torch.tensor(temperatures, device=logits.device)
-        probs = torch.softmax(logits / t.unsqueeze(dim=1), dim=-1)
-        return probs
-
-    def _apply_top_p(
-        self,
-        probs: torch.Tensor,
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        # Collect the top-p thresholds for the logits.
-        top_ps: List[float] = []
-        for i, seq_group in enumerate(input_metadata.seq_groups):
-            _, seq_ids, sampling_params = seq_group
-            if i < input_metadata.num_prompts:
-                # Logits for a prompt input.
-                top_ps.append(sampling_params.top_p)
-            else:
-                # Logits for a generation token.
-                top_ps += [sampling_params.top_p] * len(seq_ids)
-        assert len(top_ps) == probs.shape[0]
-
-        if all(p == 1.0 for p in top_ps):
-            return probs
-        p = torch.tensor(top_ps, device=probs.device)
-
-        # Apply top-p.
-        # TODO(woosuk): Optimize the following with a custom op.
-        probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
-        probs_sum = torch.cumsum(probs_sort, dim=-1)
-        mask = (probs_sum - probs_sort) > p.unsqueeze(dim=1)
-        probs_sort[mask] = 0.0
-        probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
-        probs = torch.gather(
-            probs_sort, dim=-1, index=torch.argsort(probs_idx, dim=-1))
-        return probs
+        self.logits: Dict[int, List[float]] = {}
+        self.probs: Dict[int, List[float]] = {}
 
     def _sample(
         self,
@@ -84,7 +23,7 @@ class Sampler(nn.Module):
         # TODO(woosuk): Optimize the following with a custom op.
         idx = 0
         for i, seq_group in enumerate(input_metadata.seq_groups):
-            _, seq_ids, sampling_params = seq_group
+            seq_ids, sampling_params = seq_group
             if i < input_metadata.num_prompts:
                 # Generate the next tokens for a prompt input.
                 assert len(seq_ids) == sampling_params.n
@@ -159,8 +98,77 @@ class Sampler(nn.Module):
         # Get the logits for the next tokens.
         logits = torch.matmul(hidden_states, embedding.t())
 
+        # Apply temperature scaling.
+        temperatures = _get_temperatures(input_metadata)
+        assert len(temperatures) == logits.shape[0]
+        if any(t != 1.0 for t in temperatures):
+            t = torch.tensor(temperatures, device=logits.device)
+            # Use in-place division to avoid creating a new tensor.
+            logits.div_(t.unsqueeze(dim=1))
+
+        # Compute the probabilities.
+        probs = torch.softmax(logits, dim=-1)
+
+        # Apply top-p.
+        top_ps = _get_top_ps(input_metadata)
+        assert len(top_ps) == probs.shape[0]
+        if any(p < 1.0 for p in top_ps):
+            p = torch.tensor(top_ps, device=probs.device)
+            probs = _apply_top_p(probs, p)
+
         # Sample the next tokens.
-        probs = self._compute_prob(logits, input_metadata)
-        probs = self._apply_top_p(probs, input_metadata)
         output = self._sample(probs, input_metadata)
         return output
+
+
+def _get_temperatures(
+    input_metadata: InputMetadata,
+) -> List[float]:
+    # Collect the temperatures for the logits.
+    temperatures: List[float] = []
+    for i, seq_group in enumerate(input_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+        temperature = sampling_params.temperature
+        if temperature == 0.0:
+            # NOTE: Zero temperature means deterministic sampling
+            # (i.e., greedy sampling or beam search).
+            # Set the temperature to 1 to avoid division by zero.
+            temperature = 1.0
+
+        if i < input_metadata.num_prompts:
+            # Logits for a prompt input.
+            temperatures.append(temperature)
+        else:
+            # Logits for a generation token.
+            temperatures += [temperature] * len(seq_ids)
+    return temperatures
+
+
+def _get_top_ps(
+    input_metadata: InputMetadata,
+) -> List[float]:
+    top_ps: List[float] = []
+    for i, seq_group in enumerate(input_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+        if i < input_metadata.num_prompts:
+            # Logits for a prompt input.
+            top_ps.append(sampling_params.top_p)
+        else:
+            # Logits for a generation token.
+            top_ps += [sampling_params.top_p] * len(seq_ids)
+    return top_ps
+
+
+def _apply_top_p(
+    probs: torch.Tensor,
+    p: torch.Tensor,
+) -> torch.Tensor:
+    # TODO(woosuk): Optimize.
+    probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
+    probs_sum = torch.cumsum(probs_sort, dim=-1)
+    mask = (probs_sum - probs_sort) > p.unsqueeze(dim=1)
+    probs_sort[mask] = 0.0
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    probs = torch.gather(
+        probs_sort, dim=-1, index=torch.argsort(probs_idx, dim=-1))
+    return probs
