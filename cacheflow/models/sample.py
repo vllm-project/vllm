@@ -10,8 +10,48 @@ class Sampler(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.logits: Dict[int, List[float]] = {}
-        self.probs: Dict[int, List[float]] = {}
+        self.seq_probs: Dict[int, float] = {}
+
+    def forward(
+        self,
+        embedding: torch.Tensor,
+        hidden_states: torch.Tensor,
+        input_metadata: InputMetadata,
+    ) -> Dict[int, Tuple[int, int]]:
+        # Get the hidden states of the last tokens.
+        start_idx = 0
+        last_token_indicies: List[int] = []
+        for prompt_len in input_metadata.prompt_lens:
+            last_token_indicies.append(start_idx + prompt_len - 1)
+            start_idx += prompt_len
+        last_token_indicies.extend(
+            range(start_idx, start_idx + input_metadata.num_generation_tokens))
+        hidden_states = hidden_states[last_token_indicies]
+
+        # Get the logits for the next tokens.
+        logits = torch.matmul(hidden_states, embedding.t())
+
+        # Apply temperature scaling.
+        temperatures = _get_temperatures(input_metadata)
+        assert len(temperatures) == logits.shape[0]
+        if any(t != 1.0 for t in temperatures):
+            t = torch.tensor(temperatures, device=logits.device)
+            # Use in-place division to avoid creating a new tensor.
+            logits.div_(t.unsqueeze(dim=1))
+
+        # Compute the probabilities.
+        probs = torch.softmax(logits, dim=-1)
+
+        # Apply top-p.
+        top_ps = _get_top_ps(input_metadata)
+        assert len(top_ps) == probs.shape[0]
+        if any(p < 1.0 for p in top_ps):
+            p = torch.tensor(top_ps, device=probs.device)
+            probs = _apply_top_p(probs, p)
+
+        # Sample the next tokens.
+        output = self._sample(probs, input_metadata)
+        return output
 
     def _sample(
         self,
@@ -20,7 +60,7 @@ class Sampler(nn.Module):
     ) -> Dict[int, Tuple[int, int]]:
         seq_outputs: Dict[int, Tuple[int, int]] = {}
 
-        # TODO(woosuk): Optimize the following with a custom op.
+        # TODO(woosuk): Optimize.
         idx = 0
         for i, seq_group in enumerate(input_metadata.seq_groups):
             seq_ids, sampling_params = seq_group
@@ -78,47 +118,6 @@ class Sampler(nn.Module):
                         seq_outputs[seq_id] = (seq_id, next_token_id)
 
         return seq_outputs
-
-    def forward(
-        self,
-        embedding: torch.Tensor,
-        hidden_states: torch.Tensor,
-        input_metadata: InputMetadata,
-    ) -> Dict[int, Tuple[int, int]]:
-        # Get the hidden states of the last tokens.
-        start_idx = 0
-        last_token_indicies: List[int] = []
-        for prompt_len in input_metadata.prompt_lens:
-            last_token_indicies.append(start_idx + prompt_len - 1)
-            start_idx += prompt_len
-        last_token_indicies.extend(
-            range(start_idx, start_idx + input_metadata.num_generation_tokens))
-        hidden_states = hidden_states[last_token_indicies]
-
-        # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
-
-        # Apply temperature scaling.
-        temperatures = _get_temperatures(input_metadata)
-        assert len(temperatures) == logits.shape[0]
-        if any(t != 1.0 for t in temperatures):
-            t = torch.tensor(temperatures, device=logits.device)
-            # Use in-place division to avoid creating a new tensor.
-            logits.div_(t.unsqueeze(dim=1))
-
-        # Compute the probabilities.
-        probs = torch.softmax(logits, dim=-1)
-
-        # Apply top-p.
-        top_ps = _get_top_ps(input_metadata)
-        assert len(top_ps) == probs.shape[0]
-        if any(p < 1.0 for p in top_ps):
-            p = torch.tensor(top_ps, device=probs.device)
-            probs = _apply_top_p(probs, p)
-
-        # Sample the next tokens.
-        output = self._sample(probs, input_metadata)
-        return output
 
 
 def _get_temperatures(
