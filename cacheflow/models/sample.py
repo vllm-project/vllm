@@ -6,17 +6,11 @@ import torch.nn as nn
 from cacheflow.models import InputMetadata
 from cacheflow.sequence import SequenceOutputs
 
-_DEFAULT_NUM_LOGPROBS = 5
-
 
 class Sampler(nn.Module):
 
-    def __init__(
-        self,
-        num_logprobs: int = _DEFAULT_NUM_LOGPROBS,
-    ) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.num_logprobs = num_logprobs
 
     def forward(
         self,
@@ -99,7 +93,7 @@ class Sampler(nn.Module):
                     next_token_ids = next_token_ids.tolist()
 
                 # Get top-k log probabilities for the next tokens.
-                next_logprobs = _get_topk_logprobs(logprob, self.num_logprobs)
+                next_logprobs = _get_topk_logprobs(logprob, sampling_params.num_logprobs)
 
                 # Build the output.
                 for seq_id, next_token_id in zip(seq_ids, next_token_ids):
@@ -126,7 +120,7 @@ class Sampler(nn.Module):
                         assert len(seq_ids) == 1
                         next_token_id = torch.argmax(prob, dim=-1)
                         next_token_ids = [next_token_id.item()]
-                        output_logprobs = _get_topk_logprobs(logprob, self.num_logprobs)
+                        output_logprobs = _get_topk_logprobs(logprob, sampling_params.num_logprobs)
                         output_logprobs[next_token_id] = logprob[next_token_id].item()
                         seq_to_logprobs[seq_ids[0]] = output_logprobs
                     else:
@@ -137,7 +131,7 @@ class Sampler(nn.Module):
                         next_token_ids = next_tokens.squeeze(dim=-1).tolist()
                         for i, seq_id in enumerate(seq_ids):
                             output_logprobs = _get_topk_logprobs(
-                                logprob[i], self.num_logprobs)
+                                logprob[i], sampling_params.num_logprobs)
                             token_id = next_token_ids[i]
                             output_logprobs[token_id] = logprob[i, token_id].item()
                             seq_to_logprobs[seq_id] = output_logprobs
