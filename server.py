@@ -64,7 +64,7 @@ def main():
             text, sampling_params = test_inputs.pop(0)
             frontend.query(text, **sampling_params)
         scheduler.step()
-        if not scheduler.pending and not scheduler.running:
+        if not (scheduler.pending or scheduler.running or test_inputs):
             break
 
 
