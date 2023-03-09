@@ -40,7 +40,7 @@ class Worker:
         self.num_layers = self.model.config.num_hidden_layers
         assert self.model.config.num_attention_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.model.config.num_attention_heads // tensor_model_parallel_world_size
-        self.head_size = self.model.config.hidden_size // self.num_heads
+        self.head_size = self.model.config.hidden_size // (self.num_heads * tensor_model_parallel_world_size)
 
         self.cache_engine = CacheEngine(
             worker_id=self.worker_id,

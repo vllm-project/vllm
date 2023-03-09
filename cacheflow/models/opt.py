@@ -47,19 +47,24 @@ class OPTAttention(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
+        total_num_heads = num_heads
         assert num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = num_heads // tensor_model_parallel_world_size
-        self.head_dim = embed_dim // num_heads
+        self.num_heads = total_num_heads // tensor_model_parallel_world_size
+        self.head_dim = embed_dim // total_num_heads
         self.scaling = self.head_dim**-0.5
 
         # TODO(woosuk): Fuse the three linear layers into one QKV linear layer.
         self.k_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
+                                           gather_output=False,
                                            perform_initialization=False)
         self.v_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
+                                           gather_output=False,
                                            perform_initialization=False)
         self.q_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
+                                           gather_output=False,
                                            perform_initialization=False)
         self.out_proj = RowParallelLinear(embed_dim, embed_dim, bias=bias,
+                                          input_is_parallel=True,
                                           perform_initialization=False)
 
         self.attn = OPTCacheFlowAttention(scale=self.scaling)
@@ -100,9 +105,11 @@ class OPTDecoderLayer(nn.Module):
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
         self.fc1 = ColumnParallelLinear(self.embed_dim, config.ffn_dim,
                                         bias=config.enable_bias,
+                                        gather_output=False,
                                         perform_initialization=False)
         self.fc2 = RowParallelLinear(config.ffn_dim, self.embed_dim,
                                      bias=config.enable_bias,
+                                     input_is_parallel=True,
                                      perform_initialization=False)
         self.final_layer_norm = nn.LayerNorm(
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
