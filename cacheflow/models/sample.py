@@ -177,7 +177,7 @@ def _sample_from_generation_tokens(
         # Add cumulative logprobs for the sequences in the group.
         seq_logprobs = torch.tensor(
             seq_logprobs, dtype=torch.float, device=logprobs.device)
-        logprobs += seq_logprobs.unsqueeze(dim=1)
+        logprobs = logprobs + seq_logprobs.unsqueeze(dim=1)
 
         vocab_size = logprobs.size(-1)
         beam_width = len(seq_ids)
