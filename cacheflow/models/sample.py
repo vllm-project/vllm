@@ -22,7 +22,8 @@ class Sampler(nn.Module):
             _, seq_ids, sampling_params = seq_group
             temperature = sampling_params.temperature
             if temperature == 0.0:
-                # NOTE: Zero temperature means greedy sampling.
+                # NOTE: Zero temperature means deterministic sampling
+                # (i.e., greedy sampling or beam search).
                 # Set the temperature to 1 to avoid division by zero.
                 temperature = 1.0
 

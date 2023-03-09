@@ -32,9 +32,9 @@ class SamplingParams:
             if n == 1:
                 raise ValueError(
                     'n must be greater than 1 when using beam search.')
-            if temperature == 0.0:
+            if temperature > 0.0:
                 raise ValueError(
-                    'temperature must be greater than 0 when using beam search.')
+                    'temperature must be 0 when using beam search.')
             if top_p != 1.0:
                 raise ValueError(
                     'top_p must be 1 when using beam search.')
@@ -42,12 +42,10 @@ class SamplingParams:
             # Zero temperature means greedy sampling.
             if n > 1:
                 raise ValueError(
-                    'n must be 1 when using greedy sampling '
-                    '(i.e., with zero temperature).')
+                    'n must be 1 when using greedy sampling.')
             if top_p != 1.0:
                 raise ValueError(
-                    'top_p must be 1 when using greedy sampling '
-                    '(i.e., with zero temperature).')
+                    'top_p must be 1 when using greedy sampling.')
 
         self.n = n
         self.temperature = temperature
