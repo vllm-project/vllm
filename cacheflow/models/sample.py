@@ -138,7 +138,7 @@ def _get_topk_logprobs(
     return token_to_logprob
 
 
-def _sample_prompt_output(
+def _sample_from_prompt(
     prob: torch.Tensor,
     sampling_params: SamplingParams,
 ) -> List[int]:
@@ -180,7 +180,7 @@ def _sample(
             idx += 1
 
             # Sample the next tokens.
-            next_token_ids = _sample_prompt_output(prob, sampling_params)
+            next_token_ids = _sample_from_prompt(prob, sampling_params)
             # Get top-k log probabilities for the next tokens.
             next_logprobs = _get_topk_logprobs(
                 logprob, sampling_params.num_logprobs)
