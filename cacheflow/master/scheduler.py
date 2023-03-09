@@ -228,6 +228,7 @@ class Scheduler:
             self.num_steps[group_id] += 1
             stop_token_ids = self.sampling_params[group_id].stop_token_ids
 
+            # Process beam search results before processing the next tokens.
             for seq in seq_group.seqs:
                 if seq.status == SequenceStatus.FINISHED:
                     continue
@@ -242,7 +243,13 @@ class Scheduler:
                     parent_seq.fork(seq)
                     self.block_manager.fork(parent_seq, seq)
 
+            # Process the next tokens.
+            for seq in seq_group.seqs:
+                if seq.status == SequenceStatus.FINISHED:
+                    continue
+
                 # Append a new token to the sequence.
+                output = seq_outputs[seq.seq_id]
                 seq.append(output.output_token, output.logprobs)
 
                 # Check if the sequence has generated a stop token.
