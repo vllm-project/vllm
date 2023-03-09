@@ -3,9 +3,9 @@ from typing import Dict, List, Tuple
 from cacheflow.master.block_manager import BlockSpaceManager
 from cacheflow.master.frontend import Frontend
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.sequence import InputSequenceGroup
 from cacheflow.sequence import Sequence
 from cacheflow.sequence import SequenceGroup
+from cacheflow.sequence import SequenceGroupInput
 from cacheflow.sequence import SequenceStatus
 
 _MAX_NUM_BATCHED_TOKENS = 2048
@@ -174,7 +174,7 @@ class Scheduler:
                 self.pending.clear()
 
         # 4. Create input data structures.
-        input_seq_groups: List[InputSequenceGroup] = []
+        input_seq_groups: List[SequenceGroupInput] = []
         for seq_group in self.running:
             group_id = seq_group.group_id
             num_steps = self.num_steps[group_id]
@@ -196,7 +196,7 @@ class Scheduler:
                 # sequence length
                 seq_len = seq.get_len()
 
-            input_seq_group = InputSequenceGroup(
+            input_seq_group = SequenceGroupInput(
                 group_id=group_id,
                 is_prompt=is_prompt,
                 input_tokens=input_tokens,
@@ -239,7 +239,7 @@ class Scheduler:
                     self.block_manager.fork(parent_seq, seq)
 
                 # Append a new token to the sequence.
-                seq.append([next_token])
+                seq.append(next_token, )
 
                 # Check if the sequence has generated a stop token.
                 if next_token in stop_token_ids:

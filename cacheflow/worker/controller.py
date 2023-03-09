@@ -1,7 +1,7 @@
 from typing import Dict, List, Union
 
 from cacheflow.master.scheduler import Scheduler
-from cacheflow.sequence import InputSequenceGroup
+from cacheflow.sequence import SequenceGroupInput
 from cacheflow.worker.worker import Worker
 
 
@@ -50,7 +50,7 @@ class Controller:
 
     def execute_stage(
         self,
-        input_seq_groups: List[InputSequenceGroup],
+        input_seq_groups: List[SequenceGroupInput],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],

@@ -5,7 +5,7 @@ import torch
 from cacheflow.models import get_model
 from cacheflow.models import InputMetadata
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.sequence import InputSequenceGroup
+from cacheflow.sequence import SequenceGroupInput
 from cacheflow.worker.cache_engine import CacheEngine
 
 
@@ -51,7 +51,7 @@ class Worker:
 
     def prepare_inputs(
         self,
-        input_seq_groups: List[InputSequenceGroup],
+        input_seq_groups: List[SequenceGroupInput],
     ) -> Tuple[torch.LongTensor, torch.LongTensor, InputMetadata]:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         sampling_params: Dict[int, SamplingParams] = {}
@@ -157,7 +157,7 @@ class Worker:
     @torch.inference_mode()
     def execute_stage(
         self,
-        input_seq_groups: List[InputSequenceGroup],
+        input_seq_groups: List[SequenceGroupInput],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
