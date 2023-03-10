@@ -97,7 +97,7 @@ class CacheEngine:
             cpu_cache.append((key_blocks, value_blocks))
         return cpu_cache
 
-    def _copy_blocks(
+    def _swap(
         self,
         src: List[KVCache],
         dst: List[KVCache],
@@ -108,19 +108,38 @@ class CacheEngine:
                 src_key_cache, src_value_cache = src[i]
                 dst_key_cache, dst_value_cache = dst[i]
                 # Copy the key blocks.
-                cache_ops.copy_cache_blocks(
+                cache_ops.swap_blocks(
                     src_key_cache, dst_key_cache, src_to_dst)
                 # Copy the value blocks.
-                cache_ops.copy_cache_blocks(
+                cache_ops.swap_blocks(
                     src_value_cache, dst_value_cache, src_to_dst)
                 event = self.events[i]
                 event.record(stream=self.cache_stream)
 
-    def copy(self, src_to_dst: Dict[int, int]) -> None:
-        self._copy_blocks(self.gpu_cache, self.gpu_cache, src_to_dst)
-
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:
-        self._copy_blocks(self.cpu_cache, self.gpu_cache, src_to_dst)
+        self._swap(self.cpu_cache, self.gpu_cache, src_to_dst)
 
     def swap_out(self, src_to_dst: Dict[int, int]) -> None:
-        self._copy_blocks(self.gpu_cache, self.cpu_cache, src_to_dst)
+        self._swap(self.gpu_cache, self.cpu_cache, src_to_dst)
+
+    def _copy(
+        self,
+        src: List[KVCache],
+        dst: List[KVCache],
+        src_to_dsts: Dict[int, List[int]],
+    ) -> None:
+        with torch.cuda.stream(self.cache_stream):
+            for i in range(self.num_layers):
+                src_key_cache, src_value_cache = src[i]
+                dst_key_cache, dst_value_cache = dst[i]
+                # Copy the key blocks.
+                cache_ops.copy_blocks(
+                    src_key_cache, dst_key_cache, src_to_dsts)
+                # Copy the value blocks.
+                cache_ops.copy_blocks(
+                    src_value_cache, dst_value_cache, src_to_dsts)
+                event = self.events[i]
+                event.record(stream=self.cache_stream)
+
+    def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
+        self._copy(self.gpu_cache, self.gpu_cache, src_to_dsts)
