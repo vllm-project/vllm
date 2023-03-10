@@ -195,7 +195,7 @@ def _sample_from_generation_tokens(
             else:
                 outstanding_beams.append((seq_id, token_id))
 
-        # If a beam is terminated, continue with another beam.
+        # If a beam is discarded, fork another beam.
         for seq_id in seq_ids:
             if seq_id not in beam_outputs:
                 beam_outputs[seq_id] = outstanding_beams.pop()
