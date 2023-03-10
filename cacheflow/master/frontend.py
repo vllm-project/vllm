@@ -46,14 +46,14 @@ class Frontend:
             num_logprobs=num_logprobs,
             context_window_size=context_window_size,
         )
-        self._query(prompt, sampling_params)
+        token_ids = self.tokenizer.encode(prompt)
+        self._add_query(token_ids, sampling_params)
 
-    def _query(
+    def _add_query(
         self,
-        prompt: str,
+        token_ids: List[int],
         sampling_params: SamplingParams,
     ) -> None:
-        token_ids: List[int] = self.tokenizer.encode(prompt)
         seqs: List[Sequence] = []
         for _ in range(sampling_params.n):
             seq_id = next(self.seq_counter)
