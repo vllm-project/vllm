@@ -52,13 +52,12 @@ def main():
         controllers[i].set_next(controllers[i + 1])
     controllers[-1].set_next(scheduler)
 
+    # Test the following inputs.
     test_inputs = [
         ('Ion Stoica is a', {'n': 4, 'use_beam_search': True, 'temperature': 0.0}),
         ('UC Berkeley is', {'n': 3, 'temperature': 0.8, 'top_p': 0.99}),
         ('The future of cloud computing is', {}),   # Use default parameters.
     ]
-
-    # Use iteration-level scheduling.
     while True:
         if test_inputs:
             text, sampling_params = test_inputs.pop(0)
