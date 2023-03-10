@@ -35,6 +35,10 @@ class LogicalTokenBlock:
     def get_token_ids(self) -> List[int]:
         return self.token_ids[:self.num_tokens]
 
+    def get_last_token_id(self) -> int:
+        assert self.num_tokens > 0
+        return self.token_ids[self.num_tokens - 1]
+
 
 class PhysicalTokenBlock:
 

@@ -1,9 +1,17 @@
 #include <torch/extension.h>
 
-void copy_blocks(
+#include <map>
+#include <vector>
+
+void swap_blocks(
   torch::Tensor& src,
   torch::Tensor& dst,
   const std::map<int64_t, int64_t>& block_mapping);
+
+void copy_blocks(
+  torch::Tensor& src,
+  torch::Tensor& dst,
+  const std::map<int64_t, std::vector<int64_t>>& block_mapping);
 
 void reshape_and_cache(
   torch::Tensor& key,
@@ -14,7 +22,11 @@ void reshape_and_cache(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
-    "copy_cache_blocks",
+    "swap_blocks",
+    &swap_blocks,
+    "Swap in (out) the cache blocks from src to dst");
+  m.def(
+    "copy_blocks",
     &copy_blocks,
     "Copy the cache blocks from src to dst");
   m.def(

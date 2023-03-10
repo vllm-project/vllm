@@ -1,9 +1,13 @@
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple
 
 import torch
 
 from cacheflow.models import get_model
+from cacheflow.models import set_seed
 from cacheflow.models import InputMetadata
+from cacheflow.sampling_params import SamplingParams
+from cacheflow.sequence import SequenceGroupInputs
+from cacheflow.sequence import SequenceOutputs
 from cacheflow.worker.cache_engine import CacheEngine
 
 
@@ -18,6 +22,7 @@ class Worker:
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         dtype: str,
+        seed: int,
     ) -> None:
         self.worker_id = worker_id
         self.gpu_id = gpu_id
@@ -32,6 +37,11 @@ class Worker:
         self.num_heads = self.model.config.num_attention_heads
         self.head_size = self.model.config.hidden_size // self.num_heads
         self.dtype = self.model.dtype
+
+        # Set the seed.
+        # We set the seed after initializing the model to ensure that
+        # the random state is not affected by the model initialization.
+        set_seed(seed)
 
         self.cache_engine = CacheEngine(
             worker_id=worker_id,
@@ -49,55 +59,81 @@ class Worker:
 
     def prepare_inputs(
         self,
-        prompt_tokens: Dict[int, List[int]],    # Seq id -> List of input token ids.
-        generation_tokens: Dict[int, int],      # Seq id -> Input token id.
-        context_lens: Dict[int, int],           # Seq id -> Number of tokens participating in attention.
-        block_tables: Dict[int, List[int]],     # Seq id -> List of physical block numbers.
+        input_seq_groups: List[SequenceGroupInputs],
     ) -> Tuple[torch.LongTensor, torch.LongTensor, InputMetadata]:
-        # TODO(woosuk): Support interactive generation.
-        # Add the prompt tokens.
-        prompt_lens: List[int] = []
+        seq_groups: List[Tuple[List[int], SamplingParams]] = []
+        seq_logprobs: Dict[int, float] = {}
+        sampling_params: Dict[int, SamplingParams] = {}
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
 
-        prompt_seq_ids = sorted(prompt_tokens.keys())
-        for seq_id in prompt_seq_ids:
-            prompt_len = len(prompt_tokens[seq_id])
+        # Add prompt tokens.
+        prompt_lens: List[int] = []
+        for input_seq_group in input_seq_groups:
+            if not input_seq_group.is_prompt:
+                continue
+
+            seq_ids = list(input_seq_group.input_tokens.keys())
+            sampling_params = input_seq_group.sampling_params
+            seq_groups.append((seq_ids, sampling_params))
+            seq_logprobs.update(input_seq_group.seq_logprobs)
+
+            # Use any sequence in the group.
+            seq_id = seq_ids[0]
+
+            prompt_tokens = input_seq_group.input_tokens[seq_id]
+            prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
-            input_tokens.extend(prompt_tokens[seq_id])
-            input_positions.extend(range(len(prompt_tokens[seq_id])))
+            input_tokens.extend(prompt_tokens)
+            # NOTE(woosuk): Here we assume that the first token in the prompt
+            # is always the first token in the sequence.
+            input_positions.extend(range(len(prompt_tokens)))
 
-            block_table = block_tables[seq_id]
+            # Compute the slot mapping.
+            block_table = input_seq_group.block_tables[seq_id]
             for i in range(prompt_len):
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        # Add the generation tokens.
+        # Add generation tokens.
         max_context_len = 0
         max_num_blocks_per_seq = 0
+        context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
+        for input_seq_group in input_seq_groups:
+            if input_seq_group.is_prompt:
+                continue
 
-        generation_seq_ids = sorted(generation_tokens.keys())
-        for seq_id in generation_seq_ids:
-            input_tokens.append(generation_tokens[seq_id])
-            position_id = context_lens[seq_id] - 1
-            input_positions.append(position_id)
+            seq_ids = list(input_seq_group.input_tokens.keys())
+            sampling_params = input_seq_group.sampling_params
+            seq_groups.append((seq_ids, sampling_params))
+            seq_logprobs.update(input_seq_group.seq_logprobs)
 
-            block_table = block_tables[seq_id]
-            generation_block_tables.append(block_table)
+            for seq_id in seq_ids:
+                assert len(input_seq_group.input_tokens[seq_id]) == 1
+                generation_token = input_seq_group.input_tokens[seq_id][0]
+                input_tokens.append(generation_token)
 
-            max_context_len = max(max_context_len, context_lens[seq_id])
-            max_num_blocks_per_seq = max(
-                max_num_blocks_per_seq, len(block_table))
+                position = input_seq_group.context_len - 1
+                input_positions.append(position)
 
-            block_number = block_table[position_id // self.block_size]
-            block_offset = position_id % self.block_size
-            slot = block_number * self.block_size + block_offset
-            slot_mapping.append(slot)
+                block_table = input_seq_group.block_tables[seq_id]
+                generation_block_tables.append(block_table)
+
+                max_context_len = max(
+                    max_context_len, input_seq_group.context_len)
+                max_num_blocks_per_seq = max(
+                    max_num_blocks_per_seq, len(block_table))
+                context_lens.append(input_seq_group.context_len)
+
+                block_number = block_table[position // self.block_size]
+                block_offset = position % self.block_size
+                slot = block_number * self.block_size + block_offset
+                slot_mapping.append(slot)
 
         # Optimization: Pad the input length to be a multiple of 8.
         # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
@@ -112,8 +148,7 @@ class Worker:
         slot_mapping_tensor = torch.tensor(
             slot_mapping, dtype=torch.int, device=self.device)
         context_lens_tensor = torch.tensor(
-            [context_lens[seq_id] for seq_id in generation_seq_ids],
-            dtype=torch.int, device=self.device)
+            context_lens, dtype=torch.int, device=self.device)
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq)
             for block_table in generation_block_tables]
@@ -121,7 +156,8 @@ class Worker:
             padded_block_tables, dtype=torch.int, device=self.device)
 
         input_metadata = InputMetadata(
-            seq_ids=prompt_seq_ids + generation_seq_ids,
+            seq_groups=seq_groups,
+            seq_logprobs=seq_logprobs,
             prompt_lens=prompt_lens,
             slot_mapping=slot_mapping_tensor,
             context_lens=context_lens_tensor,
@@ -133,14 +169,11 @@ class Worker:
     @torch.inference_mode()
     def execute_stage(
         self,
-        prompt_tokens: Dict[int, List[int]],    # Seq id -> List of input token ids.
-        generation_tokens: Dict[int, int],      # Seq id -> Input token id.
-        context_lens: Dict[int, int],           # Seq id -> Number of tokens participating in attention.
-        block_tables: Dict[int, List[int]],     # Seq id -> List of physical block numbers.
+        input_seq_groups: List[SequenceGroupInputs],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, int],
-    ) -> Union[torch.Tensor, Dict[int, Tuple[int, int]]]:
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> Dict[int, SequenceOutputs]:
         # Issue cache operations.
         command_issued = False
         if blocks_to_swap_in:
@@ -160,7 +193,7 @@ class Worker:
 
         # Prepare input tensors.
         input_tokens, input_positions, input_metadata = self.prepare_inputs(
-            prompt_tokens, generation_tokens, context_lens, block_tables)
+            input_seq_groups)
 
         # Execute the model.
         output = self.model(
