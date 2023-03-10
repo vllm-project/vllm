@@ -15,7 +15,8 @@ class Controller:
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
-        dtype: str = 'half',
+        dtype: str,
+        seed: int,
     ) -> None:
         self.node_id = node_id
         self.num_workers = num_workers
@@ -38,6 +39,7 @@ class Controller:
                 num_gpu_blocks=num_gpu_blocks,
                 num_cpu_blocks=num_cpu_blocks,
                 dtype=dtype,
+                seed=seed,
             )
             self.workers.append(worker)
 

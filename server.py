@@ -15,6 +15,8 @@ parser.add_argument('--num-gpu-blocks', type=int, default=1024, help='number of 
 parser.add_argument('--num-cpu-blocks', type=int, default=32, help='number of CPU blocks (per GPU)')
 # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
 parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
+# TODO(woosuk): Support fine-grained seeds (e.g., seed per sequence group).
+parser.add_argument('--seed', type=int, default=0, help='random seed')
 args = parser.parse_args()
 
 
@@ -30,6 +32,7 @@ def main():
             num_gpu_blocks=args.num_gpu_blocks,
             num_cpu_blocks=args.num_cpu_blocks,
             dtype=args.dtype,
+            seed=args.seed,
         )
         controllers.append(controller)
 

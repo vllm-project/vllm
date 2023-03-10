@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple
 import torch
 
 from cacheflow.models import get_model
+from cacheflow.models import set_seed
 from cacheflow.models import InputMetadata
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceGroupInputs
@@ -21,6 +22,7 @@ class Worker:
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         dtype: str,
+        seed: int,
     ) -> None:
         self.worker_id = worker_id
         self.gpu_id = gpu_id
@@ -35,6 +37,11 @@ class Worker:
         self.num_heads = self.model.config.num_attention_heads
         self.head_size = self.model.config.hidden_size // self.num_heads
         self.dtype = self.model.dtype
+
+        # Set the seed.
+        # We set the seed after initializing the model to ensure that
+        # the random state is not affected by the model initialization.
+        set_seed(seed)
 
         self.cache_engine = CacheEngine(
             worker_id=worker_id,
