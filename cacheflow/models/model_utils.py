@@ -1,30 +1,21 @@
-import random
 from typing import Union
 
-import numpy as np
 import torch
 import torch.nn as nn
 
+from cacheflow.models.memory_analyzer import CacheFlowMemoryAnalyzer
+from cacheflow.models.memory_analyzer import OPTMemoryAnalyzer
 from cacheflow.models.opt import OPTForCausalLM
+from cacheflow.models.utils import get_torch_dtype
 
-_MODEL_CLASSES = {
+
+_MODELS = {
     'opt': OPTForCausalLM,
 }
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    'half': torch.half,
-    'float': torch.float,
-    'float16': torch.float16,
-    'float32': torch.float32,
+_MEMORY_ANALYZERS = {
+    'opt': OPTMemoryAnalyzer,
 }
-
-
-def get_torch_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
-    if isinstance(dtype, str):
-        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype.lower()]
-    else:
-        torch_dtype = dtype
-    return torch_dtype
 
 
 def get_model(
@@ -32,7 +23,7 @@ def get_model(
     dtype: Union[torch.dtype, str],
 ) -> nn.Module:
     torch_dtype = get_torch_dtype(dtype)
-    for model_class, hf_model in _MODEL_CLASSES.items():
+    for model_class, hf_model in _MODELS.items():
         if model_class in model_name:
             model = hf_model.from_pretrained(
                 model_name, torch_dtype=torch_dtype)
@@ -40,9 +31,14 @@ def get_model(
     raise ValueError(f'Unsupported model name: {model_name}')
 
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+def get_memory_analyzer(
+    model_name: str,
+    block_size: int,
+    dtype: Union[torch.dtype, str],
+) -> CacheFlowMemoryAnalyzer:
+    torch_dtype = get_torch_dtype(dtype)
+    for model_class, memory_analyzer in _MEMORY_ANALYZERS.items():
+        if model_class in model_name:
+            return memory_analyzer(
+                model_name, block_size, torch_dtype)
+    raise ValueError(f'Unsupported model name: {model_name}')
