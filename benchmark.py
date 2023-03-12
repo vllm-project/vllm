@@ -1,10 +1,13 @@
 import argparse
+from datetime import datetime
+import os
 import pickle
 import random
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
+from transformers import AutoTokenizer
 
 from cacheflow.master.scheduler import Scheduler
 from cacheflow.models import get_memory_analyzer
@@ -25,8 +28,8 @@ parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--max-batch-size', type=int, default=2048, help='maximum number of batched tokens')
 
-parser.add_argument('--request-rate', type=float, default=10, help='reqs/sec')
-parser.add_argument('--duration', type=int, default=10, help='duration in seconds')
+parser.add_argument('--request-rate', type=float, default=1, help='reqs/sec')
+parser.add_argument('--duration', type=int, default=100, help='duration in seconds')
 
 args = parser.parse_args()
 
@@ -50,7 +53,6 @@ def generate_requests(
     timestamps = []
     for i, n in enumerate(arrival_times):
         timestamps += [i * (time_quantum / 1000)] * n
-    print(timestamps)
 
     # Load and shuffle the dataset.
     with open(dataset, 'rb') as f:
@@ -78,12 +80,13 @@ class FakeFrontend:
 
     def __init__(
         self,
+        model_name: str,
     ) -> None:
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.seq_group_counter = Counter()
         self.seq_counter = Counter()
         self.requests = []
         self.timestamps = []
-
         self.sampling_params: Dict[int, SamplingParams] = {}
         self.results: Dict[int, Tuple[int, int, SamplingParams]] = {}
 
@@ -156,6 +159,12 @@ class FakeFrontend:
         sampling_params = self.sampling_params[seq_group.group_id]
         for seq in seq_group.seqs:
             self.results[seq.seq_id] = (seq_group.arrival, now, sampling_params)
+            continue
+
+            # This is for debugging.
+            token_ids = seq.get_token_ids()
+            output = self.tokenizer.decode(token_ids, skip_special_tokens=True)
+            print(f'Seq {seq.seq_id}: {output!r}')
 
 
 def main():
@@ -185,7 +194,7 @@ def main():
         controllers.append(controller)
 
     # Create a frontend and add requests.
-    frontend = FakeFrontend()
+    frontend = FakeFrontend(args.model)
 
     # Create a scheduler.
     scheduler = Scheduler(
@@ -216,41 +225,25 @@ def main():
             max_num_steps=output_len,
         )
 
-    from datetime import datetime
-    print('Start at', datetime.now())
+    start = datetime.now()
+    print('Start at', start)
+
     frontend.start_timer()
     while True:
         scheduler.step()
         if not (scheduler.pending or scheduler.running or frontend.timestamps):
             break
-    print('End at', datetime.now())
 
-    import matplotlib.pyplot as plt
-    results = frontend.results
-    # Sort the records by key.
-    latencies = []
-    output_lens = []
-    for k in sorted(results.keys()):
-        arrival_time, finish_time, sampling_params = results[k]
-        latencies.append(finish_time - arrival_time)
-        output_lens.append(sampling_params.max_num_steps)
+    # Save the results.
+    model_name = args.model.replace('/', '_')
+    save_dir = f'exp/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
+    os.makedirs(save_dir, exist_ok=True)
+    with open(f'{save_dir}/results.pkl', 'wb') as f:
+        pickle.dump(frontend.results, f)
 
-    # Plot the results with two axes.
-    fig, ax1 = plt.subplots()
-    ax2 = ax1.twinx()
-    ax1.plot(latencies, 'b-')
-    ax2.plot(output_lens, 'r-')
-    ax1.set_xlabel('request')
-    ax1.set_ylabel('latency (sec)', color='b')
-    ax2.set_ylabel('output length', color='r')
-    plt.savefig('latency.png')
-
-    # num_results = len(frontend.latency)
-    # # Ignore the early requests.
-    # num_results = int(num_results * 0.9)
-    # latency_results = list(frontend.latency.values())[-num_results:]
-    # avg_latency = sum(latency_results) / num_results
-    # print('Average latency:', avg_latency, 'sec')
+    end = datetime.now()
+    print('End at', end)
+    print('Duration', end - start)
 
 
 if __name__ == '__main__':
