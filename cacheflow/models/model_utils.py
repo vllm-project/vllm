@@ -37,7 +37,7 @@ def get_model(
             model = hf_model.from_pretrained(
                 model_name, torch_dtype=torch_dtype)
             return model.eval()
-    raise ValueError(f'Invalid model name: {model_name}')
+    raise ValueError(f'Unsupported model name: {model_name}')
 
 
 def set_seed(seed: int) -> None:
