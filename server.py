@@ -3,8 +3,7 @@ from typing import List
 
 from cacheflow.master.frontend import Frontend
 from cacheflow.master.scheduler import Scheduler
-from cacheflow.models import compute_max_num_cpu_blocks
-from cacheflow.models import compute_max_num_gpu_blocks
+from cacheflow.models import get_memory_analyzer
 from cacheflow.worker.controller import Controller
 
 parser = argparse.ArgumentParser(description='CacheFlow server')
@@ -12,8 +11,6 @@ parser.add_argument('--model', type=str, default='facebook/opt-125m', help='mode
 parser.add_argument('--num-nodes', type=int, default=1, help='number of nodes')
 parser.add_argument('--num-workers', type=int, default=1, help='number of workers per node')
 parser.add_argument('--block-size', type=int, default=8, choices=[8, 16], help='token block size')
-parser.add_argument('--swap-space', type=int, default=16,
-                    help='The CPU memory space in GiB pinned for swapping (per GPU)')
 # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
 parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
 # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
@@ -23,18 +20,14 @@ args = parser.parse_args()
 
 
 def main():
-    num_gpu_blocks = compute_max_num_gpu_blocks(
-        model_name=args.model,
-        max_num_batched_tokens=2048,
-        block_size=args.block_size,
-        dtype=args.dtype,
-    )
-    num_cpu_blocks = compute_max_num_cpu_blocks(
-        swap_space=args.swap_space,
+    memory_analyzer = get_memory_analyzer(
         model_name=args.model,
         block_size=args.block_size,
         dtype=args.dtype,
     )
+    num_gpu_blocks = memory_analyzer.get_max_num_gpu_blocks(
+        max_num_batched_tokens=args.max_batch_size)
+    num_cpu_blocks = memory_analyzer.get_max_num_cpu_blocks()
     print(f'# GPU blocks: {num_gpu_blocks}, # CPU blocks: {num_cpu_blocks}')
 
     # Create a controller for each node.
