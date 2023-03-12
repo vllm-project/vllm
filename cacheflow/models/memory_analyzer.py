@@ -78,10 +78,10 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
     ) -> int:
         # TODO(woosuk): Support tensor parallelism.
         # NOTE: We approxmiately calculate the maximum activation size by
-        # 1) finding a maximum activation tensor size, and
+        # 1) estimating the maximum activation tensor size during inference, and
         # 2) multiplying it by 4.
-        # Here, we assume FlashAttention is used, and thus the attention maps
-        # are not materialized in GPU DRAM.
+        # Here, we assume that FlashAttention is used and
+        # thus the attention maps are never materialized in GPU DRAM.
         qkv = 3 * (max_num_batched_tokens * self.hidden_size)
         ffn = max_num_batched_tokens * self.ffn_size
         max_act = 4 * max(qkv, ffn)
