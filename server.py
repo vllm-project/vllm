@@ -18,6 +18,7 @@ parser.add_argument('--swap-space', type=int, default=16,
 parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
 # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
 parser.add_argument('--seed', type=int, default=0, help='random seed')
+parser.add_argument('--max-batch-size', type=int, default=2048, help='maximum number of batched tokens')
 args = parser.parse_args()
 
 
@@ -64,6 +65,7 @@ def main():
         block_size=args.block_size,
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=num_cpu_blocks,
+        max_num_batched_tokens=args.max_batch_size,
     )
     # Connect the controllers.
     for i in range(len(controllers) - 1):
