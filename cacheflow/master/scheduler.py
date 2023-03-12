@@ -9,8 +9,6 @@ from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.sequence import SequenceOutputs
 from cacheflow.sequence import SequenceStatus
 
-_MAX_NUM_BATCHED_TOKENS = 2048
-
 
 class Scheduler:
 
@@ -21,12 +19,14 @@ class Scheduler:
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
+        max_num_batched_tokens: int,
     ) -> None:
         self.frontend = frontend
         self.controllers = controllers
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
         self.num_cpu_blocks = num_cpu_blocks
+        self.max_num_batched_tokens = max_num_batched_tokens
 
         # Create the block space manager.
         self.block_manager = BlockSpaceManager(
@@ -164,7 +164,7 @@ class Scheduler:
                 num_prompt_tokens = seq_group.seqs[0].get_len()
                 if self.block_manager.can_allocate(seq_group):
                     if (num_batched_tokens + num_prompt_tokens
-                        <= _MAX_NUM_BATCHED_TOKENS):
+                        <= self.max_num_batched_tokens):
                         self._allocate(seq_group)
                         num_batched_tokens += num_prompt_tokens
                         continue
