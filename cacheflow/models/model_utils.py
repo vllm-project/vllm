@@ -7,11 +7,11 @@ import torch.nn as nn
 
 from cacheflow.models.opt import OPTForCausalLM
 
-MODEL_CLASSES = {
+_MODEL_CLASSES = {
     'opt': OPTForCausalLM,
 }
 
-STR_DTYPE_TO_TORCH_DTYPE = {
+_STR_DTYPE_TO_TORCH_DTYPE = {
     'half': torch.half,
     'float': torch.float,
     'float16': torch.float16,
@@ -21,7 +21,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 
 def get_torch_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
     if isinstance(dtype, str):
-        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype.lower()]
+        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype.lower()]
     else:
         torch_dtype = dtype
     return torch_dtype
@@ -32,9 +32,10 @@ def get_model(
     dtype: Union[torch.dtype, str],
 ) -> nn.Module:
     torch_dtype = get_torch_dtype(dtype)
-    for model_class, hf_model in MODEL_CLASSES.items():
+    for model_class, hf_model in _MODEL_CLASSES.items():
         if model_class in model_name:
-            model = hf_model.from_pretrained(model_name, torch_dtype=torch_dtype)
+            model = hf_model.from_pretrained(
+                model_name, torch_dtype=torch_dtype)
             return model.eval()
     raise ValueError(f'Invalid model name: {model_name}')
 
