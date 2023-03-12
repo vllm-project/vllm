@@ -61,7 +61,11 @@ class Frontend:
             seqs.append(seq)
 
         group_id = next(self.seq_group_counter)
-        seq_group = SequenceGroup(group_id, seqs)
+        seq_group = SequenceGroup(
+            group_id,
+            seqs,
+            max_num_steps=sampling_params.max_num_steps,
+        )
         self.inputs.append((seq_group, sampling_params))
 
     def get_inputs(self) -> List[Tuple[SequenceGroup, SamplingParams]]:

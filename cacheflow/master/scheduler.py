@@ -1,6 +1,6 @@
 from typing import Dict, List
 
-from cacheflow.master.block_manager import BlockSpaceManager
+from cacheflow.master.block_manager import BuddyBlockSpaceManager
 from cacheflow.master.frontend import Frontend
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence
@@ -29,7 +29,7 @@ class Scheduler:
         self.num_cpu_blocks = num_cpu_blocks
 
         # Create the block space manager.
-        self.block_manager = BlockSpaceManager(
+        self.block_manager = BuddyBlockSpaceManager(
             block_size=block_size,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
@@ -112,43 +112,11 @@ class Scheduler:
 
         # 1. Reserve new slots for the running sequences.
         # NOTE: Here we implicitly assume FCFS scheduling.
-        # That is, the most recently added sequence group is the first
-        # to be swapped out.
-        victim_idx = len(self.running) - 1
         for i, seq_group in enumerate(self.running):
-            if i > victim_idx:
-                # The i-th sequence group has already been swapped out.
-                break
-            # OOM. Swap out the victim sequence groups.
-            while not self.block_manager.can_append(seq_group):
-                victim_seq_group = self.running[victim_idx]
-                self._swap_out(victim_seq_group, blocks_to_swap_out)
-                victim_idx -= 1
-                if i > victim_idx:
-                    # No other sequence groups can be swapped out.
-                    break
-            else:
-                self._append(seq_group, blocks_to_copy)
-        self.running = self.running[:victim_idx + 1]
+            assert self.block_manager.can_append(seq_group)
+            self._append(seq_group, blocks_to_copy)
 
-        # 2. Swap in the swapped sequences if possible.
-        # NOTE: Here we implicitly assume FCFS scheduling.
-        # The swapped sequences are in LIFO order.
-        for i, seq_group in enumerate(reversed(self.swapped)):
-            if self.block_manager.can_swap_in(seq_group):
-                self._swap_in(seq_group, blocks_to_swap_in)
-                self._append(seq_group, blocks_to_copy)
-            else:
-                # OOM. Stop swapping.
-                self.swapped = self.swapped[:len(self.swapped) - i]
-                break
-        else:
-            # All swapped sequences are swapped in.
-            self.swapped.clear()
-
-        # Ensure that swap-in and swap-out never happen at the same timestep.
-        if blocks_to_swap_in:
-            assert not blocks_to_swap_out
+        assert not (blocks_to_swap_in or blocks_to_swap_out)
 
         num_batched_tokens = sum(
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
@@ -163,6 +131,7 @@ class Scheduler:
             for i, seq_group in enumerate(self.pending):
                 num_prompt_tokens = seq_group.seqs[0].get_len()
                 if self.block_manager.can_allocate(seq_group):
+                    # FIXME
                     if (num_batched_tokens + num_prompt_tokens
                         <= _MAX_NUM_BATCHED_TOKENS):
                         self._allocate(seq_group)

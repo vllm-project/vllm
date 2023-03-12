@@ -88,9 +88,11 @@ class SequenceGroup:
         self,
         group_id: int,
         seqs: List[Sequence],
+        max_num_steps: int,
     ) -> None:
         self.group_id = group_id
         self.seqs = seqs
+        self.max_num_steps = max_num_steps
 
     def get_seqs(
         self,

@@ -1,3 +1,6 @@
+import collections
+import copy
+import math
 from typing import Dict, List, Optional, Set, Tuple
 
 from cacheflow.block import PhysicalTokenBlock
@@ -7,53 +10,127 @@ from cacheflow.sequence import SequenceStatus
 from cacheflow.utils import Device
 
 
-class BlockManager:
+class BuddyAllocator:
 
     def __init__(
         self,
         device: Device,
-        block_size: int,
-        num_blocks: int,
+        token_block_size: int,
+        num_token_blocks: int,
     ) -> None:
-        if block_size not in [8, 16]:
-            raise ValueError(f'Unsupported block size: {block_size}'
+        if token_block_size not in [8, 16]:
+            raise ValueError(f'Unsupported token block size: {token_block_size}'
                              'The block size must be either 8 or 16.')
         self.device = device
-        self.block_size = block_size
-        self.num_blocks = num_blocks
+        self.token_block_size = token_block_size
+        self.num_token_blocks = num_token_blocks
 
-        # Initialize the free blocks.
-        # TODO(woosuk): Make this a priority queue.
-        self.free_blocks = [
-            PhysicalTokenBlock(device=device, block_number=i, block_size=block_size)
-            for i in range(num_blocks)
+        self.min_block_size = 1
+        self.max_block_size = 4096 // token_block_size
+        self.size_to_free_blocks: Dict[int, List[int]] = collections.defaultdict(list)
+        self.addr_to_size: Dict[int, int] = {}
+
+        start_addrs = [
+            i * self.max_block_size
+            for i in range(self.num_token_blocks // self.max_block_size)
         ]
+        self.size_to_free_blocks[self.max_block_size] = start_addrs
+        for addr in start_addrs:
+            self.addr_to_size[addr] = self.max_block_size
 
-    def allocate(self) -> PhysicalTokenBlock:
-        if not self.free_blocks:
-            raise ValueError('Out of memory! '
-                             f'No more free blocks are available.')
-        block = self.free_blocks.pop()
-        block.ref_count = 1
-        return block
+    def can_allocate(self, sizes: List[int]) -> bool:
+        # FIXME(woosuk): Must be fixed for performance.
+        size_to_free_blocks = copy.deepcopy(self.size_to_free_blocks)
+        addr_to_size = copy.deepcopy(self.addr_to_size)
+        for size in sizes:
+            try:
+                self.allocate(size, size_to_free_blocks, addr_to_size)
+            except ValueError:
+                return False
+        return True
 
-    def free(self, block: PhysicalTokenBlock) -> None:
-        if block.ref_count == 0:
-            raise ValueError('Double free! '
-                             f'The block {block} is already freed.')
-        block.ref_count -= 1
-        if block.ref_count == 0:
-            self.free_blocks.append(block)
+    def _resize(self, size: int) -> int:
+        # Bump up the size to the next power of 2.
+        size = 2 ** math.ceil(math.log2(size)) 
+        # Make sure the size is not smaller than the min block size.
+        size = max(size, self.min_block_size)
+        return size
+
+    def allocate(
+        self,
+        size: int,
+        size_to_free_blocks: Optional[Dict[int, List[int]]] = None,
+        addr_to_size: Optional[Dict[int, int]] = None,
+    ) -> List[PhysicalTokenBlock]:
+        if size_to_free_blocks is None:
+            size_to_free_blocks = self.size_to_free_blocks
+        if addr_to_size is None:
+            addr_to_size = self.addr_to_size
+
+        size = self._resize(size)
+        if size > self.max_block_size:
+            raise ValueError(
+                f'Size {size} is larger than max_block_size {self.max_block_size}.')
+
+        # Find the smallest block that can fit the size.
+        i = size
+        while True:
+            if len(size_to_free_blocks[i]) > 0:
+                # Found a block.
+                start = size_to_free_blocks[i].pop()
+                addr_to_size[start] = size
+
+                # Split the block.
+                while i > size:
+                    i //= 2
+                    size_to_free_blocks[i].append(start + i)
+                    addr_to_size[start + i] = i
+
+                # Return the blocks.
+                physical_blocks = []
+                for j in range(size):
+                    physical_block = PhysicalTokenBlock(
+                        device=self.device,
+                        block_number=start + j,
+                        block_size=self.token_block_size,
+                    )
+                    physical_block.ref_count = 1
+                    physical_blocks.append(physical_block)
+                return physical_blocks
+            else:
+                i *= 2
+                if i > self.max_block_size:
+                    raise ValueError(f'Cannot find a block of size {size}.')
+
+    def free(self, start: int) -> None:
+        size = self.addr_to_size[start]
+        del self.addr_to_size[start]
+
+        # Merge the block with its buddy.
+        while size < self.max_block_size:
+            buddy = start ^ size
+            if buddy in self.addr_to_size and self.addr_to_size[buddy] == size:
+                # Found a buddy.
+                if buddy in self.size_to_free_blocks[size]:
+                    self.size_to_free_blocks[size].remove(buddy)
+                    del self.addr_to_size[buddy]
+                    size *= 2
+                    start = min(start, buddy)
+                else:
+                    break
+            else:
+                break
+        self.size_to_free_blocks[size].append(start)
+        self.addr_to_size[start] = size
 
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
 
 
-# Mapping: logical block number -> physical block.
 BlockTable = List[PhysicalTokenBlock]
 
 
-class BlockSpaceManager:
+class BuddyBlockSpaceManager:
 
     def __init__(
         self,
@@ -65,8 +142,8 @@ class BlockSpaceManager:
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
 
-        self.gpu_allocator = BlockManager(Device.GPU, block_size, num_gpu_blocks)
-        self.cpu_allocator = BlockManager(Device.CPU, block_size, num_cpu_blocks)
+        self.gpu_allocator = BuddyAllocator(
+            Device.GPU, block_size, num_gpu_blocks)
 
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
@@ -74,152 +151,37 @@ class BlockSpaceManager:
     def can_allocate(self, seq_group: SequenceGroup) -> bool:
         # NOTE: Here we assume that all sequences in the group have the same prompt.
         seq = seq_group.seqs[0]
-        num_required_blocks = len(seq.logical_token_blocks)
-        num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
-        return num_required_blocks <= num_free_gpu_blocks
+        seq_len = seq.get_len() + seq_group.max_num_steps
+        size = (seq_len + self.block_size) // self.block_size
+        return self.gpu_allocator.can_allocate([size] * len(seq_group.seqs))
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same prompt.
         seq = seq_group.seqs[0]
+        seq_len = seq.get_len() + seq_group.max_num_steps
+        size = (seq_len + self.block_size) // self.block_size
 
-        # Allocate new physical token blocks that will store the prompt tokens.
-        block_table: BlockTable = []
-        for _ in range(len(seq.logical_token_blocks)):
-            block = self.gpu_allocator.allocate()
-            # Set the reference counts of the token blocks.
-            block.ref_count = seq_group.num_seqs()
-            block_table.append(block)
-
-        # Assign the block table for each sequence.
         for seq in seq_group.seqs:
-            self.block_tables[seq.seq_id] = block_table.copy()
+            self.block_tables[seq.seq_id] = self.gpu_allocator.allocate(size)
 
     def can_append(self, seq_group: SequenceGroup) -> bool:
-        # Simple heuristic: If there is at least one free block
-        # for each sequence, we can append.
-        num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
-        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
-        return num_seqs <= num_free_gpu_blocks
+        return True
 
     def append(self, seq: Sequence) -> Optional[Tuple[int, int]]:
-        """Allocate a physical slot for the new token."""
-        logical_blocks = seq.logical_token_blocks
-        block_table = self.block_tables[seq.seq_id]
-
-        if len(block_table) < len(logical_blocks):
-            # The sequence has a new logical block.
-            # Allocate a new physical block.
-            block = self.gpu_allocator.allocate()
-            block_table.append(block)
-            return None
-
-        # We want to append the token to the last physical block.
-        last_block = block_table[-1]
-        assert last_block.device == Device.GPU
-        if last_block.ref_count == 1:
-            # Not shared with other sequences. Appendable.
-            return None
-        else:
-            # The last block is shared with other sequences.
-            # Copy on Write: Allocate a new block and copy the tokens.
-            new_block = self.gpu_allocator.allocate()
-            block_table[-1] = new_block
-            self.gpu_allocator.free(last_block)
-            return last_block.block_number, new_block.block_number
+        return None
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
-        # NOTE: fork does not allocate a new physical block.
-        # Thus, it is always safe from OOM.
-        src_block_table = self.block_tables[parent_seq.seq_id]
-        self.block_tables[child_seq.seq_id] = src_block_table.copy()
-        for block in src_block_table:
-            block.ref_count += 1
-
-    def _get_physical_blocks(self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
-        # NOTE: Here, we assume that the physical blocks are only shared by
-        # the sequences in the same group.
-        blocks: Set[PhysicalTokenBlock] = set()
-        for seq in seq_group.seqs:
-            if seq.status == SequenceStatus.FINISHED:
-                continue
-            block_table = self.block_tables[seq.seq_id]
-            for block in block_table:
-                blocks.add(block)
-        return list(blocks)
+        raise NotImplementedError()
 
     def can_swap_in(self, seq_group: SequenceGroup) -> bool:
-        blocks = self._get_physical_blocks(seq_group)
-        num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
-        num_free_blocks = self.gpu_allocator.get_num_free_blocks()
-        # NOTE: Conservatively, we assume that every sequence will allocate
-        # at least one free block right after the swap-in.
-        # NOTE: This should match the logic in can_append().
-        return len(blocks) + num_swapped_seqs <= num_free_blocks
-
-    def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
-        # CPU block -> GPU block.
-        mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
-        for seq in seq_group.seqs:
-            if seq.status == SequenceStatus.FINISHED:
-                continue
-            new_block_table: BlockTable = []
-            block_table = self.block_tables[seq.seq_id]
-
-            for cpu_block in block_table:
-                if cpu_block in mapping:
-                    gpu_block = mapping[cpu_block]
-                    gpu_block.ref_count += 1
-                else:
-                    gpu_block = self.gpu_allocator.allocate()
-                    mapping[cpu_block] = gpu_block
-                new_block_table.append(gpu_block)
-                # Free the CPU block swapped in to GPU.
-                self.cpu_allocator.free(cpu_block)
-            self.block_tables[seq.seq_id] = new_block_table
-
-        block_number_mapping = {
-            cpu_block.block_number: gpu_block.block_number
-            for cpu_block, gpu_block in mapping.items()
-        }
-        return block_number_mapping
+        return False
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
-        blocks = self._get_physical_blocks(seq_group)
-        return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
-
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
-        # GPU block -> CPU block.
-        mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
-        for seq in seq_group.seqs:
-            if seq.status == SequenceStatus.FINISHED:
-                continue
-            new_block_table: BlockTable = []
-            block_table = self.block_tables[seq.seq_id]
-
-            for gpu_block in block_table:
-                if gpu_block in mapping:
-                    cpu_block = mapping[gpu_block]
-                    cpu_block.ref_count += 1
-                else:
-                    cpu_block = self.cpu_allocator.allocate()
-                    mapping[gpu_block] = cpu_block
-                new_block_table.append(cpu_block)
-                # Free the GPU block swapped out to CPU.
-                self.gpu_allocator.free(gpu_block)
-            self.block_tables[seq.seq_id] = new_block_table
-
-        block_number_mapping = {
-            gpu_block.block_number: cpu_block.block_number
-            for gpu_block, cpu_block in mapping.items()
-        }
-        return block_number_mapping
+        return False
 
     def _free_block_table(self, block_table: BlockTable) -> None:
-        for block in block_table:
-            if block.device == Device.GPU:
-                self.gpu_allocator.free(block)
-            else:
-                self.cpu_allocator.free(block)
+        block = block_table[0]
+        self.gpu_allocator.free(block.block_number)
 
     def free(self, seq: Sequence) -> None:
         block_table = self.block_tables[seq.seq_id]
@@ -233,4 +195,6 @@ class BlockSpaceManager:
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         block_table = self.block_tables[seq.seq_id]
+        num_blocks = len(seq.logical_token_blocks)
+        block_table = block_table[:num_blocks]
         return [block.block_number for block in block_table]
