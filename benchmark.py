@@ -28,6 +28,7 @@ parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--max-batch-size', type=int, default=2048, help='maximum number of batched tokens')
 
+parser.add_argument('--dataset', type=str, default='text_completion.pkl', help='dataset path')
 parser.add_argument('--request-rate', type=float, default=1, help='reqs/sec')
 parser.add_argument('--duration', type=int, default=100, help='duration in seconds')
 
@@ -212,7 +213,7 @@ def main():
 
     # Generate and add requests.
     requests = generate_requests(
-        dataset='text_completion.pkl',
+        dataset=args.dataset,
         request_rate=args.request_rate,
         duration=args.duration,
         seed=args.seed,
