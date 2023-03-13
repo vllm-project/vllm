@@ -191,6 +191,13 @@ class Worker:
         else:
             cache_events = None
 
+        # If there is no input, we don't need to execute the model.
+        if not input_seq_groups:
+            if cache_events is not None:
+                for event in cache_events:
+                    event.wait()
+            return {}
+
         # Prepare input tensors.
         input_tokens, input_positions, input_metadata = self.prepare_inputs(
             input_seq_groups)

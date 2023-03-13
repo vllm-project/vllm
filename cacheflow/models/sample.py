@@ -11,7 +11,7 @@ from cacheflow.sequence import SequenceOutputs
 class Sampler(nn.Module):
 
     def __init__(self) -> None:
-        super().__init__()
+        super(Sampler, self).__init__()
 
     def forward(
         self,
