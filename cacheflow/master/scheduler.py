@@ -118,8 +118,8 @@ class Scheduler:
         # 3. Join new sequences if possible.
         # NOTE: Here we implicitly assume FCFS scheduling.
         # TODO(woosuk): Add a batching policy to control the batch size.
+        self._fetch_inputs()
         if not self.swapped:
-            self._fetch_inputs()
             for i, seq_group in enumerate(self.pending):
                 num_prompt_tokens = seq_group.seqs[0].get_len()
                 if self.block_manager.can_allocate(seq_group):

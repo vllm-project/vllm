@@ -68,27 +68,23 @@ while r[last_step] == 0 and last_step >= 0:
 print(f'Median input len: {np.median(s)}')
 
 # Draw four figures in one row.
+fig, axs = plt.subplots(4, 1, figsize=(10, 10))
+
+axs[0].plot(s, label='batch_size', color='red')
+axs[0].set_ylabel('# input tokens')
+
+axs[1].plot(n, label='num_pendings', color='blue')
+axs[1].set_ylabel('# pending seqs')
+
+axs[2].plot(gpu, label='gpu_cache_usage', color='green')
+axs[2].set_ylabel('GPU cache util (%)')
+axs[2].set_ylim(bottom=0)
+
+axs[3].plot(cpu, label='cpu_cache_usage', color='orange')
+axs[3].set_ylabel('CPU cache util (%)')
+axs[3].set_ylim(bottom=0)
+
 # In each figure, draw a vertical line to indicate the last idx that p is not 0.
-
-fig, axs = plt.subplots(5, 1, figsize=(10, 10))
-
-axs[0].plot(r, label='requests_recieved', color='magenta')
-axs[0].set_ylabel('# request arrivals')
-
-axs[1].plot(s, label='batch_size', color='red')
-axs[1].set_ylabel('# input tokens')
-
-axs[2].plot(n, label='num_pendings', color='blue')
-axs[2].set_ylabel('# pending seqs')
-
-axs[3].plot(gpu, label='gpu_cache_usage', color='green')
-axs[3].set_ylabel('GPU cache util (%)')
-axs[3].set_ylim([0, 100])
-
-axs[4].plot(cpu, label='cpu_cache_usage', color='orange')
-axs[4].set_ylabel('CPU cache util (%)')
-axs[4].set_ylim([0, 100])
-
 for ax in axs:
     ax.axvline(x=last_step, color='black', linestyle='--')
 
