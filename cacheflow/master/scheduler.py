@@ -158,8 +158,8 @@ class Scheduler:
         # 3. Join new sequences if possible.
         # NOTE: Here we implicitly assume FCFS scheduling.
         # TODO(woosuk): Add a batching policy to control the batch size.
+        self._fetch_inputs()
         if not self.swapped:
-            self._fetch_inputs()
             for i, seq_group in enumerate(self.pending):
                 num_prompt_tokens = seq_group.seqs[0].get_len()
                 if self.block_manager.can_allocate(seq_group):
@@ -211,12 +211,13 @@ class Scheduler:
             input_seq_groups.append(input_seq_group)
 
         # 5. Execute the first stage of the pipeline.
-        self.controllers[0].execute_stage(
-            input_seq_groups,
-            blocks_to_swap_in,
-            blocks_to_swap_out,
-            blocks_to_copy,
-        )
+        if (input_seq_groups or blocks_to_swap_in or blocks_to_swap_out):
+            self.controllers[0].execute_stage(
+                input_seq_groups,
+                blocks_to_swap_in,
+                blocks_to_swap_out,
+                blocks_to_copy,
+            )
 
     def post_step(
         self,
