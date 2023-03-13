@@ -18,7 +18,7 @@ from cacheflow.worker.controller import Controller
 from cacheflow.utils import Counter
 
 parser = argparse.ArgumentParser(description='CacheFlow server')
-parser.add_argument('--model', type=str, default='facebook/opt-125m', help='model name')
+parser.add_argument('--model', type=str, default='facebook/opt-13b', help='model name')
 parser.add_argument('--num-nodes', type=int, default=1, help='number of nodes')
 parser.add_argument('--num-workers', type=int, default=1, help='number of workers per node')
 parser.add_argument('--block-size', type=int, default=8, choices=[8, 16], help='token block size')
@@ -26,11 +26,11 @@ parser.add_argument('--block-size', type=int, default=8, choices=[8, 16], help='
 parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
 # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
 parser.add_argument('--seed', type=int, default=0, help='random seed')
-parser.add_argument('--max-batch-size', type=int, default=2048, help='maximum number of batched tokens')
+parser.add_argument('--max-batch-size', type=int, default=2560, help='maximum number of batched tokens')
 
 parser.add_argument('--dataset', type=str, default='text_completion.pkl', help='dataset path')
 parser.add_argument('--request-rate', type=float, default=1, help='reqs/sec')
-parser.add_argument('--duration', type=int, default=100, help='duration in seconds')
+parser.add_argument('--duration', type=int, default=600, help='duration in seconds')
 
 args = parser.parse_args()
 
@@ -137,6 +137,23 @@ class FakeFrontend:
         self.start = time.time()
 
     def get_inputs(self):
+        num_requests = self.get_num_requests()
+        if num_requests == 0:
+            return []
+
+        requests = self.requests[:num_requests]
+        self.requests = self.requests[num_requests:]
+        self.timestamps = self.timestamps[num_requests:]
+
+        now = time.time()
+        for seq_group, _ in requests:
+            seq_group.arrival = now
+        return requests
+
+    def get_num_requests(self):
+        if not self.timestamps:
+            return 0
+
         now = time.time()
         now = now - self.start
 
@@ -145,15 +162,7 @@ class FakeFrontend:
                 break
         else:
             i = len(self.timestamps)
-
-        requests = self.requests[:i]
-        self.requests = self.requests[i:]
-        self.timestamps = self.timestamps[i:]
-
-        now = time.time()
-        for seq_group, _ in requests:
-            seq_group.arrival = now
-        return requests
+        return i
 
     def print_response(self, seq_group):
         now = time.time()
@@ -232,19 +241,37 @@ def main():
     frontend.start_timer()
     while True:
         scheduler.step()
-        if not (scheduler.pending or scheduler.running or frontend.timestamps):
+        if not (scheduler.pending or scheduler.running or frontend.requests):
             break
-
-    # Save the results.
-    model_name = args.model.replace('/', '_')
-    save_dir = f'exp/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
-    os.makedirs(save_dir, exist_ok=True)
-    with open(f'{save_dir}/results.pkl', 'wb') as f:
-        pickle.dump(frontend.results, f)
-
     end = datetime.now()
     print('End at', end)
     print('Duration', end - start)
+
+    # Save the results.
+    model_name = args.model.replace('/', '_')
+    save_dir = f'tmp/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Save the latency results.
+    with open(f'{save_dir}/results.pkl', 'wb') as f:
+        pickle.dump(frontend.results, f)
+    # Save other data.
+    with open(f'{save_dir}/input_lens.pkl', 'wb') as f:
+        pickle.dump(scheduler.input_lens, f)
+    with open(f'{save_dir}/swap_out_lens.pkl', 'wb') as f:
+        pickle.dump(scheduler.swap_out_lens, f)
+    with open(f'{save_dir}/swap_in_lens.pkl', 'wb') as f:
+        pickle.dump(scheduler.swap_in_lens, f)
+    with open(f'{save_dir}/num_pendings.pkl', 'wb') as f:
+        pickle.dump(scheduler.num_pendings, f)
+    with open(f'{save_dir}/next_seq_lens.pkl', 'wb') as f:
+        pickle.dump(scheduler.next_seq_lens, f)
+    with open(f'{save_dir}/gpu_cache_usage.pkl', 'wb') as f:
+        pickle.dump(scheduler.gpu_blocks_usage, f)
+    with open(f'{save_dir}/cpu_cache_usage.pkl', 'wb') as f:
+        pickle.dump(scheduler.cpu_blocks_usage, f)
+    with open(f'{save_dir}/requests_received.pkl', 'wb') as f:
+        pickle.dump(scheduler.requests_received, f)
 
 
 if __name__ == '__main__':
