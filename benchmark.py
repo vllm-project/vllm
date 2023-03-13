@@ -250,7 +250,7 @@ def main():
 
     # Save the results.
     model_name = args.model.replace('/', '_')
-    save_dir = f'tmp/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
+    save_dir = f'orca/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
     os.makedirs(save_dir, exist_ok=True)
 
     # Save the latency results.
