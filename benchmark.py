@@ -28,6 +28,8 @@ parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--max-batch-size', type=int, default=2560, help='maximum number of batched tokens')
 
+parser.add_argument('--len-estimator', type=str, choices=['oracle', 'power2', 'constant'], default='oracle')
+
 parser.add_argument('--dataset', type=str, default='text_completion.pkl', help='dataset path')
 parser.add_argument('--request-rate', type=float, default=1, help='reqs/sec')
 parser.add_argument('--duration', type=int, default=600, help='duration in seconds')
@@ -186,7 +188,8 @@ def main():
     )
     num_gpu_blocks = memory_analyzer.get_max_num_gpu_blocks(
         max_num_batched_tokens=args.max_batch_size)
-    num_cpu_blocks = memory_analyzer.get_max_num_cpu_blocks()
+    # FIXME
+    num_cpu_blocks = 3423
     print(f'# GPU blocks: {num_gpu_blocks}, # CPU blocks: {num_cpu_blocks}')
 
     # Create a controller for each node.
@@ -215,6 +218,7 @@ def main():
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=num_cpu_blocks,
         max_num_batched_tokens=args.max_batch_size,
+        len_estimator=args.len_estimator,
     )
     # Connect the controllers.
     for i in range(len(controllers) - 1):
@@ -250,7 +254,7 @@ def main():
 
     # Save the results.
     model_name = args.model.replace('/', '_')
-    save_dir = f'orca/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
+    save_dir = f'orca/{args.len_estimator}/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
     os.makedirs(save_dir, exist_ok=True)
 
     # Save the latency results.

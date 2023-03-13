@@ -20,6 +20,7 @@ class Scheduler:
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         max_num_batched_tokens: int,
+        len_estimator: str,
     ) -> None:
         self.frontend = frontend
         self.controllers = controllers
@@ -34,6 +35,7 @@ class Scheduler:
             block_size=block_size,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
+            len_estimator=len_estimator,
         )
 
         # Running sequence groups (FIFO).

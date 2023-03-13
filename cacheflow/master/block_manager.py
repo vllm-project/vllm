@@ -9,6 +9,8 @@ from cacheflow.sequence import SequenceGroup
 from cacheflow.sequence import SequenceStatus
 from cacheflow.utils import Device
 
+_MAX_SEQ_LEN = 2048
+
 
 class BuddyAllocator:
 
@@ -26,7 +28,7 @@ class BuddyAllocator:
         self.num_token_blocks = num_token_blocks
 
         self.min_block_size = 1
-        self.max_block_size = 4096 // token_block_size
+        self.max_block_size = _MAX_SEQ_LEN // token_block_size
         self.size_to_free_blocks: Dict[int, List[int]] = collections.defaultdict(list)
         self.addr_to_size: Dict[int, int] = {}
 
@@ -140,10 +142,12 @@ class BuddyBlockSpaceManager:
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
+        len_estimator: str,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
+        self.len_estimator = len_estimator
 
         self.gpu_allocator = BuddyAllocator(
             Device.GPU, block_size, num_gpu_blocks)
@@ -151,19 +155,37 @@ class BuddyBlockSpaceManager:
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
+    def _oracle(self, seq_group: SequenceGroup) -> int:
+        return seq_group.max_num_steps
+
+    def _next_power_of_two(self, seq_group: SequenceGroup) -> int:
+        output_len = seq_group.max_num_steps
+        return 1 << (output_len - 1).bit_length()
+
+    def _constant(self, seq_group: SequenceGroup) -> int:
+        # FIXME
+        return _MAX_SEQ_LEN
+
+    def _compute_allocation_size(self, seq_group: SequenceGroup) -> int:
+        if self.len_estimator == 'oracle':
+            output_len = self._oracle(seq_group)
+        elif self.len_estimator == 'power2':
+            output_len = self._next_power_of_two(seq_group)
+        elif self.len_estimator == 'constant':
+            output_len = self._constant(seq_group)
+        seq = seq_group.seqs[0]
+        seq_len = min(seq.get_len() + output_len, _MAX_SEQ_LEN)
+        size = (seq_len + self.block_size - 1) // self.block_size
+        return size
+
     def can_allocate(self, seq_group: SequenceGroup) -> bool:
         # NOTE: Here we assume that all sequences in the group have the same prompt.
-        seq = seq_group.seqs[0]
-        seq_len = seq.get_len() + seq_group.max_num_steps
-        size = (seq_len + self.block_size) // self.block_size
+        size = self._compute_allocation_size(seq_group)
         return self.gpu_allocator.can_allocate([size] * len(seq_group.seqs))
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same prompt.
-        seq = seq_group.seqs[0]
-        seq_len = seq.get_len() + seq_group.max_num_steps
-        size = (seq_len + self.block_size) // self.block_size
-
+        size = self._compute_allocation_size(seq_group)
         for seq in seq_group.seqs:
             self.block_tables[seq.seq_id] = self.gpu_allocator.allocate(size)
 
