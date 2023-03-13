@@ -15,7 +15,7 @@ parser.add_argument('--block-size', type=int, default=8, choices=[8, 16], help='
 parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
 # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
 parser.add_argument('--seed', type=int, default=0, help='random seed')
-parser.add_argument('--max-batch-size', type=int, default=2048, help='maximum number of batched tokens')
+parser.add_argument('--max-batch-size', type=int, default=2560, help='maximum number of batched tokens')
 args = parser.parse_args()
 
 
