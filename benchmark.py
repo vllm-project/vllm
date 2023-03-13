@@ -128,6 +128,7 @@ class FakeFrontend:
         seq_group = SequenceGroup(
             group_id=group_id,
             seqs=seqs,
+            max_num_steps=max_num_steps,
         )
         self.requests.append((seq_group, sampling_params))
         self.timestamps.append(timestamp)
@@ -237,7 +238,7 @@ def main():
 
     # Save the results.
     model_name = args.model.replace('/', '_')
-    save_dir = f'exp/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
+    save_dir = f'orca/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
     os.makedirs(save_dir, exist_ok=True)
     with open(f'{save_dir}/results.pkl', 'wb') as f:
         pickle.dump(frontend.results, f)
