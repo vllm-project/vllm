@@ -83,12 +83,15 @@ axs[2].set_ylabel('# pending seqs')
 
 axs[3].plot(gpu, label='gpu_cache_usage', color='green')
 axs[3].set_ylabel('GPU cache util (%)')
+axs[3].set_ylim([0, 100])
 
 axs[4].plot(cpu, label='cpu_cache_usage', color='orange')
 axs[4].set_ylabel('CPU cache util (%)')
+axs[4].set_ylim([0, 100])
 
 for ax in axs:
     ax.axvline(x=last_step, color='black', linestyle='--')
 
 axs[-1].set_xlabel('timestep')
 plt.savefig(save_dir + 'results.png')
+print('Saved to ' + save_dir + 'results.png')
