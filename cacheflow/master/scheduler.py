@@ -211,12 +211,13 @@ class Scheduler:
             input_seq_groups.append(input_seq_group)
 
         # 5. Execute the first stage of the pipeline.
-        self.controllers[0].execute_stage(
-            input_seq_groups,
-            blocks_to_swap_in,
-            blocks_to_swap_out,
-            blocks_to_copy,
-        )
+        if (input_seq_groups or blocks_to_swap_in or blocks_to_swap_out):
+            self.controllers[0].execute_stage(
+                input_seq_groups,
+                blocks_to_swap_in,
+                blocks_to_swap_out,
+                blocks_to_copy,
+            )
 
     def post_step(
         self,
