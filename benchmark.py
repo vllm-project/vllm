@@ -26,6 +26,7 @@ parser.add_argument('--block-size', type=int, default=8, choices=[8, 16], help='
 parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
 # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
 parser.add_argument('--seed', type=int, default=0, help='random seed')
+parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
 parser.add_argument('--max-batch-size', type=int, default=2560, help='maximum number of batched tokens')
 
 parser.add_argument('--dataset', type=str, default='text_completion.pkl', help='dataset path')
@@ -185,7 +186,8 @@ def main():
     )
     num_gpu_blocks = memory_analyzer.get_max_num_gpu_blocks(
         max_num_batched_tokens=args.max_batch_size)
-    num_cpu_blocks = memory_analyzer.get_max_num_cpu_blocks()
+    num_cpu_blocks = memory_analyzer.get_max_num_cpu_blocks(
+        swap_space=args.swap_space)
     print(f'# GPU blocks: {num_gpu_blocks}, # CPU blocks: {num_cpu_blocks}')
 
     # Create a controller for each node.
