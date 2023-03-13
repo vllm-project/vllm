@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from cacheflow.master.block_manager import BlockSpaceManager
 from cacheflow.master.frontend import Frontend
@@ -46,6 +46,16 @@ class Scheduler:
         self.swapped: List[SequenceGroup] = []
         # Pending sequence groups (FIFO).
         self.pending: List[SequenceGroup] = []
+
+        # Performance stats.
+        self.input_lens: List[Tuple[int, int]] = []
+        self.swap_out_lens: List[int] = []
+        self.swap_in_lens: List[int] = []
+        self.num_pendings: List[int] = []
+        self.next_seq_lens: List[Tuple[int, int]] = []
+        self.gpu_blocks_usage: List[float] = []
+        self.cpu_blocks_usage: List[float] = []
+        self.requests_received: List[int] = []
 
     def _fetch_inputs(self) -> None:
         inputs = self.frontend.get_inputs()
@@ -150,10 +160,12 @@ class Scheduler:
         if blocks_to_swap_in:
             assert not blocks_to_swap_out
 
-        num_batched_tokens = sum(
+        num_generation_tokens = sum(
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
             for seq_group in self.running
         )
+        num_batched_tokens = num_generation_tokens
+        num_requests = self.frontend.get_num_requests()
 
         # 3. Join new sequences if possible.
         # NOTE: Here we implicitly assume FCFS scheduling.
@@ -212,6 +224,28 @@ class Scheduler:
 
         # 5. Execute the first stage of the pipeline.
         if (input_seq_groups or blocks_to_swap_in or blocks_to_swap_out):
+            # Collect performance statistics.
+            num_prompt_tokens = num_batched_tokens - num_generation_tokens
+            self.input_lens.append((num_prompt_tokens, num_generation_tokens))
+            self.swap_out_lens.append(len(blocks_to_swap_out) * self.block_size)
+            self.swap_in_lens.append(len(blocks_to_swap_in) * self.block_size)
+            self.num_pendings.append(len(self.pending))
+            if self.pending:
+                seq_group = self.pending[0]
+                group_id = seq_group.group_id
+                next_seq_input_len = seq_group.seqs[0].get_len()
+                next_seq_output_len = self.sampling_params[group_id].max_num_steps
+                self.next_seq_lens.append((next_seq_input_len, next_seq_output_len))
+            else:
+                self.next_seq_lens.append((0, 0))
+            free_gpu_blocks = self.block_manager.gpu_allocator.get_num_free_blocks()
+            self.gpu_blocks_usage.append(
+                (self.num_gpu_blocks - free_gpu_blocks) / self.num_gpu_blocks)
+            free_cpu_blocks = self.block_manager.cpu_allocator.get_num_free_blocks()
+            self.cpu_blocks_usage.append(
+                (self.num_cpu_blocks - free_cpu_blocks) / self.num_cpu_blocks)
+            self.requests_received.append(num_requests)
+
             self.controllers[0].execute_stage(
                 input_seq_groups,
                 blocks_to_swap_in,
