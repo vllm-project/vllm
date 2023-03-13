@@ -92,29 +92,6 @@ class Scheduler:
                 else:
                     blocks_to_copy[src_block] = [dst_block]
 
-    def _swap_in(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_in: Dict[int, int],
-    ) -> None:
-        mapping = self.block_manager.swap_in(seq_group)
-        blocks_to_swap_in.update(mapping)
-        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
-            seq.status = SequenceStatus.RUNNING
-        self.running.append(seq_group)
-
-    def _swap_out(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_out: Dict[int, int],
-    ) -> None:
-        assert self.block_manager.can_swap_out(seq_group)
-        mapping = self.block_manager.swap_out(seq_group)
-        blocks_to_swap_out.update(mapping)
-        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            seq.status = SequenceStatus.SWAPPED
-        self.swapped.append(seq_group)
-
     def step(self) -> None:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
