@@ -208,9 +208,7 @@ class Scheduler:
             free_gpu_blocks = self.block_manager.gpu_allocator.get_num_free_blocks()
             self.gpu_blocks_usage.append(
                 (self.num_gpu_blocks - free_gpu_blocks) / self.num_gpu_blocks)
-            free_cpu_blocks = self.block_manager.cpu_allocator.get_num_free_blocks()
-            self.cpu_blocks_usage.append(
-                (self.num_cpu_blocks - free_cpu_blocks) / self.num_cpu_blocks)
+            self.cpu_blocks_usage.append(0)
             self.requests_received.append(num_requests)
 
             self.controllers[0].execute_stage(
