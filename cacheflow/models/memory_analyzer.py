@@ -5,7 +5,7 @@ from cacheflow.models.utils import get_cpu_memory
 from cacheflow.models.utils import get_dtype_size
 from cacheflow.models.utils import get_gpu_memory
 
-_GiB = 1 << 30    
+_GiB = 1 << 30
 
 
 class CacheFlowMemoryAnalyzer:
@@ -117,9 +117,19 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
 
     def get_max_num_cpu_blocks(
         self,
-        memory_utilization: float = 0.25,
+        swap_space: int,
     ) -> int:
+        swap_space = swap_space * _GiB
         cpu_memory = get_cpu_memory()
-        usable_memory = int(memory_utilization * cpu_memory)
-        max_num_blocks = usable_memory // self._get_cache_block_size()
+        if swap_space > 0.8 * cpu_memory:
+            raise ValueError(f'The swap space ({swap_space / _GiB:.2f} GiB) '
+                             'takes more than 80% of the available memory '
+                             f'({cpu_memory / _GiB:.2f} GiB).'
+                             'Please check the swap space size.')
+        if swap_space > 0.5 * cpu_memory:
+            print(f'WARNING: The swap space ({swap_space / _GiB:.2f} GiB) '
+                  'takes more than 50% of the available memory '
+                  f'({cpu_memory / _GiB:.2f} GiB).'
+                  'This may slow the system performance.')
+        max_num_blocks = swap_space // self._get_cache_block_size()
         return max_num_blocks
