@@ -124,7 +124,10 @@ class BuddyAllocator:
         self.addr_to_size[start] = size
 
     def get_num_free_blocks(self) -> int:
-        return len(self.free_blocks)
+        total = 0
+        for size, free_blocks in self.size_to_free_blocks.items():
+            total += size * len(free_blocks)
+        return total
 
 
 BlockTable = List[PhysicalTokenBlock]
