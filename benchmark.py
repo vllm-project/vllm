@@ -30,7 +30,7 @@ parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space s
 parser.add_argument('--max-batch-size', type=int, default=2560, help='maximum number of batched tokens')
 
 parser.add_argument('--dataset', type=str, default='text_completion_opt.pkl', help='dataset path')
-parser.add_argument('--request-rate', type=float, default=1, help='reqs/sec')
+parser.add_argument('--request-rate', type=float, default=1.0, help='reqs/sec')
 parser.add_argument('--duration', type=int, default=600, help='duration in seconds')
 parser.add_argument('--n', type=int, default=1, help='number of output sequences per request')
 parser.add_argument('--use-beam', action='store_true', help='use beam search')
@@ -256,7 +256,7 @@ def main():
 
     # Save the results.
     model_name = args.model.replace('/', '_')
-    beam = 'beam' if args.use_beam else 'no_beam'
+    beam = 'beam' if args.use_beam and args.n > 1 else 'no_beam'
     save_dir = (f'tmp/{model_name}/bs{args.max_batch_size}/'
                 f'n{args.n}/{beam}/r{args.request_rate}/s{args.seed}/d{args.duration}/')
     os.makedirs(save_dir, exist_ok=True)
