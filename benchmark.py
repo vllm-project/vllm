@@ -29,9 +29,11 @@ parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
 parser.add_argument('--max-batch-size', type=int, default=2560, help='maximum number of batched tokens')
 
-parser.add_argument('--dataset', type=str, default='text_completion.pkl', help='dataset path')
+parser.add_argument('--dataset', type=str, default='text_completion_opt.pkl', help='dataset path')
 parser.add_argument('--request-rate', type=float, default=1, help='reqs/sec')
 parser.add_argument('--duration', type=int, default=600, help='duration in seconds')
+parser.add_argument('--n', type=int, default=1, help='number of output sequences per request')
+parser.add_argument('--use-beam', action='store_true', help='use beam search')
 
 args = parser.parse_args()
 
@@ -64,14 +66,14 @@ def generate_requests(
     # Generate requests.
     num_requests = len(timestamps)
     requests = []
-    for conv, timestamp in zip(data[:num_requests], timestamps):
-        input_tokens = conv[0][1]
+    for pair, timestamp in zip(data[:num_requests], timestamps):
+        input_tokens, output_tokens = pair
         input_len = len(input_tokens)
         # Skip the data if the input length is too long.
         if input_len >= max_seq_len:
             continue
 
-        output_len = len(conv[1][1])
+        output_len = len(output_tokens)
         # Truncate the output length if it is too long.
         output_len = min(output_len, max_seq_len - input_len)
         requests.append((timestamp, input_tokens, output_len))
@@ -235,6 +237,9 @@ def main():
             token_ids=input_tokens,
             timestamp=timestamp,
             max_num_steps=output_len,
+            n=args.n,
+            use_beam_search=args.use_beam,
+            temperature=1.0 if not args.use_beam else 0.0,
         )
 
     start = datetime.now()
@@ -251,7 +256,9 @@ def main():
 
     # Save the results.
     model_name = args.model.replace('/', '_')
-    save_dir = f'tmp/{model_name}/bs{args.max_batch_size}/d{args.duration}/r{args.request_rate}/s{args.seed}/'
+    beam = 'beam' if args.use_beam else 'no_beam'
+    save_dir = (f'tmp/{model_name}/bs{args.max_batch_size}/'
+                f'n{args.n}/{beam}/r{args.request_rate}/s{args.seed}/d{args.duration}/')
     os.makedirs(save_dir, exist_ok=True)
 
     # Save the latency results.
@@ -274,6 +281,7 @@ def main():
         pickle.dump(scheduler.cpu_blocks_usage, f)
     with open(f'{save_dir}/requests_received.pkl', 'wb') as f:
         pickle.dump(scheduler.requests_received, f)
+    print(f'Results saved to {save_dir}')
 
 
 if __name__ == '__main__':
