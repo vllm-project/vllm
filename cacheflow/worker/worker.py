@@ -79,25 +79,23 @@ class Worker:
             seq_groups.append((seq_ids, sampling_params))
             seq_logprobs.update(input_seq_group.seq_logprobs)
 
-            # Use any sequence in the group.
-            seq_id = seq_ids[0]
+            for seq_id in seq_ids:
+                prompt_tokens = input_seq_group.input_tokens[seq_id]
+                prompt_len = len(prompt_tokens)
+                prompt_lens.append(prompt_len)
 
-            prompt_tokens = input_seq_group.input_tokens[seq_id]
-            prompt_len = len(prompt_tokens)
-            prompt_lens.append(prompt_len)
+                input_tokens.extend(prompt_tokens)
+                # NOTE(woosuk): Here we assume that the first token in the prompt
+                # is always the first token in the sequence.
+                input_positions.extend(range(len(prompt_tokens)))
 
-            input_tokens.extend(prompt_tokens)
-            # NOTE(woosuk): Here we assume that the first token in the prompt
-            # is always the first token in the sequence.
-            input_positions.extend(range(len(prompt_tokens)))
-
-            # Compute the slot mapping.
-            block_table = input_seq_group.block_tables[seq_id]
-            for i in range(prompt_len):
-                block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                # Compute the slot mapping.
+                block_table = input_seq_group.block_tables[seq_id]
+                for i in range(prompt_len):
+                    block_number = block_table[i // self.block_size]
+                    block_offset = i % self.block_size
+                    slot = block_number * self.block_size + block_offset
+                    slot_mapping.append(slot)
 
         # Add generation tokens.
         max_context_len = 0

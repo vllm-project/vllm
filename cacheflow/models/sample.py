@@ -77,13 +77,7 @@ def _get_temperatures(
             # (i.e., greedy sampling or beam search).
             # Set the temperature to 1 to avoid division by zero.
             temperature = 1.0
-
-        if i < input_metadata.num_prompts:
-            # A prompt input.
-            temperatures.append(temperature)
-        else:
-            # A generation token.
-            temperatures += [temperature] * len(seq_ids)
+        temperatures += [temperature] * len(seq_ids)
     return temperatures
 
 
@@ -93,12 +87,7 @@ def _get_top_ps(
     top_ps: List[float] = []
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
-        if i < input_metadata.num_prompts:
-            # A prompt input.
-            top_ps.append(sampling_params.top_p)
-        else:
-            # A generation token.
-            top_ps += [sampling_params.top_p] * len(seq_ids)
+        top_ps += [sampling_params.top_p] * len(seq_ids)
     return top_ps
 
 
@@ -235,7 +224,7 @@ def _sample(
             assert len(seq_ids) == sampling_params.n
             prob = probs[idx]
             logprob = logprobs[idx]
-            idx += 1
+            idx += len(seq_ids)
 
             # Sample the next tokens.
             next_token_ids = _sample_from_prompt(prob, sampling_params)

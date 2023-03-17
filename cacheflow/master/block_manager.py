@@ -176,7 +176,7 @@ class BuddyBlockSpaceManager:
         seq = seq_group.seqs[0]
         seq_len = min(seq.get_len() + output_len, _MAX_SEQ_LEN)
         size = (seq_len + self.block_size - 1) // self.block_size
-        return size
+        return size * seq_group.num_seqs()
 
     def can_allocate(self, seq_group: SequenceGroup) -> bool:
         # NOTE: Here we assume that all sequences in the group have the same prompt.

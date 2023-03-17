@@ -27,8 +27,7 @@ class Scheduler:
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
         self.num_cpu_blocks = num_cpu_blocks
-        # In Orca, we do not use the max_num_batched_tokens parameter.
-        del max_num_batched_tokens
+        self.max_num_batched_tokens = max_num_batched_tokens
 
         # Create the block space manager.
         self.block_manager = BuddyBlockSpaceManager(
@@ -121,11 +120,13 @@ class Scheduler:
         self._fetch_inputs()
         if not self.swapped:
             for i, seq_group in enumerate(self.pending):
-                num_prompt_tokens = seq_group.seqs[0].get_len()
+                num_prompt_tokens = seq_group.seqs[0].get_len() * seq_group.num_seqs()
                 if self.block_manager.can_allocate(seq_group):
-                    self._allocate(seq_group)
-                    num_batched_tokens += num_prompt_tokens
-                    continue
+                    if (num_batched_tokens + num_prompt_tokens
+                        <= self.max_num_batched_tokens):
+                        self._allocate(seq_group)
+                        num_batched_tokens += num_prompt_tokens
+                        continue
 
                 self.pending = self.pending[i:]
                 break
