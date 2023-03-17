@@ -66,6 +66,7 @@ while r[last_step] == 0 and last_step >= 0:
     last_step -= 1
 
 print(f'Median input len: {np.median(s)}')
+print(f'Average input len: {np.average(s)}')
 
 # Draw figures in one row.
 fig, axs = plt.subplots(5, 1, figsize=(10, 10))
