@@ -158,3 +158,9 @@ class SequenceOutputs:
                 f'parent_seq_id={self.parent_seq_id}, '
                 f'output_token={self.output_token}), '
                 f'logprobs={self.logprobs}')
+
+    def __eq__(self, other: 'SequenceOutputs') -> bool:
+        return (self.seq_id == other.seq_id and
+                self.parent_seq_id == other.parent_seq_id and
+                self.output_token == other.output_token and
+                self.logprobs == other.logprobs)

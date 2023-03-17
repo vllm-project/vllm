@@ -27,7 +27,7 @@ def get_model(
     torch_dtype = get_torch_dtype(dtype)
     torch.set_default_dtype(torch_dtype)
     config = AutoConfig.from_pretrained(model_name)
-    for model_class_name, model_class in MODEL_CLASSES.items():
+    for model_class_name, model_class in _MODELS.items():
         if model_class_name in model_name:
             model = model_class(config)
             weights_dir = model_class.download_weights(model_name)

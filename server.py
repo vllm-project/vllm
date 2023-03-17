@@ -164,6 +164,7 @@ if __name__ == '__main__':
     parser.add_argument('--tensor-parallel-size', type=int, default=1, help='number of tensor parallel replicas')
     # KV cache arguments
     # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
+    parser.add_argument('--block-size', type=int, default=8, choices=[8, 16], help='token block size')
     parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
     # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
     parser.add_argument('--seed', type=int, default=0, help='random seed')
