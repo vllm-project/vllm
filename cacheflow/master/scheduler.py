@@ -133,6 +133,9 @@ class Scheduler:
             else:
                 self.pending.clear()
 
+        if num_batched_tokens == 0:
+            assert not self.pending
+
         # 4. Create input data structures.
         input_seq_groups: List[SequenceGroupInputs] = []
         for seq_group in self.running:
