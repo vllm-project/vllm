@@ -38,6 +38,7 @@ parser.add_argument('--n', type=int, default=1, help='number of output sequences
 parser.add_argument('--use-beam', action='store_true', help='use beam search')
 
 args = parser.parse_args()
+args.max_batch_size = max(2048 * args.n, args.max_batch_size)
 
 
 def generate_requests(
