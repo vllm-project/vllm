@@ -6,6 +6,7 @@ import ray
 
 from cacheflow.master.frontend import Frontend
 from cacheflow.master.scheduler import Scheduler
+from cacheflow.models import get_memory_analyzer
 from cacheflow.worker.controller import Controller
 
 
@@ -88,6 +89,18 @@ def main(args: argparse.Namespace):
 
     world_size = args.pipeline_parallel_size * args.tensor_parallel_size
 
+    # TODO(zhuohan): The memory analyzer does not consider multi-gpu yet.
+    memory_analyzer = get_memory_analyzer(
+        model_name=args.model,
+        block_size=args.block_size,
+        dtype=args.dtype,
+    )
+    num_gpu_blocks = memory_analyzer.get_max_num_gpu_blocks(
+        max_num_batched_tokens=args.max_batch_size)
+    num_cpu_blocks = memory_analyzer.get_max_num_cpu_blocks(
+        swap_space=args.swap_space)
+    print(f'# GPU blocks: {num_gpu_blocks}, # CPU blocks: {num_cpu_blocks}')
+
     # Create a controller for each pipeline stage.
     controllers: List[Controller] = []
     for i in range(args.pipeline_parallel_size):
@@ -100,8 +113,10 @@ def main(args: argparse.Namespace):
             distributed_init_method=distributed_init_method,
             model_name=args.model,
             block_size=args.block_size,
-            num_gpu_blocks=args.num_gpu_blocks,
-            num_cpu_blocks=args.num_cpu_blocks,
+            num_gpu_blocks=num_gpu_blocks,
+            num_cpu_blocks=num_cpu_blocks,
+            dtype=args.dtype,
+            seed=args.seed,
         )
         controllers.append(controller)
 
@@ -116,26 +131,27 @@ def main(args: argparse.Namespace):
         frontend=frontend,
         controllers=controllers,
         block_size=args.block_size,
-        num_gpu_blocks=args.num_gpu_blocks,
-        num_cpu_blocks=args.num_cpu_blocks,
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=num_cpu_blocks,
+        max_num_batched_tokens=args.max_batch_size,
     )
     # Connect the controllers.
     for i in range(len(controllers) - 1):
         controllers[i].set_next(controllers[i + 1])
     controllers[-1].set_next(scheduler)
 
+    # Test the following inputs.
     test_inputs = [
-        'Ion Stoica is a',
-        'UC Berkeley is',
-        'The future of cloud computing is',
+        ('Ion Stoica is a', {'n': 4, 'use_beam_search': True, 'temperature': 0.0}),
+        ('UC Berkeley is', {'n': 3, 'temperature': 0.8, 'top_p': 0.99}),
+        ('The future of cloud computing is', {}),   # Use default parameters.
     ]
-    for prompt in test_inputs:
-        frontend.query(prompt)
-
-    # FIXME
     while True:
+        if test_inputs:
+            text, sampling_params = test_inputs.pop(0)
+            frontend.query(text, **sampling_params)
         scheduler.step()
-        if not scheduler.pending and not scheduler.running:
+        if not (scheduler.pending or scheduler.running or test_inputs):
             break
 
 
@@ -147,10 +163,12 @@ if __name__ == '__main__':
     parser.add_argument('--pipeline-parallel-size', type=int, default=1, help='number of pipeline stages')
     parser.add_argument('--tensor-parallel-size', type=int, default=1, help='number of tensor parallel replicas')
     # KV cache arguments
-    parser.add_argument('--block-size', type=int, default=8, help='token block size')
-    # TODO(woosuk): Add an analytical model to determine the maximum number of GPU/CPU blocks.
-    parser.add_argument('--num-gpu-blocks', type=int, default=1024, help='number of GPU blocks (per GPU)')
-    parser.add_argument('--num-cpu-blocks', type=int, default=256, help='number of CPU blocks (per GPU)')
+    # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
+    parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
+    # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
+    parser.add_argument('--seed', type=int, default=0, help='random seed')
+    parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
+    parser.add_argument('--max-batch-size', type=int, default=2560, help='maximum number of batched tokens')
     args = parser.parse_args()
 
     main(args)

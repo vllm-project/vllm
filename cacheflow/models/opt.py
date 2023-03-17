@@ -20,6 +20,7 @@ from cacheflow.parallel_utils.parallel_state import (
 from cacheflow.parallel_utils.tensor_parallel import (VocabParallelEmbedding,
                                                       ColumnParallelLinear,
                                                       RowParallelLinear)
+from cacheflow.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -238,7 +239,7 @@ class OPTForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, Tuple[int, int]]:
+    ) -> Dict[int, SequenceOutputs]:
         hidden_states = self.model(
             input_ids, positions, kv_caches, input_metadata, cache_events)
         next_tokens = self.sampler(

@@ -1,12 +1,12 @@
 #include <torch/extension.h>
-
 #include <ATen/cuda/CUDAContext.h>
 
 #include <algorithm>
 #include <cassert>
 #include <map>
+#include <vector>
 
-void copy_blocks(
+void swap_blocks(
   torch::Tensor& src,
   torch::Tensor& dst,
   const std::map<int64_t, int64_t>& block_mapping) {
@@ -43,12 +43,43 @@ void copy_blocks(
   }
 }
 
+void copy_blocks(
+  torch::Tensor& src,
+  torch::Tensor& dst,
+  const std::map<int64_t, std::vector<int64_t>>& block_mapping) {
+  torch::Device src_device = src.device();
+  torch::Device dst_device = dst.device();
+  assert(src_device.is_cuda() && dst_device.is_cuda());
+  cudaMemcpyKind memcpy_type = cudaMemcpyDeviceToDevice;
+
+  void *src_ptr = src.data_ptr();
+  void *dst_ptr = dst.data_ptr();
+
+  const int64_t block_size_in_bytes = src.element_size() * src[0].numel();
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  for (const auto& pair : block_mapping) {
+    int64_t src_block_number = pair.first;
+    for (int64_t dst_block_number : pair.second) {
+      int64_t src_offset = src_block_number * block_size_in_bytes;
+      int64_t dst_offset = dst_block_number * block_size_in_bytes;
+      cudaMemcpyAsync(
+        dst_ptr + dst_offset,
+        src_ptr + src_offset,
+        block_size_in_bytes,
+        memcpy_type,
+        stream);
+    }
+  }
+}
+
+namespace cacheflow {
+
 template<typename scalar_t>
 __global__ void reshape_and_cache_kernel(
   const scalar_t* __restrict__ key,     // [num_tokens, num_heads, head_size]
   const scalar_t* __restrict__ value,   // [num_tokens, num_heads, head_size]
   scalar_t* __restrict__ key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
-  scalar_t* __restrict__ value_cache,   // [num_blocks, num_heads, block_size, head_size]
+  scalar_t* __restrict__ value_cache,   // [num_blocks, num_heads, head_size, block_size]
   const int* __restrict__ slot_mapping, // [num_tokens]
   const int num_heads,
   const int head_size,
@@ -73,14 +104,16 @@ __global__ void reshape_and_cache_kernel(
                             + x_idx * block_size * x
                             + block_offset * x
                             + x_offset;
-    const int tgt_value_idx = block_idx * num_heads * block_size * head_size
-                              + head_idx * block_size * head_size
-                              + block_offset * head_size
-                              + head_offset;
+    const int tgt_value_idx = block_idx * num_heads * head_size * block_size
+                              + head_idx * head_size * block_size
+                              + head_offset * block_size
+                              + block_offset;
     key_cache[tgt_key_idx] = __ldg(&key[src_idx]);
     value_cache[tgt_value_idx] = __ldg(&value[src_idx]);
   }
 }
+
+} // namespace cacheflow
 
 void reshape_and_cache(
   torch::Tensor& key,
@@ -101,7 +134,7 @@ void reshape_and_cache(
     key.scalar_type(),
     "reshape_and_cache_kernel",
     [&] {
-      reshape_and_cache_kernel<scalar_t><<<grid, block, 0, stream>>>(
+      cacheflow::reshape_and_cache_kernel<scalar_t><<<grid, block, 0, stream>>>(
         key.data_ptr<scalar_t>(),
         value.data_ptr<scalar_t>(),
         key_cache.data_ptr<scalar_t>(),
