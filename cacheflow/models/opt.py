@@ -164,8 +164,11 @@ class OPTDecoder(nn.Module):
 
         assert config.word_embed_proj_dim == config.hidden_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.word_embed_proj_dim, self.padding_idx)
-        self.embed_positions = OPTLearnedPositionalEmbedding(config.max_position_embeddings, config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
+                                                   config.word_embed_proj_dim,
+                                                   perform_initialization=False)
+        self.embed_positions = OPTLearnedPositionalEmbedding(
+            config.max_position_embeddings, config.hidden_size)
 
         # Note that the only purpose of `config._remove_final_layer_norm` is to keep backward compatibility
         # with checkpoints that have been fine-tuned before transformers v4.20.1
@@ -229,8 +232,9 @@ class OPTForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = OPTModel(config)
-        # the lm_head weight is automatically tied to the embed tokens weight
-        self.lm_head = nn.Linear(config.word_embed_proj_dim, config.vocab_size, bias=False)
+        # TODO(zhuohan): create a new weight after implementing pipeline
+        #                parallelism
+        self.lm_head_weight = self.model.decoder.embed_tokens.weight
         self.sampler = Sampler()
 
     def forward(
@@ -244,10 +248,11 @@ class OPTForCausalLM(nn.Module):
         hidden_states = self.model(
             input_ids, positions, kv_caches, input_metadata, cache_events)
         next_tokens = self.sampler(
-            self.lm_head.weight, hidden_states, input_metadata)
+            self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["q_proj.weight", "k_proj.weight",
+    _column_parallel_weights = ["embed_tokens.weight",
+                                "q_proj.weight", "k_proj.weight",
                                 "v_proj.weight", "fc1.weight"]
     _column_parallel_biases = ["q_proj.bias", "k_proj.bias",
                                 "v_proj.bias", "fc1.bias"]
@@ -257,6 +262,8 @@ class OPTForCausalLM(nn.Module):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, param in state_dict.items():
+            if "lm_head_weight" in name:
+                continue
             loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path,
                                                                   name)))
             for p in (self._column_parallel_weights
@@ -304,11 +311,5 @@ class OPTForCausalLM(nn.Module):
                     param_path = os.path.join(path, name)
                     with open(param_path, "wb") as f:
                         np.save(f, param.cpu().detach().numpy())
-
-                    # shared embedding
-                    if "model.decoder.embed_tokens.weight" in name:
-                        shutil.copy(param_path, param_path.replace(
-                            "model.decoder.embed_tokens.weight",
-                            "lm_head.weight"))
 
             return path

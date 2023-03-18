@@ -6,7 +6,7 @@ import torch.nn as nn
 from cacheflow.models import InputMetadata
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceOutputs
-
+from cacheflow.parallel_utils.tensor_parallel import gather_from_tensor_model_parallel_region
 
 class Sampler(nn.Module):
 
@@ -24,6 +24,7 @@ class Sampler(nn.Module):
 
         # Get the logits for the next tokens.
         logits = torch.matmul(hidden_states, embedding.t())
+        logits = gather_from_tensor_model_parallel_region(logits)
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(input_metadata)

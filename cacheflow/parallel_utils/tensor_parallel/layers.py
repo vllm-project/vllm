@@ -147,8 +147,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         perform_initialization
     """
 
-    def __init__(self, num_embeddings: int, embedding_dim: int,
-                 padding_idx: int=None, *,
+    def __init__(self, num_embeddings: int, embedding_dim: int, *,
                  init_method=init.xavier_normal_,
                  params_dtype: torch.dtype=None,
                  use_cpu_initialization: bool=False,
@@ -157,11 +156,11 @@ class VocabParallelEmbedding(torch.nn.Module):
         # Keep the input dimensions.
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-        self.padding_idx = padding_idx
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
-        # Set the detaults for compatibility.
+        # Set the defaults for compatibility.
+        self.padding_idx = None
         self.max_norm = None
         self.norm_type = 2.
         self.scale_grad_by_freq = False
