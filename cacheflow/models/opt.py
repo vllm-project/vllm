@@ -2,6 +2,7 @@
 import os
 import glob
 import shutil
+import filelock
 from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple
 
@@ -281,28 +282,33 @@ class OPTForCausalLM(nn.Module):
     def download_weights(model_name: str, path: str = "/tmp/transformers"):
         path = os.path.join(path, f"{model_name}-np")
         path = os.path.abspath(os.path.expanduser(path))
-        test_weight_path = os.path.join(path,
-                                        "model.decoder.embed_positions.weight")
-        if os.path.exists(test_weight_path):
-            return path
-
-        folder = snapshot_download(model_name, allow_patterns="*.bin")
-        bin_files = glob.glob(os.path.join(folder, "*.bin"))
-
-        if "/" in model_name:
-            model_name = model_name.split("/")[1].lower()
         os.makedirs(path, exist_ok=True)
+        lock_path = os.path.join(path, "file_lock")
+        lock = filelock.FileLock(lock_path)
 
-        for bin_file in tqdm(bin_files, desc="Convert format"):
-            state = torch.load(bin_file)
-            for name, param in tqdm(state.items(), leave=False):
-                param_path = os.path.join(path, name)
-                with open(param_path, "wb") as f:
-                    np.save(f, param.cpu().detach().numpy())
+        with lock:
+            test_weight_path = os.path.join(
+                path, "model.decoder.embed_positions.weight")
+            if os.path.exists(test_weight_path):
+                return path
 
-                # shared embedding
-                if "model.decoder.embed_tokens.weight" in name:
-                    shutil.copy(param_path, param_path.replace(
-                        "model.decoder.embed_tokens.weight", "lm_head.weight"))
+            folder = snapshot_download(model_name, allow_patterns="*.bin")
+            bin_files = glob.glob(os.path.join(folder, "*.bin"))
 
-        return path
+            if "/" in model_name:
+                model_name = model_name.split("/")[1].lower()
+
+            for bin_file in tqdm(bin_files, desc="Convert format"):
+                state = torch.load(bin_file)
+                for name, param in tqdm(state.items(), leave=False):
+                    param_path = os.path.join(path, name)
+                    with open(param_path, "wb") as f:
+                        np.save(f, param.cpu().detach().numpy())
+
+                    # shared embedding
+                    if "model.decoder.embed_tokens.weight" in name:
+                        shutil.copy(param_path, param_path.replace(
+                            "model.decoder.embed_tokens.weight",
+                            "lm_head.weight"))
+
+            return path
