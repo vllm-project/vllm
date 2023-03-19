@@ -11,5 +11,6 @@ pip install -e .
 ## Run
 
 ```bash
-python server.py
+ray start --head
+python server.py [--tensor-parallel-size <N>]
 ```
