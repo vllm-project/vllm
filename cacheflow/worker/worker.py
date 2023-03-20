@@ -28,6 +28,7 @@ class Worker:
         world_size: int,
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
+        model_path: str = '/tmp/transformers',
     ) -> None:
         self.init_distributed_environment(distributed_init_method,
                                           rank,
@@ -38,7 +39,7 @@ class Worker:
         self.block_size = block_size
 
         # Initialize the model.
-        self.model, self.dtype = get_model(model_name, dtype=dtype)
+        self.model, self.dtype = get_model(model_name, dtype=dtype, path=model_path)
         self.model = self.model.cuda()
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())

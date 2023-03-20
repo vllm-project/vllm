@@ -94,6 +94,7 @@ def main(args: argparse.Namespace):
         model_name=args.model,
         block_size=args.block_size,
         dtype=args.dtype,
+        tensor_parallel_size=args.tensor_parallel_size,
     )
     num_gpu_blocks = memory_analyzer.get_max_num_gpu_blocks(
         max_num_batched_tokens=args.max_batch_size)
@@ -117,6 +118,7 @@ def main(args: argparse.Namespace):
             num_cpu_blocks=num_cpu_blocks,
             dtype=args.dtype,
             seed=args.seed,
+            model_path=args.model_path,
         )
         controllers.append(controller)
 
@@ -159,6 +161,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='CacheFlow server')
     # Model arguments
     parser.add_argument('--model', type=str, default='facebook/opt-125m', help='model name')
+    parser.add_argument('--model-path', type=str, default='/tmp/transformers',
+                        help='model path to download and load the weights')
     # Parallel arguments
     parser.add_argument('--pipeline-parallel-size', type=int, default=1, help='number of pipeline stages')
     parser.add_argument('--tensor-parallel-size', type=int, default=1, help='number of tensor parallel replicas')

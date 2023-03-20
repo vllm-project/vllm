@@ -299,7 +299,8 @@ class OPTForCausalLM(nn.Module):
             if os.path.exists(test_weight_path):
                 return path
 
-            folder = snapshot_download(model_name, allow_patterns="*.bin")
+            folder = snapshot_download(model_name, allow_patterns="*.bin",
+                                       cache_dir=os.path.join(path, "cache"))
             bin_files = glob.glob(os.path.join(folder, "*.bin"))
 
             if "/" in model_name:
@@ -308,6 +309,8 @@ class OPTForCausalLM(nn.Module):
             for bin_file in tqdm(bin_files, desc="Convert format"):
                 state = torch.load(bin_file)
                 for name, param in tqdm(state.items(), leave=False):
+                    if name.startswith("decoder."):
+                        name = "model." + name
                     param_path = os.path.join(path, name)
                     with open(param_path, "wb") as f:
                         np.save(f, param.cpu().detach().numpy())
