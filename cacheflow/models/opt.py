@@ -160,14 +160,23 @@ class OPTDecoder(nn.Module):
         self.max_target_positions = config.max_position_embeddings
         self.vocab_size = config.vocab_size
 
-        assert config.word_embed_proj_dim == config.hidden_size
-
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.word_embed_proj_dim,
                                                    perform_initialization=False)
         # Positional embeddings are replicated (not sharded).
         self.embed_positions = OPTLearnedPositionalEmbedding(
             config.max_position_embeddings, config.hidden_size)
+
+        # Project out & in will be replicated if they exist.
+        if config.word_embed_proj_dim != config.hidden_size:
+            self.project_out = nn.Linear(config.hidden_size, config.word_embed_proj_dim, bias=False)
+        else:
+            self.project_out = None
+
+        if config.word_embed_proj_dim != config.hidden_size:
+            self.project_in = nn.Linear(config.word_embed_proj_dim, config.hidden_size, bias=False)
+        else:
+            self.project_in = None
 
         # Note that the only purpose of `config._remove_final_layer_norm` is to keep backward compatibility
         # with checkpoints that have been fine-tuned before transformers v4.20.1
@@ -191,6 +200,8 @@ class OPTDecoder(nn.Module):
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
         pos_embeds = self.embed_positions(positions)
+        if self.project_in is not None:
+            inputs_embeds = self.project_in(inputs_embeds)
         hidden_states = inputs_embeds + pos_embeds
 
         for i in range(len(self.layers)):
@@ -204,6 +215,8 @@ class OPTDecoder(nn.Module):
 
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
+        if self.project_out is not None:
+            hidden_states = self.project_out(hidden_states)
         return hidden_states
 
 

@@ -48,10 +48,11 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         self.vocab_size = config.vocab_size
         self.max_position = config.max_position_embeddings
 
-        assert self.embedding_size == self.hidden_size
-
     def _get_param_size(self) -> int:
         word_embedding = self.vocab_size * self.embedding_size // self.tensor_parallel_size
+        if self.embedding_size != self.vocab_size:
+            # Project in/out.
+            word_embedding += 2 * self.embedding_size * self.vocab_size
         position_embedding = self.max_position * self.hidden_size
 
         ln1 = 2 * self.hidden_size
