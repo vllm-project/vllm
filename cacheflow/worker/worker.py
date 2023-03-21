@@ -8,7 +8,6 @@ from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.sequence import SequenceOutputs
 from cacheflow.worker.cache_engine import CacheEngine
-from cacheflow.parallel_utils.tensor_parallel import model_parallel_cuda_manual_seed
 from cacheflow.parallel_utils.parallel_state import (
     initialize_model_parallel, get_tensor_model_parallel_world_size)
 from cacheflow.utils import set_random_seed
@@ -35,10 +34,10 @@ class Worker:
                                           rank,
                                           world_size,
                                           tensor_parallel_size,
-                                          pipeline_parallel_size,
-                                          seed)
+                                          pipeline_parallel_size)
         self.worker_id = rank
         self.block_size = block_size
+        set_random_seed(seed)
 
         # Initialize the model.
         self.model, self.dtype = get_model(model_name, dtype=dtype, path=model_path)
@@ -49,6 +48,10 @@ class Worker:
         assert self.model.config.num_attention_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.model.config.num_attention_heads // tensor_model_parallel_world_size
         self.head_size = self.model.config.hidden_size // (self.num_heads * tensor_model_parallel_world_size)
+
+        # We reset the seed after initializing the model to ensure that
+        # the random state is not affected by the model initialization.
+        set_random_seed(seed)
 
         self.cache_engine = CacheEngine(
             worker_id=self.worker_id,
@@ -69,8 +72,7 @@ class Worker:
                                      rank: int,
                                      world_size: int,
                                      tensor_parallel_size: int = 1,
-                                     pipeline_parallel_size: int = 1,
-                                     seed: int = 0) -> None:
+                                     pipeline_parallel_size: int = 1) -> None:
         """Initialize the distributed environment."""
         torch.distributed.init_process_group(
             backend='nccl',
@@ -82,8 +84,6 @@ class Worker:
         torch.distributed.all_reduce(torch.zeros(1).cuda())
         initialize_model_parallel(tensor_parallel_size,
                                   pipeline_parallel_size)
-        set_random_seed(seed)
-        model_parallel_cuda_manual_seed(seed)
 
 
     def prepare_inputs(
