@@ -7,14 +7,14 @@ import ray
 from cacheflow.master.frontend import Frontend
 from cacheflow.master.scheduler import Scheduler
 from cacheflow.models import get_memory_analyzer
-from cacheflow.worker.controller import Controller
+from cacheflow.worker.controller import Controller, DeviceID
 
 
 def initialize_ray_cluster(
     address: str = 'auto',
     pipeline_parallel_size: int = 1,
     tensor_parallel_size: int = 1,
-) -> Tuple[int, int, str, List[List[Tuple[int, str, int]]]]:
+) -> Tuple[int, int, str, List[List[DeviceID]]]:
     # Connect to a ray cluster.
     ray.init(address=address)
 

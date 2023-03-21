@@ -30,8 +30,11 @@ def get_model(
     config = AutoConfig.from_pretrained(model_name)
     for model_class_name, model_class in _MODELS.items():
         if model_class_name in model_name:
-            model = model_class(config)
+            # Download model weights if it's not cached.
             weights_dir = model_class.download_weights(model_name, path=path)
+            # Create a model instance.
+            model = model_class(config)
+            # Load the weights from the cached or downloaded files.
             model.load_weights(weights_dir)
             return model.eval(), torch_dtype
     raise ValueError(f'Unsupported model name: {model_name}')

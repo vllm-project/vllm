@@ -7,12 +7,15 @@ from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.worker.worker import Worker
 
 
+DeviceID = Tuple[int, str, int] # rank, node resource (node IP), device id
+
+
 class Controller:
 
     def __init__(
         self,
         stage_id: int,
-        stage_devices: List[Tuple[int, 'str', int]],
+        stage_devices: List[DeviceID],
         world_size: int,
         tensor_parallel_size: int,
         pipeline_parallel_size: int,
