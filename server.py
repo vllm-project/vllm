@@ -160,7 +160,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='CacheFlow server')
     # Model arguments
     parser.add_argument('--model', type=str, default='facebook/opt-125m', help='model name')
-    parser.add_argument('--model-path', type=str, default='/tmp/transformers',
+    parser.add_argument('--model-path', type=str, default='~/.cacheflow/model_weights',
                         help='model path to download and load the weights')
     # Parallel arguments
     parser.add_argument('--pipeline-parallel-size', type=int, default=1, help='number of pipeline stages')

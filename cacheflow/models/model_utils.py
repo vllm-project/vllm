@@ -23,7 +23,7 @@ _MEMORY_ANALYZERS = {
 def get_model(
     model_name: str,
     dtype: Union[torch.dtype, str],
-    path: str = '/tmp/transformers',
+    path: str,
 ) -> nn.Module:
     torch_dtype = get_torch_dtype(dtype)
     torch.set_default_dtype(torch_dtype)

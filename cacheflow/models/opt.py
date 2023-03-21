@@ -286,7 +286,7 @@ class OPTForCausalLM(nn.Module):
             param.data.copy_(loaded_weight)
 
     @staticmethod
-    def download_weights(model_name: str, path: str = "/tmp/transformers"):
+    def download_weights(model_name: str, path: str):
         path = os.path.join(path, f"{model_name}-np")
         path = os.path.abspath(os.path.expanduser(path))
         os.makedirs(path, exist_ok=True)

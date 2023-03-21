@@ -23,7 +23,7 @@ class Controller:
         num_cpu_blocks: int,
         dtype: str,
         seed: int,
-        model_path: str = '/tmp/transformers',
+        model_path: str,
     ) -> None:
         self.stage_id = stage_id
         self.stage_devices = stage_devices
@@ -82,6 +82,7 @@ class Controller:
             futures.append(future)
 
         all_outputs = ray.get(futures)
+        # Make sure all workers have the same results.
         output = all_outputs[0]
         for other_output in all_outputs[1:]:
             assert output == other_output
