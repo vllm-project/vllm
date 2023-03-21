@@ -13,6 +13,8 @@ from cacheflow.parallel_utils.tensor_parallel import model_parallel_cuda_manual_
 from cacheflow.parallel_utils.parallel_state import (
     initialize_model_parallel, get_tensor_model_parallel_world_size)
 from cacheflow.utils import set_random_seed
+
+
 class Worker:
 
     def __init__(

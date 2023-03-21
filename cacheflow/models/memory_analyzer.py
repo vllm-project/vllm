@@ -51,7 +51,6 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         assert self.embedding_size == self.hidden_size
 
     def _get_param_size(self) -> int:
-        # TODO(woosuk): Support tensor parallelism.
         word_embedding = self.vocab_size * self.embedding_size // self.tensor_parallel_size
         position_embedding = self.max_position * self.hidden_size
 
@@ -85,7 +84,8 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         residual = max_num_batched_tokens * self.hidden_size
         qkv = 3 * (max_num_batched_tokens * self.hidden_size) // self.tensor_parallel_size
         ffn = max_num_batched_tokens * self.ffn_size // self.tensor_parallel_size
-        max_act = 2 * max(qkv, ffn) + 2 * residual
+        # Double the activation size for input and output.
+        max_act = 2 * (max(qkv, ffn) + residual)
         dtype_size = get_dtype_size(self.dtype)
         return dtype_size * max_act
 

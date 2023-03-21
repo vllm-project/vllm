@@ -1,7 +1,6 @@
 """1D OPT model compatible with HuggingFace weights."""
 import os
 import glob
-import shutil
 import filelock
 from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple
@@ -10,7 +9,6 @@ import numpy as np
 import torch
 from torch import nn
 from transformers import OPTConfig
-from transformers import PreTrainedModel
 from huggingface_hub import snapshot_download
 
 from cacheflow.models import InputMetadata
@@ -167,6 +165,7 @@ class OPTDecoder(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.word_embed_proj_dim,
                                                    perform_initialization=False)
+        # Positional embeddings are replicated (not sharded).
         self.embed_positions = OPTLearnedPositionalEmbedding(
             config.max_position_embeddings, config.hidden_size)
 
@@ -281,6 +280,7 @@ class OPTForCausalLM(nn.Module):
                         :,
                         shard_size * tensor_model_parallel_rank
                         :shard_size * (tensor_model_parallel_rank + 1)]
+                    break
 
             assert param.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
