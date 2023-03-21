@@ -27,14 +27,6 @@ def get_dtype_size(dtype: Union[torch.dtype, str]) -> int:
     return torch.tensor([], dtype=torch_dtype).element_size()
 
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
 def get_gpu_memory(gpu: int = 0) -> int:
     return torch.cuda.get_device_properties(gpu).total_memory
 
