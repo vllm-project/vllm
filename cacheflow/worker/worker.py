@@ -3,49 +3,58 @@ from typing import Dict, List, Tuple
 import torch
 
 from cacheflow.models import get_model
-from cacheflow.models import set_seed
 from cacheflow.models import InputMetadata
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.sequence import SequenceOutputs
 from cacheflow.worker.cache_engine import CacheEngine
+from cacheflow.parallel_utils.parallel_state import (
+    initialize_model_parallel, get_tensor_model_parallel_world_size)
+from cacheflow.utils import set_random_seed
 
 
 class Worker:
 
     def __init__(
         self,
-        worker_id: int,
-        gpu_id: int,
         model_name: str,
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         dtype: str,
         seed: int,
+        distributed_init_method: str,
+        rank: int,
+        world_size: int,
+        model_path: str,
+        tensor_parallel_size: int = 1,
+        pipeline_parallel_size: int = 1,
     ) -> None:
-        self.worker_id = worker_id
-        self.gpu_id = gpu_id
+        self.init_distributed_environment(distributed_init_method,
+                                          rank,
+                                          world_size,
+                                          tensor_parallel_size,
+                                          pipeline_parallel_size)
+        self.worker_id = rank
         self.block_size = block_size
-
-        self.device = torch.device('cuda', index=gpu_id)
+        set_random_seed(seed)
 
         # Initialize the model.
-        # FIXME(woosuk): This is a hack.
-        self.model = get_model(model_name, dtype=dtype).to(device=self.device)
+        self.model, self.dtype = get_model(model_name, dtype=dtype, path=model_path)
+        self.model = self.model.cuda()
+        tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
         self.num_layers = self.model.config.num_hidden_layers
-        self.num_heads = self.model.config.num_attention_heads
-        self.head_size = self.model.config.hidden_size // self.num_heads
-        self.dtype = self.model.dtype
+        assert self.model.config.num_attention_heads % tensor_model_parallel_world_size == 0
+        self.num_heads = self.model.config.num_attention_heads // tensor_model_parallel_world_size
+        self.head_size = self.model.config.hidden_size // (self.num_heads * tensor_model_parallel_world_size)
 
-        # Set the seed.
-        # We set the seed after initializing the model to ensure that
+        # We reset the seed after initializing the model to ensure that
         # the random state is not affected by the model initialization.
-        set_seed(seed)
+        set_random_seed(seed)
 
         self.cache_engine = CacheEngine(
-            worker_id=worker_id,
-            gpu_id=gpu_id,
+            worker_id=self.worker_id,
             num_layers=self.num_layers,
             num_heads=self.num_heads,
             head_size=self.head_size,
@@ -56,6 +65,26 @@ class Worker:
         )
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
+
+
+    def init_distributed_environment(self,
+                                     distributed_init_method: str,
+                                     rank: int,
+                                     world_size: int,
+                                     tensor_parallel_size: int = 1,
+                                     pipeline_parallel_size: int = 1) -> None:
+        """Initialize the distributed environment."""
+        torch.distributed.init_process_group(
+            backend='nccl',
+            init_method=distributed_init_method,
+            world_size=world_size,
+            rank=rank,
+        )
+        # A small all_reduce for warmup.
+        torch.distributed.all_reduce(torch.zeros(1).cuda())
+        initialize_model_parallel(tensor_parallel_size,
+                                  pipeline_parallel_size)
+
 
     def prepare_inputs(
         self,
@@ -142,18 +171,18 @@ class Worker:
 
         # Convert to tensors.
         tokens_tensor = torch.tensor(
-            input_tokens, dtype=torch.long, device=self.device)
+            input_tokens, dtype=torch.long, device='cuda')
         positions_tensor = torch.tensor(
-            input_positions, dtype=torch.long, device=self.device)
+            input_positions, dtype=torch.long, device='cuda')
         slot_mapping_tensor = torch.tensor(
-            slot_mapping, dtype=torch.int, device=self.device)
+            slot_mapping, dtype=torch.int, device='cuda')
         context_lens_tensor = torch.tensor(
-            context_lens, dtype=torch.int, device=self.device)
+            context_lens, dtype=torch.int, device='cuda')
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq)
             for block_table in generation_block_tables]
         block_tables_tensor = torch.tensor(
-            padded_block_tables, dtype=torch.int, device=self.device)
+            padded_block_tables, dtype=torch.int, device='cuda')
 
         input_metadata = InputMetadata(
             seq_groups=seq_groups,

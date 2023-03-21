@@ -43,4 +43,8 @@ class InputMetadata:
                 f'num_generation_tokens={self.num_generation_tokens}, '
                 f'num_valid_tokens={self.num_valid_tokens}, '
                 f'max_num_blocks_per_seq={self.max_num_blocks_per_seq}, '
-                f'max_context_len={self.max_context_len})')
+                f'max_context_len={self.max_context_len}), '
+                f'prompt_lens={self.prompt_lens}, '
+                f'slot_mapping={self.slot_mapping}, '
+                f'context_lens={self.context_lens}, '
+                f'block_tables={self.block_tables})')

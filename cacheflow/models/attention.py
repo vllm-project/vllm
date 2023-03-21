@@ -112,7 +112,7 @@ class OPTCacheFlowAttention(nn.Module):
                 output[:num_prompt_tokens],
                 query[:num_prompt_tokens],
                 key[:num_prompt_tokens],
-                value[:num_prompt_tokens],               
+                value[:num_prompt_tokens],
                 input_metadata.prompt_lens,
             )
 

@@ -31,12 +31,13 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         model_name: str,
         block_size: int,
         dtype: torch.dtype,
+        tensor_parallel_size: int,
     ) -> None:
         self.model_name = model_name
         self.block_size = block_size
         self.dtype = dtype
+        self.tensor_parallel_size = tensor_parallel_size
 
-        # TODO(woosuk): Support tensor parallelism.
         config = AutoConfig.from_pretrained(model_name)
         self.num_layers = config.num_hidden_layers
         self.hidden_size = config.hidden_size
@@ -48,26 +49,25 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         self.max_position = config.max_position_embeddings
 
     def _get_param_size(self) -> int:
-        # TODO(woosuk): Support tensor parallelism.
-        word_embedding = self.vocab_size * self.embedding_size
+        word_embedding = self.vocab_size * self.embedding_size // self.tensor_parallel_size
         if self.embedding_size != self.vocab_size:
             # Project in/out.
             word_embedding += 2 * self.embedding_size * self.vocab_size
         position_embedding = self.max_position * self.hidden_size
 
         ln1 = 2 * self.hidden_size
-        q = self.hidden_size * self.hidden_size + self.hidden_size
-        k = self.hidden_size * self.hidden_size + self.hidden_size
-        v = self.hidden_size * self.hidden_size + self.hidden_size
-        out = self.hidden_size * self.hidden_size + self.hidden_size
+        q = self.hidden_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
+        k = self.hidden_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
+        v = self.hidden_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
+        out = self.hidden_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
         mha = ln1 + q + k + v + out
 
         ln2 = 2 * self.hidden_size
-        ffn1 = self.hidden_size * self.ffn_size + self.ffn_size
-        ffn2 = self.ffn_size * self.hidden_size + self.hidden_size
+        ffn1 = self.hidden_size * self.ffn_size // self.tensor_parallel_size + self.ffn_size
+        ffn2 = self.ffn_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
         ffn = ln2 + ffn1 + ffn2
 
-        total = (word_embedding + position_embedding + 
+        total = (word_embedding + position_embedding +
                  self.num_layers * (mha + ffn))
         dtype_size = get_dtype_size(self.dtype)
         return dtype_size * total
@@ -76,15 +76,17 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         self,
         max_num_batched_tokens: int,
     ) -> int:
-        # TODO(woosuk): Support tensor parallelism.
         # NOTE: We approxmiately calculate the maximum activation size by
-        # 1) estimating the maximum activation tensor size during inference, and
-        # 2) multiplying it by 4.
+        # estimating
+        # 1) the maximum activation tensor size during inference
+        # 2) the residual tensor size during inference
         # Here, we assume that FlashAttention is used and
         # thus the attention maps are never materialized in GPU DRAM.
-        qkv = 3 * (max_num_batched_tokens * self.hidden_size)
-        ffn = max_num_batched_tokens * self.ffn_size
-        max_act = 4 * max(qkv, ffn)
+        residual = max_num_batched_tokens * self.hidden_size
+        qkv = 3 * (max_num_batched_tokens * self.hidden_size) // self.tensor_parallel_size
+        ffn = max_num_batched_tokens * self.ffn_size // self.tensor_parallel_size
+        # Double the activation size for input and output.
+        max_act = 2 * (max(qkv, ffn) + residual)
         dtype_size = get_dtype_size(self.dtype)
         return dtype_size * max_act
 

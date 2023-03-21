@@ -1,14 +1,24 @@
 """1D OPT model compatible with HuggingFace weights."""
+import os
+import glob
+import filelock
+from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from torch import nn
 from transformers import OPTConfig
-from transformers import PreTrainedModel
+from huggingface_hub import snapshot_download
 
 from cacheflow.models import InputMetadata
 from cacheflow.models.attention import OPTCacheFlowAttention
 from cacheflow.models.sample import Sampler
+from cacheflow.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from cacheflow.parallel_utils.tensor_parallel import (VocabParallelEmbedding,
+                                                      ColumnParallelLinear,
+                                                      RowParallelLinear)
 from cacheflow.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -36,15 +46,26 @@ class OPTAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
+        total_num_heads = num_heads
+        assert num_heads % tensor_model_parallel_world_size == 0
+        self.num_heads = total_num_heads // tensor_model_parallel_world_size
+        self.head_dim = embed_dim // total_num_heads
         self.scaling = self.head_dim**-0.5
 
         # TODO(woosuk): Fuse the three linear layers into one QKV linear layer.
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.k_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
+                                           gather_output=False,
+                                           perform_initialization=False)
+        self.v_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
+                                           gather_output=False,
+                                           perform_initialization=False)
+        self.q_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
+                                           gather_output=False,
+                                           perform_initialization=False)
+        self.out_proj = RowParallelLinear(embed_dim, embed_dim, bias=bias,
+                                          input_is_parallel=True,
+                                          perform_initialization=False)
 
         self.attn = OPTCacheFlowAttention(scale=self.scaling)
 
@@ -55,13 +76,13 @@ class OPTAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(
             q, k, v, key_cache, value_cache, input_metadata, cache_event)
-        output = self.out_proj(attn_output)
+        output, _ = self.out_proj(attn_output)
         return output
 
 
@@ -69,6 +90,7 @@ class OPTDecoderLayer(nn.Module):
 
     def __init__(self, config: OPTConfig):
         super().__init__()
+        self.config = config
         self.embed_dim = config.hidden_size
         self.self_attn = OPTAttention(
             embed_dim=self.embed_dim,
@@ -81,9 +103,16 @@ class OPTDecoderLayer(nn.Module):
 
         self.self_attn_layer_norm = nn.LayerNorm(
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
-        self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
-        self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
-        self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
+        self.fc1 = ColumnParallelLinear(self.embed_dim, config.ffn_dim,
+                                        bias=config.enable_bias,
+                                        gather_output=False,
+                                        perform_initialization=False)
+        self.fc2 = RowParallelLinear(config.ffn_dim, self.embed_dim,
+                                     bias=config.enable_bias,
+                                     input_is_parallel=True,
+                                     perform_initialization=False)
+        self.final_layer_norm = nn.LayerNorm(
+            self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
 
     def forward(
         self,
@@ -112,9 +141,9 @@ class OPTDecoderLayer(nn.Module):
         # 125m, 1.7B, ..., 175B applies layer norm BEFORE attention
         if self.do_layer_norm_before:
             hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states = self.fc1(hidden_states)
+        hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
         hidden_states = residual + hidden_states
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
@@ -122,29 +151,23 @@ class OPTDecoderLayer(nn.Module):
         return hidden_states
 
 
-class OPTPreTrainedModel(PreTrainedModel):
-    config_class = OPTConfig
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["OPTDecoderLayer"]
-    _keys_to_ignore_on_load_unexpected = [r"decoder\.version"]
-
-    def _init_weights(self, module) -> None:
-        del module  # unused
-        return
-
-
-class OPTDecoder(OPTPreTrainedModel):
+class OPTDecoder(nn.Module):
 
     def __init__(self, config: OPTConfig):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_position_embeddings
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.word_embed_proj_dim, self.padding_idx)
-        self.embed_positions = OPTLearnedPositionalEmbedding(config.max_position_embeddings, config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
+                                                   config.word_embed_proj_dim,
+                                                   perform_initialization=False)
+        # Positional embeddings are replicated (not sharded).
+        self.embed_positions = OPTLearnedPositionalEmbedding(
+            config.max_position_embeddings, config.hidden_size)
 
+        # Project out & in will be replicated if they exist.
         if config.word_embed_proj_dim != config.hidden_size:
             self.project_out = nn.Linear(config.hidden_size, config.word_embed_proj_dim, bias=False)
         else:
@@ -166,9 +189,6 @@ class OPTDecoder(OPTPreTrainedModel):
             self.final_layer_norm = None
 
         self.layers = nn.ModuleList([OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)])
-
-        # Initialize weights and apply final processing
-        self.post_init()
 
     def forward(
         self,
@@ -200,13 +220,11 @@ class OPTDecoder(OPTPreTrainedModel):
         return hidden_states
 
 
-class OPTModel(OPTPreTrainedModel):
+class OPTModel(nn.Module):
 
     def __init__(self, config: OPTConfig):
-        super().__init__(config)
+        super().__init__()
         self.decoder = OPTDecoder(config)
-        # Initialize weights and apply final processing
-        self.post_init()
 
     def forward(
         self,
@@ -220,40 +238,16 @@ class OPTModel(OPTPreTrainedModel):
             input_ids, positions, kv_caches, input_metadata, cache_events)
 
 
-class OPTForCausalLM(OPTPreTrainedModel):
-    _keys_to_ignore_on_load_missing = [r"lm_head.weight"]
+class OPTForCausalLM(nn.Module):
 
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         self.model = OPTModel(config)
-        # the lm_head weight is automatically tied to the embed tokens weight
-        self.lm_head = nn.Linear(config.word_embed_proj_dim, config.vocab_size, bias=False)
+        # TODO(zhuohan): create a new weight after implementing pipeline
+        #                parallelism
+        self.lm_head_weight = self.model.decoder.embed_tokens.weight
         self.sampler = Sampler()
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    # NOTE(woosuk): While the following methods are not called in the model code,
-    # they may be internally used by the transformers library.
-    # For example, tie_weights() does not work without these methods.
-    # Thus, do not delete these methods.
-    def get_input_embeddings(self):
-        return self.model.decoder.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.model.decoder.embed_tokens = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model.decoder = decoder
-
-    def get_decoder(self):
-        return self.model.decoder
 
     def forward(
         self,
@@ -266,5 +260,72 @@ class OPTForCausalLM(OPTPreTrainedModel):
         hidden_states = self.model(
             input_ids, positions, kv_caches, input_metadata, cache_events)
         next_tokens = self.sampler(
-            self.lm_head.weight, hidden_states, input_metadata)
+            self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens
+
+    _column_parallel_weights = ["embed_tokens.weight",
+                                "q_proj.weight", "k_proj.weight",
+                                "v_proj.weight", "fc1.weight"]
+    _column_parallel_biases = ["q_proj.bias", "k_proj.bias",
+                                "v_proj.bias", "fc1.bias"]
+    _row_parallel_weights = ["out_proj.weight", "fc2.weight"]
+
+    def load_weights(self, weights_path: str):
+        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+        state_dict = self.state_dict()
+        for name, param in state_dict.items():
+            if "lm_head_weight" in name:
+                continue
+            loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path,
+                                                                  name)))
+            for p in (self._column_parallel_weights
+                      + self._column_parallel_biases):
+                if p in name:
+                    shard_size = param.shape[0]
+                    loaded_weight = loaded_weight[
+                        shard_size * tensor_model_parallel_rank
+                        :shard_size * (tensor_model_parallel_rank + 1)]
+                    break
+            for p in self._row_parallel_weights:
+                if p in name:
+                    shard_size = param.shape[1]
+                    loaded_weight = loaded_weight[
+                        :,
+                        shard_size * tensor_model_parallel_rank
+                        :shard_size * (tensor_model_parallel_rank + 1)]
+                    break
+
+            assert param.shape == loaded_weight.shape
+            param.data.copy_(loaded_weight)
+
+    @staticmethod
+    def download_weights(model_name: str, path: str):
+        path = os.path.join(path, f"{model_name}-np")
+        path = os.path.abspath(os.path.expanduser(path))
+        os.makedirs(path, exist_ok=True)
+        lock_path = os.path.join(path, "file_lock")
+        lock = filelock.FileLock(lock_path)
+
+        with lock:
+            test_weight_path = os.path.join(
+                path, "model.decoder.embed_positions.weight")
+            if os.path.exists(test_weight_path):
+                return path
+
+            folder = snapshot_download(model_name, allow_patterns="*.bin",
+                                       cache_dir=os.path.join(path, "cache"))
+            bin_files = glob.glob(os.path.join(folder, "*.bin"))
+
+            if "/" in model_name:
+                model_name = model_name.split("/")[1].lower()
+
+            for bin_file in tqdm(bin_files, desc="Convert format"):
+                state = torch.load(bin_file)
+                for name, param in tqdm(state.items(), leave=False):
+                    if name.startswith("decoder."):
+                        name = "model." + name
+                    param_path = os.path.join(path, name)
+                    with open(param_path, "wb") as f:
+                        np.save(f, param.cpu().detach().numpy())
+
+            return path
