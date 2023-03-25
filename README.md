@@ -3,8 +3,9 @@
 ## Installation
 
 ```bash
-pip install psutil numpy torch transformers
-pip install flash-attn # This may take up to 10 mins.
+pip install psutil numpy ray torch transformers
+pip install sentencepiece  # Required for LlamaTokenizer.
+pip install flash-attn  # This may take up to 20 mins.
 pip install -e .
 ```
 
