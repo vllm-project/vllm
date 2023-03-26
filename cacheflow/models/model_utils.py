@@ -6,16 +6,20 @@ import torch.nn as nn
 from transformers import AutoConfig
 
 from cacheflow.models.memory_analyzer import CacheFlowMemoryAnalyzer
+from cacheflow.models.memory_analyzer import LlamaMemoryAnalyzer
 from cacheflow.models.memory_analyzer import OPTMemoryAnalyzer
+from cacheflow.models.llama import LlamaForCausalLM
 from cacheflow.models.opt import OPTForCausalLM
 from cacheflow.models.utils import get_torch_dtype
 
 
 _MODELS = {
+    'llama': LlamaForCausalLM,
     'opt': OPTForCausalLM,
 }
 
 _MEMORY_ANALYZERS = {
+    'llama': LlamaMemoryAnalyzer,
     'opt': OPTMemoryAnalyzer,
 }
 
@@ -28,6 +32,11 @@ def get_model(
     torch_dtype = get_torch_dtype(dtype)
     torch.set_default_dtype(torch_dtype)
     config = AutoConfig.from_pretrained(model_name)
+    # FIXME
+    if 'llama' in model_name:
+        model = LlamaForCausalLM.from_pretrained(model_name)
+        return model.eval(), torch_dtype
+
     for model_class_name, model_class in _MODELS.items():
         if model_class_name in model_name:
             # Download model weights if it's not cached.
