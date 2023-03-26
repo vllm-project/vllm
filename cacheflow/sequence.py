@@ -30,7 +30,7 @@ class Sequence:
 
         self.status = SequenceStatus.PENDING
         self.output_logprobs: List[Dict[int, float]] = []
-        self.cumulative_logprobs = 1.0
+        self.cumulative_logprobs = 0.0
 
     def add_block(self) -> None:
         block = LogicalTokenBlock(
