@@ -8,6 +8,7 @@ from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceOutputs
 from cacheflow.parallel_utils.tensor_parallel import gather_from_tensor_model_parallel_region
 
+
 class Sampler(nn.Module):
 
     def __init__(self) -> None:
