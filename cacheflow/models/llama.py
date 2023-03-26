@@ -54,7 +54,10 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         self.register_buffer("cos_cached", cos, persistent=False)
         self.register_buffer("sin_cached", sin, persistent=False)
 
-    def forward(self, positions: torch.LongTensor):
+    def forward(
+        self,
+        positions: torch.LongTensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         cos = F.embedding(positions, self.cos_cached)
         sin = F.embedding(positions, self.sin_cached)
         return cos, sin
@@ -145,12 +148,12 @@ class LlamaAttention(nn.Module):
 
         # Apply rotrary embedding.
         # TODO: Optimize.
+        q = q.view(-1, self.num_heads, self.head_dim).transpose(0, 1)
+        k = k.view(-1, self.num_heads, self.head_dim).transpose(0, 1)
         cos, sin = self.rotary_emb(positions)
-        q_t = q.view(-1, self.num_heads, self.head_dim).transpose(0, 1)
-        k_t = k.view(-1, self.num_heads, self.head_dim).transpose(0, 1)
-        q_t, k_t = apply_rotary_pos_emb(q_t, k_t, cos, sin)
-        q = q_t.transpose(0, 1).contiguous().view(-1, self.hidden_size)
-        k = k_t.transpose(0, 1).contiguous().view(-1, self.hidden_size)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        q = q.transpose(0, 1).contiguous().view(-1, self.hidden_size)
+        k = k.transpose(0, 1).contiguous().view(-1, self.hidden_size)
 
         key_cache, value_cache = kv_cache
         attn_output = self.attn(
@@ -226,7 +229,6 @@ class LlamaModel(LlamaPreTrainedModel):
         self.layers = nn.ModuleList([LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
 
