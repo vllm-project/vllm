@@ -1,7 +1,6 @@
 from typing import Dict, List
 
 from cacheflow.master.block_manager import BlockSpaceManager
-from cacheflow.master.frontend import Frontend
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence
 from cacheflow.sequence import SequenceGroup
@@ -14,14 +13,12 @@ class Scheduler:
 
     def __init__(
         self,
-        frontend: Frontend,
         controllers: List,
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         max_num_batched_tokens: int,
     ) -> None:
-        self.frontend = frontend
         self.controllers = controllers
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
@@ -46,10 +43,15 @@ class Scheduler:
         self.swapped: List[SequenceGroup] = []
         # Pending sequence groups (FIFO).
         self.pending: List[SequenceGroup] = []
+        # Finished sequence groups.
+        self.finished: List[SequenceGroup] = []
 
-    def _fetch_inputs(self) -> None:
-        inputs = self.frontend.get_inputs()
-        for seq_group, sampling_params in inputs:
+    def add_sequence_groups(
+        self,
+        sequence_groups: List[SequenceGroup, SamplingParams],
+    ) -> None:
+        # Add sequence groups to the pending queue.
+        for seq_group, sampling_params in sequence_groups:
             self.pending.append(seq_group)
             self.sampling_params[seq_group.group_id] = sampling_params
 
@@ -158,7 +160,6 @@ class Scheduler:
         # 3. Join new sequences if possible.
         # NOTE: Here we implicitly assume FCFS scheduling.
         # TODO(woosuk): Add a batching policy to control the batch size.
-        self._fetch_inputs()
         if not self.swapped:
             for i, seq_group in enumerate(self.pending):
                 num_prompt_tokens = seq_group.seqs[0].get_len()
@@ -277,4 +278,9 @@ class Scheduler:
         group_id = seq_group.group_id
         del self.num_steps[group_id]
         del self.sampling_params[group_id]
-        self.frontend.print_response(seq_group)
+        self.finished.append(seq_group)
+
+    def get_finished(self) -> List[SequenceGroup]:
+        finished = self.finished
+        self.finished = []
+        return finished
