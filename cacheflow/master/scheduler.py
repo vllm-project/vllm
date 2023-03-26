@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from cacheflow.master.block_manager import BlockSpaceManager
 from cacheflow.sampling_params import SamplingParams
@@ -48,7 +48,7 @@ class Scheduler:
 
     def add_sequence_groups(
         self,
-        sequence_groups: List[SequenceGroup, SamplingParams],
+        sequence_groups: List[Tuple[SequenceGroup, SamplingParams]],
     ) -> None:
         # Add sequence groups to the pending queue.
         for seq_group, sampling_params in sequence_groups:

@@ -84,7 +84,7 @@ def main(args: argparse.Namespace):
             text, sampling_params_dict = test_inputs.pop(0)
             sampling_params = SamplingParams.from_dict(sampling_params_dict)
             sampling_params = frontend.add_eos_token(sampling_params)
-            frontend.query(text, **sampling_params)
+            frontend.query(text, sampling_params)
         scheduler.add_sequence_groups(frontend.get_inputs())
         scheduler.step()
         for seq_group in scheduler.get_finished():
