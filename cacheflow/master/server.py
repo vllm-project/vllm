@@ -1,9 +1,84 @@
+import argparse
 from typing import List, Tuple
 import random
 
 import ray
 
-from cacheflow.worker.controller import DeviceID
+from cacheflow.master.scheduler import Scheduler
+from cacheflow.models import get_memory_analyzer
+from cacheflow.worker.controller import Controller, DeviceID
+
+
+class Server:
+    def __init__(
+        self,
+        model: str,
+        model_path: str,
+        pipeline_parallel_size: int,
+        tensor_parallel_size: int,
+        block_size: int,
+        dtype: str,
+        seed: int,
+        swap_space: int,
+        max_batch_size: int,
+    ):
+        # TODO(zhuohan): Support pipeline parallelism.
+        assert pipeline_parallel_size == 1, (
+            'Pipeline parallelism is not supported yet.')
+
+        (self.num_nodes, self.num_devices_per_node, distributed_init_method,
+        all_stage_devices) = (
+            initialize_ray_cluster(
+                pipeline_parallel_size=pipeline_parallel_size,
+                tensor_parallel_size=tensor_parallel_size))
+
+        self.world_size = pipeline_parallel_size * tensor_parallel_size
+
+        self.memory_analyzer = get_memory_analyzer(
+            model_name=model,
+            block_size=block_size,
+            dtype=dtype,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+        self.num_gpu_blocks = self.memory_analyzer.get_max_num_gpu_blocks(
+            max_num_batched_tokens=max_batch_size)
+        self.num_cpu_blocks = self.memory_analyzer.get_max_num_cpu_blocks(
+            swap_space=swap_space)
+        print(f'# GPU blocks: {self.num_gpu_blocks}, '
+              f'# CPU blocks: {self.num_cpu_blocks}')
+
+        # Create a controller for each pipeline stage.
+        self.controllers: List[Controller] = []
+        for i in range(pipeline_parallel_size):
+            controller = Controller(
+                stage_id=i,
+                stage_devices=all_stage_devices[i],
+                world_size=self.world_size,
+                pipeline_parallel_size=pipeline_parallel_size,
+                tensor_parallel_size=tensor_parallel_size,
+                distributed_init_method=distributed_init_method,
+                model_name=model,
+                block_size=block_size,
+                num_gpu_blocks=self.num_gpu_blocks,
+                num_cpu_blocks=self.num_cpu_blocks,
+                dtype=dtype,
+                seed=seed,
+                model_path=model_path,
+            )
+            self.controllers.append(controller)
+
+        # Create a scheduler.
+        self.scheduler = Scheduler(
+            controllers=self.controllers,
+            block_size=block_size,
+            num_gpu_blocks=self.num_gpu_blocks,
+            num_cpu_blocks=self.num_cpu_blocks,
+            max_num_batched_tokens=max_batch_size,
+        )
+        # Connect the controllers.
+        for i in range(len(self.controllers) - 1):
+            self.controllers[i].set_next(self.controllers[i + 1])
+        self.controllers[-1].set_next(self.scheduler)
 
 
 def initialize_ray_cluster(
@@ -72,7 +147,7 @@ def initialize_ray_cluster(
             all_stage_devices)
 
 
-def add_server_arguments(parser):
+def add_server_arguments(parser: argparse.ArgumentParser):
     # Model arguments
     parser.add_argument('--model', type=str, default='facebook/opt-125m', help='model name')
     parser.add_argument('--model-path', type=str, default='~/.cacheflow/model_weights',
