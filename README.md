@@ -38,7 +38,7 @@ To test the server:
 python -m cacheflow.http_frontend.test_cli_client
 ```
 
-## GradIO web server
+## Gradio web server
 
 Install the following additional dependencies:
 ```bash
