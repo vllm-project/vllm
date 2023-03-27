@@ -24,7 +24,7 @@ def http_bot(prompt):
 def build_demo():
     with gr.Blocks() as demo:
         gr.Markdown(
-            "# Cacheflow demo (OPT-13B)\n"
+            "# Cacheflow demo\n"
         )
         inputbox = gr.Textbox(label="Input", placeholder="Enter text and press ENTER")# .style(container=False)
         outputbox = gr.Textbox(label="Output", placeholder="Generated result from the model")
