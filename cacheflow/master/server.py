@@ -81,8 +81,6 @@ class Server:
             self.controllers[i].set_next(self.controllers[i + 1])
         self.controllers[-1].set_next(self.scheduler)
 
-        print("Server initialized.")
-
     def add_sequence_groups(
         self,
         sequence_groups: List[Tuple[SequenceGroup, SamplingParams]]

@@ -92,7 +92,9 @@ class FastAPIFrontend:
         while True:
             if not self.is_server_running:
                 await self.server_step()
-            await group_event.wait()
+            # Wait for new output. Add a 1s timeout to prevent dead lock.
+            await asyncio.wait_for(group_event.wait(), timeout=1)
+            group_event.clear()
             seq_group = self.running_seq_groups[group_id]
             all_outputs = []
             for seq in seq_group.seqs:
