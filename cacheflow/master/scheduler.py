@@ -232,7 +232,7 @@ class Scheduler:
         seq_group: SequenceGroup,
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
-        for seq in seq_group.seqs(status=SequenceStatus.RUNNING):
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             ret = self.block_manager.append(seq)
             if ret is not None:
                 src_block, dst_block = ret
