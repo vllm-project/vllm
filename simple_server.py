@@ -65,7 +65,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='CacheFlow server')
+    parser = argparse.ArgumentParser(description='CacheFlow simple server.')
     parser = add_server_arguments(parser)
     args = parser.parse_args()
     main(args)
