@@ -85,10 +85,12 @@ class Scheduler:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop(-1)
                     self._preempt(victim_seq_group)
+                    self.waiting.append(victim_seq_group)
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
                     self._preempt(seq_group)
+                    self.waiting.append(seq_group)
                     break
             else:
                 # Append new slots to the sequence group.
@@ -249,8 +251,9 @@ class Scheduler:
         # recompute them when the sequences are resumed.
         # We originally used swapping, but it turned out that recomputation
         # is more efficient. We keep the swapping code for future reference.
-        self.status = SequenceStatus.WAITING
-        self.block_manager.free(seq_group)
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            seq.status = SequenceStatus.WAITING
+            self.block_manager.free(seq)
 
     def _free_seq(self, seq: Sequence) -> None:
         seq.status = SequenceStatus.FINISHED
