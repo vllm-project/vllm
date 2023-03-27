@@ -80,7 +80,7 @@ class BlockSpaceManager:
         seq = seq_group.seqs[0]
         num_required_blocks = len(seq.logical_token_blocks)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
-        # Use watermark to avoid thrashing.
+        # Use watermark to avoid frequent preemptions.
         return num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks
 
     def allocate(self, seq_group: SequenceGroup) -> None:
