@@ -102,6 +102,7 @@ class Scheduler:
         )
 
         # Join new sequences if possible.
+        prompt_group_ids: List[int] = []
         self.waiting = self.policy.sort_by_priority(now, self.waiting)
         # FIXME(woosuk): This does not work if sequence groups have more than
         # one sequence.
@@ -121,14 +122,13 @@ class Scheduler:
             self._allocate(seq_group)
             self.running.append(seq_group)
             num_batched_tokens += num_prompt_tokens
+            prompt_group_ids.append(seq_group.group_id)
 
         # Create input data structures.
         input_seq_groups: List[SequenceGroupInputs] = []
         for seq_group in self.running:
             group_id = seq_group.group_id
-            num_steps = self.num_steps[group_id]
-
-            is_prompt = num_steps == 0
+            is_prompt = group_id in prompt_group_ids
 
             input_tokens: Dict[int, List[int]] = {}
             seq_logprobs: Dict[int, float] = {}
