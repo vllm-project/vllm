@@ -26,6 +26,8 @@ class Server:
         num_devices_per_node: int,
         distributed_init_method: str,
         all_stage_devices: List[List[DeviceID]],
+        gpu_memory: int,
+        cpu_memory: int,
     ):
         self.num_nodes = num_nodes
         self.num_devices_per_node = num_devices_per_node
@@ -35,6 +37,8 @@ class Server:
             model_name=model,
             block_size=block_size,
             dtype=dtype,
+            gpu_memory=gpu_memory,
+            cpu_memory=cpu_memory,
             tensor_parallel_size=tensor_parallel_size,
         )
         self.num_gpu_blocks = self.memory_analyzer.get_max_num_gpu_blocks(

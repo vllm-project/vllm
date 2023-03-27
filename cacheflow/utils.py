@@ -1,5 +1,6 @@
 import enum
 import random
+import psutil
 
 import numpy as np
 import torch
@@ -36,3 +37,11 @@ def set_random_seed(seed: int):
 
     if model_parallel_is_initialized():
         model_parallel_cuda_manual_seed(seed)
+
+
+def get_gpu_memory(gpu: int = 0) -> int:
+    return torch.cuda.get_device_properties(gpu).total_memory
+
+
+def get_cpu_memory() -> int:
+    return psutil.virtual_memory().total

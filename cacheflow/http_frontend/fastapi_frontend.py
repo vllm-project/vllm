@@ -15,7 +15,7 @@ from cacheflow.sequence import Sequence, SequenceGroup
 from cacheflow.master.server import (Server, add_server_arguments,
                                      initialize_ray_cluster)
 from cacheflow.worker.controller import DeviceID
-from cacheflow.utils import Counter
+from cacheflow.utils import Counter, get_gpu_memory, get_cpu_memory
 
 app = FastAPI()
 
@@ -42,7 +42,7 @@ class FastAPIFrontend:
         self.seq_group_counter = Counter()
         self.seq_counter = Counter()
         remote_server_class = ray.remote(num_cpus=0)(Server)
-        self.server = remote_server_class(
+        self.server = remote_server_class.remote(
             model=model,
             model_path=model_path,
             pipeline_parallel_size=pipeline_parallel_size,
@@ -56,6 +56,8 @@ class FastAPIFrontend:
             num_devices_per_node=num_devices_per_node,
             distributed_init_method=distributed_init_method,
             all_stage_devices=all_stage_devices,
+            gpu_memory=get_gpu_memory(),
+            cpu_memory=get_cpu_memory(),
         )
 
         self.running_seq_groups: Dict[int, SequenceGroup] = {}
@@ -86,7 +88,7 @@ class FastAPIFrontend:
         seq_group = SequenceGroup(group_id, seqs)
         group_event = asyncio.Event()
         self.sequence_group_events[group_id] = group_event
-        await self.server.add_sequence_groups.remote([seq_group, sampling_params])
+        await self.server.add_sequence_groups.remote([(seq_group, sampling_params)])
         while True:
             if not self.is_server_running:
                 await self.server_step()
@@ -139,6 +141,10 @@ if __name__ == "__main__":
         seed=args.seed,
         swap_space=args.swap_space,
         max_batch_size=args.max_batch_size,
+        num_nodes=num_nodes,
+        num_devices_per_node=num_devices_per_node,
+        distributed_init_method=distributed_init_method,
+        all_stage_devices=all_stage_devices,
     )
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

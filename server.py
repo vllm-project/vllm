@@ -5,7 +5,7 @@ from cacheflow.master.frontend import Frontend
 from cacheflow.master.server import (Server, add_server_arguments,
                                      initialize_ray_cluster)
 from cacheflow.sampling_params import SamplingParams
-
+from cacheflow.utils import get_gpu_memory, get_cpu_memory
 
 def main(args: argparse.Namespace):
     # TODO(zhuohan): Support pipeline parallelism.
@@ -33,6 +33,8 @@ def main(args: argparse.Namespace):
         num_devices_per_node=num_devices_per_node,
         distributed_init_method=distributed_init_method,
         all_stage_devices=all_stage_devices,
+        gpu_memory=get_gpu_memory(),
+        cpu_memory=get_cpu_memory(),
     )
 
     # Create a frontend.
