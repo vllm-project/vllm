@@ -43,8 +43,6 @@ class Scheduler:
         self.swapped: List[SequenceGroup] = []
         # Pending sequence groups (FIFO).
         self.pending: List[SequenceGroup] = []
-        # Finished sequence groups.
-        self.finished: List[SequenceGroup] = []
 
     def add_sequence_groups(
         self,
@@ -106,7 +104,7 @@ class Scheduler:
             seq.status = SequenceStatus.SWAPPED
         self.swapped.append(seq_group)
 
-    def step(self) -> None:
+    def step(self) -> List[SequenceGroup]:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
@@ -177,6 +175,8 @@ class Scheduler:
 
         # 4. Create input data structures.
         input_seq_groups: List[SequenceGroupInputs] = []
+        updated_seq_groups: List[SequenceGroup] = self.running.copy()
+
         for seq_group in self.running:
             group_id = seq_group.group_id
             num_steps = self.num_steps[group_id]
@@ -219,6 +219,8 @@ class Scheduler:
                 blocks_to_swap_out,
                 blocks_to_copy,
             )
+
+        return updated_seq_groups
 
     def post_step(
         self,
@@ -269,18 +271,12 @@ class Scheduler:
         running: List[SequenceGroup] = []
         for seq_group in self.running:
             if seq_group.is_finished():
-                self._return(seq_group)
+                self._free_seq_group(seq_group)
             else:
                 running.append(seq_group)
         self.running = running
 
-    def _return(self, seq_group: SequenceGroup) -> None:
+    def _free_seq_group(self, seq_group: SequenceGroup) -> None:
         group_id = seq_group.group_id
         del self.num_steps[group_id]
         del self.sampling_params[group_id]
-        self.finished.append(seq_group)
-
-    def get_finished(self) -> List[SequenceGroup]:
-        finished = self.finished
-        self.finished = []
-        return finished

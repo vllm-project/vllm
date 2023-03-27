@@ -7,7 +7,8 @@ import ray
 from cacheflow.master.scheduler import Scheduler
 from cacheflow.models import get_memory_analyzer
 from cacheflow.worker.controller import Controller, DeviceID
-
+from cacheflow.sequence import SequenceGroup
+from cacheflow.sampling_params import SamplingParams
 
 class Server:
     def __init__(
@@ -21,17 +22,13 @@ class Server:
         seed: int,
         swap_space: int,
         max_batch_size: int,
+        num_nodes: int,
+        num_devices_per_node: int,
+        distributed_init_method: str,
+        all_stage_devices: List[List[DeviceID]],
     ):
-        # TODO(zhuohan): Support pipeline parallelism.
-        assert pipeline_parallel_size == 1, (
-            'Pipeline parallelism is not supported yet.')
-
-        (self.num_nodes, self.num_devices_per_node, distributed_init_method,
-        all_stage_devices) = (
-            initialize_ray_cluster(
-                pipeline_parallel_size=pipeline_parallel_size,
-                tensor_parallel_size=tensor_parallel_size))
-
+        self.num_nodes = num_nodes
+        self.num_devices_per_node = num_devices_per_node
         self.world_size = pipeline_parallel_size * tensor_parallel_size
 
         self.memory_analyzer = get_memory_analyzer(
@@ -79,6 +76,19 @@ class Server:
         for i in range(len(self.controllers) - 1):
             self.controllers[i].set_next(self.controllers[i + 1])
         self.controllers[-1].set_next(self.scheduler)
+
+    def add_sequence_groups(
+        self,
+        sequence_groups: List[Tuple[SequenceGroup, SamplingParams]]
+    ):
+        self.scheduler.add_sequence_groups(sequence_groups)
+
+    def step(self):
+        return self.scheduler.step()
+
+    def has_unfinished_requests(self):
+        return (len(self.scheduler.pending) > 0 or
+                len(self.scheduler.running) > 0)
 
 
 def initialize_ray_cluster(

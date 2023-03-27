@@ -3,8 +3,7 @@ from typing import List, Optional, Set, Tuple
 from transformers import AutoTokenizer
 
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.sequence import Sequence
-from cacheflow.sequence import SequenceGroup
+from cacheflow.sequence import Sequence, SequenceGroup
 from cacheflow.utils import Counter
 
 

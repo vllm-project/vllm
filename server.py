@@ -2,10 +2,22 @@ import argparse
 from typing import List
 
 from cacheflow.master.frontend import Frontend
-from cacheflow.master.server import Server, add_server_arguments
+from cacheflow.master.server import (Server, add_server_arguments,
+                                     initialize_ray_cluster)
 from cacheflow.sampling_params import SamplingParams
 
+
 def main(args: argparse.Namespace):
+    # TODO(zhuohan): Support pipeline parallelism.
+    assert args.pipeline_parallel_size == 1, (
+        'Pipeline parallelism is not supported yet.')
+
+    (num_nodes, num_devices_per_node, distributed_init_method,
+    all_stage_devices) = (
+        initialize_ray_cluster(
+            pipeline_parallel_size=args.pipeline_parallel_size,
+            tensor_parallel_size=args.tensor_parallel_size))
+
     # Create a server.
     server = Server(
         model=args.model,
@@ -17,6 +29,10 @@ def main(args: argparse.Namespace):
         seed=args.seed,
         swap_space=args.swap_space,
         max_batch_size=args.max_batch_size,
+        num_nodes=num_nodes,
+        num_devices_per_node=num_devices_per_node,
+        distributed_init_method=distributed_init_method,
+        all_stage_devices=all_stage_devices,
     )
 
     # Create a frontend.
@@ -37,12 +53,12 @@ def main(args: argparse.Namespace):
             sampling_params = SamplingParams.from_dict(sampling_params_dict)
             sampling_params = frontend.add_eos_token(sampling_params)
             frontend.query(text, sampling_params)
-        server.scheduler.add_sequence_groups(frontend.get_inputs())
-        server.scheduler.step()
-        for seq_group in server.scheduler.get_finished():
-            frontend.print_response(seq_group)
-        if not (server.scheduler.pending or server.scheduler.running or
-                test_inputs):
+        server.add_sequence_groups(frontend.get_inputs())
+        updated_seq_groups = server.step()
+        for seq_group in updated_seq_groups:
+            if seq_group.is_finished():
+                frontend.print_response(seq_group)
+        if not (server.has_unfinished_requests() or test_inputs):
             break
 
 
