@@ -1,7 +1,7 @@
 import argparse
 from typing import List
 
-from cacheflow.master.frontend import Frontend
+from cacheflow.master.simple_frontend import SimpleFrontend
 from cacheflow.master.server import (Server, add_server_arguments,
                                      initialize_ray_cluster)
 from cacheflow.sampling_params import SamplingParams
@@ -38,7 +38,7 @@ def main(args: argparse.Namespace):
     )
 
     # Create a frontend.
-    frontend = Frontend(
+    frontend = SimpleFrontend(
         model_name=args.model,
         block_size=args.block_size,
     )

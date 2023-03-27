@@ -7,7 +7,7 @@ from cacheflow.sequence import Sequence, SequenceGroup
 from cacheflow.utils import Counter
 
 
-class Frontend:
+class SimpleFrontend:
 
     def __init__(
         self,
