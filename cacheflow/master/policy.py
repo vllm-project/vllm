@@ -24,17 +24,6 @@ class Policy:
         )
 
 
-class PolicyFactory:
-
-    def __init__(self) -> None:
-        self.policies = {
-            'fcfs': FCFS,
-        }
-
-    def get_policy(self, policy_name: str, **kwargs) -> Policy:
-        return self.policies[policy_name](**kwargs)
-
-
 class FCFS(Policy):
 
     def get_priority(
@@ -43,3 +32,14 @@ class FCFS(Policy):
         seq_group: SequenceGroup,
     ) -> float:
         return now - seq_group.arrival_time
+
+
+class PolicyFactory:
+
+    _POLICY_REGISTRY = {
+        'fcfs': FCFS,
+    }
+
+    @classmethod
+    def get_policy(cls, policy_name: str, **kwargs) -> Policy:
+        return cls._POLICY_REGISTRY[policy_name](**kwargs)
