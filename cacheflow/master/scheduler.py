@@ -48,7 +48,6 @@ class Scheduler:
         # Mapping: group_id -> sampling params.
         self.sampling_params: Dict[int, SamplingParams] = {}
         # Sequence groups in the SWAPPED state.
-        # NOTE(woosuk): This is not used for now.
         self.swapped: List[SequenceGroup] = []
 
     def _fetch_requests(self) -> int:
@@ -60,10 +59,12 @@ class Scheduler:
 
     def step(self) -> None:
         # Blocks that need to be swaped or copied before model execution.
+        blocks_to_swap_in: Dict[int, int] = {}
+        blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
 
         # Fetch new requests.
-        num_requests = self._fetch_requests()
+        self._fetch_requests()
 
         # Fix the current time.
         now = time.time()
@@ -84,13 +85,11 @@ class Scheduler:
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop(-1)
-                    self._preempt(victim_seq_group)
-                    self.waiting.append(victim_seq_group)
+                    self._preempt(victim_seq_group, blocks_to_swap_out)
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
-                    self._preempt(seq_group)
-                    self.waiting.append(seq_group)
+                    self._preempt(seq_group, blocks_to_swap_out)
                     break
             else:
                 # Append new slots to the sequence group.
@@ -98,18 +97,34 @@ class Scheduler:
                 running.append(seq_group)
         self.running = running
 
+        # Swap in the sequence groups in the SWAPPED state if possible.
+        # NOTE(woosuk): The sequence groups in the SWAPPED state are
+        # prioritized over the sequence groups in the WAITING state.
+        # This is because the sequence groups in the SWAPPED state take up
+        # CPU memory, which is limited.
+        self.swapped = self.policy.sort_by_priority(now, self.swapped)
+        while self.swapped:
+            seq_group = self.swapped[0]
+            # If the sequence group cannot be swapped in, stop joining.
+            if not self.block_manager.can_swap_in(seq_group):
+                break
+
+            seq_group = self.swapped.pop(0)
+            self._swap_in(seq_group, blocks_to_swap_in)
+            self._append(seq_group, blocks_to_copy)
+            self.running.append(seq_group)
+
         num_batched_tokens = sum(
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
             for seq_group in self.running
         )
 
-        # Join new sequences if possible.
+        # Join waiting sequences if possible.
         prompt_group_ids: List[int] = []
         self.waiting = self.policy.sort_by_priority(now, self.waiting)
-        # FIXME(woosuk): This does not work if sequence groups have more than
-        # one sequence.
         while self.waiting:
             seq_group = self.waiting[0]
+            assert seq_group.num_seqs() == 1
             # If the sequence group cannot be allocated, stop joining.
             if not self.block_manager.can_allocate(seq_group):
                 break
@@ -159,12 +174,13 @@ class Scheduler:
             input_seq_groups.append(input_seq_group)
 
         # Execute the first stage of the pipeline.
-        if input_seq_groups:
+        if input_seq_groups or blocks_to_swap_in or blocks_to_swap_out:
+            assert not (blocks_to_swap_in and blocks_to_swap_out)
             self.controllers[0].execute_stage(
                 input_seq_groups,
+                blocks_to_swap_in=blocks_to_swap_in,
+                blocks_to_swap_out=blocks_to_swap_out,
                 blocks_to_copy=blocks_to_copy,
-                blocks_to_swap_in={},
-                blocks_to_swap_out={},
             )
 
     def post_step(
@@ -243,17 +259,36 @@ class Scheduler:
                 else:
                     blocks_to_copy[src_block] = [dst_block]
 
-    def _preempt(self, seq_group: SequenceGroup) -> None:
+    def _preempt(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_out: Dict[int, int],
+    ) -> None:
         # NOTE(woosuk): There are two preemption mechanisms.
         # 1. Swapping: Swap out the blocks of the preempted sequences to CPU
         # memory and swap them back in when the sequences are resumed.
         # 2. Recomputation: Discard the blocks of the preempted sequences and
         # recompute them when the sequences are resumed.
-        # We originally used swapping, but it turned out that recomputation
-        # is more efficient. We keep the swapping code for future reference.
-        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            seq.status = SequenceStatus.WAITING
-            self.block_manager.free(seq)
+
+        # How to choose between the two?
+        # Recomputation is more efficient than swapping if the sequence group
+        # consists of a single sequence. When the sequence group has multiple
+        # sequences, we only support swapping.
+        # TODO(woosuk): Support recomputation for sequence groups with multiple
+        # sequences.
+        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        if len(seqs) == 1:
+            # Recomputation.
+            for seq in seqs:
+                seq.status = SequenceStatus.WAITING
+                self.block_manager.free(seq)
+            self.waiting.append(seq_group)
+        else:
+            # Swapping.
+            for seq in seqs:
+                seq.status = SequenceStatus.SWAPPED
+            self._swap_out(seq_group, blocks_to_swap_out)
+            self.swapped.append(seq_group)
 
     def _free_seq(self, seq: Sequence) -> None:
         seq.status = SequenceStatus.FINISHED
