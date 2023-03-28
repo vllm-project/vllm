@@ -1,6 +1,11 @@
 """1D LLaMA model compatible with HuggingFace weights."""
+import os
+import glob
+import filelock
+from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -86,14 +91,24 @@ class LlamaMLP(nn.Module):
     ):
         super().__init__()
         # TODO: Merge the gate and down linear layers.
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.gate_proj = ColumnParallelLinear(hidden_size, intermediate_size,
+                                              bias=False, gather_output=False,
+                                              perform_initialization=False)
+        self.down_proj = RowParallelLinear(intermediate_size, hidden_size,
+                                           bias=False, input_is_parallel=True,
+                                           perform_initialization=False)
+        self.up_proj = ColumnParallelLinear(hidden_size, intermediate_size,
+                                            bias=False, gather_output=False,
+                                            perform_initialization=False)
         assert hidden_act == 'silu'
         self.act_fn = nn.SiLU()
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        gate, _ = self.gate_proj(x)
+        up, _ = self.up_proj(x)
+        x = self.act_fn(gate) * up
+        x, _ = self.down_proj(x)
+        return x
 
 
 class LlamaAttention(nn.Module):
@@ -110,25 +125,33 @@ class LlamaAttention(nn.Module):
         self.scaling = self.head_dim ** -0.5
 
         # TODO: Merge the QKV linear layers.
-        self.q_proj = nn.Linear(
+        self.q_proj = ColumnParallelLinear(
             hidden_size,
             num_heads * self.head_dim,
             bias=False,
+            gather_output=False,
+            perform_initialization=False,
         )
-        self.k_proj = nn.Linear(
+        self.k_proj = ColumnParallelLinear(
             hidden_size,
             num_heads * self.head_dim,
             bias=False,
+            gather_output=False,
+            perform_initialization=False,
         )
-        self.v_proj = nn.Linear(
+        self.v_proj = ColumnParallelLinear(
             hidden_size,
             num_heads * self.head_dim,
             bias=False,
+            gather_output=False,
+            perform_initialization=False,
         )
-        self.o_proj = nn.Linear(
+        self.o_proj = RowParallelLinear(
             num_heads * self.head_dim,
             hidden_size,
             bias=False,
+            input_is_parallel=True,
+            perform_initialization=False,
         )
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim)
         # FIXME(woosuk): Rename this.
@@ -142,9 +165,9 @@ class LlamaAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
 
         # Apply rotrary embedding.
         # TODO: Optimize.
@@ -158,7 +181,7 @@ class LlamaAttention(nn.Module):
         key_cache, value_cache = kv_cache
         attn_output = self.attn(
             q, k, v, key_cache, value_cache, input_metadata, cache_event)
-        output = self.o_proj(attn_output)
+        output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -207,36 +230,18 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states
 
 
-class LlamaPreTrainedModel(PreTrainedModel):
-    config_class = LlamaConfig
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["LlamaDecoderLayer"]
-    _keys_to_ignore_on_load_unexpected = [r"decoder\.version"]
-
-    def _init_weights(self, module):
-        pass
-
-
-class LlamaModel(LlamaPreTrainedModel):
+class LlamaModel(nn.Module):
 
     def __init__(self, config: LlamaConfig):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size,
+                                                   perform_initialization=False)
         self.layers = nn.ModuleList([LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
 
     def forward(
         self,
@@ -264,35 +269,15 @@ class LlamaModel(LlamaPreTrainedModel):
         return hidden_states
 
 
-class LlamaForCausalLM(LlamaPreTrainedModel):
-    _keys_to_ignore_on_load_missing = [r"lm_head.weight"]
-
+class LlamaForCausalLM(nn.Module):
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         self.model = LlamaModel(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        # TODO(zhuohan): create a new weight after implementing pipeline
+        #                parallelism
+        self.lm_head_weight = self.model.embed_tokens.weight
         self.sampler = Sampler()
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.model.embed_tokens = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
 
     def forward(
         self,
@@ -305,5 +290,65 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         hidden_states = self.model(
             input_ids, positions, kv_caches, input_metadata, cache_events)
         next_tokens = self.sampler(
-            self.lm_head.weight, hidden_states, input_metadata)
+            self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens
+
+    _column_parallel_weights = ["embed_tokens.weight",
+                                "q_proj.weight", "k_proj.weight",
+                                "v_proj.weight", "gate_proj.weight",
+                                "up_proj.weight"]
+    _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
+
+    def load_weights(self, weights_path: str):
+        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+        state_dict = self.state_dict()
+        for name, param in state_dict.items():
+            if "lm_head_weight" in name:
+                continue
+            loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path,
+                                                                  name)))
+            for p in self._column_parallel_weights:
+                if p in name:
+                    shard_size = param.shape[0]
+                    loaded_weight = loaded_weight[
+                        shard_size * tensor_model_parallel_rank
+                        :shard_size * (tensor_model_parallel_rank + 1)]
+                    break
+            for p in self._row_parallel_weights:
+                if p in name:
+                    shard_size = param.shape[1]
+                    loaded_weight = loaded_weight[
+                        :,
+                        shard_size * tensor_model_parallel_rank
+                        :shard_size * (tensor_model_parallel_rank + 1)]
+                    break
+
+            assert param.shape == loaded_weight.shape
+            param.data.copy_(loaded_weight)
+
+    @staticmethod
+    def get_weights(model_name: str, path: str):
+        if not os.path.isfile(os.path.join(model_name, "config.json")):
+            raise ValueError("LLaMA model's model_name has to be a path"
+                             "to the huggingface model's directory.")
+        path = os.path.join(model_name, f"np")
+        path = os.path.abspath(os.path.expanduser(path))
+        os.makedirs(path, exist_ok=True)
+        lock_path = os.path.join(path, "file_lock")
+        lock = filelock.FileLock(lock_path)
+
+        with lock:
+            test_weight_path = os.path.join(path, "model.embed_tokens.weight")
+            if os.path.exists(test_weight_path):
+                return path
+
+            bin_files = glob.glob(os.path.join(model_name, "*.bin"))
+
+            for bin_file in tqdm(bin_files, desc="Convert format"):
+                state = torch.load(bin_file, map_location="cpu")
+                for name, param in tqdm(state.items(), leave=False):
+                    param_path = os.path.join(path, name)
+                    with open(param_path, "wb") as f:
+                        np.save(f, param.cpu().detach().numpy())
+
+            return path

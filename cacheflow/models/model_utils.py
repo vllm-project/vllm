@@ -32,15 +32,10 @@ def get_model(
     torch_dtype = get_torch_dtype(dtype)
     torch.set_default_dtype(torch_dtype)
     config = AutoConfig.from_pretrained(model_name)
-    # FIXME
-    if 'llama' in model_name:
-        model = LlamaForCausalLM.from_pretrained(model_name)
-        return model.eval(), torch_dtype
-
     for model_class_name, model_class in _MODELS.items():
         if model_class_name in model_name:
             # Download model weights if it's not cached.
-            weights_dir = model_class.download_weights(model_name, path=path)
+            weights_dir = model_class.get_weights(model_name, path=path)
             # Create a model instance.
             model = model_class(config)
             # Load the weights from the cached or downloaded files.
