@@ -126,7 +126,6 @@ class Scheduler:
 
             while self.waiting:
                 seq_group = self.waiting[0]
-                assert seq_group.num_seqs() == 1
                 # If the sequence group cannot be allocated, stop.
                 if not self.block_manager.can_allocate(seq_group):
                     break
