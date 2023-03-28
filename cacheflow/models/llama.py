@@ -274,9 +274,11 @@ class LlamaForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = LlamaModel(config)
-        # TODO(zhuohan): create a new weight after implementing pipeline
-        #                parallelism
-        self.lm_head_weight = self.model.embed_tokens.weight
+        self.lm_head = ColumnParallelLinear(config.hidden_size,
+                                            config.vocab_size,
+                                            bias=False,
+                                            gather_output=False,
+                                            perform_initialization=False)
         self.sampler = Sampler()
 
     def forward(
@@ -290,7 +292,7 @@ class LlamaForCausalLM(nn.Module):
         hidden_states = self.model(
             input_ids, positions, kv_caches, input_metadata, cache_events)
         next_tokens = self.sampler(
-            self.lm_head_weight, hidden_states, input_metadata)
+            self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
 
     _column_parallel_weights = ["embed_tokens.weight",
@@ -303,8 +305,6 @@ class LlamaForCausalLM(nn.Module):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, param in state_dict.items():
-            if "lm_head_weight" in name:
-                continue
             loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path,
                                                                   name)))
             for p in self._column_parallel_weights:
