@@ -159,7 +159,8 @@ class BlockSpaceManager:
         # NOTE: Conservatively, we assume that every sequence will allocate
         # at least one free block right after the swap-in.
         # NOTE: This should match the logic in can_append().
-        return len(blocks) + num_swapped_seqs <= num_free_blocks
+        num_required_blocks = len(blocks) + num_swapped_seqs
+        return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # CPU block -> GPU block.
