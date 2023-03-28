@@ -65,7 +65,6 @@ class Scheduler:
 
         # Fetch new requests.
         self._fetch_requests()
-
         # Fix the current time.
         now = time.time()
 
@@ -79,6 +78,7 @@ class Scheduler:
 
         # Reserve new token slots for the running sequence groups.
         running: List[SequenceGroup] = []
+        preempted: List[SequenceGroup] = []
         while self.running:
             seq_group = self.running.pop(0)
             while not self.block_manager.can_append(seq_group):
@@ -86,10 +86,12 @@ class Scheduler:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop(-1)
                     self._preempt(victim_seq_group, blocks_to_swap_out)
+                    preempted.append(victim_seq_group)
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
                     self._preempt(seq_group, blocks_to_swap_out)
+                    preempted.append(seq_group)
                     break
             else:
                 # Append new slots to the sequence group.
@@ -101,6 +103,9 @@ class Scheduler:
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
         while self.swapped:
             seq_group = self.swapped[0]
+            # If the sequence group has been preempted in this step, stop.
+            if seq_group in preempted:
+                break
             # If the sequence group cannot be swapped in, stop.
             if not self.block_manager.can_swap_in(seq_group):
                 break
@@ -115,17 +120,19 @@ class Scheduler:
             for seq_group in self.running
         )
 
+        # Join waiting sequences if possible.
+        prompt_group_ids: List[int] = []
         # NOTE(woosuk): The sequence groups in the SWAPPED state are strictly
         # prioritized over the sequence groups in the WAITING state.
         # This is because we want to bound the amount of CPU memory taken by
         # the swapped sequence groups.
         if not self.swapped:
-            # Join waiting sequences if possible.
-            prompt_group_ids: List[int] = []
             self.waiting = self.policy.sort_by_priority(now, self.waiting)
-
             while self.waiting:
                 seq_group = self.waiting[0]
+                # If the sequence group has been preempted in this step, stop.
+                if seq_group in preempted:
+                    break
                 # If the sequence group cannot be allocated, stop.
                 if not self.block_manager.can_allocate(seq_group):
                     break
