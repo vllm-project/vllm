@@ -98,14 +98,10 @@ class Scheduler:
         self.running = running
 
         # Swap in the sequence groups in the SWAPPED state if possible.
-        # NOTE(woosuk): The sequence groups in the SWAPPED state are
-        # prioritized over the sequence groups in the WAITING state.
-        # This is because the sequence groups in the SWAPPED state take up
-        # CPU memory, which is limited.
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
         while self.swapped:
             seq_group = self.swapped[0]
-            # If the sequence group cannot be swapped in, stop joining.
+            # If the sequence group cannot be swapped in, stop.
             if not self.block_manager.can_swap_in(seq_group):
                 break
 
@@ -119,27 +115,33 @@ class Scheduler:
             for seq_group in self.running
         )
 
-        # Join waiting sequences if possible.
-        prompt_group_ids: List[int] = []
-        self.waiting = self.policy.sort_by_priority(now, self.waiting)
-        while self.waiting:
-            seq_group = self.waiting[0]
-            assert seq_group.num_seqs() == 1
-            # If the sequence group cannot be allocated, stop joining.
-            if not self.block_manager.can_allocate(seq_group):
-                break
+        # NOTE(woosuk): The sequence groups in the SWAPPED state are strictly
+        # prioritized over the sequence groups in the WAITING state.
+        # This is because we want to bound the amount of CPU memory taken by
+        # the swapped sequence groups.
+        if not self.swapped:
+            # Join waiting sequences if possible.
+            prompt_group_ids: List[int] = []
+            self.waiting = self.policy.sort_by_priority(now, self.waiting)
 
-            # If the number of batched tokens exceeds the limit, stop joining.
-            num_prompt_tokens = seq_group.seqs[0].get_len()
-            if (num_batched_tokens + num_prompt_tokens
-                > self.max_num_batched_tokens):
-                break
+            while self.waiting:
+                seq_group = self.waiting[0]
+                assert seq_group.num_seqs() == 1
+                # If the sequence group cannot be allocated, stop.
+                if not self.block_manager.can_allocate(seq_group):
+                    break
 
-            seq_group = self.waiting.pop(0)
-            self._allocate(seq_group)
-            self.running.append(seq_group)
-            num_batched_tokens += num_prompt_tokens
-            prompt_group_ids.append(seq_group.group_id)
+                # If the number of batched tokens exceeds the limit, stop.
+                num_prompt_tokens = seq_group.seqs[0].get_len()
+                if (num_batched_tokens + num_prompt_tokens
+                    > self.max_num_batched_tokens):
+                    break
+
+                seq_group = self.waiting.pop(0)
+                self._allocate(seq_group)
+                self.running.append(seq_group)
+                num_batched_tokens += num_prompt_tokens
+                prompt_group_ids.append(seq_group.group_id)
 
         # Create input data structures.
         input_seq_groups: List[SequenceGroupInputs] = []
