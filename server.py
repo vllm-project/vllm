@@ -99,9 +99,6 @@ def main(args: argparse.Namespace):
         max_num_batched_tokens=args.max_batch_size)
     num_cpu_blocks = memory_analyzer.get_max_num_cpu_blocks(
         swap_space=args.swap_space)
-    if num_cpu_blocks > 0:
-        raise ValueError(
-            'CPU blocks are not used. Please set --swap-space to 0.')
     print(f'# GPU blocks: {num_gpu_blocks}, # CPU blocks: {num_cpu_blocks}')
 
     # Create a controller for each pipeline stage.
@@ -174,7 +171,7 @@ if __name__ == '__main__':
     parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
     # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
     parser.add_argument('--seed', type=int, default=0, help='random seed')
-    parser.add_argument('--swap-space', type=int, default=0, help='CPU swap space size (GiB) per GPU')
+    parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
     parser.add_argument('--max-batch-size', type=int, default=2560, help='maximum number of batched tokens')
     args = parser.parse_args()
 
