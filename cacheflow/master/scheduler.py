@@ -182,6 +182,7 @@ class Scheduler:
 
         # Execute the first stage of the pipeline.
         if input_seq_groups or blocks_to_swap_in or blocks_to_swap_out:
+            # Swap in and swap out should never happen at the same time.
             assert not (blocks_to_swap_in and blocks_to_swap_out)
             self.controllers[0].execute_stage(
                 input_seq_groups,
@@ -285,6 +286,11 @@ class Scheduler:
         # sequences, we only support swapping.
         # TODO(woosuk): Support recomputation for sequence groups with multiple
         # sequences.
+
+        # FIXME(woosuk): This makes our scheduling policy a bit bizarre.
+        # Because swapped sequences are prioritized over waiting sequences,
+        # sequence groups with multiple sequences are implicitly prioritized
+        # over sequence groups with a single sequence.
         seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         if len(seqs) == 1:
             # Recomputation.
