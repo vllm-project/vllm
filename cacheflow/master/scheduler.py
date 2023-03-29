@@ -51,12 +51,12 @@ class Scheduler:
         self,
         seq_groups: List[Tuple[SequenceGroup, SamplingParams]],
     ) -> None:
-        # Add sequence groups to the pending queue.
+        # Add sequence groups to the waiting queue.
         for seq_group, sampling_params in seq_groups:
-            self.pending.append(seq_group)
+            self.waiting.append(seq_group)
             self.sampling_params[seq_group.group_id] = sampling_params
 
-    def step(self) -> None:
+    def step(self) -> List[SequenceGroup]:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
@@ -303,7 +303,7 @@ class Scheduler:
         seq.status = SequenceStatus.FINISHED
         self.block_manager.free(seq)
 
-    def _return(self, seq_group: SequenceGroup) -> None:
+    def _free_seq_group(self, seq_group: SequenceGroup) -> None:
         group_id = seq_group.group_id
         del self.num_steps[group_id]
         del self.sampling_params[group_id]

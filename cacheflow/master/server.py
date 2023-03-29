@@ -92,7 +92,7 @@ class Server:
         return self.scheduler.step()
 
     def has_unfinished_requests(self):
-        return (self.scheduler.pending or self.scheduler.running or
+        return (self.scheduler.waiting or self.scheduler.running or
                 self.scheduler.swapped)
 
 
