@@ -1,13 +1,98 @@
 import argparse
+from typing import List, Tuple
 import random
-from typing import List, Tuple, Dict
 
 import ray
 
-from cacheflow.master.frontend import Frontend
 from cacheflow.master.scheduler import Scheduler
 from cacheflow.models import get_memory_analyzer
 from cacheflow.worker.controller import Controller, DeviceID
+from cacheflow.sequence import SequenceGroup
+from cacheflow.sampling_params import SamplingParams
+
+class Server:
+    def __init__(
+        self,
+        model: str,
+        model_path: str,
+        pipeline_parallel_size: int,
+        tensor_parallel_size: int,
+        block_size: int,
+        dtype: str,
+        seed: int,
+        swap_space: int,
+        max_batch_size: int,
+        num_nodes: int,
+        num_devices_per_node: int,
+        distributed_init_method: str,
+        all_stage_devices: List[List[DeviceID]],
+        gpu_memory: int,
+        cpu_memory: int,
+    ):
+        self.num_nodes = num_nodes
+        self.num_devices_per_node = num_devices_per_node
+        self.world_size = pipeline_parallel_size * tensor_parallel_size
+
+        self.memory_analyzer = get_memory_analyzer(
+            model_name=model,
+            block_size=block_size,
+            dtype=dtype,
+            gpu_memory=gpu_memory,
+            cpu_memory=cpu_memory,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+        self.num_gpu_blocks = self.memory_analyzer.get_max_num_gpu_blocks(
+            max_num_batched_tokens=max_batch_size)
+        self.num_cpu_blocks = self.memory_analyzer.get_max_num_cpu_blocks(
+            swap_space=swap_space)
+        print(f'# GPU blocks: {self.num_gpu_blocks}, '
+              f'# CPU blocks: {self.num_cpu_blocks}')
+
+        # Create a controller for each pipeline stage.
+        self.controllers: List[Controller] = []
+        for i in range(pipeline_parallel_size):
+            controller = Controller(
+                stage_id=i,
+                stage_devices=all_stage_devices[i],
+                world_size=self.world_size,
+                pipeline_parallel_size=pipeline_parallel_size,
+                tensor_parallel_size=tensor_parallel_size,
+                distributed_init_method=distributed_init_method,
+                model_name=model,
+                block_size=block_size,
+                num_gpu_blocks=self.num_gpu_blocks,
+                num_cpu_blocks=self.num_cpu_blocks,
+                dtype=dtype,
+                seed=seed,
+                model_path=model_path,
+            )
+            self.controllers.append(controller)
+
+        # Create a scheduler.
+        self.scheduler = Scheduler(
+            controllers=self.controllers,
+            block_size=block_size,
+            num_gpu_blocks=self.num_gpu_blocks,
+            num_cpu_blocks=self.num_cpu_blocks,
+            max_num_batched_tokens=max_batch_size,
+        )
+        # Connect the controllers.
+        for i in range(len(self.controllers) - 1):
+            self.controllers[i].set_next(self.controllers[i + 1])
+        self.controllers[-1].set_next(self.scheduler)
+
+    def add_sequence_groups(
+        self,
+        sequence_groups: List[Tuple[SequenceGroup, SamplingParams]]
+    ):
+        self.scheduler.add_sequence_groups(sequence_groups)
+
+    def step(self):
+        return self.scheduler.step()
+
+    def has_unfinished_requests(self):
+        return (self.scheduler.pending or self.scheduler.running or
+                self.scheduler.swapped)
 
 
 def initialize_ray_cluster(
@@ -76,88 +161,7 @@ def initialize_ray_cluster(
             all_stage_devices)
 
 
-def main(args: argparse.Namespace):
-    # TODO(zhuohan): Support pipeline parallelism.
-    assert args.pipeline_parallel_size == 1, (
-        'Pipeline parallelism is not supported yet.')
-
-    (num_nodes, num_devices_per_node, distributed_init_method,
-     all_stage_devices) = (
-        initialize_ray_cluster(
-            pipeline_parallel_size=args.pipeline_parallel_size,
-            tensor_parallel_size=args.tensor_parallel_size))
-
-    world_size = args.pipeline_parallel_size * args.tensor_parallel_size
-
-    memory_analyzer = get_memory_analyzer(
-        model_name=args.model,
-        block_size=args.block_size,
-        dtype=args.dtype,
-        tensor_parallel_size=args.tensor_parallel_size,
-    )
-    num_gpu_blocks = memory_analyzer.get_max_num_gpu_blocks(
-        max_num_batched_tokens=args.max_batch_size)
-    num_cpu_blocks = memory_analyzer.get_max_num_cpu_blocks(
-        swap_space=args.swap_space)
-    print(f'# GPU blocks: {num_gpu_blocks}, # CPU blocks: {num_cpu_blocks}')
-
-    # Create a controller for each pipeline stage.
-    controllers: List[Controller] = []
-    for i in range(args.pipeline_parallel_size):
-        controller = Controller(
-            stage_id=i,
-            stage_devices=all_stage_devices[i],
-            world_size=world_size,
-            pipeline_parallel_size=args.pipeline_parallel_size,
-            tensor_parallel_size=args.tensor_parallel_size,
-            distributed_init_method=distributed_init_method,
-            model_name=args.model,
-            block_size=args.block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            num_cpu_blocks=num_cpu_blocks,
-            dtype=args.dtype,
-            seed=args.seed,
-            model_path=args.model_path,
-        )
-        controllers.append(controller)
-
-    # Create a frontend.
-    frontend = Frontend(
-        model_name=args.model,
-        block_size=args.block_size,
-    )
-
-    # Create a scheduler.
-    scheduler = Scheduler(
-        frontend=frontend,
-        controllers=controllers,
-        block_size=args.block_size,
-        num_gpu_blocks=num_gpu_blocks,
-        num_cpu_blocks=num_cpu_blocks,
-        max_num_batched_tokens=args.max_batch_size,
-    )
-    # Connect the controllers.
-    for i in range(len(controllers) - 1):
-        controllers[i].set_next(controllers[i + 1])
-    controllers[-1].set_next(scheduler)
-
-    # Test the following inputs.
-    test_inputs = [
-        ('Ion Stoica is a', {'n': 4, 'use_beam_search': True, 'temperature': 0.0}),
-        ('UC Berkeley is', {'n': 3, 'temperature': 0.8, 'top_p': 0.99}),
-        ('The future of cloud computing is', {}),   # Use default parameters.
-    ]
-    while True:
-        if test_inputs:
-            text, sampling_params = test_inputs.pop(0)
-            frontend.query(text, **sampling_params)
-        scheduler.step()
-        if not (scheduler.pending or scheduler.running or test_inputs):
-            break
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='CacheFlow server')
+def add_server_arguments(parser: argparse.ArgumentParser):
     # Model arguments
     parser.add_argument('--model', type=str, default='facebook/opt-125m', help='model name')
     parser.add_argument('--model-path', type=str, default='~/.cacheflow/model_weights',
@@ -173,6 +177,4 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
     parser.add_argument('--max-batch-size', type=int, default=2560, help='maximum number of batched tokens')
-    args = parser.parse_args()
-
-    main(args)
+    return parser
