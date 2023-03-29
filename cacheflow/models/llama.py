@@ -120,34 +120,37 @@ class LlamaAttention(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.head_dim = hidden_size // num_heads
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tensor_model_parallel_world_size == 0
+        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
+        self.head_dim = hidden_size // self.total_num_heads
         self.scaling = self.head_dim ** -0.5
 
         # TODO: Merge the QKV linear layers.
         self.q_proj = ColumnParallelLinear(
             hidden_size,
-            num_heads * self.head_dim,
+            self.total_num_heads * self.head_dim,
             bias=False,
             gather_output=False,
             perform_initialization=False,
         )
         self.k_proj = ColumnParallelLinear(
             hidden_size,
-            num_heads * self.head_dim,
+            self.total_num_heads * self.head_dim,
             bias=False,
             gather_output=False,
             perform_initialization=False,
         )
         self.v_proj = ColumnParallelLinear(
             hidden_size,
-            num_heads * self.head_dim,
+            self.total_num_heads * self.head_dim,
             bias=False,
             gather_output=False,
             perform_initialization=False,
         )
         self.o_proj = RowParallelLinear(
-            num_heads * self.head_dim,
+            self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             input_is_parallel=True,
@@ -295,7 +298,7 @@ class LlamaForCausalLM(nn.Module):
             self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["embed_tokens.weight",
+    _column_parallel_weights = ["embed_tokens.weight", "lm_head.weight",
                                 "q_proj.weight", "k_proj.weight",
                                 "v_proj.weight", "gate_proj.weight",
                                 "up_proj.weight"]
