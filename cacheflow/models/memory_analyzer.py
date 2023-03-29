@@ -131,7 +131,7 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         workspace_size = self.get_workspace_size()
 
         max_cache_size = usable_memory - (param_size + act_size + workspace_size)
-        max_num_blocks = max_cache_size // self._get_cache_block_size()
+        max_num_blocks = max_cache_size // self.get_cache_block_size()
         return max_num_blocks
 
 
