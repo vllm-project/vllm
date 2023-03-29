@@ -112,8 +112,8 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         return dtype_size * max_act
 
     def get_cache_block_size(self) -> int:
-        key_cache_block = self.block_size * self.num_heads * self.head_size
-        value_cache_block = self.block_size * self.num_heads * self.head_size
+        key_cache_block = self.block_size * self.hidden_size // self.tensor_parallel_size
+        value_cache_block = key_cache_block
         total = self.num_layers * (key_cache_block + value_cache_block)
         dtype_size = get_dtype_size(self.dtype)
         return dtype_size * total
@@ -131,6 +131,8 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         workspace_size = self.get_workspace_size()
 
         max_cache_size = usable_memory - (param_size + act_size + workspace_size)
+        if max_cache_size <= 0:
+            raise RuntimeError('Not enough GPU memory.')
         max_num_blocks = max_cache_size // self.get_cache_block_size()
         return max_num_blocks
 
@@ -207,8 +209,8 @@ class LlamaMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         return dtype_size * max_act
 
     def get_cache_block_size(self) -> int:
-        key_cache_block = self.block_size * self.num_heads * self.head_size
-        value_cache_block = self.block_size * self.num_heads * self.head_size
+        key_cache_block = self.block_size * self.hidden_size // self.tensor_parallel_size
+        value_cache_block = key_cache_block
         total = self.num_layers * (key_cache_block + value_cache_block)
         dtype_size = get_dtype_size(self.dtype)
         return dtype_size * total
@@ -227,5 +229,7 @@ class LlamaMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         workspace_size = self.get_workspace_size()
 
         max_cache_size = usable_memory - (param_size + act_size + workspace_size)
+        if max_cache_size <= 0:
+            raise RuntimeError('Not enough GPU memory.')
         max_num_blocks = max_cache_size // self.get_cache_block_size()
         return max_num_blocks
