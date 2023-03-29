@@ -28,7 +28,7 @@ class Scheduler:
         self.max_num_batched_tokens = max_num_batched_tokens
 
         # Instantiate the scheduling policy.
-        self.policy = PolicyFactory.get_policy('fcfs')
+        self.policy = PolicyFactory.get_policy(policy_name='fcfs')
         # Create the block space manager.
         self.block_manager = BlockSpaceManager(
             block_size=block_size,
