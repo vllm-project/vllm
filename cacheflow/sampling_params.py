@@ -1,4 +1,4 @@
-from typing import Optional, Set
+from typing import Optional, Set, Dict
 
 
 class SamplingParams:
@@ -71,7 +71,7 @@ class SamplingParams:
                 f'context_window_size={self.context_window_size})')
 
     @classmethod
-    def from_dict(cls, d: dict) -> 'SamplingParams':
+    def from_dict(cls, d: Dict) -> 'SamplingParams':
         return cls(
             n=d.get('n', 1),
             temperature=d.get('temperature', 1.0),

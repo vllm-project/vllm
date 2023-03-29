@@ -91,8 +91,8 @@ class Server:
         return self.scheduler.step()
 
     def has_unfinished_requests(self):
-        return (len(self.scheduler.pending) > 0 or
-                len(self.scheduler.running) > 0)
+        return (self.scheduler.pending or self.scheduler.running or
+                self.scheduler.swapped)
 
 
 def initialize_ray_cluster(
