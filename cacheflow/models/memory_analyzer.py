@@ -1,9 +1,7 @@
 import torch
 from transformers import AutoConfig
 
-from cacheflow.models.utils import get_cpu_memory
 from cacheflow.models.utils import get_dtype_size
-from cacheflow.models.utils import get_gpu_memory
 
 _GiB = 1 << 30
 
@@ -28,7 +26,7 @@ class CacheFlowMemoryAnalyzer:
         swap_space: int,
     ) -> int:
         swap_space = swap_space * _GiB
-        cpu_memory = get_cpu_memory()
+        cpu_memory = self.cpu_memory
         if swap_space > 0.8 * cpu_memory:
             raise ValueError(f'The swap space ({swap_space / _GiB:.2f} GiB) '
                              'takes more than 80% of the available memory '
@@ -50,11 +48,15 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         model_name: str,
         block_size: int,
         dtype: torch.dtype,
+        gpu_memory: int,
+        cpu_memory: int,
         tensor_parallel_size: int,
     ) -> None:
         self.model_name = model_name
         self.block_size = block_size
         self.dtype = dtype
+        self.gpu_memory = gpu_memory
+        self.cpu_memory = cpu_memory
         self.tensor_parallel_size = tensor_parallel_size
 
         config = AutoConfig.from_pretrained(model_name)
@@ -122,8 +124,7 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         memory_utilization: float = 0.95,
     ) -> int:
         # NOTE(woosuk): This assumes that the machine has homogeneous GPUs.
-        gpu_memory = get_gpu_memory()
-        usable_memory = int(memory_utilization * gpu_memory)
+        usable_memory = int(memory_utilization * self.gpu_memory)
 
         param_size = self._get_param_size()
         act_size = self._get_max_act_size(max_num_batched_tokens)
@@ -141,11 +142,15 @@ class LlamaMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         model_name: str,
         block_size: int,
         dtype: torch.dtype,
+        gpu_memory: int,
+        cpu_memory: int,
         tensor_parallel_size: int,
     ) -> None:
         self.model_name = model_name
         self.block_size = block_size
         self.dtype = dtype
+        self.gpu_memory = gpu_memory
+        self.cpu_memory = cpu_memory
         self.tensor_parallel_size = tensor_parallel_size
 
         config = AutoConfig.from_pretrained(model_name)
@@ -214,7 +219,7 @@ class LlamaMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         memory_utilization: float = 0.95,
     ) -> int:
         # NOTE(woosuk): This assumes that the machine has homogeneous GPUs.
-        gpu_memory = get_gpu_memory()
+        gpu_memory = self.gpu_memory
         usable_memory = int(memory_utilization * gpu_memory)
 
         param_size = self._get_param_size()

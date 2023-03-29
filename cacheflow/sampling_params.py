@@ -1,4 +1,4 @@
-from typing import Optional, Set
+from typing import Optional, Set, Dict
 
 
 class SamplingParams:
@@ -69,3 +69,16 @@ class SamplingParams:
                 f'max_num_steps={self.max_num_steps}, '
                 f'num_logprobs={self.num_logprobs}, '
                 f'context_window_size={self.context_window_size})')
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> 'SamplingParams':
+        return cls(
+            n=d.get('n', 1),
+            temperature=d.get('temperature', 1.0),
+            top_p=d.get('top_p', 1.0),
+            use_beam_search=d.get('use_beam_search', False),
+            stop_token_ids=set(d.get('stop_token_ids', set())),
+            max_num_steps=d.get('max_num_steps', 16),
+            num_logprobs=d.get('num_logprobs', 0),
+            context_window_size=d.get('context_window_size', None),
+        )

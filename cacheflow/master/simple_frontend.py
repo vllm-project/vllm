@@ -3,12 +3,11 @@ from typing import List, Optional, Set, Tuple
 from transformers import AutoTokenizer
 
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.sequence import Sequence
-from cacheflow.sequence import SequenceGroup
+from cacheflow.sequence import Sequence, SequenceGroup
 from cacheflow.utils import Counter
 
 
-class Frontend:
+class SimpleFrontend:
 
     def __init__(
         self,
@@ -22,30 +21,16 @@ class Frontend:
         self.seq_counter = Counter()
         self.inputs: List[Tuple[SequenceGroup, SamplingParams]] = []
 
+    def add_eos_token(self, sampling_params: SamplingParams) -> SamplingParams:
+        # Stop generation when we see an EOS token.
+        sampling_params.stop_token_ids.add(self.tokenizer.eos_token_id)
+        return sampling_params
+
     def query(
         self,
         prompt: str,
-        n: int = 1,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        use_beam_search: bool = False,
-        stop_token_ids: Set[int] = set(),
-        max_num_steps: int = 16,  # From OpenAI API.
-        num_logprobs: int = 0,
-        context_window_size: Optional[int] = None,
+        sampling_params: SamplingParams,
     ) -> None:
-        # Stop when we see an EOS token.
-        stop_token_ids.add(self.tokenizer.eos_token_id)
-        sampling_params = SamplingParams(
-            n=n,
-            temperature=temperature,
-            top_p=top_p,
-            use_beam_search=use_beam_search,
-            stop_token_ids=stop_token_ids,
-            max_num_steps=max_num_steps,
-            num_logprobs=num_logprobs,
-            context_window_size=context_window_size,
-        )
         token_ids = self.tokenizer.encode(prompt)
         self._add_query(token_ids, sampling_params)
 
