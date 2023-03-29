@@ -1,8 +1,7 @@
 import time
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from cacheflow.master.block_manager import BlockSpaceManager
-from cacheflow.master.frontend import Frontend
 from cacheflow.master.policy import PolicyFactory
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence
@@ -16,14 +15,12 @@ class Scheduler:
 
     def __init__(
         self,
-        frontend: Frontend,
         controllers: List,
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         max_num_batched_tokens: int,
     ) -> None:
-        self.frontend = frontend
         self.controllers = controllers
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
@@ -50,12 +47,14 @@ class Scheduler:
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
 
-    def _fetch_requests(self) -> int:
-        inputs = self.frontend.get_inputs()
-        for seq_group, sampling_params in inputs:
-            self.waiting.append(seq_group)
+    def add_sequence_groups(
+        self,
+        seq_groups: List[Tuple[SequenceGroup, SamplingParams]],
+    ) -> None:
+        # Add sequence groups to the pending queue.
+        for seq_group, sampling_params in seq_groups:
+            self.pending.append(seq_group)
             self.sampling_params[seq_group.group_id] = sampling_params
-        return len(inputs)
 
     def step(self) -> None:
         # Blocks that need to be swaped or copied before model execution.
@@ -63,8 +62,6 @@ class Scheduler:
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
 
-        # Fetch new requests.
-        self._fetch_requests()
         # Fix the current time.
         now = time.time()
 
@@ -151,6 +148,8 @@ class Scheduler:
 
         # Create input data structures.
         input_seq_groups: List[SequenceGroupInputs] = []
+        updated_seq_groups: List[SequenceGroup] = self.running.copy()
+
         for seq_group in self.running:
             group_id = seq_group.group_id
             is_prompt = group_id in prompt_group_ids
@@ -190,6 +189,8 @@ class Scheduler:
                 blocks_to_swap_out=blocks_to_swap_out,
                 blocks_to_copy=blocks_to_copy,
             )
+
+        return updated_seq_groups
 
     def post_step(
         self,
@@ -240,7 +241,7 @@ class Scheduler:
         running: List[SequenceGroup] = []
         for seq_group in self.running:
             if seq_group.is_finished():
-                self._return(seq_group)
+                self._free_seq_group(seq_group)
             else:
                 running.append(seq_group)
         self.running = running
@@ -306,7 +307,6 @@ class Scheduler:
         group_id = seq_group.group_id
         del self.num_steps[group_id]
         del self.sampling_params[group_id]
-        self.frontend.print_response(seq_group)
 
     def _swap_in(
         self,

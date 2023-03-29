@@ -44,11 +44,14 @@ def get_memory_analyzer(
     model_name: str,
     block_size: int,
     dtype: Union[torch.dtype, str],
+    gpu_memory: int,
+    cpu_memory: int,
     tensor_parallel_size: int = 1,
 ) -> CacheFlowMemoryAnalyzer:
     torch_dtype = get_torch_dtype(dtype)
     for model_class, memory_analyzer in _MEMORY_ANALYZERS.items():
         if model_class in model_name:
             return memory_analyzer(
-                model_name, block_size, torch_dtype, tensor_parallel_size)
+                model_name, block_size, torch_dtype, gpu_memory, cpu_memory,
+                tensor_parallel_size)
     raise ValueError(f'Unsupported model name: {model_name}')
