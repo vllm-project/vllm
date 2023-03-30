@@ -1,0 +1,16 @@
+#include <torch/extension.h>
+
+void rotary_embedding_neox(
+  torch::Tensor& out_query,
+  torch::Tensor& out_key,
+  torch::Tensor& positions,
+  torch::Tensor& query,
+  torch::Tensor& key,
+  torch::Tensor& cos_sin_cache);
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def(
+    "rotary_embedding_neox",
+    &rotary_embedding_neox,
+    "Apply GPT-NeoX style rotary embedding to query and key");
+}

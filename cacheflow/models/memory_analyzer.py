@@ -165,8 +165,7 @@ class LlamaMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         self.head_size = config.hidden_size // self.num_heads
         self.ffn_size = config.intermediate_size
         self.vocab_size = config.vocab_size
-        # FIXME
-        self.max_position = 2048
+        self.max_position = 8192
 
     def _get_param_size(self) -> int:
         word_embedding = self.vocab_size * self.hidden_size // self.tensor_parallel_size

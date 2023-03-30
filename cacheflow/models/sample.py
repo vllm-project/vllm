@@ -12,7 +12,7 @@ from cacheflow.parallel_utils.tensor_parallel import gather_from_tensor_model_pa
 class Sampler(nn.Module):
 
     def __init__(self) -> None:
-        super(Sampler, self).__init__()
+        super().__init__()
 
     def forward(
         self,

@@ -8,12 +8,10 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from torch import nn
-import torch.nn.functional as F
 from transformers import LlamaConfig
-from transformers import PreTrainedModel
 
 from cacheflow.models import InputMetadata
-from cacheflow.models.attention import OPTCacheFlowAttention
+from cacheflow.models.attention import LlamaCacheFlowAttention
 from cacheflow.models.sample import Sampler
 from cacheflow.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
@@ -41,48 +39,8 @@ class LlamaRMSNorm(nn.Module):
         return self.weight * hidden_states
 
 
-class LlamaRotaryEmbedding(torch.nn.Module):
-
-    def __init__(self, dim, max_position_embeddings=2048, base=10000):
-        super().__init__()
-        self.max_position_embeddings = max_position_embeddings
-
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2) / dim))
-        self.register_buffer("inv_freq", inv_freq)
-
-        # Create cos and sin embeddings.
-        t = torch.arange(max_position_embeddings).float()
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq.float())
-        emb = torch.cat((freqs, freqs), dim=-1)
-        cos = emb.cos().to(dtype=self.inv_freq.dtype)
-        sin = emb.sin().to(dtype=self.inv_freq.dtype)
-        self.register_buffer("cos_cached", cos, persistent=False)
-        self.register_buffer("sin_cached", sin, persistent=False)
-
-    def forward(
-        self,
-        positions: torch.LongTensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        cos = F.embedding(positions, self.cos_cached)
-        sin = F.embedding(positions, self.sin_cached)
-        return cos, sin
-
-
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin):
-    # TODO: Optimize.
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
 class LlamaMLP(nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
@@ -156,9 +114,7 @@ class LlamaAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.rotary_emb = LlamaRotaryEmbedding(self.head_dim)
-        # FIXME(woosuk): Rename this.
-        self.attn = OPTCacheFlowAttention(scale=self.scaling)
+        self.attn = LlamaCacheFlowAttention(self.scaling, self.head_dim)
 
     def forward(
         self,
@@ -171,19 +127,9 @@ class LlamaAttention(nn.Module):
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
-
-        # Apply rotrary embedding.
-        # TODO: Optimize.
-        q = q.view(-1, self.num_heads, self.head_dim).transpose(0, 1)
-        k = k.view(-1, self.num_heads, self.head_dim).transpose(0, 1)
-        cos, sin = self.rotary_emb(positions)
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        q = q.transpose(0, 1).contiguous().view(-1, self.num_heads * self.head_dim)
-        k = k.transpose(0, 1).contiguous().view(-1, self.num_heads * self.head_dim)
-
-        key_cache, value_cache = kv_cache
+        k_cache, v_cache = kv_cache
         attn_output = self.attn(
-            q, k, v, key_cache, value_cache, input_metadata, cache_event)
+            positions, q, k, v, k_cache, v_cache, input_metadata, cache_event)
         output, _ = self.o_proj(attn_output)
         return output
 

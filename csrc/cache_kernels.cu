@@ -122,13 +122,13 @@ void reshape_and_cache(
   torch::Tensor& value_cache,
   torch::Tensor& slot_mapping) {
   int num_tokens = key.size(0);
-  int head_num = key.size(1);
+  int num_heads = key.size(1);
   int head_size = key.size(2);
   int block_size = key_cache.size(3);
   int x = key_cache.size(4);
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(head_num * head_size, 512));
+  dim3 block(std::min(num_heads * head_size, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(
     key.scalar_type(),
@@ -140,7 +140,7 @@ void reshape_and_cache(
         key_cache.data_ptr<scalar_t>(),
         value_cache.data_ptr<scalar_t>(),
         slot_mapping.data_ptr<int>(),
-        head_num,
+        num_heads,
         head_size,
         block_size,
         x);
