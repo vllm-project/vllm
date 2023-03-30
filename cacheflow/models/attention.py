@@ -90,7 +90,7 @@ class OPTCacheFlowAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:                          # [num_tokens, num_heads * head_size]
         # Pre-allocate the output tensor.
-        output = torch.zeros_like(query)
+        output = torch.empty_like(query)
 
         # Prune out paddings if any.
         query = query[:input_metadata.num_valid_tokens]

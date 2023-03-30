@@ -282,8 +282,7 @@ class OPTForCausalLM(nn.Module):
                 loaded_weight = np.stack([q_bias, k_bias, v_bias]).transpose(1, 0)
                 loaded_weight = torch.from_numpy(loaded_weight.reshape(-1))
             else:
-                loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path,
-                                                                    name)))
+                loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path, name)))
 
             for p in (self._column_parallel_weights
                       + self._column_parallel_biases):
