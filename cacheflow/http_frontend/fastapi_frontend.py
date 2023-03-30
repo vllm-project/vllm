@@ -84,8 +84,9 @@ class FastAPIFrontend:
             seq = Sequence(seq_id, token_ids, block_size=self.block_size)
             seqs.append(seq)
 
+        arrival_time = time.time()
         group_id = next(self.seq_group_counter)
-        seq_group = SequenceGroup(group_id, seqs)
+        seq_group = SequenceGroup(group_id, seqs, arrival_time)
         group_event = asyncio.Event()
         self.sequence_group_events[group_id] = group_event
         await self.server.add_sequence_groups.remote([(seq_group, sampling_params)])

@@ -1,3 +1,4 @@
+import time
 from typing import List, Optional, Set, Tuple
 
 from transformers import AutoTokenizer
@@ -39,6 +40,7 @@ class SimpleFrontend:
         token_ids: List[int],
         sampling_params: SamplingParams,
     ) -> None:
+        arrival_time = time.time()
         seqs: List[Sequence] = []
         for _ in range(sampling_params.n):
             seq_id = next(self.seq_counter)
@@ -46,7 +48,7 @@ class SimpleFrontend:
             seqs.append(seq)
 
         group_id = next(self.seq_group_counter)
-        seq_group = SequenceGroup(group_id, seqs)
+        seq_group = SequenceGroup(group_id, seqs, arrival_time)
         self.inputs.append((seq_group, sampling_params))
 
     def get_inputs(self) -> List[Tuple[SequenceGroup, SamplingParams]]:
