@@ -178,8 +178,8 @@ class LlamaAttention(nn.Module):
         k = k.view(-1, self.num_heads, self.head_dim).transpose(0, 1)
         cos, sin = self.rotary_emb(positions)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        q = q.transpose(0, 1).contiguous().view(-1, self.hidden_size)
-        k = k.transpose(0, 1).contiguous().view(-1, self.hidden_size)
+        q = q.transpose(0, 1).contiguous().view(-1, self.num_heads * self.head_dim)
+        k = k.transpose(0, 1).contiguous().view(-1, self.num_heads * self.head_dim)
 
         key_cache, value_cache = kv_cache
         attn_output = self.attn(
