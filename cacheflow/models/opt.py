@@ -53,16 +53,9 @@ class OPTAttention(nn.Module):
         self.head_dim = embed_dim // total_num_heads
         self.scaling = self.head_dim**-0.5
 
-        # TODO(woosuk): Fuse the three linear layers into one QKV linear layer.
-        self.k_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
-                                           gather_output=False,
-                                           perform_initialization=False)
-        self.v_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
-                                           gather_output=False,
-                                           perform_initialization=False)
-        self.q_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
-                                           gather_output=False,
-                                           perform_initialization=False)
+        self.qkv_proj = ColumnParallelLinear(embed_dim, 3 * embed_dim, bias=bias,
+                                             gather_output=False,
+                                             perform_initialization=False)
         self.out_proj = RowParallelLinear(embed_dim, embed_dim, bias=bias,
                                           input_is_parallel=True,
                                           perform_initialization=False)
@@ -76,15 +69,17 @@ class OPTAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
+        qkv = qkv.reshape(qkv.shape[:-1] + (-1, 3))
+        q, k, v = torch.split(qkv, 1, dim=-1)
+        q = q.squeeze(dim=-1).contiguous()
+        k = k.squeeze(dim=-1).contiguous()
+        v = v.squeeze(dim=-1).contiguous()
         key_cache, value_cache = kv_cache
         attn_output = self.attn(
             q, k, v, key_cache, value_cache, input_metadata, cache_event)
         output, _ = self.out_proj(attn_output)
         return output
-
 
 class OPTDecoderLayer(nn.Module):
 
@@ -263,11 +258,9 @@ class OPTForCausalLM(nn.Module):
             self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["embed_tokens.weight",
-                                "q_proj.weight", "k_proj.weight",
-                                "v_proj.weight", "fc1.weight"]
-    _column_parallel_biases = ["q_proj.bias", "k_proj.bias",
-                                "v_proj.bias", "fc1.bias"]
+    _column_parallel_weights = ["embed_tokens.weight", "qkv_proj.weight",
+                                "fc1.weight"]
+    _column_parallel_biases = ["qkv_proj.bias", "fc1.bias"]
     _row_parallel_weights = ["out_proj.weight", "fc2.weight"]
 
     def load_weights(self, weights_path: str):
@@ -276,8 +269,22 @@ class OPTForCausalLM(nn.Module):
         for name, param in state_dict.items():
             if "lm_head_weight" in name:
                 continue
-            loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path,
-                                                                  name)))
+            if "qkv_proj.weight" in name:
+                q_weight = np.load(os.path.join(weights_path, name.replace("qkv_proj", "q_proj")))
+                k_weight = np.load(os.path.join(weights_path, name.replace("qkv_proj", "k_proj")))
+                v_weight = np.load(os.path.join(weights_path, name.replace("qkv_proj", "v_proj")))
+                loaded_weight = np.stack([q_weight, k_weight, v_weight]).transpose(1, 0, 2)
+                loaded_weight = torch.from_numpy(loaded_weight.reshape(-1, loaded_weight.shape[-1]))
+            elif "qkv_proj.bias" in name:
+                q_bias = np.load(os.path.join(weights_path, name.replace("qkv_proj", "q_proj")))
+                k_bias = np.load(os.path.join(weights_path, name.replace("qkv_proj", "k_proj")))
+                v_bias = np.load(os.path.join(weights_path, name.replace("qkv_proj", "v_proj")))
+                loaded_weight = np.stack([q_bias, k_bias, v_bias]).transpose(1, 0)
+                loaded_weight = torch.from_numpy(loaded_weight.reshape(-1))
+            else:
+                loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path,
+                                                                    name)))
+
             for p in (self._column_parallel_weights
                       + self._column_parallel_biases):
                 if p in name:
