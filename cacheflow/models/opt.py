@@ -51,7 +51,7 @@ class OPTAttention(nn.Module):
         assert num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
         self.head_dim = embed_dim // total_num_heads
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim ** -0.5
 
         # TODO(woosuk): Fuse the three linear layers into one QKV linear layer.
         self.k_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=bias,
@@ -66,7 +66,6 @@ class OPTAttention(nn.Module):
         self.out_proj = RowParallelLinear(embed_dim, embed_dim, bias=bias,
                                           input_is_parallel=True,
                                           perform_initialization=False)
-
         self.attn = OPTCacheFlowAttention(scale=self.scaling)
 
     def forward(
