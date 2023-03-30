@@ -1,5 +1,6 @@
+import enum
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from cacheflow.master.block_manager import BlockSpaceManager
 from cacheflow.master.policy import PolicyFactory
@@ -9,6 +10,19 @@ from cacheflow.sequence import SequenceGroup
 from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.sequence import SequenceOutputs
 from cacheflow.sequence import SequenceStatus
+
+
+class PreemptionMode(enum.Enum):
+    """Preemption modes.
+
+    1. Swapping: Swap out the blocks of the preempted sequences to CPU memory
+    and swap them back in when the sequences are resumed.
+    2. Recomputation: Discard the blocks of the preempted sequences and
+    recompute them when the sequences are resumed, treating the sequences as
+    new prompts.
+    """
+    SWAP = enum.auto()
+    RECOMPUTE = enum.auto()
 
 
 class Scheduler:
@@ -56,7 +70,9 @@ class Scheduler:
             self.waiting.append(seq_group)
             self.sampling_params[seq_group.group_id] = sampling_params
 
-    def step(self) -> List[SequenceGroup]:
+    def _schedule(
+        self,
+    ) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, List[int]], List[int]]:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
@@ -145,6 +161,21 @@ class Scheduler:
                 self.running.append(seq_group)
                 num_batched_tokens += num_prompt_tokens
                 prompt_group_ids.append(seq_group.group_id)
+
+        return (blocks_to_swap_in,
+                blocks_to_swap_out,
+                blocks_to_copy,
+                prompt_group_ids)
+
+    def step(self) -> List[SequenceGroup]:
+        # Schedule sequence groups.
+        # This function call changes the internal states of the scheduler
+        # such as self.running, self.swapped, and self.waiting.
+        scheduler_output = self._schedule()
+        blocks_to_swap_in = scheduler_output[0]
+        blocks_to_swap_out = scheduler_output[1]
+        blocks_to_copy = scheduler_output[2]
+        prompt_group_ids = scheduler_output[3]
 
         # Create input data structures.
         input_seq_groups: List[SequenceGroupInputs] = []
@@ -273,37 +304,53 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: Dict[int, int],
+        preemption_mode: Optional[PreemptionMode] = None,
     ) -> None:
-        # NOTE(woosuk): There are two preemption mechanisms.
-        # 1. Swapping: Swap out the blocks of the preempted sequences to CPU
-        # memory and swap them back in when the sequences are resumed.
-        # 2. Recomputation: Discard the blocks of the preempted sequences and
-        # recompute them when the sequences are resumed.
-
-        # How to choose between the two?
-        # Recomputation is more efficient than swapping if the sequence group
-        # consists of a single sequence. When the sequence group has multiple
-        # sequences, we only support swapping.
-        # TODO(woosuk): Support recomputation for sequence groups with multiple
-        # sequences.
-
+        # If preemption mode is not specified, we determine the mode as follows:
+        # We use recomputation by default since it incurs lower overhead than
+        # swapping. However, when the sequence group has multiple sequences
+        # (e.g., beam search), recomputation is not supported. In such a case,
+        # we use swapping instead.
         # FIXME(woosuk): This makes our scheduling policy a bit bizarre.
-        # Because swapped sequences are prioritized over waiting sequences,
+        # As swapped sequences are prioritized over waiting sequences,
         # sequence groups with multiple sequences are implicitly prioritized
         # over sequence groups with a single sequence.
-        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-        if len(seqs) == 1:
-            # Recomputation.
-            for seq in seqs:
-                seq.status = SequenceStatus.WAITING
-                self.block_manager.free(seq)
-            self.waiting.append(seq_group)
+        # TODO(woosuk): Support recomputation for sequence groups with multiple
+        # sequences. This may require a more sophisticated CUDA kernel.
+        if preemption_mode is None:
+            seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+            if len(seqs) == 1:
+                preemption_mode = PreemptionMode.RECOMPUTE
+            else:
+                preemption_mode = PreemptionMode.SWAP
+        if preemption_mode == PreemptionMode.RECOMPUTE:
+            self._preempt_by_recompute(seq_group)
+        elif preemption_mode == PreemptionMode.SWAP:
+            self._preempt_by_swap(seq_group, blocks_to_swap_out)
         else:
-            # Swapping.
-            for seq in seqs:
-                seq.status = SequenceStatus.SWAPPED
-            self._swap_out(seq_group, blocks_to_swap_out)
-            self.swapped.append(seq_group)
+            assert False, 'Invalid preemption mode.'
+
+    def _preempt_by_recompute(
+        self,
+        seq_group: SequenceGroup,
+    ) -> None:
+        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        assert len(seqs) == 1
+        for seq in seqs:
+            seq.status = SequenceStatus.WAITING
+            self.block_manager.free(seq)
+        self.waiting.append(seq_group)
+
+    def _preempt_by_swap(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_out: Dict[int, int],
+    ) -> None:
+        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        for seq in seqs:
+            seq.status = SequenceStatus.SWAPPED
+        self._swap_out(seq_group, blocks_to_swap_out)
+        self.swapped.append(seq_group)
 
     def _free_seq(self, seq: Sequence) -> None:
         seq.status = SequenceStatus.FINISHED
