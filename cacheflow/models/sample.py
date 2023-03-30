@@ -12,7 +12,7 @@ from cacheflow.parallel_utils.tensor_parallel import gather_from_tensor_model_pa
 class Sampler(nn.Module):
 
     def __init__(self) -> None:
-        super(Sampler, self).__init__()
+        super().__init__()
 
     def forward(
         self,
@@ -39,7 +39,7 @@ class Sampler(nn.Module):
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities (before applying top-p).
-        logprobs = torch.log(probs)
+        logprobs = torch.log(probs, out=logits)
 
         # Apply top-p truncation.
         top_ps = _get_top_ps(input_metadata)
