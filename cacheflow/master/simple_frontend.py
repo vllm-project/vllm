@@ -61,4 +61,5 @@ class SimpleFrontend:
         for seq in seq_group.seqs:
             token_ids = seq.get_token_ids()
             output = self.tokenizer.decode(token_ids, skip_special_tokens=True)
+            output = output.strip()
             print(f'Seq {seq.seq_id}: {output!r}')

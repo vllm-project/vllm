@@ -299,7 +299,7 @@ class OPTForCausalLM(nn.Module):
             param.data.copy_(loaded_weight)
 
     @staticmethod
-    def download_weights(model_name: str, path: str):
+    def get_weights(model_name: str, path: str):
         path = os.path.join(path, f"{model_name}-np")
         path = os.path.abspath(os.path.expanduser(path))
         os.makedirs(path, exist_ok=True)
@@ -316,11 +316,8 @@ class OPTForCausalLM(nn.Module):
                                        cache_dir=os.path.join(path, "cache"))
             bin_files = glob.glob(os.path.join(folder, "*.bin"))
 
-            if "/" in model_name:
-                model_name = model_name.split("/")[1].lower()
-
             for bin_file in tqdm(bin_files, desc="Convert format"):
-                state = torch.load(bin_file)
+                state = torch.load(bin_file, map_location="cpu")
                 for name, param in tqdm(state.items(), leave=False):
                     if name.startswith("decoder."):
                         name = "model." + name
