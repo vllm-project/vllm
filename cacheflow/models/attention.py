@@ -158,7 +158,7 @@ class LlamaCacheFlowAttention(GPTCacheFlowAttention):
     ) -> None:
         super().__init__(scale)
 
-        # Create the rotary embedding.
+        # Create the cos and sin cache.
         inv_freq = 1.0 / (base ** (torch.arange(0, head_size, 2) / head_size))
         t = torch.arange(max_position).float()
         freqs = torch.einsum('i,j -> ij', t, inv_freq.float())
@@ -184,7 +184,7 @@ class LlamaCacheFlowAttention(GPTCacheFlowAttention):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:                          # [num_tokens, num_heads * head_size]
-        # Apply the rotary embedding to the query and key before passing them
+        # Apply rotary embedding to the query and key before passing them
         # to the attention op.
         out_query = torch.empty_like(query)
         out_key = torch.empty_like(key)
