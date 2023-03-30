@@ -60,11 +60,15 @@ class BlockSpaceManager:
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
+        watermark: float = 0.01,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
+        self.watermark = watermark
+        assert watermark >= 0.0
 
+        self.watermark_blocks = int(watermark * num_gpu_blocks)
         self.gpu_allocator = BlockAllocator(Device.GPU, block_size, num_gpu_blocks)
         self.cpu_allocator = BlockAllocator(Device.CPU, block_size, num_cpu_blocks)
 
@@ -76,7 +80,8 @@ class BlockSpaceManager:
         seq = seq_group.seqs[0]
         num_required_blocks = len(seq.logical_token_blocks)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
-        return num_required_blocks <= num_free_gpu_blocks
+        # Use watermark to avoid frequent cache eviction.
+        return num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same prompt.
@@ -154,7 +159,8 @@ class BlockSpaceManager:
         # NOTE: Conservatively, we assume that every sequence will allocate
         # at least one free block right after the swap-in.
         # NOTE: This should match the logic in can_append().
-        return len(blocks) + num_swapped_seqs <= num_free_blocks
+        num_required_blocks = len(blocks) + num_swapped_seqs
+        return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # CPU block -> GPU block.
