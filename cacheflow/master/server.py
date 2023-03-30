@@ -10,6 +10,7 @@ from cacheflow.worker.controller import Controller, DeviceID
 from cacheflow.sequence import SequenceGroup
 from cacheflow.sampling_params import SamplingParams
 
+
 class Server:
     def __init__(
         self,
@@ -91,7 +92,7 @@ class Server:
         return self.scheduler.step()
 
     def has_unfinished_requests(self):
-        return (self.scheduler.pending or self.scheduler.running or
+        return (self.scheduler.waiting or self.scheduler.running or
                 self.scheduler.swapped)
 
 

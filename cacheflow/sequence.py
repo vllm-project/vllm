@@ -7,7 +7,7 @@ from cacheflow.sampling_params import SamplingParams
 
 
 class SequenceStatus(enum.Enum):
-    PENDING = enum.auto()
+    WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()
     FINISHED = enum.auto()
@@ -28,7 +28,7 @@ class Sequence:
         # Initialize the logical token blocks with the given token ids.
         self.add(token_ids)
 
-        self.status = SequenceStatus.PENDING
+        self.status = SequenceStatus.WAITING
         self.output_logprobs: List[Dict[int, float]] = []
         self.cumulative_logprobs = 0.0
 
@@ -88,9 +88,11 @@ class SequenceGroup:
         self,
         group_id: int,
         seqs: List[Sequence],
+        arrival_time: float,
     ) -> None:
         self.group_id = group_id
         self.seqs = seqs
+        self.arrival_time = arrival_time
 
     def get_seqs(
         self,
