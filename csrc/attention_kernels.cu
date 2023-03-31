@@ -3,6 +3,7 @@
 
 #include "attention_utils.h"
 #include "cuda_primitives.h"
+#include "reduction_utils.h"
 
 #include <algorithm>
 
