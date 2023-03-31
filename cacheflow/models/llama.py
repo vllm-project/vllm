@@ -101,10 +101,10 @@ class LlamaMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        gate_up = gate_up.reshape(gate_up.shape[:-1] + (-1, 2))
-        gate, up = torch.split(gate_up, 1, dim=-1)
-        gate = gate.squeeze(dim=-1).contiguous()
-        up = up.squeeze(dim=-1).contiguous()
+        gate_up = gate_up.reshape(gate_up.shape[:-1] + (2, -1))
+        gate, up = torch.split(gate_up, 1, dim=-2)
+        gate = gate.squeeze(dim=-2).contiguous()
+        up = up.squeeze(dim=-2).contiguous()
         x = self.act_fn(gate) * up
         x, _ = self.down_proj(x)
         return x
@@ -153,11 +153,11 @@ class LlamaAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        qkv = qkv.reshape(qkv.shape[:-1] + (-1, 3))
-        q, k, v = torch.split(qkv, 1, dim=-1)
-        q = q.squeeze(dim=-1).contiguous()
-        k = k.squeeze(dim=-1).contiguous()
-        v = v.squeeze(dim=-1).contiguous()
+        qkv = qkv.reshape(qkv.shape[:-1] + (3, -1))
+        q, k, v = torch.split(qkv, 1, dim=-2)
+        q = q.squeeze(dim=-2).contiguous()
+        k = k.squeeze(dim=-2).contiguous()
+        v = v.squeeze(dim=-2).contiguous()
 
         # Apply rotrary embedding.
         # TODO: Optimize.
@@ -294,34 +294,42 @@ class LlamaForCausalLM(nn.Module):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, param in state_dict.items():
-            if "qkv_proj.weight" in name:
-                q_weight = np.load(os.path.join(weights_path, name.replace("qkv_proj", "q_proj")))
-                k_weight = np.load(os.path.join(weights_path, name.replace("qkv_proj", "k_proj")))
-                v_weight = np.load(os.path.join(weights_path, name.replace("qkv_proj", "v_proj")))
-                loaded_weight = np.stack([q_weight, k_weight, v_weight]).transpose(1, 0, 2)
-                loaded_weight = torch.from_numpy(loaded_weight.reshape(-1, loaded_weight.shape[-1]))
-            elif "gate_up_proj.weight" in name:
-                gate_weight = np.load(os.path.join(weights_path, name.replace("gate_up_proj", "gate_proj")))
-                up_weight = np.load(os.path.join(weights_path, name.replace("gate_up_proj", "up_proj")))
-                loaded_weight = np.stack([gate_weight, up_weight]).transpose(1, 0, 2)
-                loaded_weight = torch.from_numpy(loaded_weight.reshape(-1, loaded_weight.shape[-1]))
+            if "qkv_proj" in name or "gate_up_proj" in name:
+                if "qkv_proj" in name:
+                    original_name = "qkv_proj"
+                    weight_names = ["q_proj", "k_proj", "v_proj"]
+                    shard_size = param.shape[0] // 3
+                else:
+                    original_name = "gate_up_proj"
+                    weight_names = ["gate_proj", "up_proj"]
+                    shard_size = param.shape[0] // 2
+                weights_to_concat = []
+                for weight_name in weight_names:
+                    weight = np.load(os.path.join(
+                        weights_path, name.replace(original_name, weight_name)))
+                    weights_to_concat.append(weight[
+                        shard_size * tensor_model_parallel_rank
+                        :shard_size * (tensor_model_parallel_rank + 1)])
+                loaded_weight = torch.from_numpy(
+                    np.concatenate(weights_to_concat, axis=0))
             else:
-                loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path, name)))
-            for p in self._column_parallel_weights:
-                if p in name:
-                    shard_size = param.shape[0]
-                    loaded_weight = loaded_weight[
-                        shard_size * tensor_model_parallel_rank
-                        :shard_size * (tensor_model_parallel_rank + 1)]
-                    break
-            for p in self._row_parallel_weights:
-                if p in name:
-                    shard_size = param.shape[1]
-                    loaded_weight = loaded_weight[
-                        :,
-                        shard_size * tensor_model_parallel_rank
-                        :shard_size * (tensor_model_parallel_rank + 1)]
-                    break
+                loaded_weight = torch.from_numpy(
+                    np.load(os.path.join(weights_path, name)))
+                for p in self._column_parallel_weights:
+                    if p in name:
+                        shard_size = param.shape[0]
+                        loaded_weight = loaded_weight[
+                            shard_size * tensor_model_parallel_rank
+                            :shard_size * (tensor_model_parallel_rank + 1)]
+                        break
+                for p in self._row_parallel_weights:
+                    if p in name:
+                        shard_size = param.shape[1]
+                        loaded_weight = loaded_weight[
+                            :,
+                            shard_size * tensor_model_parallel_rank
+                            :shard_size * (tensor_model_parallel_rank + 1)]
+                        break
 
             assert param.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)

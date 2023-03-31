@@ -70,11 +70,11 @@ class OPTAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        qkv = qkv.reshape(qkv.shape[:-1] + (-1, 3))
-        q, k, v = torch.split(qkv, 1, dim=-1)
-        q = q.squeeze(dim=-1).contiguous()
-        k = k.squeeze(dim=-1).contiguous()
-        v = v.squeeze(dim=-1).contiguous()
+        qkv = qkv.reshape(qkv.shape[:-1] + (3, -1))
+        q, k, v = torch.split(qkv, 1, dim=-2)
+        q = q.squeeze(dim=-2).contiguous()
+        k = k.squeeze(dim=-2).contiguous()
+        v = v.squeeze(dim=-2).contiguous()
         key_cache, value_cache = kv_cache
         attn_output = self.attn(
             q, k, v, key_cache, value_cache, input_metadata, cache_event)
@@ -258,9 +258,7 @@ class OPTForCausalLM(nn.Module):
             self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["embed_tokens.weight", "qkv_proj.weight",
-                                "fc1.weight"]
-    _column_parallel_biases = ["qkv_proj.bias", "fc1.bias"]
+    _column_parallel_weights = ["embed_tokens.weight", "fc1.weight", "fc1.bias"]
     _row_parallel_weights = ["out_proj.weight", "fc2.weight"]
 
     def load_weights(self, weights_path: str):
@@ -269,37 +267,35 @@ class OPTForCausalLM(nn.Module):
         for name, param in state_dict.items():
             if "lm_head_weight" in name:
                 continue
-            if "qkv_proj.weight" in name:
-                q_weight = np.load(os.path.join(weights_path, name.replace("qkv_proj", "q_proj")))
-                k_weight = np.load(os.path.join(weights_path, name.replace("qkv_proj", "k_proj")))
-                v_weight = np.load(os.path.join(weights_path, name.replace("qkv_proj", "v_proj")))
-                loaded_weight = np.stack([q_weight, k_weight, v_weight]).transpose(1, 0, 2)
-                loaded_weight = torch.from_numpy(loaded_weight.reshape(-1, loaded_weight.shape[-1]))
-            elif "qkv_proj.bias" in name:
-                q_bias = np.load(os.path.join(weights_path, name.replace("qkv_proj", "q_proj")))
-                k_bias = np.load(os.path.join(weights_path, name.replace("qkv_proj", "k_proj")))
-                v_bias = np.load(os.path.join(weights_path, name.replace("qkv_proj", "v_proj")))
-                loaded_weight = np.stack([q_bias, k_bias, v_bias]).transpose(1, 0)
-                loaded_weight = torch.from_numpy(loaded_weight.reshape(-1))
+            if "qkv_proj" in name:
+                shard_size = param.shape[0] // 3
+                weights_to_concat = []
+                for weight_name in ["q_proj", "k_proj", "v_proj"]:
+                    weight = np.load(os.path.join(
+                        weights_path, name.replace("qkv_proj", weight_name)))
+                    weights_to_concat.append(weight[
+                        shard_size * tensor_model_parallel_rank
+                        :shard_size * (tensor_model_parallel_rank + 1)])
+                loaded_weight = torch.from_numpy(
+                    np.concatenate(weights_to_concat, axis=0))
             else:
-                loaded_weight = torch.from_numpy(np.load(os.path.join(weights_path, name)))
-
-            for p in (self._column_parallel_weights
-                      + self._column_parallel_biases):
-                if p in name:
-                    shard_size = param.shape[0]
-                    loaded_weight = loaded_weight[
-                        shard_size * tensor_model_parallel_rank
-                        :shard_size * (tensor_model_parallel_rank + 1)]
-                    break
-            for p in self._row_parallel_weights:
-                if p in name:
-                    shard_size = param.shape[1]
-                    loaded_weight = loaded_weight[
-                        :,
-                        shard_size * tensor_model_parallel_rank
-                        :shard_size * (tensor_model_parallel_rank + 1)]
-                    break
+                loaded_weight = torch.from_numpy(
+                    np.load(os.path.join(weights_path, name)))
+                for p in self._column_parallel_weights:
+                    if p in name:
+                        shard_size = param.shape[0]
+                        loaded_weight = loaded_weight[
+                            shard_size * tensor_model_parallel_rank
+                            :shard_size * (tensor_model_parallel_rank + 1)]
+                        break
+                for p in self._row_parallel_weights:
+                    if p in name:
+                        shard_size = param.shape[1]
+                        loaded_weight = loaded_weight[
+                            :,
+                            shard_size * tensor_model_parallel_rank
+                            :shard_size * (tensor_model_parallel_rank + 1)]
+                        break
 
             assert param.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
