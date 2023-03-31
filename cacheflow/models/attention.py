@@ -6,13 +6,14 @@ import torch.nn as nn
 
 from cacheflow import attention_ops
 from cacheflow import cache_ops
+from cacheflow import pos_encoding_ops
 from cacheflow.models import InputMetadata
 
 
-class OPTCacheFlowAttention(nn.Module):
+class GPTCacheFlowAttention(nn.Module):
 
     def __init__(self, scale: float) -> None:
-        super(OPTCacheFlowAttention, self).__init__()
+        super().__init__()
         self.scale = float(scale)
 
         self.flash_attn = FlashAttention(softmax_scale=self.scale)
@@ -136,3 +137,71 @@ class OPTCacheFlowAttention(nn.Module):
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.
         return output.view(-1, num_heads * head_size)
+
+
+class OPTCacheFlowAttention(GPTCacheFlowAttention):
+    """OPT uses the same attention mechanism as GPT."""
+
+    def __init__(self, scale: float) -> None:
+        super().__init__(scale)
+
+
+class LlamaCacheFlowAttention(GPTCacheFlowAttention):
+    """Llama uses GPT-NeoX style rotary embedding."""
+
+    def __init__(
+        self,
+        scale: float,
+        head_size: int,
+        max_position: int = 8192,
+        base: int = 10000,
+    ) -> None:
+        super().__init__(scale)
+
+        # Create the cos and sin cache.
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_size, 2) / head_size))
+        t = torch.arange(max_position).float()
+        freqs = torch.einsum('i,j -> ij', t, inv_freq.float())
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+
+        # FIXME(woosuk): This assumes that we configure the default dtype when
+        # initializing the model. Make it more robust.
+        torch_dtype = torch.get_default_dtype()
+        cache = cache.to(torch_dtype)
+        # Embedding size: [max_position, head_size]
+        self.register_buffer('cos_sin_cache', cache, persistent=False)
+
+    def forward(
+        self,
+        positions: torch.LongTensor,            # [num_tokens]
+        query: torch.Tensor,                    # [num_tokens, num_heads * head_size]
+        key: torch.Tensor,                      # [num_tokens, num_heads * head_size]
+        value: torch.Tensor,                    # [num_tokens, num_heads * head_size]
+        key_cache: torch.Tensor,                # [num_blocks, num_heads, head_size/x, block_size, x]
+        value_cache: torch.Tensor,              # [num_blocks, num_heads, head_size, block_size]
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
+    ) -> torch.Tensor:                          # [num_tokens, num_heads * head_size]
+        # Apply rotary embedding to the query and key before passing them
+        # to the attention op.
+        out_query = torch.empty_like(query)
+        out_key = torch.empty_like(key)
+        pos_encoding_ops.rotary_embedding_neox(
+            out_query,
+            out_key,
+            positions,
+            query,
+            key,
+            self.cos_sin_cache,
+        )
+        return super().forward(
+            out_query,
+            out_key,
+            value,
+            key_cache,
+            value_cache,
+            input_metadata,
+            cache_event,
+        )
