@@ -31,6 +31,14 @@ positional_encoding_extension = cpp_extension.CUDAExtension(
 )
 ext_modules.append(positional_encoding_extension)
 
+# Layer normalization kernels.
+layernorm_extension = cpp_extension.CUDAExtension(
+    name='cacheflow.layernorm_ops',
+    sources=['csrc/layernorm.cpp', 'csrc/layernorm_kernels.cu'],
+    extra_compile_args={'cxx': CXX_FLAGS, 'nvcc': NVCC_FLAGS},
+)
+ext_modules.append(layernorm_extension)
+
 setuptools.setup(
     name='cacheflow',
     ext_modules=ext_modules,
