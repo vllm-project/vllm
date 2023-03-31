@@ -6,8 +6,6 @@ from .layers import (
     set_defaults_if_not_set_tensor_model_parallel_attributes,
     copy_tensor_model_parallel_attributes,
     param_is_not_tensor_parallel_duplicate,
-    linear_with_grad_accumulation_and_async_allreduce
-
 )
 
 from .mappings import (
@@ -39,7 +37,6 @@ __all__ = [
     "set_defaults_if_not_set_tensor_model_parallel_attributes",
     "copy_tensor_model_parallel_attributes",
     "param_is_not_tensor_parallel_duplicate",
-    "linear_with_grad_accumulation_and_async_allreduce",
     # mappings.py
     "copy_to_tensor_model_parallel_region",
     "gather_from_tensor_model_parallel_region",
