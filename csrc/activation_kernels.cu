@@ -44,24 +44,3 @@ void silu_and_mul(
         d);
     });
 }
-
-namespace cacheflow {
-
-// template<typename T>
-// __global__ void in_place_add_bias_gelu(
-//     T* out,
-//     const T* __restrict__ bias,
-//     int m, int n)
-// {
-//     for (int id = blockIdx.x * blockDim.x + threadIdx.x; id < m * n; id += blockDim.x * gridDim.x) {
-//         T val = out[id];
-//         if (bias != nullptr) {
-//             T reg_bias = __ldg(&bias[id % n]);
-//             val = val + reg_bias;
-//         }
-//         out[id] = (T)(gelu(val));
-//     }
-// }
-
-
-} // namespace cacheflow
