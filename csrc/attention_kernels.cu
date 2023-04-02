@@ -431,6 +431,10 @@ __device__ void multi_query_cached_kv_attention_kernel_1xN_(
     accs[i] = 0.f;
   }
 
+  // TODO(suquark): we may reuse the k_vecs shared memory here.
+  // TODO(suquark): We may use matrix multiplication here.
+  __shared__ V_vec v_vecs[NUM_ROWS_PER_THREAD];
+
   for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
     const int physical_block_number = block_table[block_idx];
     const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
@@ -439,10 +443,6 @@ __device__ void multi_query_cached_kv_attention_kernel_1xN_(
 
     const scalar_t* v_ptr = v_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
                                     + head_idx * HEAD_SIZE * BLOCK_SIZE;
-
-    // TODO(suquark): we may reuse the k_vecs shared memory here.
-    // TODO(suquark): We may use matrix multiplication here.
-    __shared__ V_vec v_vecs[NUM_ROWS_PER_THREAD];
 
     // TODO(suquark): currently, gridDim.x = num_heads > NUM_VECS_PER_THREAD. but it is not always true.
     if (thread_idx < NUM_ROWS_PER_THREAD) {
@@ -458,7 +458,7 @@ __device__ void multi_query_cached_kv_attention_kernel_1xN_(
     for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
       if (row_idx < HEAD_SIZE) {
-        accs[i] += dot(logits_vec, cast_to_float(k_vecs[i]));
+        accs[i] += dot(logits_vec, cast_to_float(v_vecs[i]));
       }
     }
   }
