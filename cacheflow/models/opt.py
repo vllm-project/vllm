@@ -76,6 +76,7 @@ class OPTAttention(nn.Module):
         output, _ = self.out_proj(attn_output)
         return output
 
+
 class OPTDecoderLayer(nn.Module):
 
     def __init__(self, config: OPTConfig):
