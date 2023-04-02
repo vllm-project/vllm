@@ -25,9 +25,6 @@ class GPTCacheFlowAttention(nn.Module):
         cumulative_prompt_lens: torch.Tensor,   # [num_prompts + 1]
         max_prompt_len: int,
     ) -> None:
-        # NOTE: Each of the query, key, and value tensors is not contiguous
-        # in memory. This is because the tensors are sliced from a qkv tensor
-        # of shape [num_prompt_tokens, 3 * num_heads * head_size].
         if query.dtype == torch.float:
             raise ValueError('The float data type is not supported by '
                              'FlashAttention. Use the half data type instead.')
@@ -83,27 +80,26 @@ class GPTCacheFlowAttention(nn.Module):
 
     def forward(
         self,
-        qkv: torch.Tensor,                      # [num_tokens, 3 * num_heads * head_size]
+        query: torch.Tensor,                    # [num_tokens, num_heads * head_size]
+        key: torch.Tensor,                      # [num_tokens, num_heads * head_size]
+        value: torch.Tensor,                    # [num_tokens, num_heads * head_size]
         key_cache: torch.Tensor,                # [num_blocks, num_heads, head_size/x, block_size, x]
         value_cache: torch.Tensor,              # [num_blocks, num_heads, head_size, block_size]
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:                          # [num_tokens, num_heads * head_size]
-        num_tokens = qkv.shape[0]
+        # NOTE: The query, key, and value tensors must be sliced from a qkv
+        # tensor of shape [num_tokens, 3 * num_heads * head_size].
+
+        # Reshape the query, key, and value tensors.
         num_heads = value_cache.shape[1]
         head_size = value_cache.shape[2]
+        query = query.view(-1, num_heads, head_size)
+        key = key.view(-1, num_heads, head_size)
+        value = value.view(-1, num_heads, head_size)
 
         # Pre-allocate the output tensor.
-        output = torch.empty(
-            num_tokens,
-            num_heads,
-            head_size,
-            dtype=qkv.dtype,
-            device=qkv.device,
-        )
-        # Reshape and split the qkv tensor.
-        qkv = qkv.view(-1, 3, num_heads, head_size)
-        query, key, value = qkv.unbind(dim=1)
+        output = torch.empty_like(query)
 
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
@@ -194,19 +190,15 @@ class LlamaCacheFlowAttention(GPTCacheFlowAttention):
     ) -> torch.Tensor:                          # [num_tokens, num_heads * head_size]
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
-        out_query = torch.empty_like(query)
-        out_key = torch.empty_like(key)
         pos_encoding_ops.rotary_embedding_neox(
-            out_query,
-            out_key,
             positions,
             query,
             key,
             self.cos_sin_cache,
         )
         return super().forward(
-            out_query,
-            out_key,
+            query,
+            key,
             value,
             key_cache,
             value_cache,
