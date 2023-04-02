@@ -1,8 +1,6 @@
 #include <torch/extension.h>
 
 void rotary_embedding_neox(
-  torch::Tensor& out_query,
-  torch::Tensor& out_key,
   torch::Tensor& positions,
   torch::Tensor& query,
   torch::Tensor& key,
