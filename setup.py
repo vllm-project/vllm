@@ -39,6 +39,13 @@ layernorm_extension = cpp_extension.CUDAExtension(
 )
 ext_modules.append(layernorm_extension)
 
+activation_extension = cpp_extension.CUDAExtension(
+    name='cacheflow.activation_ops',
+    sources=['csrc/activation.cpp', 'csrc/activation_kernels.cu'],
+    extra_compile_args={'cxx': CXX_FLAGS, 'nvcc': NVCC_FLAGS},
+)
+ext_modules.append(activation_extension)
+
 setuptools.setup(
     name='cacheflow',
     ext_modules=ext_modules,
