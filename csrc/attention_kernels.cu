@@ -529,44 +529,36 @@ template<
   int HEAD_SIZE,
   int BLOCK_SIZE,
   int NUM_THREADS>
-__global__ void multi_query_cached_kv_attention_kernel_1xN_(
-  const int* cu_query_lens,
-  const int num_queries,                  // len(cu_query_lens) - 1
+__global__ void multi_query_cached_kv_attention_kernel(
+  const int* seq_prompt_mapping,          // [num_seqs] mapping from seq_idx to prompt_idx
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
   const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
   const float scale,
-  const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
-  const int* __restrict__ context_lens,   // [num_seqs]
+  const int* __restrict__ block_tables,   // [num_prompts, max_num_blocks_per_seq]
+  const int* __restrict__ context_lens,   // [num_prompts]
   const int max_num_blocks_per_seq) {
-    for (int i = 0; i < num_queries; i++) {
-      const int start_idx = cu_query_lens[i];
-      const int end_idx = cu_query_lens[i + 1];
-      const int query_len = end_idx - start_idx;
-      const int context_len = context_lens[i];
-      const int* block_table = block_tables + i * max_num_blocks_per_seq;
-
-      const scalar_t* query_ptr = q + start_idx * num_heads * HEAD_SIZE;
-      scalar_t* out_ptr = out + start_idx * num_heads * HEAD_SIZE;
-      // NOTE: we do not need to adjust the kv cache, since the block table is
-      // already adjusted.
-      multi_query_cached_kv_attention_kernel_1xN_<
+    const int seq_idx = blockIdx.y;
+    const int prompt_idx = seq_prompt_mapping[seq_idx];
+    const int* block_table = block_tables + prompt_idx * max_num_blocks_per_seq;
+    const int context_len = context_lens[prompt_idx];
+    multi_query_cached_kv_attention_kernel_1xN_<
         scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>(
-          out_ptr,
-          query_ptr,
+          out,
+          q,
           k_cache,
           v_cache,
           scale,
           block_table,
           context_len,
           max_num_blocks_per_seq);
-    }
+}
 
 } // namespace cacheflow
 
 #define LAUNCH_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
-  cacheflow::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>   \
+  cacheflow::multi_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>    \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     out_ptr,                                                                                  \
     query_ptr,                                                                                \
@@ -693,6 +685,171 @@ void single_query_cached_kv_attention(
         max_context_len);
     } else if (block_size == 16) {
       single_query_cached_kv_attention_launcher<float, 16>(
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else {
+      assert(false);
+    }
+  } else {
+    assert(false);
+  }
+}
+
+
+#define LAUNCH_MULTI_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                  \
+  cacheflow::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>   \
+  <<<grid, block, shared_mem_size, stream>>>(                                                 \
+    seq_prompt_mapping_ptr,                                                                   \
+    out_ptr,                                                                                  \
+    query_ptr,                                                                                \
+    key_cache_ptr,                                                                            \
+    value_cache_ptr,                                                                          \
+    scale,                                                                                    \
+    block_tables_ptr,                                                                         \
+    context_lens_ptr,                                                                         \
+    max_num_blocks_per_seq);
+
+
+// TODO(woosuk): Tune NUM_THREADS.
+template<
+  typename T,
+  int BLOCK_SIZE,
+  int NUM_THREADS = 128>
+void multi_query_cached_kv_attention_launcher(
+  const int* seq_prompt_mapping_ptr,
+  torch::Tensor& out,
+  torch::Tensor& query,
+  torch::Tensor& key_cache,
+  torch::Tensor& value_cache,
+  float scale,
+  torch::Tensor& block_tables,
+  torch::Tensor& context_lens,
+  int max_context_len) {
+  int num_seqs = query.size(0);
+  int num_heads = query.size(1);
+  int head_size = query.size(2);
+  int max_num_blocks_per_seq = block_tables.size(1);
+
+  T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
+  T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
+  T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
+  T* value_cache_ptr = reinterpret_cast<T*>(value_cache.data_ptr());
+  int* block_tables_ptr = block_tables.data_ptr<int>();
+  int* context_lens_ptr = context_lens.data_ptr<int>();
+
+  constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
+  int padded_max_context_len = ((max_context_len + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+  int logits_size = padded_max_context_len * sizeof(float);
+  int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
+  int shared_mem_size = std::max(logits_size, outputs_size);
+
+  dim3 grid(num_heads, num_seqs);
+  dim3 block(NUM_THREADS);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  switch (head_size) {
+    case 32:
+      LAUNCH_MULTI_ATTENTION_KERNEL(T, 32, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 64:
+      LAUNCH_MULTI_ATTENTION_KERNEL(T, 64, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 80:
+      LAUNCH_MULTI_ATTENTION_KERNEL(T, 80, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 96:
+      LAUNCH_MULTI_ATTENTION_KERNEL(T, 96, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 128:
+      LAUNCH_MULTI_ATTENTION_KERNEL(T, 128, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 160:
+      LAUNCH_MULTI_ATTENTION_KERNEL(T, 160, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 192:
+      LAUNCH_MULTI_ATTENTION_KERNEL(T, 192, BLOCK_SIZE, NUM_THREADS);
+      break;
+    case 256:
+      LAUNCH_MULTI_ATTENTION_KERNEL(T, 256, BLOCK_SIZE, NUM_THREADS);
+      break;
+    default:
+      assert(false);
+      break;
+  }
+}
+
+void multi_query_cached_kv_attention(
+  torch::Tensor& cu_query_lens,
+  torch::Tensor& out,
+  torch::Tensor& query,
+  torch::Tensor& key_cache,
+  torch::Tensor& value_cache,
+  float scale,
+  torch::Tensor& block_tables,
+  torch::Tensor& context_lens,
+  int block_size,
+  int max_context_len) {
+  
+  int num_queries = cu_query_lens.size(0) - 1;
+  int num_seqs = query.size(0);
+
+  int seq_prompt_mapping[num_queries];
+  for (int i = 0, query_cursor = 0; i < num_seqs; ++i) {
+    if (i >= cu_query_lens[query_cursor + 1]) {
+      ++query_cursor; 
+    }
+    seq_prompt_mapping[query_cursor] = i;
+  }
+
+  // TODO(woosuk): Support BF16.
+  if (query.element_size() == 2) {
+    // Half.
+    if (block_size == 8) {
+      multi_query_cached_kv_attention_launcher<uint16_t, 8>(
+        seq_prompt_mapping,
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else if (block_size == 16) {
+      multi_query_cached_kv_attention_launcher<uint16_t, 16>(
+        seq_prompt_mapping,
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else {
+      assert(false);
+    }
+  } else if (query.element_size() == 4) {
+    // Float.
+    if (block_size == 8) {
+      multi_query_cached_kv_attention_launcher<float, 8>(
+        seq_prompt_mapping,
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else if (block_size == 16) {
+      multi_query_cached_kv_attention_launcher<float, 16>(
+        seq_prompt_mapping,
         out,
         query,
         key_cache,
