@@ -60,7 +60,7 @@ void rotary_embedding_neox(
   TORCH_CHECK(stride == key.stride(0));
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * head_size, 512));
+  dim3 block(std::min(num_heads * head_size / 2, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(
     query.scalar_type(),
