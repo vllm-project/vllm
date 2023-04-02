@@ -265,8 +265,8 @@ __device__ void multi_query_cached_kv_attention_kernel_1xN_(
   const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
   const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
   const float scale,
-  const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
-  const int* __restrict__ context_lens,   // [num_seqs]
+  const int __restrict__ block_table,   // [num_seqs, max_num_blocks_per_seq]
+  const int __restrict__ context_len,   // [num_seqs]
   const int max_num_blocks_per_seq) {
   constexpr int THREAD_GROUP_SIZE = WARP_SIZE / BLOCK_SIZE;
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
@@ -318,35 +318,51 @@ __device__ void multi_query_cached_kv_attention_kernel_1xN_(
   constexpr int x = 16 / sizeof(scalar_t);
   float qk_max = -FLT_MAX;
 
-  const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
-  const int context_len = context_lens[seq_idx];
+  // const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
+  // const int context_len = context_lens[seq_idx];
   const int num_blocks = (context_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+  // constexpr int MAX_CONTEXT_LEN = 4096;  // FIXME(suquark): make this configurable
+  // __shared__ int physical_block_numbers[MAX_CONTEXT_LEN / BLOCK_SIZE];
+
+  // int n_blocks_to_load = (num_blocks - warp_idx - 1) / NUM_WARPS + 1;
+  // if (thread_idx < n_blocks_to_load) {
+  //   physical_block_numbers[thread_idx] = block_table[warp_idx + thread_idx * NUM_WARPS];
+  // }
+  // for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
+  //   // TODO(suquark): we start physical_block_number to shared memory.
+  //   const int physical_block_number = block_table[block_idx];
+  // }
+
+  // TODO(suquark): we may increase the share memory size to reduce synchronization.
+  __shared__ K_vec k_vecs[NUM_VECS_PER_THREAD];
 
   // Iterate over the key blocks.
   // Each warp fetches a block of keys for each iteration.
   // Each thread group in a warp fetches a key from the block, and computes
   // dot product with the query.
   for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
+    // TODO(suquark): we start physical_block_number to shared memory.
     const int physical_block_number = block_table[block_idx];
     const int physical_block_offset = thread_group_idx % BLOCK_SIZE;
     const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
 
-    // Load a key to registers.
+    // Load a key to shared memory.
     // Each thread in a thread group has a different part of the key.
     // For example, if the the thread group size is 4, then the first thread in the group
     // has 0, 4, 8, ... th vectors of the key, and the second thread has 1, 5, 9, ... th
     // vectors of the key, and so on.
-    K_vec k_vecs[NUM_VECS_PER_THREAD];
-#pragma unroll
-    for (int i = 0; i < NUM_VECS_PER_THREAD; i++) {
-      const scalar_t* k_ptr = k_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
+    const scalar_t* k_ptr = k_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
                                       + head_idx * HEAD_SIZE * BLOCK_SIZE
                                       + physical_block_offset * x;
-      const int vec_idx = thread_group_offset + i * THREAD_GROUP_SIZE;
+    // TODO(suquark): currently, gridDim.x = num_heads > NUM_VECS_PER_THREAD. but it is not always true.
+    if (thread_idx < NUM_VECS_PER_THREAD) {
+      const int vec_idx = thread_group_offset + thread_idx * THREAD_GROUP_SIZE;
       const int offset1 = (vec_idx * VEC_SIZE) / x;
       const int offset2 = (vec_idx * VEC_SIZE) % x;
-      k_vecs[i] = *reinterpret_cast<const K_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+      k_vecs[thread_idx] = *reinterpret_cast<const K_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
     }
+    __syncthreads();
 
     // Compute dot product.
     // This includes a reduction across the threads in the same thread group.
@@ -423,13 +439,26 @@ __device__ void multi_query_cached_kv_attention_kernel_1xN_(
 
     const scalar_t* v_ptr = v_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
                                     + head_idx * HEAD_SIZE * BLOCK_SIZE;
+
+    // TODO(suquark): we may reuse the k_vecs shared memory here.
+    // TODO(suquark): We may use matrix multiplication here.
+    __shared__ V_vec k_vecs[NUM_ROWS_PER_THREAD];
+
+    // TODO(suquark): currently, gridDim.x = num_heads > NUM_VECS_PER_THREAD. but it is not always true.
+    if (thread_idx < NUM_ROWS_PER_THREAD) {
+      const int row_idx = lane / NUM_V_VECS_PER_ROW + thread_idx * NUM_ROWS_PER_ITER;
+      if (row_idx < HEAD_SIZE) {
+        const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
+        k_vecs[thread_idx] = *reinterpret_cast<const V_vec*>(k_ptr + offset);
+      }
+    }
+    __syncthreads();
+    // TODO(suquark): We may use matrix multiplication here.
 #pragma unroll
     for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
       if (row_idx < HEAD_SIZE) {
-        const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
-        V_vec v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
-        accs[i] += dot(logits_vec, cast_to_float(v_vec));
+        accs[i] += dot(logits_vec, cast_to_float(k_vecs[i]));
       }
     }
   }
@@ -493,6 +522,43 @@ __device__ void multi_query_cached_kv_attention_kernel_1xN_(
     }
   }
 }
+
+// Grid: (num_heads, num_seqs).
+template<
+  typename scalar_t,
+  int HEAD_SIZE,
+  int BLOCK_SIZE,
+  int NUM_THREADS>
+__global__ void multi_query_cached_kv_attention_kernel_1xN_(
+  const int* cu_query_lens,
+  const int num_queries,                  // len(cu_query_lens) - 1
+  scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
+  const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
+  const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
+  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
+  const float scale,
+  const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
+  const int* __restrict__ context_lens,   // [num_seqs]
+  const int max_num_blocks_per_seq) {
+    for (int i = 0; i < num_queries; i++) {
+      const int start_idx = cu_query_lens[i];
+      const int end_idx = cu_query_lens[i + 1];
+      const int query_len = end_idx - start_idx;
+      const int context_len = context_lens[i];
+      const int* block_table = block_tables + i * max_num_blocks_per_seq;
+
+      multi_query_cached_kv_attention_kernel_1xN_<
+        scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>(
+          out,
+          q,
+          k_cache,
+          v_cache,
+          scale,
+          block_table,
+          context_len,
+          max_num_blocks_per_seq);
+    }
+
 
 } // namespace cacheflow
 
