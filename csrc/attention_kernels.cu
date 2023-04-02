@@ -547,10 +547,14 @@ __global__ void multi_query_cached_kv_attention_kernel_1xN_(
       const int context_len = context_lens[i];
       const int* block_table = block_tables + i * max_num_blocks_per_seq;
 
+      const scalar_t* query_ptr = q + start_idx * num_heads * HEAD_SIZE;
+      scalar_t* out_ptr = out + start_idx * num_heads * HEAD_SIZE;
+      // NOTE: we do not need to adjust the kv cache, since the block table is
+      // already adjusted.
       multi_query_cached_kv_attention_kernel_1xN_<
         scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>(
-          out,
-          q,
+          out_ptr,
+          query_ptr,
           k_cache,
           v_cache,
           scale,
@@ -558,7 +562,6 @@ __global__ void multi_query_cached_kv_attention_kernel_1xN_(
           context_len,
           max_num_blocks_per_seq);
     }
-
 
 } // namespace cacheflow
 
