@@ -442,14 +442,14 @@ __device__ void multi_query_cached_kv_attention_kernel_1xN_(
 
     // TODO(suquark): we may reuse the k_vecs shared memory here.
     // TODO(suquark): We may use matrix multiplication here.
-    __shared__ V_vec k_vecs[NUM_ROWS_PER_THREAD];
+    __shared__ V_vec v_vecs[NUM_ROWS_PER_THREAD];
 
     // TODO(suquark): currently, gridDim.x = num_heads > NUM_VECS_PER_THREAD. but it is not always true.
     if (thread_idx < NUM_ROWS_PER_THREAD) {
       const int row_idx = lane / NUM_V_VECS_PER_ROW + thread_idx * NUM_ROWS_PER_ITER;
       if (row_idx < HEAD_SIZE) {
         const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
-        k_vecs[thread_idx] = *reinterpret_cast<const V_vec*>(k_ptr + offset);
+        v_vecs[thread_idx] = *reinterpret_cast<const V_vec*>(v_ptr + offset);
       }
     }
     __syncthreads();
@@ -796,11 +796,12 @@ void multi_query_cached_kv_attention(
   int max_context_len) {
   
   int num_queries = cu_query_lens.size(0) - 1;
+  const int* cu_query_lens_ptr = cu_query_lens.data_ptr<int>();
   int num_seqs = query.size(0);
 
   int seq_prompt_mapping[num_queries];
   for (int i = 0, query_cursor = 0; i < num_seqs; ++i) {
-    if (i >= cu_query_lens[query_cursor + 1]) {
+    if (i >= cu_query_lens_ptr[query_cursor + 1]) {
       ++query_cursor; 
     }
     seq_prompt_mapping[query_cursor] = i;
