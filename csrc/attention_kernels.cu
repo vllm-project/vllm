@@ -265,8 +265,8 @@ __device__ void multi_query_cached_kv_attention_kernel_1xN_(
   const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
   const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
   const float scale,
-  const int __restrict__ block_table,   // [num_seqs, max_num_blocks_per_seq]
-  const int __restrict__ context_len,   // [num_seqs]
+  const int* __restrict__ block_table,    // [num_seqs, max_num_blocks_per_seq]
+  const int context_len,                  // [num_seqs]
   const int max_num_blocks_per_seq) {
   constexpr int THREAD_GROUP_SIZE = WARP_SIZE / BLOCK_SIZE;
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
