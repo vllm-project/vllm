@@ -321,6 +321,7 @@ __device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
   float qk_max = -FLT_MAX;
 
   const int num_blocks = (context_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+  const int mask_boundary = context_len - seq_len + 1 + (seq_idx - seq_start_idx);
 
   // Iterate over the key blocks.
   // Each warp fetches a block of keys for each iteration.
@@ -351,7 +352,7 @@ __device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
     // Compute dot product.
     // This includes a reduction across the threads in the same thread group.
     const float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs, k_vecs);
-    const bool mask = token_idx >= context_len - seq_len + 1 + (seq_idx - seq_start_idx);
+    const bool mask = token_idx >= mask_boundary;
 
     if (thread_group_offset == 0) {
       // Store the partial reductions to shared memory.
@@ -386,7 +387,7 @@ __device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
-  for (int i = thread_idx; i < context_len; i += NUM_THREADS) {
+  for (int i = thread_idx; i < mask_boundary; i += NUM_THREADS) {
     float val = __expf(logits[i] - qk_max);
     logits[i] = val;
     exp_sum += val;
