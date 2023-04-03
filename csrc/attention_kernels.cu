@@ -794,7 +794,7 @@ __global__ void multi_query_cached_kv_attention_kernel(
         scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>(
           out,
           q,
-          start_seq_idx,
+          seq_start_idx,
           seq_len,
           k_cache,
           v_cache,
