@@ -270,7 +270,7 @@ __device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
   const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
   const float scale,
   const int* __restrict__ block_table,   // [num_seqs, max_num_blocks_per_seq]
-  const int context_len,   // [num_seqs]
+  const int context_len,
   const int max_num_blocks_per_seq) {
   constexpr int THREAD_GROUP_SIZE = WARP_SIZE / BLOCK_SIZE;
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
@@ -539,7 +539,7 @@ __global__ void multi_query_cached_kv_attention_kernel(
 } // namespace cacheflow
 
 #define LAUNCH_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
-  cacheflow::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>    \
+  cacheflow::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>   \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     out_ptr,                                                                                  \
     query_ptr,                                                                                \
