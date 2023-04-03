@@ -722,7 +722,7 @@ template<
   int BLOCK_SIZE,
   int NUM_THREADS = 128>
 void multi_query_cached_kv_attention_launcher(
-  const int* seq_prompt_mapping_ptr,
+  torch::Tensor& seq_prompt_mapping,
   torch::Tensor& out,
   torch::Tensor& query,
   torch::Tensor& key_cache,
@@ -736,6 +736,7 @@ void multi_query_cached_kv_attention_launcher(
   int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);
 
+  int* seq_prompt_mapping_ptr = seq_prompt_mapping.data_ptr<int>();
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
