@@ -255,13 +255,13 @@ __global__ void single_query_cached_kv_attention_kernel(
 }
 
 
-// Grid: (num_heads, num_seqs).
+// Grid: (num_heads, num_query_tokens).
 template<
   typename scalar_t,
   int HEAD_SIZE,
   int BLOCK_SIZE,
   int NUM_THREADS>
-__device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
+__device__ void multi_query_cached_kv_attention_kernel_unoptimized_(
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
   const int seq_start_idx,
@@ -498,7 +498,7 @@ __device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
 }
 
 
-// Grid: (num_heads, num_seqs).
+// Grid: (num_heads, num_query_tokens).
 template<
   typename scalar_t,
   int HEAD_SIZE,
@@ -521,8 +521,7 @@ __global__ void multi_query_cached_kv_attention_kernel(
     const int seq_len = cu_query_lens[prompt_idx + 1] - seq_start_idx;
     const int* block_table = block_tables + prompt_idx * max_num_blocks_per_seq;
     const int context_len = context_lens[prompt_idx];
-    // multi_query_cached_kv_attention_kernel_1xN_<
-    multi_query_cached_kv_attention_kernel_unoptimized_1xN_<
+    multi_query_cached_kv_attention_kernel_unoptimized_<
         scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>(
           out,
           q,
@@ -797,6 +796,9 @@ void multi_query_cached_kv_attention(
     accessor[i] = query_cursor;
   }
 
+  // TODO(suquark): This can be slow, as it to(torch::kCPU) and to(torch::kCUDA)
+  // implicitly synchronizes the CPU and GPU. And we can avoid this issue by giving
+  // the mapping as an input parameter. Let's do this optimization in a later PR.
   torch::Tensor seq_prompt_mapping = cpu_tensor.to(torch::kCUDA);
 
   // TODO(woosuk): Support BF16.
