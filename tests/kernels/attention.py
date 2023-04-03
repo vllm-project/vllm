@@ -285,6 +285,7 @@ def test_multi_query_cached_kv_attention(
         for query_len in query_lens
     ]
     max_context_len = max(context_lens)
+    context_lens = torch.tensor(context_lens, dtype=torch.int, device='cuda')
 
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables = []
