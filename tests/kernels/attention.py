@@ -327,21 +327,6 @@ def test_multi_query_cached_kv_attention(
 
 @torch.inference_mode()
 def test_attention(seed: int) -> None:
-    for dtype in [torch.half, torch.float]:
-        for block_size in [8, 16]:
-            for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
-                print(f'Testing multi_query_cached_kv_attention with '
-                      f'dtype={dtype}, block_size={block_size}, '
-                      f'head_size={head_size}')
-                test_multi_query_cached_kv_attention(
-                    num_queries=11,
-                    num_heads=3,
-                    head_size=head_size,
-                    block_size=block_size,
-                    num_blocks=1024,
-                    dtype=dtype,
-                )
-
     # NOTE(woosuk): Even when the seed is fixed, there is a chance that
     # the test fails due to the precision issue. Re-run the test if it fails.
     torch.random.manual_seed(seed)
@@ -354,6 +339,24 @@ def test_attention(seed: int) -> None:
                       f'head_size={head_size}')
                 test_single_query_cached_kv_attention(
                     num_tokens=37,
+                    num_heads=3,
+                    head_size=head_size,
+                    block_size=block_size,
+                    num_blocks=1024,
+                    dtype=dtype,
+                )
+
+    # NOTE(siyuan): Same as above. Re-run the test if it fails. Also
+    # note that the test is also more likely to fail due to the much
+    # larger amount of tokens in the input may increase the variance.
+    for dtype in [torch.half, torch.float]:
+        for block_size in [8, 16]:
+            for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
+                print(f'Testing multi_query_cached_kv_attention with '
+                      f'dtype={dtype}, block_size={block_size}, '
+                      f'head_size={head_size}')
+                test_multi_query_cached_kv_attention(
+                    num_queries=11,
                     num_heads=3,
                     head_size=head_size,
                     block_size=block_size,
