@@ -262,6 +262,7 @@ template<
 __device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
+  const int query_len,
   const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
   const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
   const float scale,
@@ -349,8 +350,8 @@ __device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
     // Compute dot product.
     // This includes a reduction across the threads in the same thread group.
     const float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs, k_vecs);
-    const bool mask = token_idx >= context_len;
-  
+    const bool mask = token_idx >= context_len - query_len;
+
     if (thread_group_offset == 0) {
       // Store the partial reductions to shared memory.
       // NOTE(woosuk): It is required to zero out the masked logits.
@@ -771,6 +772,7 @@ template<
   int BLOCK_SIZE,
   int NUM_THREADS>
 __global__ void multi_query_cached_kv_attention_kernel(
+  const int* cu_query_lens,               // [num_prompts+1]
   const int* seq_prompt_mapping,          // [num_seqs] mapping from seq_idx to prompt_idx
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -782,6 +784,7 @@ __global__ void multi_query_cached_kv_attention_kernel(
   const int max_num_blocks_per_seq) {
     const int seq_idx = blockIdx.y;
     const int prompt_idx = seq_prompt_mapping[seq_idx];
+    const int query_len = cu_query_lens[prompt_idx + 1] - cu_query_lens[prompt_idx];
     const int* block_table = block_tables + prompt_idx * max_num_blocks_per_seq;
     const int context_len = context_lens[prompt_idx];
     // multi_query_cached_kv_attention_kernel_1xN_<
@@ -789,6 +792,7 @@ __global__ void multi_query_cached_kv_attention_kernel(
         scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>(
           out,
           q,
+          query_len,
           k_cache,
           v_cache,
           scale,
@@ -945,8 +949,9 @@ void single_query_cached_kv_attention(
 
 
 #define LAUNCH_MULTI_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                  \
-  cacheflow::multi_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>   \
+  cacheflow::multi_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>    \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
+    cu_query_lens_ptr,                                                                        \
     seq_prompt_mapping_ptr,                                                                   \
     out_ptr,                                                                                  \
     query_ptr,                                                                                \
@@ -964,6 +969,7 @@ template<
   int BLOCK_SIZE,
   int NUM_THREADS = 128>
 void multi_query_cached_kv_attention_launcher(
+  torch::Tensor& cu_query_lens,
   torch::Tensor& seq_prompt_mapping,
   torch::Tensor& out,
   torch::Tensor& query,
@@ -978,6 +984,7 @@ void multi_query_cached_kv_attention_launcher(
   int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);
 
+  int* cu_query_lens_ptr = cu_query_lens.data_ptr<int>();
   int* seq_prompt_mapping_ptr = seq_prompt_mapping.data_ptr<int>();
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
@@ -1037,15 +1044,17 @@ void multi_query_cached_kv_attention(
   torch::Tensor& context_lens,
   int block_size,
   int max_context_len) {
+
+  torch::Tensor query_lens = cu_query_lens.to(torch::kCPU);
   
-  int num_queries = cu_query_lens.size(0) - 1;
-  const int* cu_query_lens_ptr = cu_query_lens.data_ptr<int>();
+  int num_queries = query_lens.size(0) - 1;
+  const int* query_lens_ptr = query_lens.data_ptr<int>();
   int num_seqs = query.size(0);
 
   torch::Tensor cpu_tensor = torch::empty({num_seqs}, torch::dtype(torch::kInt32));
   auto accessor = cpu_tensor.accessor<int32_t, 1>();
   for (int i = 0, query_cursor = 0; i < num_seqs; ++i) {
-    if (i >= cu_query_lens_ptr[query_cursor + 1]) {
+    if (i >= query_lens_ptr[query_cursor + 1]) {
       ++query_cursor; 
     }
     accessor[i] = query_cursor;
@@ -1058,6 +1067,7 @@ void multi_query_cached_kv_attention(
     // Half.
     if (block_size == 8) {
       multi_query_cached_kv_attention_launcher<uint16_t, 8>(
+        cu_query_lens,
         seq_prompt_mapping,
         out,
         query,
@@ -1069,6 +1079,7 @@ void multi_query_cached_kv_attention(
         max_context_len);
     } else if (block_size == 16) {
       multi_query_cached_kv_attention_launcher<uint16_t, 16>(
+        cu_query_lens,
         seq_prompt_mapping,
         out,
         query,
@@ -1085,6 +1096,7 @@ void multi_query_cached_kv_attention(
     // Float.
     if (block_size == 8) {
       multi_query_cached_kv_attention_launcher<float, 8>(
+        cu_query_lens,
         seq_prompt_mapping,
         out,
         query,
@@ -1096,6 +1108,7 @@ void multi_query_cached_kv_attention(
         max_context_len);
     } else if (block_size == 16) {
       multi_query_cached_kv_attention_launcher<float, 16>(
+        cu_query_lens,
         seq_prompt_mapping,
         out,
         query,
