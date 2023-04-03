@@ -259,7 +259,7 @@ template<
   int HEAD_SIZE,
   int BLOCK_SIZE,
   int NUM_THREADS>
-__global__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
+__device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
