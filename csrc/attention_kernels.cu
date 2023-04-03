@@ -799,13 +799,16 @@ void multi_query_cached_kv_attention(
   const int* cu_query_lens_ptr = cu_query_lens.data_ptr<int>();
   int num_seqs = query.size(0);
 
-  int seq_prompt_mapping[num_queries];
+  torch::Tensor cpu_tensor = torch::empty({num_seqs}, torch::dtype(torch::kInt32));
+  auto accessor = cpu_tensor.accessor<int32_t, 1>();
   for (int i = 0, query_cursor = 0; i < num_seqs; ++i) {
     if (i >= cu_query_lens_ptr[query_cursor + 1]) {
       ++query_cursor; 
     }
-    seq_prompt_mapping[query_cursor] = i;
+    accessor[i] = query_cursor;
   }
+
+  torch::Tensor seq_prompt_mapping = cpu_tensor.to(torch::kCUDA);
 
   // TODO(woosuk): Support BF16.
   if (query.element_size() == 2) {
