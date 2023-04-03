@@ -262,7 +262,7 @@ template<
 __device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
-  const int query_len,
+  const int start_seq_idx,
   const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
   const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
   const float scale,
@@ -350,7 +350,7 @@ __device__ void multi_query_cached_kv_attention_kernel_unoptimized_1xN_(
     // Compute dot product.
     // This includes a reduction across the threads in the same thread group.
     const float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs, k_vecs);
-    const bool mask = token_idx >= context_len - query_len;
+    const bool mask = token_idx >= context_len + (seq_idx - start_seq_idx);
 
     if (thread_group_offset == 0) {
       // Store the partial reductions to shared memory.
@@ -784,7 +784,7 @@ __global__ void multi_query_cached_kv_attention_kernel(
   const int max_num_blocks_per_seq) {
     const int seq_idx = blockIdx.y;
     const int prompt_idx = seq_prompt_mapping[seq_idx];
-    const int query_len = cu_query_lens[prompt_idx + 1] - cu_query_lens[prompt_idx];
+    const int start_seq_idx = cu_query_lens[prompt_idx];
     const int* block_table = block_tables + prompt_idx * max_num_blocks_per_seq;
     const int context_len = context_lens[prompt_idx];
     // multi_query_cached_kv_attention_kernel_1xN_<
@@ -792,7 +792,7 @@ __global__ void multi_query_cached_kv_attention_kernel(
         scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>(
           out,
           q,
-          query_len,
+          start_seq_idx,
           k_cache,
           v_cache,
           scale,
