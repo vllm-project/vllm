@@ -1,5 +1,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
+import time
+
 import torch
 
 from cacheflow.parallel_utils.parallel_state import (
@@ -7,6 +9,8 @@ from cacheflow.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_group,
 )
+from cacheflow.profile import (maybe_sync_for_profiling,
+                               add_to_communication_latency)
 from .utils import split_tensor_along_last_dim
 
 
@@ -17,8 +21,15 @@ def _reduce(input_):
     if get_tensor_model_parallel_world_size()==1:
         return input_
 
+    maybe_sync_for_profiling()
+    start_time = time.time()
+
     # All-reduce.
     torch.distributed.all_reduce(input_, group=get_tensor_model_parallel_group())
+
+    maybe_sync_for_profiling()
+    end_time = time.time()
+    add_to_communication_latency(end_time - start_time)
 
     return input_
 
@@ -78,7 +89,15 @@ def _gather_along_last_dim(input_):
 
     tensor_list = [torch.empty_like(input_) for _ in range(world_size)]
     tensor_list[rank] = input_
+
+    maybe_sync_for_profiling()
+    start_time = time.time()
+
     torch.distributed.all_gather(tensor_list, input_, group=get_tensor_model_parallel_group())
+
+    maybe_sync_for_profiling()
+    end_time = time.time()
+    add_to_communication_latency(end_time - start_time)
 
     # Note: torch.cat already creates a contiguous tensor.
     output = torch.cat(tensor_list, dim=last_dim).contiguous()
@@ -99,8 +118,16 @@ def _gather_along_first_dim(input_):
 
     output = torch.empty(dim_size, dtype=input_.dtype,
                          device=torch.cuda.current_device())
+
+    maybe_sync_for_profiling()
+    start_time = time.time()
+
     torch.distributed._all_gather_base(output, input_.contiguous(),
                                        group=get_tensor_model_parallel_group())
+
+    maybe_sync_for_profiling()
+    end_time = time.time()
+    add_to_communication_latency(end_time - start_time)
 
     return output
 
@@ -119,8 +146,17 @@ def _reduce_scatter_along_first_dim(input_):
 
     output = torch.empty(dim_size, dtype=input_.dtype,
                          device=torch.cuda.current_device())
+
+    maybe_sync_for_profiling()
+    start_time = time.time()
+
     torch.distributed._reduce_scatter_base(output, input_.contiguous(),
                                            group=get_tensor_model_parallel_group())
+
+    maybe_sync_for_profiling()
+    end_time = time.time()
+    add_to_communication_latency(end_time - start_time)
+
     return output
 
 

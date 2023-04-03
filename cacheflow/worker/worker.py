@@ -1,5 +1,6 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
+import time
 import torch
 
 from cacheflow.models import get_model
@@ -10,6 +11,10 @@ from cacheflow.sequence import SequenceOutputs
 from cacheflow.worker.cache_engine import CacheEngine
 from cacheflow.parallel_utils.parallel_state import (
     initialize_model_parallel, get_tensor_model_parallel_world_size)
+from cacheflow.profile import (maybe_sync_for_profiling,
+                               set_sync_for_profiling,
+                               reset_communication_latency,
+                               get_communication_latency)
 from cacheflow.utils import set_random_seed
 
 
@@ -29,7 +34,9 @@ class Worker:
         model_path: str,
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
+        sync_for_profiling: bool = False,
     ) -> None:
+        set_sync_for_profiling(sync_for_profiling)
         self.init_distributed_environment(distributed_init_method,
                                           rank,
                                           world_size,
@@ -65,6 +72,8 @@ class Worker:
         )
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
+
+        self.reset_timer()
 
 
     def init_distributed_environment(self,
@@ -211,6 +220,9 @@ class Worker:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
     ) -> Dict[int, SequenceOutputs]:
+        maybe_sync_for_profiling()
+        start_time = time.time()
+
         # Issue cache operations.
         command_issued = False
         if blocks_to_swap_in:
@@ -247,8 +259,26 @@ class Worker:
             input_metadata=input_metadata,
             cache_events=cache_events,
         )
+        maybe_sync_for_profiling()
+        end_time = time.time()
+        latency = end_time - start_time
+        self.execution_latency += latency
+        self.num_profiled_steps += 1
+
         return output
 
+    def reset_timer(self) -> None:
+        self.execution_latency = 0.0
+        self.num_profiled_steps = 0
+        reset_communication_latency()
+
+    def get_profile_results(self) -> Dict[str, Any]:
+        communication_latency = get_communication_latency()
+        return {
+            'execution_latency': self.execution_latency,
+            'communication_latency': communication_latency,
+            'num_profiled_steps': self.num_profiled_steps,
+        }
 
 def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
     return x + [0] * ((-len(x)) % multiple_of)

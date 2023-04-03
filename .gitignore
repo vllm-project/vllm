@@ -4,3 +4,7 @@
 *.eggs/
 *.so
 build/
+log/
+archive/
+*.csv
+.vscode/

@@ -1,3 +1,4 @@
+import json
 import argparse
 import time
 from typing import List
@@ -11,17 +12,24 @@ from cacheflow.master.server import (Server, add_server_arguments,
                                      initialize_ray_cluster)
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
+from cacheflow.profile import set_sync_for_profiling
 
 
 def main(args: argparse.Namespace):
+    print(json.dumps(args.__dict__))
+    set_sync_for_profiling()
+
     # TODO(zhuohan): Support pipeline parallelism.
     assert args.pipeline_parallel_size == 1, (
         'Pipeline parallelism is not supported yet.')
 
+    cuda_profiler = False
+    ray_cluster_address = "local" if cuda_profiler else "auto"
+
     (num_nodes, num_devices_per_node, distributed_init_method,
     all_stage_devices) = (
         initialize_ray_cluster(
-            address='local',
+            address=ray_cluster_address,
             pipeline_parallel_size=args.pipeline_parallel_size,
             tensor_parallel_size=args.tensor_parallel_size))
 
@@ -60,32 +68,55 @@ def main(args: argparse.Namespace):
     sampling_params = SamplingParams.from_dict(sampling_params_dict)
     input_token_ids = [0] * args.input_len
 
-    def profile_step(profile=False):
-        if profile:
+    def profile_step():
+        if cuda_profiler:
             torch.cuda.cudart().cudaProfilerStart()
+        server.reset_timer()
         for _ in range(args.batch_size):
             frontend._add_query(input_token_ids, sampling_params)
         server.add_sequence_groups(frontend.get_inputs())
+        # Prompt step
         start_time = time.time()
-        while True:
-            server.step()
-            if not server.has_unfinished_requests():
-                break
+        server.step()
         end_time = time.time()
-        latency = end_time - start_time
-        if profile:
+        prompt_latency = end_time - start_time
+        # Decoding steps
+        num_decoding_steps = 0
+        start_time = time.time()
+        while server.has_unfinished_requests():
+            server.step()
+            num_decoding_steps += 1
+        end_time = time.time()
+        decoding_latency = end_time - start_time
+        if cuda_profiler:
             torch.cuda.cudart().cudaProfilerStop()
-        return latency
+        server_profile_results = server.get_profile_results()
+        # First controller's first worker
+        worker_execution_latency = server_profile_results[0][0]["execution_latency"]
+        worker_communication_latency = server_profile_results[0][0]["communication_latency"]
+        return (prompt_latency, decoding_latency, num_decoding_steps,
+                worker_execution_latency, worker_communication_latency)
 
-    print("Warm up step")
+    print("== Warm up step ==")
     profile_step()
 
     # Benchmark.
-    latencies = []
-    for _ in tqdm(range(3), desc="Profile step"):
-        latencies.append(profile_step())
-    print(f'Avg latency: {np.mean(latencies)} seconds')
-
+    print("== Profile steps ==")
+    num_profile_steps = 5
+    for step in range(num_profile_steps):
+        (prompt_latency, decoding_latency, num_decoding_steps,
+         worker_execution_latency, worker_communication_latency) = profile_step()
+        decoding_latency_per_step = decoding_latency / num_decoding_steps if num_decoding_steps > 0 else 0.0
+        result = {
+            "step": step,
+            "prompt_latency_seconds": prompt_latency,
+            "decoding_latency_seconds": decoding_latency,
+            "decoding_latency_per_step_seconds": decoding_latency_per_step,
+            "num_decoding_steps": num_decoding_steps,
+            "worker_execution_latency_seconds": worker_execution_latency,
+            "worker_communication_latency_seconds": worker_communication_latency,
+        }
+        print(json.dumps(result))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='CacheFlow simple server.')
@@ -95,5 +126,4 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=8)
     args = parser.parse_args()
     args.max_batch_size = max(args.max_batch_size, args.batch_size * args.input_len)
-    print(args)
     main(args)

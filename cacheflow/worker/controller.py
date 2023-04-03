@@ -1,10 +1,11 @@
-from typing import Dict, List, Union, Tuple
+from typing import Dict, List, Union, Tuple, Any
 
 import ray
 
 from cacheflow.master.scheduler import Scheduler
 from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.worker.worker import Worker
+from cacheflow.profile import get_sync_for_profiling
 
 
 DeviceID = Tuple[int, str, int] # rank, node resource (node IP), device id
@@ -57,6 +58,7 @@ class Controller:
                 tensor_parallel_size=tensor_parallel_size,
                 pipeline_parallel_size=pipeline_parallel_size,
                 model_path=model_path,
+                sync_for_profiling=get_sync_for_profiling(),
             )
             self.workers.append(worker)
 
@@ -95,3 +97,10 @@ class Controller:
         else:
             # TODO: Support pipeline parallelism.
             assert False
+
+    def get_profile_results(self) -> List[Dict[str, Any]]:
+        return ray.get([worker.get_profile_results.remote()
+                        for worker in self.workers])
+
+    def reset_timer(self) -> None:
+        ray.get([worker.reset_timer.remote() for worker in self.workers])

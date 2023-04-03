@@ -95,6 +95,14 @@ class Server:
         return (self.scheduler.waiting or self.scheduler.running or
                 self.scheduler.swapped)
 
+    def reset_timer(self):
+        for controller in self.controllers:
+            controller.reset_timer()
+
+    def get_profile_results(self):
+        return [controller.get_profile_results() for controller in
+                self.controllers]
+
 
 def initialize_ray_cluster(
     address: str = 'auto',
