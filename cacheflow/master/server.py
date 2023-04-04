@@ -3,6 +3,7 @@ from typing import List, Tuple
 import random
 
 import ray
+from transformers import AutoTokenizer
 
 from cacheflow.master.scheduler import Scheduler
 from cacheflow.models import get_memory_analyzer
@@ -33,9 +34,10 @@ class Server:
         self.num_nodes = num_nodes
         self.num_devices_per_node = num_devices_per_node
         self.world_size = pipeline_parallel_size * tensor_parallel_size
-
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.memory_analyzer = get_memory_analyzer(
             model_name=model,
+            model_path=model_path,
             block_size=block_size,
             dtype=dtype,
             gpu_memory=gpu_memory,
@@ -76,6 +78,7 @@ class Server:
             num_gpu_blocks=self.num_gpu_blocks,
             num_cpu_blocks=self.num_cpu_blocks,
             max_num_batched_tokens=max_batch_size,
+            tokenizer=self.tokenizer
         )
         # Connect the controllers.
         for i in range(len(self.controllers) - 1):

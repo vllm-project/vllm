@@ -40,8 +40,9 @@ class Worker:
         set_random_seed(seed)
 
         # Initialize the model.
-        self.model, self.dtype = get_model(model_name, dtype=dtype, path=model_path)
+        self.model, self.dtype = get_model(model_name, model_path, dtype=dtype, path=model_path)
         self.model = self.model.cuda()
+        print("loading model done...")
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
         self.num_layers = self.model.config.num_hidden_layers

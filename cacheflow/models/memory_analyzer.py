@@ -145,6 +145,7 @@ class LlamaMemoryAnalyzer(CacheFlowMemoryAnalyzer):
     def __init__(
         self,
         model_name: str,
+        model_path: str,
         block_size: int,
         dtype: torch.dtype,
         gpu_memory: int,
@@ -152,13 +153,14 @@ class LlamaMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         tensor_parallel_size: int,
     ) -> None:
         self.model_name = model_name
+        self.model_path = model_path
         self.block_size = block_size
         self.dtype = dtype
         self.gpu_memory = gpu_memory
         self.cpu_memory = cpu_memory
         self.tensor_parallel_size = tensor_parallel_size
 
-        config = AutoConfig.from_pretrained(model_name)
+        config = AutoConfig.from_pretrained(model_path)
         self.num_layers = config.num_hidden_layers
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads

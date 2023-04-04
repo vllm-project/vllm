@@ -34,12 +34,14 @@ class Scheduler:
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         max_num_batched_tokens: int,
+        tokenizer,
     ) -> None:
         self.controllers = controllers
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
         self.num_cpu_blocks = num_cpu_blocks
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.tokenizer = tokenizer
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name='fcfs')
@@ -233,6 +235,7 @@ class Scheduler:
             group_id = seq_group.group_id
             self.num_steps[group_id] += 1
             stop_token_ids = self.sampling_params[group_id].stop_token_ids
+            stop_func = self.sampling_params[group_id].stop_func
 
             # Process beam search results before processing the next tokens.
             for seq in seq_group.seqs:
@@ -262,6 +265,12 @@ class Scheduler:
                 if output.output_token in stop_token_ids:
                     self._free_seq(seq)
                     continue
+
+                if stop_func is not None:
+                    if self.tokenizer.decode(seq.get_token_ids(), skip_special_tokens=True).endswith(stop_func):
+                        print(f"hitting the separation symbols: {seq.get_token_ids()[-2:]}.. Stopped!")
+                        self._free_seq(seq)
+                        continue
 
                 # Check if the sequence has reached the maximum number of steps.
                 max_num_steps = self.sampling_params[group_id].max_num_steps
