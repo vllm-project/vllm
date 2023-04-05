@@ -35,7 +35,7 @@ def main(args: argparse.Namespace):
         dtype=args.dtype,
         seed=args.seed,
         swap_space=args.swap_space,
-        max_batch_size=args.max_batch_size,
+        max_num_batched_tokens=args.max_num_batched_tokens,
         num_nodes=num_nodes,
         num_devices_per_node=num_devices_per_node,
         distributed_init_method=distributed_init_method,
@@ -94,6 +94,7 @@ if __name__ == '__main__':
     parser.add_argument('--output-len', type=int, default=128)
     parser.add_argument('--batch-size', type=int, default=8)
     args = parser.parse_args()
-    args.max_batch_size = max(args.max_batch_size, args.batch_size * args.input_len)
+    args.max_num_batched_tokens = max(
+        args.max_num_batched_tokens, args.batch_size * args.input_len)
     print(args)
     main(args)
