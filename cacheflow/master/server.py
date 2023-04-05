@@ -168,8 +168,8 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--model-path', type=str, default='~/.cacheflow/model_weights',
                         help='model path to download and load the weights')
     # Parallel arguments
-    parser.add_argument('--pipeline-parallel-size', type=int, default=1, help='number of pipeline stages')
-    parser.add_argument('--tensor-parallel-size', type=int, default=1, help='number of tensor parallel replicas')
+    parser.add_argument('--pipeline-parallel-size', '-pp', type=int, default=1, help='number of pipeline stages')
+    parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1, help='number of tensor parallel replicas')
     # KV cache arguments
     parser.add_argument('--block-size', type=int, default=8, choices=[8, 16], help='token block size')
     # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
