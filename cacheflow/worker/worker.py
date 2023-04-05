@@ -9,7 +9,9 @@ from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.sequence import SequenceOutputs
 from cacheflow.worker.cache_engine import CacheEngine
 from cacheflow.parallel_utils.parallel_state import (
-    initialize_model_parallel, get_tensor_model_parallel_world_size)
+    initialize_model_parallel,
+    initialize_all_reduce_launcher,
+    get_tensor_model_parallel_world_size)
 from cacheflow.utils import set_random_seed
 
 
@@ -27,6 +29,7 @@ class Worker:
         rank: int,
         world_size: int,
         model_path: str,
+        max_num_batched_tokens: int,
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
     ) -> None:
@@ -44,6 +47,8 @@ class Worker:
         self.model = self.model.cuda()
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
+        initialize_all_reduce_launcher(
+            max_num_batched_tokens, self.model.config.hidden_size, self.dtype)
         self.num_layers = self.model.config.num_hidden_layers
         assert self.model.config.num_attention_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.model.config.num_attention_heads // tensor_model_parallel_world_size
