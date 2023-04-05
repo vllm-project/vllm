@@ -206,11 +206,18 @@ def initialize_model_parallel(
     _set_global_memory_buffer()
 
 
-def init_all_reduce_launcher(max_num_tokens, hidden_size):
+def initialize_all_reduce_launcher(
+    max_num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    disable_graph: bool = False,
+) -> None:
     global _ALL_REDUCE_LAUNCHER
     _ALL_REDUCE_LAUNCHER = GraphAllReduce(
         max_num_tokens=max_num_tokens,
         hidden_size=hidden_size,
+        dtype=dtype,
+        disable_graph=disable_graph,
     )
 
 def model_parallel_is_initialized():
@@ -532,13 +539,20 @@ def destroy_model_parallel():
     global _GLOBAL_MEMORY_BUFFER
     _GLOBAL_MEMORY_BUFFER = None
 
+
 class GraphAllReduce:
 
     def __init__(
         self,
         max_num_tokens: int,
         hidden_size: int,
+        dtype: torch.dtype,
+        disable_graph: bool = False,
     ) -> None:
+        self.max_num_tokens = max_num_tokens
+        self.hidden_size = hidden_size
+        self.disable_graph = disable_graph
+
         tp_world_size = get_tensor_model_parallel_world_size()
         if tp_world_size == 1:
             return
@@ -546,14 +560,15 @@ class GraphAllReduce:
         self.group = get_tensor_model_parallel_group()
         self.buffer = torch.empty(
             size=(max_num_tokens, hidden_size),
-            dtype=torch.half, # FIXME: hardcoded dtype
+            dtype=dtype,
             device='cuda',
         )
 
         # Build graphs for different number of tokens.
-        self.graphs = {}
-        for num_tokens in range(8, max_num_tokens + 1, 8):
-            self.graphs[num_tokens] = self._build_graph(num_tokens)
+        if not self.disable_graph:
+            self.graphs = {}
+            for num_tokens in range(8, max_num_tokens + 1, 8):
+                self.graphs[num_tokens] = self._build_graph(num_tokens)
 
     def _build_graph(self, num_tokens: int) -> torch.cuda.CUDAGraph:
         # Warm up.
@@ -571,5 +586,8 @@ class GraphAllReduce:
     def launch(self, x: torch.Tensor) -> torch.Tensor:
         # NOTE: x must be a slice of self.buffer.
         num_tokens = x.shape[0]
-        self.graphs[num_tokens].replay()
+        if self.disable_graph:
+            torch.distributed.all_reduce(x, group=self.group)
+        else:
+            self.graphs[num_tokens].replay()
         return x
