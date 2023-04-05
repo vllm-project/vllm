@@ -6,7 +6,7 @@ from typing import List
 from flash_attn.flash_attn_interface import _flash_attn_forward
 import torch
 
-from cacheflow import attention_ops
+from cacheflow import attention_ops, cache_ops
 
 
 def benchmark(name, f, num_warmup = 10, num_iters = 100):
@@ -43,7 +43,7 @@ def benchmark_multi_query_cached_kv_attention(
     num_total_tokens = cu_query_lens[-1]
     qkv = torch.randn(
         num_total_tokens, 3, num_heads, head_size, dtype=dtype, device='cuda')
-    query, _, _ = qkv.unbind(dim=1)
+    query, key, value = qkv.unbind(dim=1)  # NOTE: this will not make a copy.
 
     # Create key and value cache.
     x = 16 // torch.tensor([], dtype=dtype).element_size()
@@ -72,21 +72,53 @@ def benchmark_multi_query_cached_kv_attention(
     scale = float(1.0 / (head_size ** 0.5))
     output = torch.empty(
         num_total_tokens, num_heads, head_size, dtype=dtype, device='cuda')
+    
+    num_kv_tokens = sum(context_lens)
+    cu_context_lens = [0]
+    for context_len in context_lens:
+        cu_context_lens.append(cu_context_lens[-1] + context_len)
+    cpu_context_lens = torch.tensor(cu_context_lens, dtype=torch.int, device='cpu')
+    cu_context_lens = cpu_context_lens.cuda()
+    ref_output = torch.empty_like(output)
 
     # Run our implementation.
     def run_ours():
-        attention_ops.multi_query_cached_kv_attention(
-            cu_query_lens,
-            output,
-            query,
+        cache_ops.gather_cached_kv(
+            qkv,
             key_cache,
             value_cache,
-            scale,
+            cu_context_lens,
+            cpu_context_lens,
             block_tables,
-            context_len_tensor,
-            block_size,
-            max_context_len,
         )
+
+        _flash_attn_forward(
+            query,
+            key,
+            value,
+            ref_output,
+            cu_query_lens,
+            cu_context_lens,
+            max(query_lens),
+            max_context_len,
+            dropout_p=0.0,
+            softmax_scale=scale,
+            causal=True,
+            return_softmax=False,
+        )
+
+        # attention_ops.multi_query_cached_kv_attention(
+        #     cu_query_lens,
+        #     output,
+        #     query,
+        #     key_cache,
+        #     value_cache,
+        #     scale,
+        #     block_tables,
+        #     context_len_tensor,
+        #     block_size,
+        #     max_context_len,
+        # )
     benchmark('Ours', run_ours)
 
     # Upper bound: Flash attention.

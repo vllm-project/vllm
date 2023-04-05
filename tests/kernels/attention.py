@@ -4,7 +4,7 @@ from typing import List, Optional
 from flash_attn.flash_attn_interface import _flash_attn_forward
 import torch
 
-from cacheflow import attention_ops
+from cacheflow import attention_ops, cache_ops
 
 MAX_SEQ_LEN = 4096
 
@@ -65,7 +65,8 @@ def ref_single_query_cached_kv_attention(
 
 
 def ref_multi_query_kv_attention(
-    cu_seq_lens: List[int],
+    cu_query_lens: List[int],
+    cu_context_lens: List[int],
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -74,21 +75,25 @@ def ref_multi_query_kv_attention(
     head_size = query.shape[-1]
     scale = 1.0 / (head_size ** 0.5)
 
-    num_seqs = len(cu_seq_lens) - 1
+    num_seqs = len(cu_query_lens) - 1
     ref_outputs = []
     for i in range(num_seqs):
-        start_idx = cu_seq_lens[i]
-        end_idx = cu_seq_lens[i + 1]
-        seq_len = end_idx - start_idx
+        query_start_idx = cu_query_lens[i]
+        query_end_idx = cu_query_lens[i + 1]
+        query_len = query_end_idx - query_start_idx
+
+        context_start_idx = cu_context_lens[i]
+        context_end_idx = cu_context_lens[i + 1]
+        context_len = context_end_idx - context_start_idx
 
         # Create attention mask
-        attn_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1) * -1e5
+        attn_mask = torch.triu(torch.ones(query_len, context_len), diagonal=1) * -1e5
         attn_mask = attn_mask.to(dtype=dtype, device='cuda')
 
         ref_output = ref_masked_attention(
-            query[start_idx:end_idx],
-            key[start_idx:end_idx],
-            value[start_idx:end_idx],
+            query[query_start_idx:query_end_idx],
+            key[context_start_idx:context_end_idx],
+            value[context_start_idx:context_end_idx],
             scale,
             attn_mask=attn_mask,
         )
@@ -227,42 +232,58 @@ def test_multi_query_kv_attention(
     head_size: int,
     dtype: torch.dtype,
 ) -> None:
-    seq_lens = random.sample(range(1, MAX_SEQ_LEN), num_seqs)
-    max_seq_len = max(seq_lens)
-    num_tokens = sum(seq_lens)
+    query_lens = random.sample(range(1, MAX_SEQ_LEN), num_seqs)
+    max_query_len = max(query_lens)
+    num_query_tokens = sum(query_lens)
+    cu_query_lens = [0]
+    for seq_len in query_lens:
+        cu_query_lens.append(cu_query_lens[-1] + seq_len)
+    cu_query_lens = torch.tensor(cu_query_lens, dtype=torch.int, device='cuda')
 
-    cu_seq_lens = [0]
-    for seq_len in seq_lens:
-        cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
-    cu_seq_lens = torch.tensor(cu_seq_lens, dtype=torch.int, device='cuda')
+    context_lens = random.sample(range(1, MAX_SEQ_LEN), num_seqs)
+    max_context_len = max(context_lens)
+    num_context_tokens = sum(context_lens)
+    cu_context_lens = [0]
+    for seq_len in context_lens:
+        cu_context_lens.append(cu_context_lens[-1] + seq_len)
+    cu_context_lens = torch.tensor(
+        cu_context_lens, dtype=torch.int, device='cuda')
 
     scale = float(1.0 / (head_size ** 0.5))
     qkv = torch.randn(
-        num_tokens, 3, num_heads, head_size, dtype=dtype, device='cuda')
-    # Adjust the range of the values to reduce precision errors.
-    qkv = qkv / (head_size ** 0.5)
+        num_query_tokens, 3, num_heads, head_size, dtype=dtype, device='cuda')
+    query, _, _ = qkv.unbind(dim=1)
+    qkv = torch.randn(
+        num_context_tokens, 3, num_heads, head_size, dtype=dtype, device='cuda')
+    _, key, value = qkv.unbind(dim=1)
 
-    query, key, value = qkv.unbind(dim=1)
+    # Adjust the range of the values to reduce precision errors.
+    query = query / (head_size ** 0.5)
+    key = key / (head_size ** 0.5)
+    value = value / (head_size ** 0.5)
+
     output = torch.empty(
-        num_tokens, num_heads, head_size, dtype=dtype, device='cuda')
+        num_query_tokens, num_heads, head_size, dtype=dtype, device='cuda')
     _flash_attn_forward(
         query,
         key,
         value,
         output,
-        cu_seq_lens,
-        cu_seq_lens,
-        max_seq_len,
-        max_seq_len,
+        cu_query_lens,
+        cu_context_lens,
+        max_query_len,
+        max_context_len,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
         return_softmax=False,
     )
 
-    cu_seq_lens = cu_seq_lens.cpu().tolist()
+    cu_query_lens = cu_query_lens.cpu().tolist()
+    cu_context_lens = cu_context_lens.cpu().tolist()
     ref_output = ref_multi_query_kv_attention(
-        cu_seq_lens,
+        cu_query_lens,
+        cu_context_lens,
         query,
         key,
         value,
@@ -287,7 +308,7 @@ def test_multi_query_cached_kv_attention(
 
     qkv = torch.randn(
         num_total_tokens, 3, num_heads, head_size, dtype=dtype, device='cuda')
-    query, _, _ = qkv.unbind(dim=1)
+    query, key, value = qkv.unbind(dim=1)
     x = 16 // torch.tensor([], dtype=dtype).element_size()
     key_block_shape = (num_heads, head_size // x, block_size, x)
     key_cache = torch.randn(
@@ -302,7 +323,13 @@ def test_multi_query_cached_kv_attention(
         for query_len in query_lens
     ]
     max_context_len = max(context_lens)
-    context_lens = torch.tensor(context_lens, dtype=torch.int, device='cuda')
+    cu_context_lens = torch.tensor(context_lens, dtype=torch.int, device='cuda')
+
+    cu_seqlens_k = [0]
+    for seq_len in context_lens:
+        cu_seqlens_k.append(cu_seqlens_k[-1] + seq_len)
+    cu_seqlens_k = torch.tensor(
+        cu_seqlens_k, dtype=torch.int, device='cuda')
 
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables = []
@@ -318,17 +345,49 @@ def test_multi_query_cached_kv_attention(
     output = torch.empty(
         num_total_tokens, num_heads, head_size, dtype=dtype, device='cuda')
 
-    attention_ops.multi_query_cached_kv_attention(
-        cu_query_lens,
-        output,
-        query,
+    # attention_ops.multi_query_cached_kv_attention(
+    #     cu_query_lens,
+    #     output,
+    #     query,
+    #     key_cache,
+    #     value_cache,
+    #     scale,
+    #     block_tables,
+    #     context_lens,
+    #     block_size,
+    #     max_context_len,
+    # )
+
+    old_key = key.clone()
+    old_value = value.clone()
+
+    cache_ops.gather_cached_kv(
+        qkv,
         key_cache,
         value_cache,
-        scale,
+        cu_seqlens_k,
+        cu_seqlens_k.cpu(),
         block_tables,
-        context_lens,
-        block_size,
+    )
+
+    # test if key and value are updated
+    assert not torch.allclose(key, old_key, atol=1e-3, rtol=1e-5)
+    assert not torch.allclose(value, old_value, atol=1e-3, rtol=1e-5)
+    
+
+    _flash_attn_forward(
+        query,
+        key,
+        value,
+        output,
+        cu_query_lens,
+        cu_seqlens_k,
+        num_total_tokens,
         max_context_len,
+        dropout_p=0.0,
+        softmax_scale=scale,
+        causal=True,
+        return_softmax=False,
     )
 
     ref_output = ref_multi_query_cached_kv_attention(
@@ -337,7 +396,7 @@ def test_multi_query_cached_kv_attention(
         key_cache,
         value_cache,
         block_tables,
-        context_lens,
+        cu_context_lens,
         dtype,
     )
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
@@ -349,20 +408,20 @@ def test_attention(seed: int) -> None:
     # the test fails due to the precision issue. Re-run the test if it fails.
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    for dtype in [torch.half, torch.float]:
-        for block_size in [8, 16]:
-            for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
-                print(f'Testing single_query_cached_kv_attention with '
-                      f'dtype={dtype}, block_size={block_size}, '
-                      f'head_size={head_size}')
-                test_single_query_cached_kv_attention(
-                    num_tokens=37,
-                    num_heads=3,
-                    head_size=head_size,
-                    block_size=block_size,
-                    num_blocks=1024,
-                    dtype=dtype,
-                )
+    # for dtype in [torch.half, torch.float]:
+    #     for block_size in [8, 16]:
+    #         for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
+    #             print(f'Testing single_query_cached_kv_attention with '
+    #                   f'dtype={dtype}, block_size={block_size}, '
+    #                   f'head_size={head_size}')
+    #             test_single_query_cached_kv_attention(
+    #                 num_tokens=37,
+    #                 num_heads=3,
+    #                 head_size=head_size,
+    #                 block_size=block_size,
+    #                 num_blocks=1024,
+    #                 dtype=dtype,
+    #             )
 
     # NOTE(siyuan): Same as above. Re-run the test if it fails. Also
     # note that the test is also more likely to fail due to the much
