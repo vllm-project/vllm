@@ -218,8 +218,8 @@ if __name__ == '__main__':
             f'{model_name}-tp{args.tensor_parallel_size}',
             f'sample-n1-{args.n1}-n2-{args.n2}-n4-{args.n4}-n8-{args.n8}-n2b-{args.n2_beam}-n4b-{args.n4_beam}-n8b-{args.n8_beam}',
             f'req-rate-{args.request_rate}',
-            f'duration-{args.duration}',
             f'seed{args.seed}',
+            f'duration-{args.duration}',
         )
     os.makedirs(args.output_dir, exist_ok=True)
 
