@@ -119,7 +119,14 @@ def main(args: argparse.Namespace):
             for seq in seq_group.get_seqs():
                 seq_len = seq.get_len()
                 output_len = seq_len - seq.prompt_len
-                finished.append((arrival_time, finish_time, seq.prompt_len, output_len))
+                finished.append({
+                    'group_id': seq_group.group_id,
+                    'seq_id': seq.seq_id,
+                    'arrival_time': arrival_time, 
+                    'finish_time': finish_time,
+                    'prompt_len': seq.prompt_len,
+                    'output_len': output_len,
+                })
             pbar.update(1)
 
         if not (requests or server.has_unfinished_requests()):
