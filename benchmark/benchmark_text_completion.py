@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import pickle
 import time
 from typing import List
 
@@ -135,6 +136,8 @@ def main(args: argparse.Namespace):
     pbar.close()
     logger.info('Finish benchmarking. Saving stats.')
     server.scheduler.save_stats(args.output_dir)
+    with open(os.path.join(args.output_dir, 'sequences.pkl'), 'wb') as f:
+        pickle.dump(finished, f)
     logger.info('Done.')
 
 
