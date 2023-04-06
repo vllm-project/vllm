@@ -222,7 +222,9 @@ def _sample(
     idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
-        if i < input_metadata.num_prompts:
+        # NOTE(woosuk): In Orca, we must use idx instead of i because
+        # each beam is considered as a separate prompt.
+        if idx < input_metadata.num_prompts:
             # Generate the next tokens for a prompt input.
             assert len(seq_ids) == sampling_params.n
             prob = probs[idx]
