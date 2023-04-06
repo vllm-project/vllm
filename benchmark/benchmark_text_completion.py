@@ -47,6 +47,7 @@ def main(args: argparse.Namespace):
         all_stage_devices=all_stage_devices,
         gpu_memory=get_gpu_memory(),
         cpu_memory=get_cpu_memory(),
+        len_estimator=args.len_estimator,
         collect_stats=True,
     )
 
@@ -185,6 +186,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='CacheFlow simple server.')
     parser = add_server_arguments(parser) 
     parser.add_argument('--output-dir', type=str, help='path to output directory', default=None)
+    parser.add_argument('--len-estimator', type=str, choices=['oracle', 'power2', 'constant'], required=True)
 
     parser.add_argument('--dataset', type=str, help='path to dataset', required=True)
     parser.add_argument('--request-rate', type=float, help='reqs/sec', required=True)
@@ -213,7 +215,7 @@ if __name__ == '__main__':
     dataset_name = 'sharegpt' if 'sharegpt' in args.dataset else 'alpaca'
     if args.output_dir is None:
         args.output_dir = os.path.join(
-            'outputs',
+            f'orca-{args.len_estimator}',
             dataset_name,
             f'{model_name}-tp{args.tensor_parallel_size}',
             f'sample-n1-{args.n1}-n2-{args.n2}-n4-{args.n4}-n8-{args.n8}-n2b-{args.n2_beam}-n4b-{args.n4_beam}-n8b-{args.n8_beam}',
