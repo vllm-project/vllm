@@ -1,4 +1,6 @@
 import enum
+import os
+import pickle
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -34,12 +36,14 @@ class Scheduler:
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         max_num_batched_tokens: int,
+        collect_stats: bool,
     ) -> None:
         self.controllers = controllers
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
         self.num_cpu_blocks = num_cpu_blocks
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.collect_stats = collect_stats
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name='fcfs')
@@ -60,6 +64,16 @@ class Scheduler:
         self.sampling_params: Dict[int, SamplingParams] = {}
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
+
+        # Performance-related statistics.
+        self.input_lens: List[Tuple[int, int]] = []
+        self.swap_out_lens: List[int] = []
+        self.swap_in_lens: List[int] = []
+        self.num_waiting: List[int] = []
+        self.num_running: List[int] = []
+        self.num_swapped: List[int] = []
+        self.gpu_cache_usage: List[float] = []
+        self.cpu_cache_usage: List[float] = []
 
     def add_sequence_groups(
         self,
@@ -161,6 +175,22 @@ class Scheduler:
                 self.running.append(seq_group)
                 num_batched_tokens += num_prompt_tokens
                 prompt_group_ids.append(seq_group.group_id)
+
+        if self.collect_stats:
+            if self.running or blocks_to_swap_in or blocks_to_swap_out:
+                self.input_lens.append(num_batched_tokens)
+                self.swap_out_lens.append(len(blocks_to_swap_out) * self.block_size)
+                self.swap_in_lens.append(len(blocks_to_swap_in) * self.block_size)
+                self.num_swapped.append(len(self.swapped))
+                self.num_running.append(len(self.running))
+                self.num_waiting.append(len(self.waiting))
+
+                num_free_gpu_blocks = self.block_manager.get_num_free_gpu_blocks()
+                self.gpu_cache_usage.append(
+                    (self.num_gpu_blocks - num_free_gpu_blocks) / self.num_gpu_blocks)
+                num_free_cpu_blocks = self.block_manager.get_num_free_cpu_blocks()
+                self.cpu_cache_usage.append(
+                    (self.num_cpu_blocks - num_free_cpu_blocks) / self.num_cpu_blocks)
 
         return (blocks_to_swap_in,
                 blocks_to_swap_out,
@@ -381,3 +411,25 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+
+    def save_stats(
+        self,
+        output_dir: str,
+    ) -> None:
+        assert self.collect_stats, 'Statistics collection is disabled.'
+        with open(os.path.join(output_dir, 'input_lens.pkl'), 'wb') as f:
+            pickle.dump(self.input_lens, f)
+        with open(os.path.join(output_dir, 'swap_out_lens.pkl'), 'wb') as f:
+            pickle.dump(self.swap_out_lens, f)
+        with open(os.path.join(output_dir, 'swap_in_lens.pkl'), 'wb') as f:
+            pickle.dump(self.swap_in_lens, f)
+        with open(os.path.join(output_dir, 'num_waiting.pkl'), 'wb') as f:
+            pickle.dump(self.num_waiting, f)
+        with open(os.path.join(output_dir, 'num_running.pkl'), 'wb') as f:
+            pickle.dump(self.num_running, f)
+        with open(os.path.join(output_dir, 'num_swapped.pkl'), 'wb') as f:
+            pickle.dump(self.num_swapped, f)
+        with open(os.path.join(output_dir, 'gpu_cache_usage.pkl'), 'wb') as f:
+            pickle.dump(self.gpu_cache_usage, f)
+        with open(os.path.join(output_dir, 'cpu_cache_usage.pkl'), 'wb') as f:
+            pickle.dump(self.cpu_cache_usage, f)

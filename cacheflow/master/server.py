@@ -29,6 +29,7 @@ class Server:
         all_stage_devices: List[List[DeviceID]],
         gpu_memory: int,
         cpu_memory: int,
+        collect_stats: bool = False,
     ):
         self.num_nodes = num_nodes
         self.num_devices_per_node = num_devices_per_node
@@ -77,6 +78,7 @@ class Server:
             num_gpu_blocks=self.num_gpu_blocks,
             num_cpu_blocks=self.num_cpu_blocks,
             max_num_batched_tokens=max_num_batched_tokens,
+            collect_stats=collect_stats,
         )
         # Connect the controllers.
         for i in range(len(self.controllers) - 1):
