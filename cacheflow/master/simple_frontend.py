@@ -50,7 +50,8 @@ class SimpleFrontend:
             seqs.append(seq)
 
         group_id = next(self.seq_group_counter)
-        seq_group = SequenceGroup(group_id, seqs, arrival_time)
+        seq_group = SequenceGroup(
+            group_id, seqs, arrival_time=arrival_time, max_num_steps=sampling_params.max_num_steps)
         self.inputs.append((seq_group, sampling_params))
 
     def get_inputs(self) -> List[Tuple[SequenceGroup, SamplingParams]]:

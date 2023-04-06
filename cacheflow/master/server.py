@@ -29,6 +29,7 @@ class Server:
         all_stage_devices: List[List[DeviceID]],
         gpu_memory: int,
         cpu_memory: int,
+        len_estimator: str = 'oracle',
         collect_stats: bool = False,
     ):
         self.num_nodes = num_nodes
@@ -78,6 +79,7 @@ class Server:
             num_gpu_blocks=self.num_gpu_blocks,
             num_cpu_blocks=self.num_cpu_blocks,
             max_num_batched_tokens=max_num_batched_tokens,
+            len_estimator=len_estimator,
             collect_stats=collect_stats,
         )
         # Connect the controllers.
