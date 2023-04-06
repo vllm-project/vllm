@@ -33,7 +33,6 @@ def generate_text_completion_requests(
     timestamps = []
     for i, n in enumerate(arrival_times):
         timestamps += [i * (time_quantum / 1000)] * n
-    print(timestamps)
 
     # Load and shuffle the dataset.
     num_requests = len(timestamps)
