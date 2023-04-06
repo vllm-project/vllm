@@ -3,7 +3,7 @@ import pickle
 
 import matplotlib.pyplot as plt
 
-STATS = [
+STAT_NAMES = [
     'input_lens',
     'num_running',
     'num_waiting',
@@ -17,17 +17,17 @@ STATS = [
 
 
 def plot_stats(output_dir: str):
-    # Get timestamps.
-    with open(os.path.join(output_dir, 'timestamps.pkl'), 'rb') as f:
-        timestamps = pickle.load(f)
+    # Get stats.
+    with open(os.path.join(output_dir, 'stats.pkl'), 'rb') as f:
+        stats = pickle.load(f)
+    timestamps = stats['timestamps']
 
     # Draw one figure for each stat.
-    num_stats = len(STATS)
+    num_stats = len(STAT_NAMES)
     COLORS = ['b', 'g', 'r', 'c', 'm', 'y', 'k', 'orange', 'purple', 'pink', 'brown', 'gray']
     fig, axs = plt.subplots(num_stats, 1, figsize=(10, 2 * num_stats))
-    for i, stat in enumerate(STATS):
-        with open(os.path.join(output_dir, f'{stat}.pkl'), 'rb') as f:
-            data = pickle.load(f)
+    for i, stat in enumerate(STAT_NAMES):
+        data = stats[stat]
         axs[i].plot(timestamps, data, color=COLORS[i % len(COLORS)])
         axs[i].set_ylabel(stat.replace('_', ' '), fontdict={'fontsize': 12})
         axs[i].set_ylim(bottom=0)

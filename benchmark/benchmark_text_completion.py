@@ -99,6 +99,7 @@ def main(args: argparse.Namespace):
     pbar = tqdm(total=len(requests), desc='Finished requests')
 
     finished = []
+    server.scheduler.reset_stats()
     start_time = time.time()
     while True:
         now = time.time()
@@ -229,7 +230,7 @@ if __name__ == '__main__':
         level=logging.INFO,
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(os.path.join(args.output_dir, "log.txt")),
+            logging.FileHandler(os.path.join(args.output_dir, 'log.txt')),
         ],
     )
     logger.info(args)

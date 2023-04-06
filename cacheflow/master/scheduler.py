@@ -2,7 +2,7 @@ import enum
 import os
 import pickle
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from cacheflow.master.block_manager import BlockSpaceManager
 from cacheflow.master.policy import PolicyFactory
@@ -66,17 +66,7 @@ class Scheduler:
         self.swapped: List[SequenceGroup] = []
 
         # Performance-related statistics.
-        self.start_time: Optional[float] = None
-        self.timestamps: List[float] = []
-        self.input_lens: List[int] = []
-        self.swap_out_lens: List[int] = []
-        self.swap_in_lens: List[int] = []
-        self.num_preemption: List[int] = []
-        self.num_waiting: List[int] = []
-        self.num_running: List[int] = []
-        self.num_swapped: List[int] = []
-        self.gpu_cache_usage: List[float] = []
-        self.cpu_cache_usage: List[float] = []
+        self.stats = Stats()
 
     def add_sequence_groups(
         self,
@@ -181,21 +171,20 @@ class Scheduler:
 
         if self.collect_stats:
             if self.running or blocks_to_swap_in or blocks_to_swap_out:
-                self.start_time = now if self.start_time is None else self.start_time
-                self.timestamps.append(now - self.start_time)
-                self.input_lens.append(num_batched_tokens)
-                self.swap_out_lens.append(len(blocks_to_swap_out) * self.block_size)
-                self.swap_in_lens.append(len(blocks_to_swap_in) * self.block_size)
-                self.num_preemption.append(len(preempted))
-                self.num_swapped.append(len(self.swapped))
-                self.num_running.append(len(self.running))
-                self.num_waiting.append(len(self.waiting))
+                self.stats.timestamps.append(now - self.stats.start_time)
+                self.stats.input_lens.append(num_batched_tokens)
+                self.stats.swap_out_lens.append(len(blocks_to_swap_out) * self.block_size)
+                self.stats.swap_in_lens.append(len(blocks_to_swap_in) * self.block_size)
+                self.stats.num_preemption.append(len(preempted))
+                self.stats.num_swapped.append(len(self.swapped))
+                self.stats.num_running.append(len(self.running))
+                self.stats.num_waiting.append(len(self.waiting))
 
                 num_free_gpu_blocks = self.block_manager.get_num_free_gpu_blocks()
-                self.gpu_cache_usage.append(
+                self.stats.gpu_cache_usage.append(
                     (self.num_gpu_blocks - num_free_gpu_blocks) / self.num_gpu_blocks)
                 num_free_cpu_blocks = self.block_manager.get_num_free_cpu_blocks()
-                self.cpu_cache_usage.append(
+                self.stats.cpu_cache_usage.append(
                     (self.num_cpu_blocks - num_free_cpu_blocks) / self.num_cpu_blocks)
 
         return (blocks_to_swap_in,
@@ -418,28 +407,50 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
 
+    def reset_stats(self) -> None:
+        self.stats.reset()
+
     def save_stats(
         self,
         output_dir: str,
     ) -> None:
         assert self.collect_stats, 'Statistics collection is disabled.'
-        with open(os.path.join(output_dir, 'timestamps.pkl'), 'wb') as f:
-            pickle.dump(self.timestamps, f)
-        with open(os.path.join(output_dir, 'input_lens.pkl'), 'wb') as f:
-            pickle.dump(self.input_lens, f)
-        with open(os.path.join(output_dir, 'swap_out_lens.pkl'), 'wb') as f:
-            pickle.dump(self.swap_out_lens, f)
-        with open(os.path.join(output_dir, 'swap_in_lens.pkl'), 'wb') as f:
-            pickle.dump(self.swap_in_lens, f)
-        with open(os.path.join(output_dir, 'num_preemption.pkl'), 'wb') as f:
-            pickle.dump(self.num_preemption, f)
-        with open(os.path.join(output_dir, 'num_waiting.pkl'), 'wb') as f:
-            pickle.dump(self.num_waiting, f)
-        with open(os.path.join(output_dir, 'num_running.pkl'), 'wb') as f:
-            pickle.dump(self.num_running, f)
-        with open(os.path.join(output_dir, 'num_swapped.pkl'), 'wb') as f:
-            pickle.dump(self.num_swapped, f)
-        with open(os.path.join(output_dir, 'gpu_cache_usage.pkl'), 'wb') as f:
-            pickle.dump(self.gpu_cache_usage, f)
-        with open(os.path.join(output_dir, 'cpu_cache_usage.pkl'), 'wb') as f:
-            pickle.dump(self.cpu_cache_usage, f)
+        self.stats.save(output_dir)
+
+
+class Stats:
+
+    def __init__(self) -> None:
+        self.start_time: float = time.time()
+        self.timestamps: List[float] = []
+        self.input_lens: List[int] = []
+        self.swap_out_lens: List[int] = []
+        self.swap_in_lens: List[int] = []
+        self.num_preemption: List[int] = []
+        self.num_waiting: List[int] = []
+        self.num_running: List[int] = []
+        self.num_swapped: List[int] = []
+        self.gpu_cache_usage: List[float] = []
+        self.cpu_cache_usage: List[float] = []
+
+    def reset(self) -> None:
+        self.__init__()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'start_time': self.start_time,
+            'timestamps': self.timestamps,
+            'input_lens': self.input_lens,
+            'swap_out_lens': self.swap_out_lens,
+            'swap_in_lens': self.swap_in_lens,
+            'num_preemption': self.num_preemption,
+            'num_waiting': self.num_waiting,
+            'num_running': self.num_running,
+            'num_swapped': self.num_swapped,
+            'gpu_cache_usage': self.gpu_cache_usage,
+            'cpu_cache_usage': self.cpu_cache_usage,
+        }
+
+    def save(self, output_dir: str) -> None:
+        with open(os.path.join(output_dir, 'stats.pkl'), 'wb') as f:
+            pickle.dump(self.to_dict(), f)
