@@ -113,6 +113,8 @@ class Worker:
             seq_groups.append((seq_ids, sampling_params))
             seq_logprobs.update(input_seq_group.seq_logprobs)
 
+            # In Orca, we treat all sequences in a sequence group as if they
+            # were independent.
             for seq_id in seq_ids:
                 prompt_tokens = input_seq_group.input_tokens[seq_id]
                 prompt_len = len(prompt_tokens)
