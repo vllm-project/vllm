@@ -7,7 +7,7 @@ from cacheflow.sampling_params import SamplingParams
 
 
 class SequenceStatus(enum.Enum):
-    PENDING = enum.auto()
+    WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()
     FINISHED = enum.auto()
@@ -28,9 +28,10 @@ class Sequence:
         # Initialize the logical token blocks with the given token ids.
         self.add(token_ids)
 
-        self.status = SequenceStatus.PENDING
+        self.prompt_len = len(token_ids)
+        self.status = SequenceStatus.WAITING
         self.output_logprobs: List[Dict[int, float]] = []
-        self.cumulative_logprobs = 1.0
+        self.cumulative_logprobs = 0.0
 
     def add_block(self) -> None:
         block = LogicalTokenBlock(
@@ -89,10 +90,12 @@ class SequenceGroup:
         group_id: int,
         seqs: List[Sequence],
         max_num_steps: int,
+        arrival_time: float,
     ) -> None:
         self.group_id = group_id
         self.seqs = seqs
         self.max_num_steps = max_num_steps
+        self.arrival_time = arrival_time
 
     def get_seqs(
         self,
@@ -160,3 +163,9 @@ class SequenceOutputs:
                 f'parent_seq_id={self.parent_seq_id}, '
                 f'output_token={self.output_token}), '
                 f'logprobs={self.logprobs}')
+
+    def __eq__(self, other: 'SequenceOutputs') -> bool:
+        return (self.seq_id == other.seq_id and
+                self.parent_seq_id == other.parent_seq_id and
+                self.output_token == other.output_token and
+                self.logprobs == other.logprobs)

@@ -1,7 +1,11 @@
-from typing import Dict, List, Tuple
+import enum
+import os
+import pickle
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from cacheflow.master.block_manager import BuddyBlockSpaceManager
-from cacheflow.master.frontend import Frontend
+from cacheflow.master.policy import PolicyFactory
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence
 from cacheflow.sequence import SequenceGroup
@@ -10,25 +14,40 @@ from cacheflow.sequence import SequenceOutputs
 from cacheflow.sequence import SequenceStatus
 
 
+class PreemptionMode(enum.Enum):
+    """Preemption modes.
+
+    1. Swapping: Swap out the blocks of the preempted sequences to CPU memory
+    and swap them back in when the sequences are resumed.
+    2. Recomputation: Discard the blocks of the preempted sequences and
+    recompute them when the sequences are resumed, treating the sequences as
+    new prompts.
+    """
+    SWAP = enum.auto()
+    RECOMPUTE = enum.auto()
+
+
 class Scheduler:
 
     def __init__(
         self,
-        frontend: Frontend,
         controllers: List,
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         max_num_batched_tokens: int,
         len_estimator: str,
+        collect_stats: bool,
     ) -> None:
-        self.frontend = frontend
         self.controllers = controllers
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
         self.num_cpu_blocks = num_cpu_blocks
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.collect_stats = collect_stats
 
+        # Instantiate the scheduling policy.
+        self.policy = PolicyFactory.get_policy(policy_name='fcfs')
         # Create the block space manager.
         self.block_manager = BuddyBlockSpaceManager(
             block_size=block_size,
@@ -37,114 +56,161 @@ class Scheduler:
             len_estimator=len_estimator,
         )
 
-        # Running sequence groups (FIFO).
+        # Sequence groups in the WAITING state.
+        self.waiting: List[SequenceGroup] = []
+        # Sequence groups in the RUNNING state.
         self.running: List[SequenceGroup] = []
         # Mapping: group_id -> num_steps.
         self.num_steps: Dict[int, int] = {}
         # Mapping: group_id -> sampling params.
         self.sampling_params: Dict[int, SamplingParams] = {}
-
-        # Swapped sequence groups (LIFO).
+        # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
-        # Pending sequence groups (FIFO).
-        self.pending: List[SequenceGroup] = []
 
-        # Performance stats.
-        self.input_lens: List[Tuple[int, int]] = []
-        self.swap_out_lens: List[int] = []
-        self.swap_in_lens: List[int] = []
-        self.num_pendings: List[int] = []
-        self.next_seq_lens: List[Tuple[int, int]] = []
-        self.gpu_blocks_usage: List[float] = []
-        self.cpu_blocks_usage: List[float] = []
-        self.requests_received: List[int] = []
+        # Performance-related statistics.
+        self.stats = Stats()
 
-    def _fetch_inputs(self) -> None:
-        inputs = self.frontend.get_inputs()
-        for seq_group, sampling_params in inputs:
-            self.pending.append(seq_group)
+    def add_sequence_groups(
+        self,
+        seq_groups: List[Tuple[SequenceGroup, SamplingParams]],
+    ) -> None:
+        # Add sequence groups to the waiting queue.
+        for seq_group, sampling_params in seq_groups:
+            self.waiting.append(seq_group)
             self.sampling_params[seq_group.group_id] = sampling_params
 
-    def _free_seq(self, seq: Sequence) -> None:
-        seq.status = SequenceStatus.FINISHED
-        self.block_manager.free(seq)
-
-    def _allocate(self, seq_group: SequenceGroup) -> None:
-        self.block_manager.allocate(seq_group)
-        for seq in seq_group.seqs:
-            seq.status = SequenceStatus.RUNNING
-        self.running.append(seq_group)
-        # FIXME(woosuk): Support interactive generation.
-        self.num_steps[seq_group.group_id] = 0
-
-    def _append(
+    def _schedule(
         self,
-        seq_group: SequenceGroup,
-        blocks_to_copy: Dict[int, List[int]],
-    ) -> None:
-        for seq in seq_group.seqs:
-            if seq.status == SequenceStatus.FINISHED:
-                continue
-            ret = self.block_manager.append(seq)
-            if ret is not None:
-                src_block, dst_block = ret
-                if src_block in blocks_to_copy:
-                    blocks_to_copy[src_block].append(dst_block)
-                else:
-                    blocks_to_copy[src_block] = [dst_block]
-
-    def step(self) -> None:
+    ) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, List[int]], List[int]]:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
 
-        # 1. Reserve new slots for the running sequences.
-        # NOTE: Here we implicitly assume FCFS scheduling.
-        for i, seq_group in enumerate(self.running):
-            assert self.block_manager.can_append(seq_group)
+        # Fix the current time.
+        now = time.time()
+
+        # NOTE(woosuk): We prioritize the sequence groups in the RUNNING state
+        # in order to minimize the preemption overheads.
+        # Preemption happens only when there is no available slot to keep all
+        # the sequence groups in the RUNNING state.
+        # In this case, the policy is responsible for deciding which sequence
+        # groups to preempt.
+        self.running = self.policy.sort_by_priority(now, self.running)
+
+        # Reserve new token slots for the running sequence groups.
+        running: List[SequenceGroup] = []
+        preempted: List[SequenceGroup] = []
+        while self.running:
+            seq_group = self.running.pop(0)
+            while not self.block_manager.can_append(seq_group):
+                if self.running:
+                    # Preempt the lowest-priority sequence groups.
+                    victim_seq_group = self.running.pop(-1)
+                    self._preempt(victim_seq_group, blocks_to_swap_out)
+                    preempted.append(victim_seq_group)
+                else:
+                    # No other sequence groups can be preempted.
+                    # Preempt the current sequence group.
+                    self._preempt(seq_group, blocks_to_swap_out)
+                    preempted.append(seq_group)
+                    break
+            else:
+                # Append new slots to the sequence group.
+                self._append(seq_group, blocks_to_copy)
+                running.append(seq_group)
+        self.running = running
+
+        # Swap in the sequence groups in the SWAPPED state if possible.
+        self.swapped = self.policy.sort_by_priority(now, self.swapped)
+        while self.swapped:
+            seq_group = self.swapped[0]
+            # If the sequence group has been preempted in this step, stop.
+            if seq_group in preempted:
+                break
+            # If the sequence group cannot be swapped in, stop.
+            if not self.block_manager.can_swap_in(seq_group):
+                break
+
+            seq_group = self.swapped.pop(0)
+            self._swap_in(seq_group, blocks_to_swap_in)
             self._append(seq_group, blocks_to_copy)
+            self.running.append(seq_group)
 
-        assert not (blocks_to_swap_in or blocks_to_swap_out)
-
-        num_generation_tokens = sum(
+        num_batched_tokens = sum(
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
             for seq_group in self.running
         )
-        num_batched_tokens = num_generation_tokens
-        num_requests = self.frontend.get_num_requests()
 
-        # 3. Join new sequences if possible.
-        # NOTE: Here we implicitly assume FCFS scheduling.
-        # TODO(woosuk): Add a batching policy to control the batch size.
-        self._fetch_inputs()
+        # Join waiting sequences if possible.
+        prompt_group_ids: List[int] = []
+        # NOTE(woosuk): The sequence groups in the SWAPPED state are strictly
+        # prioritized over the sequence groups in the WAITING state.
+        # This is because we want to bound the amount of CPU memory taken by
+        # the swapped sequence groups.
         if not self.swapped:
-            for i, seq_group in enumerate(self.pending):
-                num_prompt_tokens = seq_group.seqs[0].get_len() * seq_group.num_seqs()
-                if self.block_manager.can_allocate(seq_group):
-                    if (num_batched_tokens + num_prompt_tokens
-                        <= self.max_num_batched_tokens):
-                        self._allocate(seq_group)
-                        num_batched_tokens += num_prompt_tokens
-                        continue
+            self.waiting = self.policy.sort_by_priority(now, self.waiting)
+            while self.waiting:
+                seq_group = self.waiting[0]
+                # If the sequence group has been preempted in this step, stop.
+                if seq_group in preempted:
+                    break
+                # If the sequence group cannot be allocated, stop.
+                if not self.block_manager.can_allocate(seq_group):
+                    break
 
-                self.pending = self.pending[i:]
-                break
-            else:
-                self.pending.clear()
+                # If the number of batched tokens exceeds the limit, stop.
+                num_prompt_tokens = seq_group.seqs[0].get_len()
+                if (num_batched_tokens + num_prompt_tokens
+                    > self.max_num_batched_tokens):
+                    break
 
-        if num_batched_tokens == 0:
-            assert not self.pending
+                seq_group = self.waiting.pop(0)
+                self._allocate(seq_group)
+                self.running.append(seq_group)
+                num_batched_tokens += num_prompt_tokens
+                prompt_group_ids.append(seq_group.group_id)
 
-        # 4. Create input data structures.
+        if self.collect_stats:
+            if self.running or blocks_to_swap_in or blocks_to_swap_out:
+                self.stats.timestamps.append(now - self.stats.start_time)
+                self.stats.input_lens.append(num_batched_tokens)
+                self.stats.swap_out_lens.append(len(blocks_to_swap_out) * self.block_size)
+                self.stats.swap_in_lens.append(len(blocks_to_swap_in) * self.block_size)
+                self.stats.num_preemption.append(len(preempted))
+                self.stats.num_swapped.append(len(self.swapped))
+                self.stats.num_running.append(len(self.running))
+                self.stats.num_waiting.append(len(self.waiting))
+
+                num_free_gpu_blocks = self.block_manager.get_num_free_gpu_blocks()
+                self.stats.gpu_cache_usage.append(
+                    (self.num_gpu_blocks - num_free_gpu_blocks) / self.num_gpu_blocks)
+                num_free_cpu_blocks = self.block_manager.get_num_free_cpu_blocks()
+                self.stats.cpu_cache_usage.append(
+                    (self.num_cpu_blocks - num_free_cpu_blocks) / self.num_cpu_blocks)
+
+        return (blocks_to_swap_in,
+                blocks_to_swap_out,
+                blocks_to_copy,
+                prompt_group_ids)
+
+    def step(self) -> List[SequenceGroup]:
+        # Schedule sequence groups.
+        # This function call changes the internal states of the scheduler
+        # such as self.running, self.swapped, and self.waiting.
+        scheduler_output = self._schedule()
+        blocks_to_swap_in = scheduler_output[0]
+        blocks_to_swap_out = scheduler_output[1]
+        blocks_to_copy = scheduler_output[2]
+        prompt_group_ids = scheduler_output[3]
+
+        # Create input data structures.
         input_seq_groups: List[SequenceGroupInputs] = []
+        updated_seq_groups: List[SequenceGroup] = self.running.copy()
+
         for seq_group in self.running:
             group_id = seq_group.group_id
-            num_steps = self.num_steps[group_id]
-
-            # NOTE(woosuk): We assume that the number of steps is 0
-            # for the prompt sequences.
-            is_prompt = num_steps == 0
+            is_prompt = group_id in prompt_group_ids
 
             input_tokens: Dict[int, List[int]] = {}
             seq_logprobs: Dict[int, float] = {}
@@ -172,34 +238,18 @@ class Scheduler:
             )
             input_seq_groups.append(input_seq_group)
 
-        # 5. Execute the first stage of the pipeline.
-        if (input_seq_groups or blocks_to_swap_in or blocks_to_swap_out):
-            # Collect performance statistics.
-            num_prompt_tokens = num_batched_tokens - num_generation_tokens
-            self.input_lens.append((num_prompt_tokens, num_generation_tokens))
-            self.swap_out_lens.append(len(blocks_to_swap_out) * self.block_size)
-            self.swap_in_lens.append(len(blocks_to_swap_in) * self.block_size)
-            self.num_pendings.append(len(self.pending))
-            if self.pending:
-                seq_group = self.pending[0]
-                group_id = seq_group.group_id
-                next_seq_input_len = seq_group.seqs[0].get_len()
-                next_seq_output_len = self.sampling_params[group_id].max_num_steps
-                self.next_seq_lens.append((next_seq_input_len, next_seq_output_len))
-            else:
-                self.next_seq_lens.append((0, 0))
-            free_gpu_blocks = self.block_manager.gpu_allocator.get_num_free_blocks()
-            self.gpu_blocks_usage.append(
-                (self.num_gpu_blocks - free_gpu_blocks) / self.num_gpu_blocks)
-            self.cpu_blocks_usage.append(0)
-            self.requests_received.append(num_requests)
-
+        # Execute the first stage of the pipeline.
+        if input_seq_groups or blocks_to_swap_in or blocks_to_swap_out:
+            # Swap in and swap out should never happen at the same time.
+            assert not (blocks_to_swap_in and blocks_to_swap_out)
             self.controllers[0].execute_stage(
                 input_seq_groups,
-                blocks_to_swap_in,
-                blocks_to_swap_out,
-                blocks_to_copy,
+                blocks_to_swap_in=blocks_to_swap_in,
+                blocks_to_swap_out=blocks_to_swap_out,
+                blocks_to_copy=blocks_to_copy,
             )
+
+        return updated_seq_groups
 
     def post_step(
         self,
@@ -250,13 +300,159 @@ class Scheduler:
         running: List[SequenceGroup] = []
         for seq_group in self.running:
             if seq_group.is_finished():
-                self._return(seq_group)
+                self._free_seq_group(seq_group)
             else:
                 running.append(seq_group)
         self.running = running
 
-    def _return(self, seq_group: SequenceGroup) -> None:
+    def _allocate(self, seq_group: SequenceGroup) -> None:
+        self.block_manager.allocate(seq_group)
+        for seq in seq_group.seqs:
+            seq.status = SequenceStatus.RUNNING
+        # FIXME(woosuk): Support interactive generation.
+        if seq_group.group_id not in self.num_steps:
+            self.num_steps[seq_group.group_id] = 0
+
+    def _append(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> None:
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            ret = self.block_manager.append(seq)
+            if ret is not None:
+                src_block, dst_block = ret
+                if src_block in blocks_to_copy:
+                    blocks_to_copy[src_block].append(dst_block)
+                else:
+                    blocks_to_copy[src_block] = [dst_block]
+
+    def _preempt(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_out: Dict[int, int],
+        preemption_mode: Optional[PreemptionMode] = None,
+    ) -> None:
+        # If preemption mode is not specified, we determine the mode as follows:
+        # We use recomputation by default since it incurs lower overhead than
+        # swapping. However, when the sequence group has multiple sequences
+        # (e.g., beam search), recomputation is not supported. In such a case,
+        # we use swapping instead.
+        # FIXME(woosuk): This makes our scheduling policy a bit bizarre.
+        # As swapped sequences are prioritized over waiting sequences,
+        # sequence groups with multiple sequences are implicitly prioritized
+        # over sequence groups with a single sequence.
+        # TODO(woosuk): Support recomputation for sequence groups with multiple
+        # sequences. This may require a more sophisticated CUDA kernel.
+        if preemption_mode is None:
+            seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+            if len(seqs) == 1:
+                preemption_mode = PreemptionMode.RECOMPUTE
+            else:
+                preemption_mode = PreemptionMode.SWAP
+        if preemption_mode == PreemptionMode.RECOMPUTE:
+            self._preempt_by_recompute(seq_group)
+        elif preemption_mode == PreemptionMode.SWAP:
+            self._preempt_by_swap(seq_group, blocks_to_swap_out)
+        else:
+            assert False, 'Invalid preemption mode.'
+
+    def _preempt_by_recompute(
+        self,
+        seq_group: SequenceGroup,
+    ) -> None:
+        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        assert len(seqs) == 1
+        for seq in seqs:
+            seq.status = SequenceStatus.WAITING
+            self.block_manager.free(seq)
+        self.waiting.append(seq_group)
+
+    def _preempt_by_swap(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_out: Dict[int, int],
+    ) -> None:
+        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        for seq in seqs:
+            seq.status = SequenceStatus.SWAPPED
+        self._swap_out(seq_group, blocks_to_swap_out)
+        self.swapped.append(seq_group)
+
+    def _free_seq(self, seq: Sequence) -> None:
+        seq.status = SequenceStatus.FINISHED
+        self.block_manager.free(seq)
+
+    def _free_seq_group(self, seq_group: SequenceGroup) -> None:
         group_id = seq_group.group_id
         del self.num_steps[group_id]
         del self.sampling_params[group_id]
-        self.frontend.print_response(seq_group)
+
+    def _swap_in(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_in: Dict[int, int],
+    ) -> None:
+        mapping = self.block_manager.swap_in(seq_group)
+        blocks_to_swap_in.update(mapping)
+        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+            seq.status = SequenceStatus.RUNNING
+
+    def _swap_out(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_out: Dict[int, int],
+    ) -> None:
+        assert self.block_manager.can_swap_out(seq_group)
+        mapping = self.block_manager.swap_out(seq_group)
+        blocks_to_swap_out.update(mapping)
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            seq.status = SequenceStatus.SWAPPED
+
+    def reset_stats(self) -> None:
+        self.stats.reset()
+
+    def save_stats(
+        self,
+        output_dir: str,
+    ) -> None:
+        assert self.collect_stats, 'Statistics collection is disabled.'
+        self.stats.save(output_dir)
+
+
+class Stats:
+
+    def __init__(self) -> None:
+        self.start_time: float = time.time()
+        self.timestamps: List[float] = []
+        self.input_lens: List[int] = []
+        self.swap_out_lens: List[int] = []
+        self.swap_in_lens: List[int] = []
+        self.num_preemption: List[int] = []
+        self.num_waiting: List[int] = []
+        self.num_running: List[int] = []
+        self.num_swapped: List[int] = []
+        self.gpu_cache_usage: List[float] = []
+        self.cpu_cache_usage: List[float] = []
+
+    def reset(self) -> None:
+        self.__init__()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'start_time': self.start_time,
+            'timestamps': self.timestamps,
+            'input_lens': self.input_lens,
+            'swap_out_lens': self.swap_out_lens,
+            'swap_in_lens': self.swap_in_lens,
+            'num_preemption': self.num_preemption,
+            'num_waiting': self.num_waiting,
+            'num_running': self.num_running,
+            'num_swapped': self.num_swapped,
+            'gpu_cache_usage': self.gpu_cache_usage,
+            'cpu_cache_usage': self.cpu_cache_usage,
+        }
+
+    def save(self, output_dir: str) -> None:
+        with open(os.path.join(output_dir, 'stats.pkl'), 'wb') as f:
+            pickle.dump(self.to_dict(), f)

@@ -223,3 +223,9 @@ class BuddyBlockSpaceManager:
         num_blocks = len(seq.logical_token_blocks)
         block_table = block_table[:num_blocks]
         return [block.block_number for block in block_table]
+
+    def get_num_free_gpu_blocks(self) -> int:
+        return self.gpu_allocator.get_num_free_blocks()
+
+    def get_num_free_cpu_blocks(self) -> int:
+        return self.cpu_allocator.get_num_free_blocks()

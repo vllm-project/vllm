@@ -6,12 +6,13 @@ import torch.nn as nn
 from cacheflow.models import InputMetadata
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceOutputs
+from cacheflow.parallel_utils.tensor_parallel import gather_from_tensor_model_parallel_region
 
 
 class Sampler(nn.Module):
 
     def __init__(self) -> None:
-        super(Sampler, self).__init__()
+        super().__init__()
 
     def forward(
         self,
@@ -24,6 +25,7 @@ class Sampler(nn.Module):
 
         # Get the logits for the next tokens.
         logits = torch.matmul(hidden_states, embedding.t())
+        logits = gather_from_tensor_model_parallel_region(logits)
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(input_metadata)
@@ -34,6 +36,7 @@ class Sampler(nn.Module):
             # Use in-place division to avoid creating a new tensor.
             logits.div_(t.unsqueeze(dim=1))
 
+        # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities (before applying top-p).
