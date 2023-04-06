@@ -23,7 +23,7 @@ def plot_stats(output_dir: str):
 
     # Draw one figure for each stat.
     num_stats = len(STATS)
-    COLORS = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
+    COLORS = ['b', 'g', 'r', 'c', 'm', 'y', 'k', 'orange', 'purple', 'pink', 'brown', 'gray']
     fig, axs = plt.subplots(num_stats, 1, figsize=(10, 2 * num_stats))
     for i, stat in enumerate(STATS):
         with open(os.path.join(output_dir, f'{stat}.pkl'), 'rb') as f:
