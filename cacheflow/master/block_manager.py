@@ -228,4 +228,4 @@ class BuddyBlockSpaceManager:
         return self.gpu_allocator.get_num_free_blocks()
 
     def get_num_free_cpu_blocks(self) -> int:
-        return self.cpu_allocator.get_num_free_blocks()
+        return self.num_total_cpu_blocks
