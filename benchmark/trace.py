@@ -25,17 +25,18 @@ def generate_text_completion_requests(
     random.seed(seed)
     np.random.seed(seed)
 
-    # Generate timesteps for requests using Poisson distribution.
+    # Generate timestamps for requests using Poisson distribution.
     lam = request_rate * (time_quantum / 1000)
     quantums_per_sec = 1000 / time_quantum
     arrival_times = np.random.poisson(
         lam=lam, size=int(duration * quantums_per_sec))
-    timesteps = []
+    timestamps = []
     for i, n in enumerate(arrival_times):
-        timesteps += [i * (time_quantum / 1000)] * n
+        timestamps += [i * (time_quantum / 1000)] * n
+    print(timestamps)
 
     # Load and shuffle the dataset.
-    num_requests = len(timesteps)
+    num_requests = len(timestamps)
     with open(dataset, 'rb') as f:
         data = pickle.load(f)
 
@@ -54,7 +55,7 @@ def generate_text_completion_requests(
         data += filtered
     data = data[:num_requests]
     # Shuffle the data.
-    assert len(data) == len(timesteps)
+    assert len(data) == len(timestamps)
     random.shuffle(data)
 
     random_sampling_params_dict = {
@@ -78,7 +79,7 @@ def generate_text_completion_requests(
     requests = []
     assert n1 + n2 + n4 + n8 + n2_beam + n4_beam + n8_beam == 1.0
     cum_sum = 0
-    for timestep, pair in zip(timesteps, data):
+    for timestamp, pair in zip(timestamps, data):
         input_tokens, output_len = pair
         if cum_sum < n1 * num_requests:
             sampling_params = SamplingParams(
@@ -104,5 +105,5 @@ def generate_text_completion_requests(
         else:
             raise ValueError('Invalid request ratio.')
         cum_sum += 1
-        requests.append((timestep, input_tokens, sampling_params))
+        requests.append((timestamp, input_tokens, sampling_params))
     return requests
