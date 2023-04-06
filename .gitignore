@@ -4,3 +4,6 @@
 *.eggs/
 *.so
 build/
+
+*.pkl
+**/log.txt
