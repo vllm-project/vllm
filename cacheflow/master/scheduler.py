@@ -123,6 +123,7 @@ class Scheduler:
 
         # Swap in the sequence groups in the SWAPPED state if possible.
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
+        assert not self.swapped, 'In Orca, swapping never happens.'
         while self.swapped:
             seq_group = self.swapped[0]
             # If the sequence group has been preempted in this step, stop.
@@ -333,6 +334,7 @@ class Scheduler:
         blocks_to_swap_out: Dict[int, int],
         preemption_mode: Optional[PreemptionMode] = None,
     ) -> None:
+        assert False, 'In Orca, preemption never happens.'
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
         # swapping. However, when the sequence group has multiple sequences
