@@ -103,8 +103,9 @@ def main(args: argparse.Namespace):
         now = time.time()
         while requests:
             if requests[0][0] <= now - start_time:
-                _, input_tokens, sampling_params = requests.pop(0)
-                frontend._add_query(input_tokens, sampling_params)
+                request_time, input_tokens, sampling_params = requests.pop(0)
+                frontend._add_query(
+                    input_tokens, sampling_params, arrival_time=now + request_time)
             else:
                 break
         server.add_sequence_groups(frontend.get_inputs())
@@ -216,7 +217,7 @@ if __name__ == '__main__':
             f'duration-{args.duration}',
             f'seed{args.seed}',
         )
-        os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     # Set up logging.
     logging.basicConfig(
