@@ -4,3 +4,4 @@
 *.eggs/
 *.so
 build/
+.idea
