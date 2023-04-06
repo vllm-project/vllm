@@ -270,8 +270,6 @@ class Scheduler:
                 output = seq_outputs[seq.seq_id]
                 if seq.seq_id != output.parent_seq_id:
                     # The sequence is a fork of the parent sequence (beam search).
-                    # Free the current sequence.
-                    self.block_manager.free(seq)
                     # Fork the parent sequence.
                     parent_seq = seq_group.find(output.parent_seq_id)
                     parent_seq.fork(seq)
@@ -320,13 +318,12 @@ class Scheduler:
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            ret = self.block_manager.append(seq)
-            if ret is not None:
-                src_block, dst_block = ret
+            mapping = self.block_manager.append(seq)
+            for src_block, dst_blocks in mapping.items():
                 if src_block in blocks_to_copy:
-                    blocks_to_copy[src_block].append(dst_block)
+                    blocks_to_copy[src_block] += dst_blocks
                 else:
-                    blocks_to_copy[src_block] = [dst_block]
+                    blocks_to_copy[src_block] = dst_blocks
 
     def _preempt(
         self,

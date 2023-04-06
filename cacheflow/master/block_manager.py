@@ -155,6 +155,9 @@ class BuddyBlockSpaceManager:
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
+        # Mapping src physical block number -> List[dst physical block number].
+        self.forked: Dict[int, List[int]] = {}
+
     def _oracle(self, seq_group: SequenceGroup) -> int:
         return seq_group.max_num_steps
 
@@ -192,11 +195,24 @@ class BuddyBlockSpaceManager:
     def can_append(self, seq_group: SequenceGroup) -> bool:
         return True
 
-    def append(self, seq: Sequence) -> Optional[Tuple[int, int]]:
-        return None
+    def append(self, seq: Sequence) -> Dict[int, List[int]]:
+        ret: Dict[int, List[int]] = {}
+        block_table = self.block_tables[seq.seq_id]
+        for block in block_table:
+            if block.block_number in self.forked:
+                assert block.block_number not in ret
+                ret[block.block_number] = self.forked[block.block_number]
+                del self.forked[block.block_number]
+        return ret
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
-        raise NotImplementedError()
+        src_block_table = self.block_tables[parent_seq.seq_id]
+        dst_block_table = self.block_tables[child_seq.seq_id]
+        for src_block, dst_block in zip(src_block_table, dst_block_table):
+            if src_block.block_number in self.forked:
+                self.forked[src_block.block_number].append(dst_block.block_number)
+            else:
+                self.forked[src_block.block_number] = [dst_block.block_number]
 
     def can_swap_in(self, seq_group: SequenceGroup) -> bool:
         return False
@@ -207,6 +223,9 @@ class BuddyBlockSpaceManager:
     def _free_block_table(self, block_table: BlockTable) -> None:
         block = block_table[0]
         self.gpu_allocator.free(block.block_number)
+        for block in block_table:
+            if block.block_number in self.forked:
+                del self.forked[block.block_number]
 
     def free(self, seq: Sequence) -> None:
         block_table = self.block_tables[seq.seq_id]
