@@ -66,9 +66,12 @@ class Scheduler:
         self.swapped: List[SequenceGroup] = []
 
         # Performance-related statistics.
-        self.input_lens: List[Tuple[int, int]] = []
+        self.start_time: Optional[float] = None
+        self.timestamps: List[float] = []
+        self.input_lens: List[int] = []
         self.swap_out_lens: List[int] = []
         self.swap_in_lens: List[int] = []
+        self.num_preemption: List[int] = []
         self.num_waiting: List[int] = []
         self.num_running: List[int] = []
         self.num_swapped: List[int] = []
@@ -178,9 +181,12 @@ class Scheduler:
 
         if self.collect_stats:
             if self.running or blocks_to_swap_in or blocks_to_swap_out:
+                self.start_time = now if self.start_time is None else self.start_time
+                self.timestamps.append(now - self.start_time)
                 self.input_lens.append(num_batched_tokens)
                 self.swap_out_lens.append(len(blocks_to_swap_out) * self.block_size)
                 self.swap_in_lens.append(len(blocks_to_swap_in) * self.block_size)
+                self.num_preemption.append(len(preempted))
                 self.num_swapped.append(len(self.swapped))
                 self.num_running.append(len(self.running))
                 self.num_waiting.append(len(self.waiting))
@@ -417,12 +423,16 @@ class Scheduler:
         output_dir: str,
     ) -> None:
         assert self.collect_stats, 'Statistics collection is disabled.'
+        with open(os.path.join(output_dir, 'timestamps.pkl'), 'wb') as f:
+            pickle.dump(self.timestamps, f)
         with open(os.path.join(output_dir, 'input_lens.pkl'), 'wb') as f:
             pickle.dump(self.input_lens, f)
         with open(os.path.join(output_dir, 'swap_out_lens.pkl'), 'wb') as f:
             pickle.dump(self.swap_out_lens, f)
         with open(os.path.join(output_dir, 'swap_in_lens.pkl'), 'wb') as f:
             pickle.dump(self.swap_in_lens, f)
+        with open(os.path.join(output_dir, 'num_preemption.pkl'), 'wb') as f:
+            pickle.dump(self.num_preemption, f)
         with open(os.path.join(output_dir, 'num_waiting.pkl'), 'wb') as f:
             pickle.dump(self.num_waiting, f)
         with open(os.path.join(output_dir, 'num_running.pkl'), 'wb') as f:
