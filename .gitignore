@@ -6,4 +6,5 @@
 build/
 
 *.pkl
+*.png
 **/log.txt
