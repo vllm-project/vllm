@@ -5,7 +5,7 @@ import time
 from typing import List
 
 from tqdm import tqdm
-import numpy as np
+from transformers import AutoConfig
 
 from benchmark.trace import generate_text_completion_requests
 from cacheflow.master.simple_frontend import SimpleFrontend
@@ -132,11 +132,48 @@ def main(args: argparse.Namespace):
         if not (requests or server.has_unfinished_requests()):
             break
     pbar.close()
-
     logger.info('Finish benchmarking. Saving stats.')
     server.scheduler.save_stats(args.output_dir)
-
     logger.info('Done.')
+
+
+def get_model_name(model: str) -> str:
+    OPT_MODELS = [
+        'opt-125m',
+        'opt-350m',
+        'opt-1.3b',
+        'opt-2.7b',
+        'opt-6.7b',
+        'opt-13b',
+        'opt-30b',
+        'opt-60b',
+    ]
+    for opt_model in OPT_MODELS:
+        if opt_model in model:
+            return opt_model
+
+    config = AutoConfig.from_pretrained(model)
+    assert config.model_type == 'llama'
+    hidden_size = config.hidden_size
+    if hidden_size == 4096:
+        return 'llama-7b'
+    elif hidden_size == 5120:
+        return 'llama-13b'
+    elif hidden_size == 6656:
+        return 'llama-30b'
+    elif hidden_size == 8192:
+        return 'llama-65b'
+    else:
+        raise ValueError(f'Unknown model: {model}')
+
+
+def get_dataset_name(dataset: str) -> str:
+    if 'sharegpt' in dataset.lower():
+        return 'sharegpt'
+    elif 'alpaca' in dataset.lower():
+        return 'alpaca'
+    else:
+        raise ValueError(f'Unknown dataset: {dataset}')
 
 
 if __name__ == '__main__':
@@ -159,28 +196,14 @@ if __name__ == '__main__':
     if args.n1 + args.n2 + args.n4 + args.n8 + args.n2_beam + args.n4_beam + args.n8_beam != 1.0:
         raise ValueError('The ratios of requests must sum to 1.')
 
-    MODELS = [
-        'opt-6.7b',
-        'opt-13b',
-        'opt-30b',
-        'opt-60b',
-        'llama-7b',
-        'llama-13b',
-        'llama-30b',
-        'llama-65b',
-    ]
-    for model_name in MODELS:
-        if model_name in args.model:
-            break
-    else:
-        raise ValueError(f'Unknown model name: {args.model}')
-
+    model_name = get_model_name(args.model)
+    dataset_name = get_dataset_name(args.dataset)
     if 'opt' in model_name:
-        if 'opt' not in args.dataset:
-            raise ValueError(f'Invalid dataset: {args.dataset}')
+        if 'opt' not in args.dataset.lower():
+            raise ValueError(f'OPT models can only be used with OPT datasets.')
     elif 'llama' in model_name:
-        if 'llama' not in args.dataset:
-            raise ValueError(f'Invalid dataset: {args.dataset}')
+        if 'llama' not in args.dataset.lower():
+            raise ValueError(f'Llama models can only be used with Llama datasets.')
 
     dataset_name = 'sharegpt' if 'sharegpt' in args.dataset else 'alpaca'
     if args.output_dir is None:
