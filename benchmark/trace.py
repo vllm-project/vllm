@@ -14,8 +14,8 @@ def generate_text_completion_requests(
     seed: int,
     n1: float = 0.0,
     n2: float = 0.0,
+    n3: float = 0.0,
     n4: float = 0.0,
-    n8: float = 0.0,
     n2_beam: float = 0.0,
     n4_beam: float = 0.0,
     n8_beam: float = 0.0,
@@ -76,7 +76,7 @@ def generate_text_completion_requests(
 
     # Generate requests based on the sampling parameter ratio.
     requests = []
-    assert n1 + n2 + n4 + n8 + n2_beam + n4_beam + n8_beam == 1.0
+    assert n1 + n2 + n3 + n4 + n2_beam + n4_beam + n8_beam == 1.0
     cum_sum = 0
     for timestamp, pair in zip(timestamps, data):
         input_tokens, output_len = pair
@@ -86,19 +86,19 @@ def generate_text_completion_requests(
         elif cum_sum < (n1 + n2) * num_requests:
             sampling_params = SamplingParams(
                 n=2, max_num_steps=output_len, **random_sampling_params_dict)
-        elif cum_sum < (n1 + n2 + n4) * num_requests:
+        elif cum_sum < (n1 + n2 + n3) * num_requests:
             sampling_params = SamplingParams(
                 n=4, max_num_steps=output_len, **random_sampling_params_dict)
-        elif cum_sum < (n1 + n2 + n4 + n8) * num_requests:
+        elif cum_sum < (n1 + n2 + n3 + n4) * num_requests:
             sampling_params = SamplingParams(
                 n=8, max_num_steps=output_len, **random_sampling_params_dict)
-        elif cum_sum < (n1 + n2 + n4 + n8 + n2_beam) * num_requests:
+        elif cum_sum < (n1 + n2 + n3 + n4 + n2_beam) * num_requests:
             sampling_params = SamplingParams(
                 n=2, max_num_steps=output_len, **beam_search_params_dict)
-        elif cum_sum < (n1 + n2 + n4 + n8 + n2_beam + n4_beam) * num_requests:
+        elif cum_sum < (n1 + n2 + n3 + n4 + n2_beam + n4_beam) * num_requests:
             sampling_params = SamplingParams(
                 n=4, max_num_steps=output_len, **beam_search_params_dict)
-        elif cum_sum < (n1 + n2 + n4 + n8 + n2_beam + n4_beam + n8_beam) * num_requests:
+        elif cum_sum < (n1 + n2 + n3 + n4 + n2_beam + n4_beam + n8_beam) * num_requests:
             sampling_params = SamplingParams(
                 n=8, max_num_steps=output_len, **beam_search_params_dict)
         else:
