@@ -63,8 +63,8 @@ def main(args: argparse.Namespace):
         args.seed,
         args.n1,
         args.n2,
+        args.n3,
         args.n4,
-        args.n8,
         args.n2_beam,
         args.n4_beam,
         args.n8_beam,
@@ -192,13 +192,13 @@ if __name__ == '__main__':
 
     parser.add_argument('--n1', type=float, help='ratio of requests with n=1', default=0.0)
     parser.add_argument('--n2', type=float, help='ratio of requests with n=2', default=0.0)
+    parser.add_argument('--n3', type=float, help='ratio of requests with n=3', default=0.0)
     parser.add_argument('--n4', type=float, help='ratio of requests with n=4', default=0.0)
-    parser.add_argument('--n8', type=float, help='ratio of requests with n=8', default=0.0)
     parser.add_argument('--n2-beam', type=float, help='ratio of requests with n=2 & beam search', default=0.0)
     parser.add_argument('--n4-beam', type=float, help='ratio of requests with n=4 & beam search', default=0.0)
     parser.add_argument('--n8-beam', type=float, help='ratio of requests with n=8 & beam search', default=0.0)
     args = parser.parse_args()
-    if args.n1 + args.n2 + args.n4 + args.n8 + args.n2_beam + args.n4_beam + args.n8_beam != 1.0:
+    if args.n1 + args.n2 + args.n3 + args.n4 + args.n2_beam + args.n4_beam + args.n8_beam != 1.0:
         raise ValueError('The ratios of requests must sum to 1.')
 
     model_name = get_model_name(args.model)
@@ -216,7 +216,7 @@ if __name__ == '__main__':
             'exp',
             dataset_name,
             f'{model_name}-tp{args.tensor_parallel_size}',
-            f'sample-n1-{args.n1}-n2-{args.n2}-n4-{args.n4}-n8-{args.n8}-n2b-{args.n2_beam}-n4b-{args.n4_beam}-n8b-{args.n8_beam}',
+            f'sample-n1-{args.n1}-n2-{args.n2}-n3-{args.n3}-n4-{args.n4}-n2b-{args.n2_beam}-n4b-{args.n4_beam}-n8b-{args.n8_beam}',
             'cacheflow',
             f'req-rate-{args.request_rate}',
             f'seed{args.seed}',
