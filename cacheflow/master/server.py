@@ -1,5 +1,5 @@
 import argparse
-from typing import List, Tuple, Union
+from typing import List, Tuple
 import random
 
 import ray

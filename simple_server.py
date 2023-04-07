@@ -45,13 +45,9 @@ def main(args: argparse.Namespace):
 
     # Test the following inputs.
     test_inputs = [
-        # ('Ion Stoica is a', {'n': 4, 'use_beam_search': True, 'temperature': 0.0}),
-        # ('UC Berkeley is', {'n': 3, 'temperature': 0.8, 'top_p': 0.99}),
-        # ('The future of cloud computing is', {}),   # Use default parameters.
-
-        ('Ion Stoica is a', {'temperature': 0.7, 'max_num_steps': 256}),
-        ('UC Berkeley is', {'temperature': 0.7, 'max_num_steps': 256}),
-        ('The future of cloud computing is', {'temperature': 0.7, 'max_num_steps': 256}),  # Use default parameters.
+        ('Ion Stoica is a', {'n': 4, 'use_beam_search': True, 'temperature': 0.0}),
+        ('UC Berkeley is', {'n': 3, 'temperature': 0.8, 'top_p': 0.99}),
+        ('The future of cloud computing is', {}),   # Use default parameters.
     ]
     while True:
         if test_inputs:
