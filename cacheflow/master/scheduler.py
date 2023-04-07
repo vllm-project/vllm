@@ -267,7 +267,7 @@ class Scheduler:
                     continue
 
                 if stop_str is not None:
-                    if self.tokenizer.decode(seq.get_token_ids(), skip_special_tokens=True).endswith(stor_str):
+                    if self.tokenizer.decode(seq.get_token_ids(), skip_special_tokens=True).endswith(stop_str):
                         self._free_seq(seq)
                         continue
 
