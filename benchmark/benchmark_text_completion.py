@@ -152,7 +152,7 @@ def get_model_name(model: str) -> str:
         'opt-6.7b',
         'opt-13b',
         'opt-30b',
-        'opt-60b',
+        'opt-66b',
     ]
     for opt_model in OPT_MODELS:
         if opt_model in model:
