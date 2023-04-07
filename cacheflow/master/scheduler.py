@@ -235,7 +235,7 @@ class Scheduler:
             group_id = seq_group.group_id
             self.num_steps[group_id] += 1
             stop_token_ids = self.sampling_params[group_id].stop_token_ids
-            stop_func = self.sampling_params[group_id].stop_func
+            stor_str = self.sampling_params[group_id].stop_str
 
             # Process beam search results before processing the next tokens.
             for seq in seq_group.seqs:
@@ -266,9 +266,8 @@ class Scheduler:
                     self._free_seq(seq)
                     continue
 
-                if stop_func is not None:
-                    if self.tokenizer.decode(seq.get_token_ids(), skip_special_tokens=True).endswith(stop_func):
-                        print(f"hitting the separation symbols: {seq.get_token_ids()[-2:]}.. Stopped!")
+                if stor_str is not None:
+                    if self.tokenizer.decode(seq.get_token_ids(), skip_special_tokens=True).endswith(stor_str):
                         self._free_seq(seq)
                         continue
 

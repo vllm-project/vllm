@@ -13,7 +13,7 @@ class SamplingParams:
         max_num_steps: int,
         num_logprobs: int,
         context_window_size: Optional[int],
-        stop_func=None
+        stop_str=None
     ) -> None:
         if n < 1:
             raise ValueError(f'n must be at least 1, got {n}.')
@@ -60,7 +60,7 @@ class SamplingParams:
         self.max_num_steps = max_num_steps
         self.num_logprobs = num_logprobs
         self.context_window_size = context_window_size
-        self.stop_func = stop_func
+        self.stop_str = stop_str
 
     def __repr__(self) -> str:
         return (f'SamplingParams(n={self.n}, '
