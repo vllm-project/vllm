@@ -36,6 +36,7 @@ class Scheduler:
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         max_num_batched_tokens: int,
+        max_num_sequences: int,
         collect_stats: bool,
     ) -> None:
         self.controllers = controllers
@@ -43,6 +44,7 @@ class Scheduler:
         self.num_gpu_blocks = num_gpu_blocks
         self.num_cpu_blocks = num_cpu_blocks
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.max_num_sequences = max_num_sequences
         self.collect_stats = collect_stats
 
         # Instantiate the scheduling policy.
@@ -130,6 +132,12 @@ class Scheduler:
             if not self.block_manager.can_swap_in(seq_group):
                 break
 
+            # The total number of sequences in the RUNNING state should not
+            # exceed the maximum number of sequences.
+            num_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
+            if len(self.running) + num_seqs > self.max_num_sequences:
+                break
+
             seq_group = self.swapped.pop(0)
             self._swap_in(seq_group, blocks_to_swap_in)
             self._append(seq_group, blocks_to_copy)
@@ -161,6 +169,12 @@ class Scheduler:
                 num_prompt_tokens = seq_group.seqs[0].get_len()
                 if (num_batched_tokens + num_prompt_tokens
                     > self.max_num_batched_tokens):
+                    break
+
+                # The total number of sequences in the RUNNING state should not
+                # exceed the maximum number of sequences.
+                num_seqs = seq_group.num_seqs(status=SequenceStatus.WAITING)
+                if len(self.running) + num_seqs > self.max_num_sequences:
                     break
 
                 seq_group = self.waiting.pop(0)
