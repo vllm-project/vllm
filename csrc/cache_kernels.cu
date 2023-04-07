@@ -43,33 +43,93 @@ void swap_blocks(
   }
 }
 
+namespace cacheflow {
+
+// Grid: (num_layers, num_pairs)
+template<typename scalar_t>
+__global__ void copy_blocks_kernel(
+  int64_t* key_cache_ptrs,
+  int64_t* value_cache_ptrs,
+  const int* __restrict__ block_mapping,
+  const int numel_per_block) {
+  const int layer_idx = blockIdx.x;
+  const int pair_idx = blockIdx.y;
+
+  scalar_t* key_cache = reinterpret_cast<scalar_t*>(key_cache_ptrs[layer_idx]);
+  scalar_t* value_cache = reinterpret_cast<scalar_t*>(value_cache_ptrs[layer_idx]);
+  int src_block_number = block_mapping[2 * pair_idx];
+  int dst_block_number = block_mapping[2 * pair_idx + 1];
+
+  const int src_block_offset = src_block_number * numel_per_block;
+  const int dst_block_offset = dst_block_number * numel_per_block;
+  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
+    int src_offset = src_block_offset + i;
+    int dst_offset = dst_block_offset + i;
+    key_cache[dst_offset] = key_cache[src_offset];
+  }
+  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
+    int src_offset = src_block_offset + i;
+    int dst_offset = dst_block_offset + i;
+    value_cache[dst_offset] = value_cache[src_offset];
+  }
+}
+
+} // namespace cacheflow
+
 void copy_blocks(
-  torch::Tensor& src,
-  torch::Tensor& dst,
+  std::vector<torch::Tensor>& key_caches,
+  std::vector<torch::Tensor>& value_caches,
   const std::map<int64_t, std::vector<int64_t>>& block_mapping) {
-  torch::Device src_device = src.device();
-  torch::Device dst_device = dst.device();
-  assert(src_device.is_cuda() && dst_device.is_cuda());
-  cudaMemcpyKind memcpy_type = cudaMemcpyDeviceToDevice;
+  int num_layers = key_caches.size();
+  TORCH_CHECK(num_layers == value_caches.size());
+  if (num_layers == 0) {
+    return;
+  }
+  torch::Device cache_device = key_caches[0].device();
+  TORCH_CHECK(cache_device.is_cuda());
 
-  void *src_ptr = src.data_ptr();
-  void *dst_ptr = dst.data_ptr();
-
-  const int64_t block_size_in_bytes = src.element_size() * src[0].numel();
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  // Create data structures for the kernel.
+  // Create an array of pointers to the key and value caches.
+  int64_t key_cache_ptrs[num_layers];
+  int64_t value_cache_ptrs[num_layers];
+  for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+    key_cache_ptrs[layer_idx] = reinterpret_cast<int64_t>(key_caches[layer_idx].data_ptr());
+    value_cache_ptrs[layer_idx] = reinterpret_cast<int64_t>(value_caches[layer_idx].data_ptr());
+  }
+  // Create block mapping array.
+  std::vector<int> block_mapping_vec;
   for (const auto& pair : block_mapping) {
-    int64_t src_block_number = pair.first;
-    for (int64_t dst_block_number : pair.second) {
-      int64_t src_offset = src_block_number * block_size_in_bytes;
-      int64_t dst_offset = dst_block_number * block_size_in_bytes;
-      cudaMemcpyAsync(
-        dst_ptr + dst_offset,
-        src_ptr + src_offset,
-        block_size_in_bytes,
-        memcpy_type,
-        stream);
+    int src_block_number = pair.first;
+    for (int dst_block_number : pair.second) {
+      block_mapping_vec.push_back(src_block_number);
+      block_mapping_vec.push_back(dst_block_number);
     }
   }
+  int* block_mapping_array = block_mapping_vec.data();
+  int num_pairs = block_mapping_vec.size() / 2;
+
+  // Move the data structures to the GPU.
+  // NOTE: This synchronizes the CPU and GPU.
+  torch::Tensor key_cache_ptrs_tensor = torch::from_blob(
+    key_cache_ptrs, {num_layers}, torch::kInt64).to(cache_device);
+  torch::Tensor value_cache_ptrs_tensor = torch::from_blob(
+    value_cache_ptrs, {num_layers}, torch::kInt64).to(cache_device);
+  torch::Tensor block_mapping_tensor = torch::from_blob(
+    block_mapping_array, {2 * num_pairs}, torch::kInt).to(cache_device);
+
+  // Launch the kernel.
+  const int numel_per_block = key_caches[0][0].numel();
+  dim3 grid(num_layers, num_pairs);
+  dim3 block(std::min(1024, numel_per_block));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+    key_caches[0].scalar_type(), "copy_blocks_kernel", ([&] {
+      cacheflow::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
+        key_cache_ptrs_tensor.data_ptr<int64_t>(),
+        value_cache_ptrs_tensor.data_ptr<int64_t>(),
+        block_mapping_tensor.data_ptr<int>(),
+        numel_per_block);
+    }));
 }
 
 namespace cacheflow {
