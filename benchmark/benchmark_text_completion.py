@@ -107,7 +107,7 @@ def main(args: argparse.Namespace):
             if requests[0][0] <= now - start_time:
                 request_time, input_tokens, sampling_params = requests.pop(0)
                 frontend._add_query(
-                    input_tokens, sampling_params, arrival_time=now + request_time)
+                    input_tokens, sampling_params, arrival_time=start_time + request_time)
             else:
                 break
         server.add_sequence_groups(frontend.get_inputs())
