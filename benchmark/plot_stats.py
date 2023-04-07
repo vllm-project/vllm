@@ -28,6 +28,9 @@ def plot_stats(output_dir: str):
     fig, axs = plt.subplots(num_stats, 1, figsize=(10, 2 * num_stats))
     for i, stat in enumerate(STAT_NAMES):
         data = stats[stat]
+        if stat in ['gpu_cache_usage', 'cpu_cache_usage']:
+            data = [x * 100 for x in data]
+            stat = stat + ' (%)'
         axs[i].plot(timestamps, data, color=COLORS[i % len(COLORS)])
         axs[i].set_ylabel(stat.replace('_', ' '), fontdict={'fontsize': 12})
         axs[i].set_ylim(bottom=0)

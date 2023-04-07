@@ -185,5 +185,5 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
     parser.add_argument('--max-num-batched-tokens', type=int, default=2560, help='maximum number of batched tokens per iteration')
-    parser.add_argument('--max-num-sequences', type=int, default=128, help='maximum number of sequences per iteration')
+    parser.add_argument('--max-num-sequences', type=int, default=256, help='maximum number of sequences per iteration')
     return parser
