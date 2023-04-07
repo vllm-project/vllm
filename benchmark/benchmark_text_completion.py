@@ -41,6 +41,7 @@ def main(args: argparse.Namespace):
         seed=args.seed,
         swap_space=args.swap_space,
         max_num_batched_tokens=args.max_num_batched_tokens,
+        max_num_sequences=args.max_num_sequences,
         num_nodes=num_nodes,
         num_devices_per_node=num_devices_per_node,
         distributed_init_method=distributed_init_method,
@@ -181,6 +182,33 @@ def get_dataset_name(dataset: str) -> str:
         raise ValueError(f'Unknown dataset: {dataset}')
 
 
+def get_sampling_dir_name(
+    n1: float,
+    n2: float,
+    n3: float,
+    n4: float,
+    n2_beam: float,
+    n4_beam: float,
+    n8_beam: float,
+) -> str:
+    method = ''
+    if n1 > 0.0:
+        method = 'n1' if n1 == 1.0 else method + f'n1-{n1}-'
+    if n2 > 0.0:
+        method = 'n2' if n2 == 1.0 else method + f'n2-{n2}-'
+    if n3 > 0.0:
+        method = 'n3' if n3 == 1.0 else method + f'n3-{n3}-'
+    if n4 > 0.0:
+        method = 'n4' if n4 == 1.0 else method + f'n4-{n4}-'
+    if n2_beam > 0.0:
+        method = 'n2-beam' if n2_beam == 1.0 else method + f'n2-beam-{n2_beam}-'
+    if n4_beam > 0.0:
+        method = 'n4-beam' if n4_beam == 1.0 else method + f'n4-beam-{n4_beam}-'
+    if n8_beam > 0.0:
+        method = 'n8-beam' if n8_beam == 1.0 else method + f'n8-beam-{n8_beam}-'
+    return method[:-1] if method.endswith('-') else method
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='CacheFlow simple server.')
     parser = add_server_arguments(parser) 
@@ -211,12 +239,14 @@ if __name__ == '__main__':
             raise ValueError(f'Llama models can only be used with Llama datasets.')
 
     dataset_name = 'sharegpt' if 'sharegpt' in args.dataset else 'alpaca'
+    sample_dir = get_sampling_dir_name(
+        args.n1, args.n2, args.n3, args.n4, args.n2_beam, args.n4_beam, args.n8_beam)
     if args.output_dir is None:
         args.output_dir = os.path.join(
             'exp',
             dataset_name,
             f'{model_name}-tp{args.tensor_parallel_size}',
-            f'sample-n1-{args.n1}-n2-{args.n2}-n3-{args.n3}-n4-{args.n4}-n2b-{args.n2_beam}-n4b-{args.n4_beam}-n8b-{args.n8_beam}',
+            sample_dir,
             'cacheflow',
             f'req-rate-{args.request_rate}',
             f'seed{args.seed}',
