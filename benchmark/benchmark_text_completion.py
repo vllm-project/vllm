@@ -213,10 +213,11 @@ if __name__ == '__main__':
     dataset_name = 'sharegpt' if 'sharegpt' in args.dataset else 'alpaca'
     if args.output_dir is None:
         args.output_dir = os.path.join(
-            'outputs',
+            'exp',
             dataset_name,
             f'{model_name}-tp{args.tensor_parallel_size}',
             f'sample-n1-{args.n1}-n2-{args.n2}-n4-{args.n4}-n8-{args.n8}-n2b-{args.n2_beam}-n4b-{args.n4_beam}-n8b-{args.n8_beam}',
+            'cacheflow',
             f'req-rate-{args.request_rate}',
             f'seed{args.seed}',
             f'duration-{args.duration}',
