@@ -120,24 +120,8 @@ class CacheEngine:
     def swap_out(self, src_to_dst: Dict[int, int]) -> None:
         self._swap(self.gpu_cache, self.cpu_cache, src_to_dst)
 
-    def _copy(
-        self,
-        src: List[KVCache],
-        dst: List[KVCache],
-        src_to_dsts: Dict[int, List[int]],
-    ) -> None:
-        with torch.cuda.stream(self.cache_stream):
-            for i in range(self.num_layers):
-                src_key_cache, src_value_cache = src[i]
-                dst_key_cache, dst_value_cache = dst[i]
-                # Copy the key blocks.
-                cache_ops.copy_blocks(
-                    src_key_cache, dst_key_cache, src_to_dsts)
-                # Copy the value blocks.
-                cache_ops.copy_blocks(
-                    src_value_cache, dst_value_cache, src_to_dsts)
-                event = self.events[i]
-                event.record(stream=self.cache_stream)
-
     def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
-        self._copy(self.gpu_cache, self.gpu_cache, src_to_dsts)
+        key_caches = [key_cache for key_cache, _ in self.gpu_cache]
+        value_caches = [value_cache for _, value_cache in self.gpu_cache]
+        # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
+        cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
