@@ -88,10 +88,10 @@ def generate_text_completion_requests(
                 n=2, max_num_steps=output_len, **random_sampling_params_dict)
         elif cum_sum < (n1 + n2 + n3) * num_requests:
             sampling_params = SamplingParams(
-                n=4, max_num_steps=output_len, **random_sampling_params_dict)
+                n=3, max_num_steps=output_len, **random_sampling_params_dict)
         elif cum_sum < (n1 + n2 + n3 + n4) * num_requests:
             sampling_params = SamplingParams(
-                n=8, max_num_steps=output_len, **random_sampling_params_dict)
+                n=4, max_num_steps=output_len, **random_sampling_params_dict)
         elif cum_sum < (n1 + n2 + n3 + n4 + n2_beam) * num_requests:
             sampling_params = SamplingParams(
                 n=2, max_num_steps=output_len, **beam_search_params_dict)
