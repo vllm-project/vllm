@@ -9,8 +9,8 @@ void swap_blocks(
   const std::map<int64_t, int64_t>& block_mapping);
 
 void copy_blocks(
-  torch::Tensor& src,
-  torch::Tensor& dst,
+  std::vector<torch::Tensor>& key_caches,
+  std::vector<torch::Tensor>& value_caches,
   const std::map<int64_t, std::vector<int64_t>>& block_mapping);
 
 void reshape_and_cache(
