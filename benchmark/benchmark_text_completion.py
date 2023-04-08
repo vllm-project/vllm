@@ -67,8 +67,10 @@ def main(args: argparse.Namespace):
         args.n2,
         args.n3,
         args.n4,
+        args.n6,
         args.n2_beam,
         args.n4_beam,
+        args.n6_beam,
         args.n8_beam,
     )
 
@@ -188,8 +190,10 @@ def get_sampling_dir_name(
     n2: float,
     n3: float,
     n4: float,
+    n6: float,
     n2_beam: float,
     n4_beam: float,
+    n6_beam: float,
     n8_beam: float,
 ) -> str:
     method = ''
@@ -201,10 +205,14 @@ def get_sampling_dir_name(
         method = 'n3' if n3 == 1.0 else method + f'n3-{n3}-'
     if n4 > 0.0:
         method = 'n4' if n4 == 1.0 else method + f'n4-{n4}-'
+    if n6 > 0.0:
+        method = 'n6' if n6 == 1.0 else method + f'n6-{n6}-'
     if n2_beam > 0.0:
         method = 'n2-beam' if n2_beam == 1.0 else method + f'n2-beam-{n2_beam}-'
     if n4_beam > 0.0:
         method = 'n4-beam' if n4_beam == 1.0 else method + f'n4-beam-{n4_beam}-'
+    if n6_beam > 0.0:
+        method = 'n6-beam' if n6_beam == 1.0 else method + f'n6-beam-{n6_beam}-'
     if n8_beam > 0.0:
         method = 'n8-beam' if n8_beam == 1.0 else method + f'n8-beam-{n8_beam}-'
     return method[:-1] if method.endswith('-') else method
@@ -224,11 +232,13 @@ if __name__ == '__main__':
     parser.add_argument('--n2', type=float, help='ratio of requests with n=2', default=0.0)
     parser.add_argument('--n3', type=float, help='ratio of requests with n=3', default=0.0)
     parser.add_argument('--n4', type=float, help='ratio of requests with n=4', default=0.0)
+    parser.add_argument('--n6', type=float, help='ratio of requests with n=6', default=0.0)
     parser.add_argument('--n2-beam', type=float, help='ratio of requests with n=2 & beam search', default=0.0)
     parser.add_argument('--n4-beam', type=float, help='ratio of requests with n=4 & beam search', default=0.0)
+    parser.add_argument('--n6-beam', type=float, help='ratio of requests with n=6 & beam search', default=0.0)
     parser.add_argument('--n8-beam', type=float, help='ratio of requests with n=8 & beam search', default=0.0)
     args = parser.parse_args()
-    if args.n1 + args.n2 + args.n3 + args.n4 + args.n2_beam + args.n4_beam + args.n8_beam != 1.0:
+    if args.n1 + args.n2 + args.n3 + args.n4 + args.n6 + args.n2_beam + args.n4_beam + args.n6_beam + args.n8_beam != 1.0:
         raise ValueError('The ratios of requests must sum to 1.')
 
     model_name = get_model_name(args.model)
@@ -242,7 +252,7 @@ if __name__ == '__main__':
 
     dataset_name = 'sharegpt' if 'sharegpt' in args.dataset else 'alpaca'
     sample_dir = get_sampling_dir_name(
-        args.n1, args.n2, args.n3, args.n4, args.n2_beam, args.n4_beam, args.n8_beam)
+        args.n1, args.n2, args.n3, args.n4, args.n6, args.n2_beam, args.n4_beam, args.n6_beam, args.n8_beam)
     if args.output_dir is None:
         args.output_dir = os.path.join(
             'exp',
