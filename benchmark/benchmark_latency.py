@@ -50,14 +50,15 @@ def main(args: argparse.Namespace):
         block_size=args.block_size,
     )
     sampling_params_dict = {
-        'n': 1,
-        'temperature': 0.0,
+        'n': args.n,
+        'temperature': 0.0 if args.use_beam_search else 1.0,
         'top_p': 1.0,
-        'use_beam_search': False,
+        'use_beam_search': args.use_beam_search,
         'stop_token_ids': set(),
         'max_num_steps': args.output_len,
     }
     sampling_params = SamplingParams.from_dict(sampling_params_dict)
+    print(sampling_params)
     input_token_ids = [0] * args.input_len
 
     def profile_step(profile=False):
@@ -93,6 +94,8 @@ if __name__ == '__main__':
     parser.add_argument('--input-len', type=int, default=32)
     parser.add_argument('--output-len', type=int, default=128)
     parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--n', type=int, default=1)
+    parser.add_argument('--use-beam-search', action='store_true')
     args = parser.parse_args()
     args.max_num_batched_tokens = max(
         args.max_num_batched_tokens, args.batch_size * args.input_len)
