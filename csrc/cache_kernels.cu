@@ -274,8 +274,8 @@ template<typename scalar_t>
 __global__ void gather_cached_kv_kernel_2(
   scalar_t* __restrict__ key,             // [num_tokens, [stride], num_heads, head_size]
   scalar_t* __restrict__ value,           // [num_tokens, [stride], num_heads, head_size]
-  const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
-  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
+  const scalar_t* __restrict__ key_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
+  const scalar_t* __restrict__ value_cache,   // [num_blocks, num_heads, head_size, block_size]
   const int* __restrict__ slot_mapping,   // [num_tokens]
   const int key_stride,
   const int value_stride,
