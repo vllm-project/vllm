@@ -7,7 +7,7 @@ import torch
 from cacheflow import cache_ops
 
 
-def benchmark(name, f, num_warmup = 10, num_iters = 100):
+def benchmark(name, f, size: int, num_warmup = 10, num_iters = 100):
     for _ in range(num_warmup):
         f()
     torch.cuda.synchronize()
@@ -17,7 +17,9 @@ def benchmark(name, f, num_warmup = 10, num_iters = 100):
         f()
     torch.cuda.synchronize()
     end = time.time()
-    print(f'{name}: {(end - start) / num_iters * 1000:.3f} ms')
+    avg_time = (end - start) / num_iters
+    print(f'[Latency] {name}: {avg_time * 1000:.3f} ms')
+    print(f'[Throughput] {name}: {size / avg_time / 2 ** 30:.3f} GB/s')
 
 
 @torch.inference_mode()
@@ -50,10 +52,11 @@ def test_gather_cached_kv(
         size=value_cache_shape, dtype=dtype, device='cuda')
 
     # Run Flash attention.
-    def run_flash_attn():
+    def run():
         cache_ops.gather_cached_kv(key, value, key_cache, value_cache, slot_mapping)
 
-    benchmark('gather_cached_kv', run_flash_attn)
+    benchmark('gather_cached_kv', run,
+              size=block_size * num_blocks * num_heads * head_size * 2 * dtype.element_size())
 
 
 if __name__ == '__main__':
@@ -75,4 +78,4 @@ if __name__ == '__main__':
     )
 
     for i in range(6, 12):
-        run_benchmark(num_tokens=i ** 2)
+        run_benchmark(num_tokens=2 ** i)
