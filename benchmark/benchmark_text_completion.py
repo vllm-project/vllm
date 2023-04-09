@@ -155,6 +155,7 @@ def get_model_name(model: str) -> str:
         'opt-13b',
         'opt-30b',
         'opt-66b',
+        'opt-175b',
     ]
     for opt_model in OPT_MODELS:
         if opt_model in model:
@@ -253,7 +254,7 @@ if __name__ == '__main__':
         args.n1, args.n2, args.n3, args.n4, args.n6, args.n2_beam, args.n4_beam, args.n6_beam, args.n8_beam)
     if args.output_dir is None:
         args.output_dir = os.path.join(
-            'exp',
+            '../exp',
             dataset_name,
             f'{model_name}-tp{args.tensor_parallel_size}',
             sample_dir,
