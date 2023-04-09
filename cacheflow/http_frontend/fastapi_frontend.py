@@ -111,7 +111,7 @@ class FastAPIFrontend:
             try:
                 await asyncio.wait_for(group_event.wait(), timeout=TIMEOUT_TO_PREVENT_DEADLOCK)
             except asyncio.TimeoutError:
-                pass
+                continue
             # Reset the event to wait for the next output.
             group_event.clear()
             # Decode and return new outputs
