@@ -56,7 +56,7 @@ def test_gather_cached_kv(
         cache_ops.gather_cached_kv(key, value, key_cache, value_cache, slot_mapping)
 
     benchmark('gather_cached_kv', run,
-              size=block_size * num_blocks * num_heads * head_size * 2 * dtype.element_size())
+              size=block_size * num_blocks * num_heads * head_size * 2 * qkv.element_size())
 
 
 if __name__ == '__main__':
