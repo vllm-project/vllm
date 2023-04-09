@@ -47,6 +47,7 @@ class FastAPIFrontend:
         self.server = remote_server_class.remote(
             model=model,
             model_path=model_path,
+            use_dummy_weights=False,
             pipeline_parallel_size=pipeline_parallel_size,
             tensor_parallel_size=tensor_parallel_size,
             block_size=block_size,
