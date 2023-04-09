@@ -21,12 +21,11 @@ void reshape_and_cache(
   torch::Tensor& slot_mapping);
 
 void gather_cached_kv(
-  torch::Tensor& qkv_out,
+  torch::Tensor& key,
+  torch::Tensor& value,
   torch::Tensor& key_cache,
   torch::Tensor& value_cache,
-  torch::Tensor& cu_seqlens_k,
-  torch::Tensor& seqlens_k,
-  torch::Tensor& block_tables);
+  torch::Tensor& slot_mapping);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
