@@ -239,11 +239,12 @@ __global__ void gather_cached_kv_kernel_optimized(
     const int block_idx = slot_idx / block_size;
     const int block_offset = slot_idx % block_size;
 
-    const int num_tokens = num_heads * head_size;
+    const int dim = num_heads * head_size;
+    assert(dim % 4 == 0);  // this is true for known use cases
     const int unroll_factor = 4;
-    const int unrolled_num_tokens = num_tokens / unroll_factor;
+    const int unrolled_dim = dim / unroll_factor;
 
-    for (int i = threadIdx.x; i < unrolled_num_tokens; i += blockDim.x)
+    for (int i = threadIdx.x; i < unrolled_dim; i += blockDim.x)
     {
         int tgt_key_indices[unroll_factor];
         int tgt_value_indices[unroll_factor];
@@ -255,7 +256,7 @@ __global__ void gather_cached_kv_kernel_optimized(
         #pragma unroll
         for (int j = 0; j < unroll_factor; ++j)
         {
-            int index = i + j * unrolled_num_tokens;
+            int index = i + j * unrolled_dim;
 
             const int tgt_key_idx = token_idx * key_stride + index;
             const int tgt_value_idx = token_idx * value_stride + index;
