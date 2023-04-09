@@ -27,6 +27,7 @@ class Controller:
         dtype: str,
         seed: int,
         model_path: str,
+        use_dummy_weights: bool,
         max_num_batched_tokens: int,
     ) -> None:
         self.stage_id = stage_id
@@ -58,6 +59,7 @@ class Controller:
                 tensor_parallel_size=tensor_parallel_size,
                 pipeline_parallel_size=pipeline_parallel_size,
                 model_path=model_path,
+                use_dummy_weights=use_dummy_weights,
                 max_num_batched_tokens=max_num_batched_tokens,
             )
             self.workers.append(worker)

@@ -16,6 +16,7 @@ class Server:
         self,
         model: str,
         model_path: str,
+        use_dummy_weights: bool,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
         block_size: int,
@@ -66,6 +67,7 @@ class Server:
                 dtype=dtype,
                 seed=seed,
                 model_path=model_path,
+                use_dummy_weights=use_dummy_weights,
                 max_num_batched_tokens=max_num_batched_tokens,
             )
             self.controllers.append(controller)
@@ -179,4 +181,5 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
     parser.add_argument('--max-num-batched-tokens', type=int, default=2560, help='maximum number of batched tokens')
+    parser.add_argument('--use-dummy-weights', action='store_true', help='use dummy values for model weights')
     return parser

@@ -29,6 +29,7 @@ class Worker:
         rank: int,
         world_size: int,
         model_path: str,
+        use_dummy_weights: bool,
         max_num_batched_tokens: int,
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
@@ -43,8 +44,8 @@ class Worker:
         set_random_seed(seed)
 
         # Initialize the model.
-        self.model, self.dtype = get_model(model_name, dtype=dtype, path=model_path)
-        self.model = self.model.cuda()
+        self.model, self.dtype = get_model(
+            model_name, dtype=dtype, path=model_path, use_dummy_weights=use_dummy_weights)
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
         initialize_all_reduce_launcher(

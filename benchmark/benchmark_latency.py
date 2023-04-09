@@ -29,6 +29,7 @@ def main(args: argparse.Namespace):
     server = Server(
         model=args.model,
         model_path=args.model_path,
+        use_dummy_weights=args.use_dummy_weights,
         pipeline_parallel_size=args.pipeline_parallel_size,
         tensor_parallel_size=args.tensor_parallel_size,
         block_size=args.block_size,
