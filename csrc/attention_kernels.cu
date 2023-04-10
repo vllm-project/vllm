@@ -654,6 +654,16 @@ void single_query_cached_kv_attention(
         block_tables,
         context_lens,
         max_context_len);
+    } else if (block_size == 32) {
+      single_query_cached_kv_attention_launcher<uint16_t, 32>(
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
     } else {
       assert(false);
     }
@@ -671,6 +681,16 @@ void single_query_cached_kv_attention(
         max_context_len);
     } else if (block_size == 16) {
       single_query_cached_kv_attention_launcher<float, 16>(
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else if (block_size == 32) {
+      single_query_cached_kv_attention_launcher<float, 32>(
         out,
         query,
         key_cache,
@@ -834,6 +854,18 @@ void multi_query_cached_kv_attention(
         block_tables,
         context_lens,
         max_context_len);
+    } else if (block_size == 32) {
+      multi_query_cached_kv_attention_launcher<uint16_t, 32>(
+        cu_query_lens,
+        seq_prompt_mapping,
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
     } else {
       assert(false);
     }
@@ -853,6 +885,18 @@ void multi_query_cached_kv_attention(
         max_context_len);
     } else if (block_size == 16) {
       multi_query_cached_kv_attention_launcher<float, 16>(
+        cu_query_lens,
+        seq_prompt_mapping,
+        out,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        context_lens,
+        max_context_len);
+    } else if (block_size == 32) {
+      multi_query_cached_kv_attention_launcher<float, 32>(
         cu_query_lens,
         seq_prompt_mapping,
         out,
