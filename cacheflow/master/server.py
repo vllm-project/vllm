@@ -34,7 +34,7 @@ class Server:
         self.num_nodes = num_nodes
         self.num_devices_per_node = num_devices_per_node
         self.world_size = pipeline_parallel_size * tensor_parallel_size
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
         self.memory_analyzer = get_memory_analyzer(
             model_name=model,
             model_path=model_path,
