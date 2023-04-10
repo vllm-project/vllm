@@ -16,13 +16,17 @@ from cacheflow.models.utils import get_torch_dtype
 _MODELS = {
     'llama': LlamaForCausalLM,
     'opt': OPTForCausalLM,
-    'vicuna': LlamaForCausalLM
+    'vicuna': LlamaForCausalLM,
+    'koala': LlamaForCausalLM,
+    'alpaca': LlamaForCausalLM,
 }
 
 _MEMORY_ANALYZERS = {
     'llama': LlamaMemoryAnalyzer,
     'opt': OPTMemoryAnalyzer,
-    'vicuna': LlamaMemoryAnalyzer
+    'vicuna': LlamaMemoryAnalyzer,
+    'koala': LlamaMemoryAnalyzer,
+    'alpaca': LlamaMemoryAnalyzer,
 }
 
 
