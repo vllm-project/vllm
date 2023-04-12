@@ -24,12 +24,15 @@ class Server:
         seed: int,
         swap_space: int,
         max_num_batched_tokens: int,
+        max_num_sequences: int,
         num_nodes: int,
         num_devices_per_node: int,
         distributed_init_method: str,
         all_stage_devices: List[List[DeviceID]],
         gpu_memory: int,
         cpu_memory: int,
+        collect_stats: bool = False,
+        do_memory_analysis: bool = False,
     ):
         self.num_nodes = num_nodes
         self.num_devices_per_node = num_devices_per_node
@@ -79,6 +82,9 @@ class Server:
             num_gpu_blocks=self.num_gpu_blocks,
             num_cpu_blocks=self.num_cpu_blocks,
             max_num_batched_tokens=max_num_batched_tokens,
+            max_num_sequences=max_num_sequences,
+            collect_stats=collect_stats,
+            do_memory_analysis=do_memory_analysis,
         )
         # Connect the controllers.
         for i in range(len(self.controllers) - 1):
@@ -180,6 +186,7 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
-    parser.add_argument('--max-num-batched-tokens', type=int, default=2560, help='maximum number of batched tokens')
+    parser.add_argument('--max-num-batched-tokens', type=int, default=2560, help='maximum number of batched tokens per iteration')
+    parser.add_argument('--max-num-sequences', type=int, default=256, help='maximum number of sequences per iteration')
     parser.add_argument('--use-dummy-weights', action='store_true', help='use dummy values for model weights')
     return parser

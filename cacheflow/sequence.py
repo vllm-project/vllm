@@ -28,6 +28,7 @@ class Sequence:
         # Initialize the logical token blocks with the given token ids.
         self.add(token_ids)
 
+        self.prompt_len = len(token_ids)
         self.status = SequenceStatus.WAITING
         self.output_logprobs: List[Dict[int, float]] = []
         self.cumulative_logprobs = 0.0

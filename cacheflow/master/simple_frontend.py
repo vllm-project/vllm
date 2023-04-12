@@ -39,8 +39,10 @@ class SimpleFrontend:
         self,
         token_ids: List[int],
         sampling_params: SamplingParams,
+        arrival_time: Optional[float] = None,
     ) -> None:
-        arrival_time = time.time()
+        if arrival_time is None:
+            arrival_time = time.time()
         seqs: List[Sequence] = []
         for _ in range(sampling_params.n):
             seq_id = next(self.seq_counter)
