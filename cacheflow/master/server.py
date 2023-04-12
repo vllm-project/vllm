@@ -32,6 +32,7 @@ class Server:
         gpu_memory: int,
         cpu_memory: int,
         collect_stats: bool = False,
+        do_memory_analysis: bool = False,
     ):
         self.num_nodes = num_nodes
         self.num_devices_per_node = num_devices_per_node
@@ -83,6 +84,7 @@ class Server:
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_sequences=max_num_sequences,
             collect_stats=collect_stats,
+            do_memory_analysis=do_memory_analysis,
         )
         # Connect the controllers.
         for i in range(len(self.controllers) - 1):

@@ -50,6 +50,7 @@ def main(args: argparse.Namespace):
         gpu_memory=get_gpu_memory(),
         cpu_memory=get_cpu_memory(),
         collect_stats=True,
+        do_memory_analysis=args.do_memory_analysis,
     )
 
     # Create a frontend.
@@ -107,6 +108,10 @@ def main(args: argparse.Namespace):
     start_time = time.time()
     while True:
         now = time.time()
+        if args.timeout is not None and now - start_time > args.timeout:
+            logger.info('Timeout. Stop benchmarking.')
+            break
+
         while requests:
             if requests[0][0] <= now - start_time:
                 request_time, input_tokens, sampling_params = requests.pop(0)
@@ -227,6 +232,9 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, help='path to dataset', required=True)
     parser.add_argument('--request-rate', type=float, help='reqs/sec', required=True)
     parser.add_argument('--duration', type=int, help='duration in seconds', required=True)
+    parser.add_argument('--do-memory-analysis', action='store_true',
+        help='do memory analysis (This will lower the throughput. Use this only for analysis.)')
+    parser.add_argument('--timeout', type=int, help='time out in seconds', default=None)
 
     parser.add_argument('--n1', type=float, help='ratio of requests with n=1', default=0.0)
     parser.add_argument('--n2', type=float, help='ratio of requests with n=2', default=0.0)
