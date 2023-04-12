@@ -49,6 +49,7 @@ class Scheduler:
         self.max_num_sequences = max_num_sequences
         self.collect_stats = collect_stats
         self.do_memory_analysis = do_memory_analysis
+        self.len_estimator = len_estimator
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name='fcfs')
@@ -212,7 +213,6 @@ class Scheduler:
                     num_logical_tokens = 0
                     num_physical_blocks = 0
                     num_physical_tokens = 0
-                    physical_block_numbers = set()
                     num_reserved_tokens = 0
                     for seq_group in self.running:
                         group_id = seq_group.group_id
@@ -225,13 +225,24 @@ class Scheduler:
                             seq_id = seq.seq_id
                             block_table = block_tables[seq_id]
                             for i, block in enumerate(block_table):
-                                if block.block_number in physical_block_numbers:
-                                    continue
-                                physical_block_numbers.add(block.block_number)
                                 num_physical_blocks += 1
-                                num_physical_tokens += seq.logical_token_blocks[i].num_tokens
-                    
-                    assert num_physical_blocks == num_used_gpu_blocks
+                                if i < len(seq.logical_token_blocks):
+                                    num_physical_tokens += seq.logical_token_blocks[i].num_tokens
+                            
+                            if self.len_estimator == 'oracle':
+                                output_len = max_num_steps
+                            elif self.len_estimator == 'power2':
+                                output_len = 1 << (max_num_steps - 1).bit_length()
+                            elif self.len_estimator == 'constant':
+                                output_len = 2048
+                            else:
+                                assert False
+                            allocated = min(seq.prompt_len + output_len, 2048)
+                            reserved = allocated - seq.get_len()
+                            num_reserved_tokens += reserved                            
+
+                    assert num_physical_blocks == num_used_gpu_blocks, \
+                        f'{num_physical_blocks} != {num_used_gpu_blocks}'
                     self.stats.num_logical_blocks.append(num_logical_blocks)
                     self.stats.num_logical_tokens.append(num_logical_tokens)
                     self.stats.num_physical_blocks.append(num_physical_blocks)
