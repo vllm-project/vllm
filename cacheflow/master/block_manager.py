@@ -32,13 +32,20 @@ class BuddyAllocator:
         self.size_to_free_blocks: Dict[int, List[int]] = collections.defaultdict(list)
         self.addr_to_size: Dict[int, int] = {}
 
-        start_addrs = [
-            i * self.max_block_size
-            for i in range(self.num_token_blocks // self.max_block_size)
-        ]
-        self.size_to_free_blocks[self.max_block_size] = start_addrs
-        for addr in start_addrs:
-            self.addr_to_size[addr] = self.max_block_size
+        buddy_size = self.max_block_size
+        last_start_addr = 0
+        start_addrs = []
+        while buddy_size >= 1:
+            new_start_addrs = []
+            while last_start_addr + buddy_size <= self.num_token_blocks:
+                new_start_addrs.append(last_start_addr)
+                last_start_addr += buddy_size
+
+            self.size_to_free_blocks[buddy_size] = new_start_addrs
+            for addr in new_start_addrs:
+                self.addr_to_size[addr] = buddy_size
+            start_addrs.extend(new_start_addrs)
+            buddy_size //= 2
 
     def can_allocate(self, sizes: List[int]) -> bool:
         # FIXME(woosuk): Must be fixed for performance.
