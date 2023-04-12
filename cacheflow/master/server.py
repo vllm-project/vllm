@@ -33,6 +33,7 @@ class Server:
         cpu_memory: int,
         len_estimator: str = 'oracle',
         collect_stats: bool = False,
+        do_memory_analysis: bool = False,
     ):
         self.num_nodes = num_nodes
         self.num_devices_per_node = num_devices_per_node
@@ -85,6 +86,7 @@ class Server:
             max_num_sequences=max_num_sequences,
             len_estimator=len_estimator,
             collect_stats=collect_stats,
+            do_memory_analysis=do_memory_analysis,
         )
         # Connect the controllers.
         for i in range(len(self.controllers) - 1):
@@ -180,7 +182,7 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--pipeline-parallel-size', '-pp', type=int, default=1, help='number of pipeline stages')
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1, help='number of tensor parallel replicas')
     # KV cache arguments
-    parser.add_argument('--block-size', type=int, default=8, choices=[8, 16], help='token block size')
+    parser.add_argument('--block-size', type=int, default=8, choices=[8, 16, 32], help='token block size')
     # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
     parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
     # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
