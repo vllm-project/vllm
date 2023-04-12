@@ -38,6 +38,7 @@ class Scheduler:
         max_num_batched_tokens: int,
         max_num_sequences: int,
         collect_stats: bool,
+        do_memory_analysis: bool = False,
     ) -> None:
         self.controllers = controllers
         self.block_size = block_size
@@ -46,6 +47,7 @@ class Scheduler:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_sequences = max_num_sequences
         self.collect_stats = collect_stats
+        self.do_memory_analysis = do_memory_analysis
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name='fcfs')
@@ -68,7 +70,7 @@ class Scheduler:
         self.swapped: List[SequenceGroup] = []
 
         # Performance-related statistics.
-        self.stats = Stats()
+        self.stats = Stats(num_gpu_blocks, num_cpu_blocks)
 
     def add_sequence_groups(
         self,
@@ -195,11 +197,43 @@ class Scheduler:
                 self.stats.num_waiting.append(len(self.waiting))
 
                 num_free_gpu_blocks = self.block_manager.get_num_free_gpu_blocks()
-                self.stats.gpu_cache_usage.append(
-                    (self.num_gpu_blocks - num_free_gpu_blocks) / self.num_gpu_blocks)
+                num_used_gpu_blocks = self.num_gpu_blocks - num_free_gpu_blocks
+                self.stats.gpu_cache_usage.append(num_used_gpu_blocks / self.num_gpu_blocks)
                 num_free_cpu_blocks = self.block_manager.get_num_free_cpu_blocks()
-                self.stats.cpu_cache_usage.append(
-                    (self.num_cpu_blocks - num_free_cpu_blocks) / self.num_cpu_blocks)
+                num_used_cpu_blocks = self.num_cpu_blocks - num_free_cpu_blocks
+                self.stats.cpu_cache_usage.append(num_used_cpu_blocks / self.num_cpu_blocks)
+
+                if self.do_memory_analysis:
+                    block_tables = self.block_manager.block_tables
+                    num_logical_blocks = 0
+                    num_logical_tokens = 0
+                    num_physical_blocks = 0
+                    num_physical_tokens = 0
+                    physical_block_numbers = set()
+                    num_reserved_tokens = 0
+                    for seq_group in self.running:
+                        group_id = seq_group.group_id
+                        sampling_params = self.sampling_params[group_id]
+                        max_num_steps = sampling_params.max_num_steps
+                        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                            num_logical_blocks += len(seq.logical_token_blocks)
+                            num_logical_tokens += seq.get_len()
+
+                            seq_id = seq.seq_id
+                            block_table = block_tables[seq_id]
+                            for i, block in enumerate(block_table):
+                                if block.block_number in physical_block_numbers:
+                                    continue
+                                physical_block_numbers.add(block.block_number)
+                                num_physical_blocks += 1
+                                num_physical_tokens += seq.logical_token_blocks[i].num_tokens
+                    
+                    assert num_physical_blocks == num_used_gpu_blocks
+                    self.stats.num_logical_blocks.append(num_logical_blocks)
+                    self.stats.num_logical_tokens.append(num_logical_tokens)
+                    self.stats.num_physical_blocks.append(num_physical_blocks)
+                    self.stats.num_physical_tokens.append(num_physical_tokens)
+                    self.stats.num_reserved_tokens.append(num_reserved_tokens)
 
         return (blocks_to_swap_in,
                 blocks_to_swap_out,
@@ -422,7 +456,7 @@ class Scheduler:
             seq.status = SequenceStatus.SWAPPED
 
     def reset_stats(self) -> None:
-        self.stats.reset()
+        self.stats.reset(self.num_gpu_blocks, self.num_cpu_blocks)
 
     def save_stats(
         self,
@@ -434,8 +468,15 @@ class Scheduler:
 
 class Stats:
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        num_gpu_blocks: int,
+        num_cpu_blocks: int,
+    ) -> None:
         self.start_time: float = time.time()
+        self.num_gpu_blocks = num_gpu_blocks
+        self.num_cpu_blocks = num_cpu_blocks
+
         self.timestamps: List[float] = []
         self.input_lens: List[int] = []
         self.swap_out_lens: List[int] = []
@@ -447,12 +488,24 @@ class Stats:
         self.gpu_cache_usage: List[float] = []
         self.cpu_cache_usage: List[float] = []
 
-    def reset(self) -> None:
-        self.__init__()
+        self.num_logical_blocks: List[int] = []
+        self.num_logical_tokens: List[int] = []
+        self.num_physical_blocks: List[int] = []
+        self.num_physical_tokens: List[int] = []
+        self.num_reserved_tokens: List[int] = []
+
+    def reset(
+        self,
+        num_gpu_blocks: int,
+        num_cpu_blocks: int,
+    ) -> None:
+        self.__init__(num_gpu_blocks, num_cpu_blocks)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             'start_time': self.start_time,
+            'num_gpu_blocks': self.num_gpu_blocks,
+            'num_cpu_blocks': self.num_cpu_blocks,
             'timestamps': self.timestamps,
             'input_lens': self.input_lens,
             'swap_out_lens': self.swap_out_lens,
@@ -463,6 +516,11 @@ class Stats:
             'num_swapped': self.num_swapped,
             'gpu_cache_usage': self.gpu_cache_usage,
             'cpu_cache_usage': self.cpu_cache_usage,
+            'num_logical_blocks': self.num_logical_blocks,
+            'num_logical_tokens': self.num_logical_tokens,
+            'num_physical_blocks': self.num_physical_blocks,
+            'num_physical_tokens': self.num_physical_tokens,
+            'num_reserved_tokens': self.num_reserved_tokens,
         }
 
     def save(self, output_dir: str) -> None:
