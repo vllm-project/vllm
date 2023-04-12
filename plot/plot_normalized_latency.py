@@ -15,9 +15,9 @@ SYSTEMS = [
 ]
 
 SYSTEM_TO_LABEL = {
-    'orca-constant': 'Orca (max)',
-    'orca-power2': 'Orca (next power of 2)',
-    'orca-oracle': 'Orca (oracle)',
+    'orca-constant': 'Orca (Max)',
+    'orca-power2': 'Orca (Next power of 2)',
+    'orca-oracle': 'Orca (Oracle)',
     'cacheflow': 'CacheFlow',
 }
 
