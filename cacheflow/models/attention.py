@@ -12,9 +12,23 @@ from cacheflow.models import InputMetadata
 
 class GPTCacheFlowAttention(nn.Module):
 
-    def __init__(self, scale: float) -> None:
+    def __init__(
+        self,
+        scale: float,
+        num_heads: int,
+        head_size: int,
+        kv_buffer_size: int = 2048,
+    ) -> None:
         super().__init__()
         self.scale = float(scale)
+        self.num_heads = num_heads
+        self.head_size = head_size
+
+        kv_buffer = torch.empty(
+            size=(kv_buffer_size, 3, num_heads, head_size),
+            dtype=torch.get_default_dtype(),
+        )
+        self.register_buffer('kv_buffer', kv_buffer, persistent=False)
 
     def multi_query_kv_attention(
         self,
@@ -28,8 +42,7 @@ class GPTCacheFlowAttention(nn.Module):
         if query.dtype == torch.float:
             raise ValueError('The float data type is not supported by '
                              'FlashAttention. Use the half data type instead.')
-        head_size = query.shape[-1]
-        if head_size > 128:
+        if self.head_size > 128:
             raise ValueError('FlashAttention does not support head_size > 128.')
 
         # Directly call FlashAttention's internal function to avoid allocating
@@ -49,6 +62,42 @@ class GPTCacheFlowAttention(nn.Module):
             return_softmax=False,
         )
 
+    def multi_query_cached_kv_attention(
+        self,
+        output: torch.Tensor,                   # [num_prefix_prompt_tokens, num_heads, head_size]
+        query: torch.Tensor,                    # [num_prefix_prompt_tokens, num_heads, head_size]
+        key: torch.Tensor,                      # [num_prefix_prompt_tokens, num_heads, head_size]
+        value: torch.Tensor,                    # [num_prefix_prompt_tokens, num_heads, head_size]
+        key_cache: torch.Tensor,                # [num_blocks, num_heads, head_size/x, block_size, x]
+        value_cache: torch.Tensor,              # [num_blocks, num_heads, head_size, block_size]
+        slots: torch.Tensor,                    # [num_prefix_prompt_tokens]
+        cumulative_query_lens: torch.Tensor,    # [num_prompts + 1]
+        cumulative_context_lens: torch.Tensor,  # [num_prompts + 1]
+        max_query_len: int,
+        max_context_len: int,
+    ) -> None:
+        cache_ops.gather_kv(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slots,
+        )
+        _flash_attn_forward(
+            query,
+            key,
+            value,
+            output,
+            cumulative_query_lens,
+            cumulative_context_lens,
+            max_query_len,
+            max_context_len,
+            dropout_p=0.0,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax=False,
+        )
+
     def single_query_cached_kv_attention(
         self,
         output: torch.Tensor,           # [num_generation_tokens, num_heads, head_size]
@@ -57,10 +106,9 @@ class GPTCacheFlowAttention(nn.Module):
         value_cache: torch.Tensor,      # [num_blocks, num_heads, head_size, block_size]
         input_metadata: InputMetadata,
     ) -> None:
-        head_size = value_cache.shape[2]
-        supported_head_sizes = [32, 64, 80, 96, 128, 160, 192, 256]
-        if head_size not in supported_head_sizes:
-            raise ValueError(f'head_size ({head_size}) is not supported by '
+        supported_head_sizes = {32, 64, 80, 96, 128, 160, 192, 256}
+        if self.head_size not in supported_head_sizes:
+            raise ValueError(f'head_size ({self.head_size}) is not supported by '
                              'the single_query_cached_kv_attention kernel. '
                              'Use one of the following head sizes: '
                              f'{supported_head_sizes}.')
@@ -92,11 +140,9 @@ class GPTCacheFlowAttention(nn.Module):
         # tensor of shape [num_tokens, 3 * num_heads * head_size].
 
         # Reshape the query, key, and value tensors.
-        num_heads = value_cache.shape[1]
-        head_size = value_cache.shape[2]
-        query = query.view(-1, num_heads, head_size)
-        key = key.view(-1, num_heads, head_size)
-        value = value.view(-1, num_heads, head_size)
+        query = query.view(-1, self.num_heads, self.head_size)
+        key = key.view(-1, self.num_heads, self.head_size)
+        value = value.view(-1, self.num_heads, self.head_size)
 
         # Pre-allocate the output tensor.
         output = torch.empty_like(query)
@@ -129,6 +175,25 @@ class GPTCacheFlowAttention(nn.Module):
                 input_metadata.slot_mapping,
             )
 
+        # Compute the attetion op for prompt with cached prefix.
+        num_query_tokens = input_metadata.num_query_tokens
+        if num_query_tokens > 0:
+            start = num_prompt_tokens
+            end = num_prompt_tokens + num_query_tokens
+            self.multi_query_cached_kv_attention(
+                output[start:end],
+                query[start:end],
+                key[start:end],
+                value[start:end],
+                key_cache,
+                value_cache,
+                input_metadata.slots_including_prefix,
+                input_metadata.cumulative_query_lens,
+                input_metadata.cumulative_context_lens_including_prefix,
+                input_metadata.max_query_len,
+                input_metadata.max_context_len_including_prefix,
+            )
+
         if input_metadata.num_generation_tokens > 0:
             # Compute the attention op for generation tokens.
             self.single_query_cached_kv_attention(
@@ -140,7 +205,7 @@ class GPTCacheFlowAttention(nn.Module):
 
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.
-        return output.view(-1, num_heads * head_size)
+        return output.view(-1, self.num_heads * self.head_size)
 
 
 class OPTCacheFlowAttention(GPTCacheFlowAttention):
@@ -156,11 +221,12 @@ class LlamaCacheFlowAttention(GPTCacheFlowAttention):
     def __init__(
         self,
         scale: float,
+        num_heads: int,
         head_size: int,
         max_position: int = 8192,
         base: int = 10000,
     ) -> None:
-        super().__init__(scale)
+        super().__init__(scale, num_heads, head_size)
 
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base ** (torch.arange(0, head_size, 2) / head_size))

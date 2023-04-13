@@ -98,19 +98,21 @@ class Worker:
     ) -> Tuple[torch.LongTensor, torch.LongTensor, InputMetadata]:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         seq_logprobs: Dict[int, float] = {}
-        sampling_params: Dict[int, SamplingParams] = {}
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
 
-        # Add prompt tokens.
+        # Add prompt tokens without prefix.
         prompt_lens: List[int] = []
         for input_seq_group in input_seq_groups:
             if not input_seq_group.is_prompt:
                 continue
+            if input_seq_group.num_prefix_tokens > 0:
+                continue
+            sampling_params = input_seq_group.sampling_params
+            assert sampling_params.prefix_id is None
 
             seq_ids = list(input_seq_group.input_tokens.keys())
-            sampling_params = input_seq_group.sampling_params
             seq_groups.append((seq_ids, sampling_params))
             seq_logprobs.update(input_seq_group.seq_logprobs)
 
@@ -138,6 +140,62 @@ class Worker:
         for prompt_len in prompt_lens:
             cumulative_prompt_lens.append(
                 cumulative_prompt_lens[-1] + prompt_len)
+
+        # Add prompt tokens with prefix.
+        query_lens: List[int] = []
+        context_lens_including_prefix: List[int] = []
+        slots_including_prefix: List[int] = []
+        for input_seq_group in input_seq_groups:
+            if not input_seq_group.is_prompt:
+                continue
+            
+            if input_seq_group.num_prefix_tokens == 0:
+                continue
+            sampling_params = input_seq_group.sampling_params
+            assert sampling_params.prefix_id is not None
+
+            seq_ids = list(input_seq_group.input_tokens.keys())
+            seq_groups.append((seq_ids, sampling_params))
+            seq_logprobs.update(input_seq_group.seq_logprobs)
+
+            # Use any sequence in the group.
+            seq_id = seq_ids[0]
+
+            prompt_tokens = input_seq_group.input_tokens[seq_id]
+            prompt_len = len(prompt_tokens)
+            query_lens.append(prompt_len)
+
+            num_prefix_tokens = input_seq_group.num_prefix_tokens
+            assert num_prefix_tokens % self.block_size == 0
+            num_prefix_blocks = num_prefix_tokens // self.block_size
+
+            input_tokens.extend(prompt_tokens)
+            input_positions.extend(range(num_prefix_tokens + prompt_len))
+
+            # Compute the slot mapping.
+            block_table = input_seq_group.block_tables[seq_id]
+            block_table = block_table[num_prefix_blocks:]
+            for i in range(prompt_len):
+                block_number = block_table[i // self.block_size]
+                block_offset = i % self.block_size
+                slot = block_number * self.block_size + block_offset
+                slot_mapping.append(slot)
+
+            for i in range(num_prefix_tokens + prompt_len):
+                block_number = block_table[i // self.block_size]
+                block_offset = i % self.block_size
+                slot = block_number * self.block_size + block_offset
+                slots_including_prefix.append(slot)
+            context_lens_including_prefix.append(num_prefix_tokens + prompt_len)
+
+        cumulative_query_lens: List[int] = [0]
+        for query_len in query_lens:
+            cumulative_query_lens.append(
+                cumulative_query_lens[-1] + query_len)
+        cumulative_context_lens_including_prefix: List[int] = [0]
+        for context_len in context_lens_including_prefix:
+            cumulative_context_lens_including_prefix.append(
+                cumulative_context_lens_including_prefix[-1] + context_len)
 
         # Add generation tokens.
         max_context_len = 0
@@ -197,6 +255,14 @@ class Worker:
         cumulative_prompt_lens_tensor = torch.tensor(
             cumulative_prompt_lens, dtype=torch.int, device='cuda')
 
+        # Data structure for prefix.
+        slots_including_prefix_tensor = torch.tensor(
+            slots_including_prefix, dtype=torch.int, device='cuda')
+        cumulative_query_lens_tensor = torch.tensor(
+            cumulative_query_lens, dtype=torch.int, device='cuda')
+        cumulative_context_lens_including_prefix_tensor = torch.tensor(
+            cumulative_context_lens_including_prefix, dtype=torch.int, device='cuda')
+
         input_metadata = InputMetadata(
             seq_groups=seq_groups,
             seq_logprobs=seq_logprobs,
@@ -206,6 +272,10 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
+            query_lens=query_lens,
+            cumulative_query_lens=cumulative_query_lens_tensor,
+            cumulative_context_lens_including_prefix=cumulative_context_lens_including_prefix_tensor,
+            slots_including_prefix=slots_including_prefix_tensor,
         )
         return tokens_tensor, positions_tensor, input_metadata
 

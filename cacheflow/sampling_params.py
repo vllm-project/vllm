@@ -13,6 +13,7 @@ class SamplingParams:
         max_num_steps: int,
         num_logprobs: int,
         context_window_size: Optional[int],
+        prefix_id: Optional[int],
     ) -> None:
         if n < 1:
             raise ValueError(f'n must be at least 1, got {n}.')
@@ -59,6 +60,7 @@ class SamplingParams:
         self.max_num_steps = max_num_steps
         self.num_logprobs = num_logprobs
         self.context_window_size = context_window_size
+        self.prefix_id = prefix_id
 
     def __repr__(self) -> str:
         return (f'SamplingParams(n={self.n}, '
@@ -68,7 +70,8 @@ class SamplingParams:
                 f'stop_token_ids={self.stop_token_ids}, '
                 f'max_num_steps={self.max_num_steps}, '
                 f'num_logprobs={self.num_logprobs}, '
-                f'context_window_size={self.context_window_size})')
+                f'context_window_size={self.context_window_size}, '
+                f'prefix_id={self.prefix_id})')
 
     @classmethod
     def from_dict(cls, d: Dict) -> 'SamplingParams':
@@ -81,4 +84,5 @@ class SamplingParams:
             max_num_steps=d.get('max_num_steps', 16),
             num_logprobs=d.get('num_logprobs', 0),
             context_window_size=d.get('context_window_size', None),
+            prefix_id=d.get('prefix_id', None),
         )
