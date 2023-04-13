@@ -58,6 +58,11 @@ class Scheduler:
             num_cpu_blocks=num_cpu_blocks,
         )
 
+        # Prefix sequence groups: prefix_id -> SequenceGroup.
+        self.prefix: Dict[int, SequenceGroup] = {}
+        # Prefix that has not been processed yet.
+        self.waiting_prefix: List[SequenceGroup] = []
+
         # Sequence groups in the WAITING state.
         self.waiting: List[SequenceGroup] = []
         # Sequence groups in the RUNNING state.
@@ -72,6 +77,18 @@ class Scheduler:
         # Performance-related statistics.
         self.stats = Stats(num_gpu_blocks, num_cpu_blocks)
 
+    def register_prefix(
+        self,
+        seq_group: SequenceGroup,
+    ) -> None:
+        num_seqs = seq_group.num_seqs()
+        if num_seqs > 1:
+            raise ValueError(
+                'The prefix must be a single sequence, '
+                f'but got {num_seqs} sequences.')
+        self.waiting_prefix.append(seq_group)
+        self.sampling_params[seq_group.group_id] = SamplingParams.from_dict({})
+
     def add_sequence_groups(
         self,
         seq_groups: List[Tuple[SequenceGroup, SamplingParams]],
@@ -80,10 +97,36 @@ class Scheduler:
         for seq_group, sampling_params in seq_groups:
             self.waiting.append(seq_group)
             self.sampling_params[seq_group.group_id] = sampling_params
+            if sampling_params.prefix_id is not None:
+                if sampling_params.prefix_id not in self.prefix:
+                    raise ValueError(
+                        f'Invalid prefix id: {sampling_params.prefix_id}')
 
     def _schedule(
         self,
     ) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, List[int]], List[int]]:
+        # Prioritize the processing of prefix if there is any.
+        # This must happen at the initialization phase, before start serving.
+        if self.waiting_prefix:
+            assert not self.waiting
+            assert not self.running
+            assert not self.swapped
+            group_ids = []
+            for seq_group in self.waiting_prefix:
+                assert seq_group.num_seqs() == 1
+                seq = seq_group.seqs[0]
+                seq.status = SequenceStatus.PREFIX
+                self.running.append(seq_group)
+
+                # NOTE(woosuk): The prefix id is the same as the sequence id,
+                # not the group id.
+                self.prefix[seq.seq_id] = seq_group
+                self.block_manager.allocate(seq_group)
+                group_ids.append(seq_group.group_id)
+
+            self.waiting_prefix = []
+            return ({}, {}, {}, group_ids)
+
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
@@ -274,14 +317,24 @@ class Scheduler:
                 # sequence length
                 seq_len = seq.get_len()
 
+            sampling_params = self.sampling_params[group_id]
+            if sampling_params.prefix_id is None:
+                num_prefix_tokens = 0
+            else:
+                prefix_seq_group = self.prefix[sampling_params.prefix_id]
+                prefix_seq = prefix_seq_group.seqs[0]
+                num_prefix_tokens = prefix_seq.get_len()
+                seq_len += num_prefix_tokens
+
             input_seq_group = SequenceGroupInputs(
                 group_id=group_id,
                 is_prompt=is_prompt,
                 input_tokens=input_tokens,
                 context_len=seq_len,
                 seq_logprobs=seq_logprobs,
-                sampling_params=self.sampling_params[group_id],
+                sampling_params=sampling_params,
                 block_tables=block_tables,
+                num_prefix_tokens=num_prefix_tokens,
             )
             input_seq_groups.append(input_seq_group)
 
@@ -302,6 +355,13 @@ class Scheduler:
         self,
         seq_outputs: Dict[int, SequenceOutputs],
     ) -> None:
+        if self.prefix:
+            # Skip prefix sequences.
+            self.running = [
+                seq_group for seq_group in self.running
+                if seq_group.seqs[0].seq_id not in self.prefix
+            ]
+
         # Update the running sequences and free blocks.
         for seq_group in self.running:
             group_id = seq_group.group_id
@@ -353,7 +413,14 @@ class Scheduler:
         self.running = running
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
-        self.block_manager.allocate(seq_group)
+        group_id = seq_group.group_id
+        sampling_params = self.sampling_params[group_id]
+        if sampling_params.prefix_id is not None:
+            self.block_manager.allocate_with_prefix(
+                seq_group, sampling_params.prefix_id)
+        else:
+            self.block_manager.allocate(seq_group)
+
         for seq in seq_group.seqs:
             seq.status = SequenceStatus.RUNNING
         # FIXME(woosuk): Support interactive generation.

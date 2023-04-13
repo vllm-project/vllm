@@ -17,6 +17,11 @@ class InputMetadata:
         context_lens: torch.Tensor,
         max_context_len: int,
         block_tables: torch.Tensor,
+        query_lens: List[int],
+        cumulative_query_lens: torch.Tensor,
+        max_context_len_including_prefix: int,
+        cumulative_context_lens_including_prefix: torch.Tensor,
+        slots_including_prefix: torch.Tensor,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_logprobs = seq_logprobs
@@ -27,9 +32,20 @@ class InputMetadata:
         self.max_context_len = max_context_len
         self.block_tables = block_tables
 
+        self.query_lens = query_lens
+        self.cumulative_query_lens = cumulative_query_lens
+        self.max_context_len_including_prefix = max_context_len_including_prefix
+        self.cumulative_context_lens_including_prefix = cumulative_context_lens_including_prefix
+        self.slots_including_prefix = slots_including_prefix
+
         self.num_prompts = len(prompt_lens)
         self.num_prompt_tokens = sum(prompt_lens)
         self.max_prompt_len = max(prompt_lens) if prompt_lens else 0
+
+        self.num_queries = len(query_lens)
+        self.num_query_tokens = sum(query_lens)
+        self.max_query_len = max(query_lens) if query_lens else 0
+
         self.num_generation_tokens = context_lens.shape[0]
         self.num_valid_tokens = slot_mapping.shape[0]
         if block_tables.numel() > 0:
@@ -37,7 +53,8 @@ class InputMetadata:
         else:
             self.max_num_blocks_per_seq = 0
         assert block_tables.shape[0] == self.num_generation_tokens
-        assert context_lens.shape[0] == self.num_generation_tokens
+        assert self.num_valid_tokens == (
+            self.num_prompt_tokens + self.num_query_tokens + self.num_generation_tokens)
 
     def __repr__(self) -> str:
         return (f'InputMetadata('

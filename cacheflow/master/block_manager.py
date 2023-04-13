@@ -97,6 +97,32 @@ class BlockSpaceManager:
         for seq in seq_group.seqs:
             self.block_tables[seq.seq_id] = block_table.copy()
 
+    def allocate_with_prefix(
+        self,
+        seq_group: SequenceGroup,
+        prefix_id: int,
+    ) -> Optional[Tuple[int, List[int]]]:
+        # NOTE(woosuk): We ensure that every prefix must be a multiple of the
+        # block size, by recomputing the last few prefix tokens if they are
+        # not a multiple of the block size.
+        block_table = self.block_tables[prefix_id].copy()
+        # Increase the reference count of the prefix blocks.
+        for block in block_table:
+            block.ref_count += seq_group.num_seqs()
+
+        # Allocate new physical token blocks that will store the prompt tokens.
+        # NOTE: Here we assume that all sequences in the group have the same prompt.
+        seq = seq_group.seqs[0]
+        for _ in range(len(seq.logical_token_blocks)):
+            block = self.gpu_allocator.allocate()
+            # Set the reference counts of the token blocks.
+            block.ref_count = seq_group.num_seqs()
+            block_table.append(block)
+
+        # Assign the same block table for every sequence.
+        for seq in seq_group.seqs:
+            self.block_tables[seq.seq_id] = block_table.copy()
+
     def can_append(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
         # for each sequence, we can append.

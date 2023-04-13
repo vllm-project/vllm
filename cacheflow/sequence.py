@@ -7,6 +7,7 @@ from cacheflow.sampling_params import SamplingParams
 
 
 class SequenceStatus(enum.Enum):
+    PREFIX = enum.auto()
     WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()
@@ -132,6 +133,7 @@ class SequenceGroupInputs:
         seq_logprobs: Dict[int, float],         # Seq id -> cumulative logprobs.
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],     # Seq id -> List of physical block numbers.
+        num_prefix_tokens: int,
     ) -> None:
         self.group_id = group_id
         self.is_prompt = is_prompt
@@ -140,6 +142,7 @@ class SequenceGroupInputs:
         self.seq_logprobs = seq_logprobs
         self.sampling_params = sampling_params
         self.block_tables = block_tables
+        self.num_prefix_tokens = num_prefix_tokens
 
 
 class SequenceOutputs:
