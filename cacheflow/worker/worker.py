@@ -174,9 +174,8 @@ class Worker:
 
             # Compute the slot mapping.
             block_table = input_seq_group.block_tables[seq_id]
-            block_table = block_table[num_prefix_blocks:]
             for i in range(prompt_len):
-                block_number = block_table[i // self.block_size]
+                block_number = block_table[num_prefix_blocks + (i // self.block_size)]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
@@ -274,6 +273,7 @@ class Worker:
             block_tables=block_tables_tensor,
             query_lens=query_lens,
             cumulative_query_lens=cumulative_query_lens_tensor,
+            prefix_context_lens=context_lens_including_prefix,
             cumulative_context_lens_including_prefix=cumulative_context_lens_including_prefix_tensor,
             slots_including_prefix=slots_including_prefix_tensor,
         )

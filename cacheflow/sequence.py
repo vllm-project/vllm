@@ -7,7 +7,6 @@ from cacheflow.sampling_params import SamplingParams
 
 
 class SequenceStatus(enum.Enum):
-    PREFIX = enum.auto()
     WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()

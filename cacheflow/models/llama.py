@@ -90,6 +90,7 @@ class LlamaAttention(nn.Module):
         positions: torch.LongTensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
+        kv_buffer: torch.Tensor,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
@@ -97,7 +98,7 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(
-            positions, q, k, v, k_cache, v_cache, input_metadata, cache_event)
+            positions, q, k, v, k_cache, v_cache, kv_buffer, input_metadata, cache_event)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -124,6 +125,7 @@ class LlamaDecoderLayer(nn.Module):
         positions: torch.LongTensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
+        kv_buffer: torch.Tensor,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
@@ -134,6 +136,7 @@ class LlamaDecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
+            kv_buffer=kv_buffer,
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
@@ -154,6 +157,17 @@ class LlamaModel(nn.Module):
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+
+        # Allocate KV buffer.
+        kv_buffer_size = 2048
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
+        num_heads = config.num_attention_heads // tensor_model_parallel_world_size
+        head_size = config.hidden_size // config.num_attention_heads
+        kv_buffer = torch.empty(
+            size=(kv_buffer_size, 3, num_heads, head_size),
+            dtype=torch.get_default_dtype(),
+        )
+        self.register_buffer('kv_buffer', kv_buffer, persistent=False)
 
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size,
                                                    perform_initialization=False)
@@ -179,6 +193,7 @@ class LlamaModel(nn.Module):
                 positions,
                 hidden_states,
                 kv_caches[i],
+                self.kv_buffer,
                 input_metadata,
                 cache_event,
             )

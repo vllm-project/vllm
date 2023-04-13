@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 
 from flash_attn.flash_attn_interface import _flash_attn_forward
 import torch
@@ -17,18 +17,11 @@ class GPTCacheFlowAttention(nn.Module):
         scale: float,
         num_heads: int,
         head_size: int,
-        kv_buffer_size: int = 2048,
     ) -> None:
         super().__init__()
         self.scale = float(scale)
         self.num_heads = num_heads
         self.head_size = head_size
-
-        kv_buffer = torch.empty(
-            size=(kv_buffer_size, 3, num_heads, head_size),
-            dtype=torch.get_default_dtype(),
-        )
-        self.register_buffer('kv_buffer', kv_buffer, persistent=False)
 
     def multi_query_kv_attention(
         self,
@@ -66,37 +59,47 @@ class GPTCacheFlowAttention(nn.Module):
         self,
         output: torch.Tensor,                   # [num_prefix_prompt_tokens, num_heads, head_size]
         query: torch.Tensor,                    # [num_prefix_prompt_tokens, num_heads, head_size]
-        key: torch.Tensor,                      # [num_prefix_prompt_tokens, num_heads, head_size]
-        value: torch.Tensor,                    # [num_prefix_prompt_tokens, num_heads, head_size]
         key_cache: torch.Tensor,                # [num_blocks, num_heads, head_size/x, block_size, x]
         value_cache: torch.Tensor,              # [num_blocks, num_heads, head_size, block_size]
-        slots: torch.Tensor,                    # [num_prefix_prompt_tokens]
-        cumulative_query_lens: torch.Tensor,    # [num_prompts + 1]
-        cumulative_context_lens: torch.Tensor,  # [num_prompts + 1]
-        max_query_len: int,
-        max_context_len: int,
+        kv_buffer: torch.Tensor,
+        slots: torch.Tensor,                    # []
+        query_lens: List[int],
+        kv_lens: List[int],
     ) -> None:
-        cache_ops.gather_kv(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slots,
-        )
-        _flash_attn_forward(
-            query,
-            key,
-            value,
-            output,
-            cumulative_query_lens,
-            cumulative_context_lens,
-            max_query_len,
-            max_context_len,
-            dropout_p=0.0,
-            softmax_scale=self.scale,
-            causal=True,
-            return_softmax=False,
-        )
+        _, key_buffer, value_buffer = kv_buffer.unbind(dim=1)
+
+        num_pairs = len(query_lens)
+        cum_query_len = 0
+        cum_kv_len = 0
+        for i in range(num_pairs):
+            query_len = query_lens[i]
+            kv_len = kv_lens[i]
+            cache_ops.gather_cached_kv(
+                key_buffer[:kv_len],
+                value_buffer[:kv_len],
+                key_cache,
+                value_cache,
+                slots[cum_kv_len:cum_kv_len + kv_len],
+            )
+            torch.cuda.synchronize()
+            _flash_attn_forward(
+                query[cum_query_len:cum_query_len + query_len],
+                key_buffer[:kv_len],
+                value_buffer[:kv_len],
+                output[cum_query_len:cum_query_len + query_len],
+                torch.tensor([0, query_len], dtype=torch.int, device=query.device),
+                torch.tensor([0, kv_len], dtype=torch.int, device=query.device),
+                query_len,
+                kv_len,
+                dropout_p=0.0,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax=False,
+            )
+            torch.cuda.synchronize()
+
+            cum_query_len += query_len
+            cum_kv_len += kv_len
 
     def single_query_cached_kv_attention(
         self,
@@ -133,6 +136,7 @@ class GPTCacheFlowAttention(nn.Module):
         value: torch.Tensor,                    # [num_tokens, num_heads * head_size]
         key_cache: torch.Tensor,                # [num_blocks, num_heads, head_size/x, block_size, x]
         value_cache: torch.Tensor,              # [num_blocks, num_heads, head_size, block_size]
+        kv_buffer: torch.Tensor,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:                          # [num_tokens, num_heads * head_size]
@@ -150,6 +154,7 @@ class GPTCacheFlowAttention(nn.Module):
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
+            torch.cuda.synchronize()
             self.multi_query_kv_attention(
                 output[:num_prompt_tokens],
                 query[:num_prompt_tokens],
@@ -158,6 +163,7 @@ class GPTCacheFlowAttention(nn.Module):
                 input_metadata.cumulative_prompt_lens,
                 input_metadata.max_prompt_len,
             )
+            torch.cuda.synchronize()
 
         # Wait until the cache op is done.
         if cache_event is not None:
@@ -167,6 +173,7 @@ class GPTCacheFlowAttention(nn.Module):
         num_valid_tokens = input_metadata.num_valid_tokens
         if num_valid_tokens > 0:
             # The stride is 3 because the key and value are sliced from qkv.
+            torch.cuda.synchronize()
             cache_ops.reshape_and_cache(
                 key[:num_valid_tokens],
                 value[:num_valid_tokens],
@@ -180,28 +187,30 @@ class GPTCacheFlowAttention(nn.Module):
         if num_query_tokens > 0:
             start = num_prompt_tokens
             end = num_prompt_tokens + num_query_tokens
+            torch.cuda.synchronize()
             self.multi_query_cached_kv_attention(
                 output[start:end],
                 query[start:end],
-                key[start:end],
-                value[start:end],
                 key_cache,
                 value_cache,
+                kv_buffer,
                 input_metadata.slots_including_prefix,
-                input_metadata.cumulative_query_lens,
-                input_metadata.cumulative_context_lens_including_prefix,
-                input_metadata.max_query_len,
-                input_metadata.max_context_len_including_prefix,
+                input_metadata.query_lens,
+                input_metadata.prefix_context_lens,
             )
+            torch.cuda.synchronize()
 
         if input_metadata.num_generation_tokens > 0:
             # Compute the attention op for generation tokens.
+            start = num_prompt_tokens + num_query_tokens
+            end = num_valid_tokens
             self.single_query_cached_kv_attention(
-                output[num_prompt_tokens:num_valid_tokens],
-                query[num_prompt_tokens:num_valid_tokens],
+                output[start:end],
+                query[start:end],
                 key_cache,
                 value_cache,
                 input_metadata)
+            torch.cuda.synchronize()
 
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.
@@ -251,6 +260,7 @@ class LlamaCacheFlowAttention(GPTCacheFlowAttention):
         value: torch.Tensor,                    # [num_tokens, num_heads * head_size]
         key_cache: torch.Tensor,                # [num_blocks, num_heads, head_size/x, block_size, x]
         value_cache: torch.Tensor,              # [num_blocks, num_heads, head_size, block_size]
+        kv_buffer: torch.Tensor,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:                          # [num_tokens, num_heads * head_size]
@@ -268,6 +278,7 @@ class LlamaCacheFlowAttention(GPTCacheFlowAttention):
             value,
             key_cache,
             value_cache,
+            kv_buffer,
             input_metadata,
             cache_event,
         )
