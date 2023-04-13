@@ -97,6 +97,12 @@ class Server:
     ):
         self.scheduler.add_sequence_groups(sequence_groups)
 
+    def register_prefix(
+        self,
+        sequence_group: SequenceGroup,
+    ) -> None:
+        self.scheduler.register_prefix(sequence_group)
+
     def step(self):
         return self.scheduler.step()
 

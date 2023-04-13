@@ -2,7 +2,9 @@ import pickle
 import random
 from typing import List, Tuple
 
+from datasets import load_dataset
 import numpy as np
+from transformers import AutoTokenizer
 
 from cacheflow.sampling_params import SamplingParams
 
@@ -114,3 +116,100 @@ def generate_text_completion_requests(
         cum_sum += 1
         requests.append((timestamp, input_tokens, sampling_params))
     return requests
+
+
+def generate_translation_requests(
+    model: str,
+    dataset: str,
+    num_examples: int,
+    request_rate: float,
+    duration: int,
+    seed: int,
+    block_size: int,
+    max_seq_len: int = 2048,
+    time_quantum: int = 10,
+) -> Tuple[List[int], List[Tuple[float, List[int], SamplingParams]]]:
+    tokenizer = AutoTokenizer.from_pretrained(model)
+
+    random.seed(seed)
+    np.random.seed(seed)
+
+    # Generate timestamps for requests using Poisson distribution.
+    lam = request_rate * (time_quantum / 1000)
+    quantums_per_sec = 1000 / time_quantum
+    arrival_times = np.random.poisson(
+        lam=lam, size=int(duration * quantums_per_sec))
+    timestamps = []
+    for i, n in enumerate(arrival_times):
+        timestamps += [i * (time_quantum / 1000)] * n
+
+    # Load the training dataset and sample examples.
+    train_set = load_dataset('wmt16', 'de-en', split='train')
+    train_size = train_set.num_rows
+    if num_examples > train_size:
+        raise ValueError(
+            f'Number of examples ({num_examples}) is greater than the '
+            f'number of training examples ({train_size}).')
+
+    # Add instruction first.
+    prefix = 'Translate English to German:\n'
+
+    # Randomly sample examples from the training dataset and add them to the
+    # prefix.
+    indices = np.random.choice(train_size, num_examples, replace=False).tolist()
+    for i in indices:
+        pair = train_set[i]['translation']
+        en = pair['en']
+        de = pair['de']
+        example = f'{en} => {de}\n'
+        prefix += example
+    prefix_tokens = tokenizer.encode(prefix, add_special_tokens=True)
+
+    # If the prefix length is not a multiple of the block size, truncate it.
+    prefix_len = len(prefix_tokens)
+    remainder_tokens = []
+    if prefix_len % block_size != 0:
+        remainder_tokens = prefix_tokens[-(prefix_len % block_size):]
+        prefix_tokens = prefix_tokens[:-(prefix_len % block_size)]
+        prefix_len = len(prefix_tokens)
+    
+    # Tokenize the test set.
+    test_set = load_dataset(dataset, 'de-en', split='test')
+    tokenized = []
+    for data in test_set:
+        en = data['translation']['en'] + ' =>'
+        # We skip the <start> token because the tokens will be appended to a prefix.
+        en_tokens = tokenizer.encode(en, add_special_tokens=False)
+        input_tokens = remainder_tokens + en_tokens
+
+        de = data['translation']['de']
+        output_tokens = tokenizer.encode(de, add_special_tokens=False)
+
+        # Filter out too long sequences.
+        if prefix_len + len(input_tokens) + len(output_tokens) > max_seq_len:
+            continue
+        tokenized.append((input_tokens, len(output_tokens)))
+
+    # Generate requests.
+    num_requests = len(timestamps)
+    while len(tokenized) < num_requests:
+        tokenized += tokenized
+    tokenized = tokenized[:num_requests]
+    # Shuffle the requests.
+    random.shuffle(tokenized)
+    random_sampling_params_dict = {
+        'temperature': 0.0,
+        'top_p': 1.0,
+        'use_beam_search': False,
+        'stop_token_ids': set(),
+        'num_logprobs': 0,
+        'context_window_size': None,
+        'prefix_id': 0, # FIXME
+    }
+    requests = []
+    for timestamp, pair in zip(timestamps, tokenized):
+        input_tokens, output_len = pair
+        sampling_params = SamplingParams(
+            n=1, max_num_steps=output_len, **random_sampling_params_dict)
+        requests.append((timestamp, input_tokens, sampling_params))
+    return prefix_tokens, requests

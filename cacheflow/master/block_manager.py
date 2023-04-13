@@ -135,7 +135,8 @@ class BlockSpaceManager:
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
 
-        if len(block_table) < len(logical_blocks):
+        # HACK
+        if logical_blocks[-1].num_tokens == 1:
             # The sequence has a new logical block.
             # Allocate a new physical block.
             block = self.gpu_allocator.allocate()

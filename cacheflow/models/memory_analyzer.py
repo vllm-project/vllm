@@ -210,8 +210,12 @@ class LlamaMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         # Size of output logits.
         output_logits = 2 * (max_num_batched_tokens * self.vocab_size)
         max_act = max(max_act, output_logits)
+
+        # KV buffer size.
+        kv_buffer = 2048 * 3 * self.hidden_size // self.tensor_parallel_size
+
         dtype_size = get_dtype_size(self.dtype)
-        return dtype_size * max_act
+        return dtype_size * (max_act + kv_buffer)
 
     def get_cache_block_size(self) -> int:
         key_cache_block = self.block_size * self.hidden_size // self.tensor_parallel_size

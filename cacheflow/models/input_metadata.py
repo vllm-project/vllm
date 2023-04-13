@@ -19,7 +19,7 @@ class InputMetadata:
         block_tables: torch.Tensor,
         query_lens: List[int],
         cumulative_query_lens: torch.Tensor,
-        max_context_len_including_prefix: int,
+        prefix_context_lens: List[int],
         cumulative_context_lens_including_prefix: torch.Tensor,
         slots_including_prefix: torch.Tensor,
     ) -> None:
@@ -34,7 +34,7 @@ class InputMetadata:
 
         self.query_lens = query_lens
         self.cumulative_query_lens = cumulative_query_lens
-        self.max_context_len_including_prefix = max_context_len_including_prefix
+        self.prefix_context_lens = prefix_context_lens
         self.cumulative_context_lens_including_prefix = cumulative_context_lens_including_prefix
         self.slots_including_prefix = slots_including_prefix
 
@@ -45,6 +45,7 @@ class InputMetadata:
         self.num_queries = len(query_lens)
         self.num_query_tokens = sum(query_lens)
         self.max_query_len = max(query_lens) if query_lens else 0
+        self.max_prefix_context_len = max(prefix_context_lens) if prefix_context_lens else 0
 
         self.num_generation_tokens = context_lens.shape[0]
         self.num_valid_tokens = slot_mapping.shape[0]

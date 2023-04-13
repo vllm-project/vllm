@@ -86,6 +86,12 @@ class Scheduler:
             raise ValueError(
                 'The prefix must be a single sequence, '
                 f'but got {num_seqs} sequences.')
+        seq = seq_group.seqs[0]
+        print(f'Registering prefix id: {seq.seq_id}, prefix length: {seq.prompt_len}')
+        if seq.prompt_len % self.block_size != 0:
+            raise ValueError(
+                'The prefix length must be a multiple of the block size, '
+                f'but got {seq.prompt_len} and {self.block_size}.')
         self.waiting_prefix.append(seq_group)
         self.sampling_params[seq_group.group_id] = SamplingParams.from_dict({})
 
@@ -115,7 +121,7 @@ class Scheduler:
             for seq_group in self.waiting_prefix:
                 assert seq_group.num_seqs() == 1
                 seq = seq_group.seqs[0]
-                seq.status = SequenceStatus.PREFIX
+                seq.status = SequenceStatus.RUNNING
                 self.running.append(seq_group)
 
                 # NOTE(woosuk): The prefix id is the same as the sequence id,
