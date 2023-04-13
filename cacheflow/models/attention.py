@@ -81,7 +81,6 @@ class GPTCacheFlowAttention(nn.Module):
                 value_cache,
                 slots[cum_kv_len:cum_kv_len + kv_len],
             )
-            torch.cuda.synchronize()
             _flash_attn_forward(
                 query[cum_query_len:cum_query_len + query_len],
                 key_buffer[:kv_len],
@@ -96,7 +95,6 @@ class GPTCacheFlowAttention(nn.Module):
                 causal=True,
                 return_softmax=False,
             )
-            torch.cuda.synchronize()
 
             cum_query_len += query_len
             cum_kv_len += kv_len
@@ -154,7 +152,6 @@ class GPTCacheFlowAttention(nn.Module):
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
-            torch.cuda.synchronize()
             self.multi_query_kv_attention(
                 output[:num_prompt_tokens],
                 query[:num_prompt_tokens],
@@ -163,7 +160,6 @@ class GPTCacheFlowAttention(nn.Module):
                 input_metadata.cumulative_prompt_lens,
                 input_metadata.max_prompt_len,
             )
-            torch.cuda.synchronize()
 
         # Wait until the cache op is done.
         if cache_event is not None:
@@ -173,7 +169,6 @@ class GPTCacheFlowAttention(nn.Module):
         num_valid_tokens = input_metadata.num_valid_tokens
         if num_valid_tokens > 0:
             # The stride is 3 because the key and value are sliced from qkv.
-            torch.cuda.synchronize()
             cache_ops.reshape_and_cache(
                 key[:num_valid_tokens],
                 value[:num_valid_tokens],
@@ -187,7 +182,6 @@ class GPTCacheFlowAttention(nn.Module):
         if num_query_tokens > 0:
             start = num_prompt_tokens
             end = num_prompt_tokens + num_query_tokens
-            torch.cuda.synchronize()
             self.multi_query_cached_kv_attention(
                 output[start:end],
                 query[start:end],
@@ -198,7 +192,6 @@ class GPTCacheFlowAttention(nn.Module):
                 input_metadata.query_lens,
                 input_metadata.prefix_context_lens,
             )
-            torch.cuda.synchronize()
 
         if input_metadata.num_generation_tokens > 0:
             # Compute the attention op for generation tokens.
@@ -210,7 +203,6 @@ class GPTCacheFlowAttention(nn.Module):
                 key_cache,
                 value_cache,
                 input_metadata)
-            torch.cuda.synchronize()
 
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.
