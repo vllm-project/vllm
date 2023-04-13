@@ -8,3 +8,5 @@ build/
 *.pkl
 *.png
 **/log.txt
+
+*.swp
