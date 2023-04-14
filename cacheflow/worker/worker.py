@@ -170,7 +170,7 @@ class Worker:
             num_prefix_blocks = num_prefix_tokens // self.block_size
 
             input_tokens.extend(prompt_tokens)
-            input_positions.extend(range(num_prefix_tokens + prompt_len))
+            input_positions.extend(range(num_prefix_tokens, num_prefix_tokens + prompt_len))
 
             # Compute the slot mapping.
             block_table = input_seq_group.block_tables[seq_id]
