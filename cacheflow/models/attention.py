@@ -214,8 +214,8 @@ class GPTCacheFlowAttention(nn.Module):
 class OPTCacheFlowAttention(GPTCacheFlowAttention):
     """OPT uses the same attention mechanism as GPT."""
 
-    def __init__(self, scale: float) -> None:
-        super().__init__(scale)
+    def __init__(self, scale: float, num_heads: int, head_size: int) -> None:
+        super().__init__(scale, num_heads, head_size)
 
 
 class LlamaCacheFlowAttention(GPTCacheFlowAttention):
