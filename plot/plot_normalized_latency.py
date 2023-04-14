@@ -179,8 +179,10 @@ def plot_normalized_latency(
             plt.ylim(bottom=0, top=ylim)
 
     # Save figure.
-    model, tp = get_model(exp_dir)
-    sampling = get_sampling(exp_dir)
+    #model, tp = get_model(exp_dir)
+    #sampling = get_sampling(exp_dir)
+    model, tp = "opt", 1
+    sampling = "sampling"
     figname = f'{model}-tp{tp}-{sampling}.{format}'
     os.makedirs('./figures', exist_ok=True)
     plt.savefig(os.path.join('figures', figname), bbox_inches='tight')
