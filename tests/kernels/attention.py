@@ -4,7 +4,7 @@ from typing import List, Optional
 from flash_attn.flash_attn_interface import _flash_attn_forward
 import torch
 
-from cacheflow import attention_ops
+from cacheflow import attention_ops, cache_ops
 
 MAX_SEQ_LEN = 4096
 
@@ -271,6 +271,78 @@ def test_multi_query_kv_attention(
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
+def test_multi_query_kv_cached_attention_with_flashattn(
+    num_seqs: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    dtype: torch.dtype,
+) -> None:
+    seq_lens = random.sample(range(1, MAX_SEQ_LEN), num_seqs)
+    max_seq_len = max(seq_lens)
+    num_tokens = sum(seq_lens)
+
+    cu_seq_lens = [0]
+    for seq_len in seq_lens:
+        cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
+    cu_seq_lens = torch.tensor(cu_seq_lens, dtype=torch.int, device='cuda')
+
+    scale = float(1.0 / (head_size ** 0.5))
+    qkv = torch.randn(
+        num_tokens, 3, num_heads, head_size, dtype=dtype, device='cuda')
+    # Adjust the range of the values to reduce precision errors.
+    qkv = qkv / (head_size ** 0.5)
+
+    query, key, value = qkv.unbind(dim=1)
+    output = torch.empty(
+        num_tokens, num_heads, head_size, dtype=dtype, device='cuda')
+    
+    # ------------------ integrate with cache ------------------
+
+    num_slots = num_tokens
+    num_blocks = (num_slots + block_size - 1) // block_size
+    # use a shuffled slot mapping to test the cache functions
+    slot_mapping = torch.randperm(num_slots, dtype=torch.int, device='cuda')
+    x = 16 // torch.tensor([], dtype=dtype).element_size()
+    key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
+    key_cache = torch.randn(size=key_cache_shape, dtype=dtype, device='cuda')
+    value_cache_shape = (num_blocks, num_heads, head_size, block_size)
+    value_cache = torch.randn(
+        size=value_cache_shape, dtype=dtype, device='cuda')
+
+    cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
+    new_qkv = torch.zeros_like(qkv)
+    _, new_key, new_value = new_qkv.unbind(dim=1)
+    cache_ops.gather_cached_kv(new_key, new_value, key_cache, value_cache, slot_mapping)
+
+    # ------------------ attention ------------------
+
+    _flash_attn_forward(
+        query,
+        new_key,
+        new_value,
+        output,
+        cu_seq_lens,
+        cu_seq_lens,
+        max_seq_len,
+        max_seq_len,
+        dropout_p=0.0,
+        softmax_scale=scale,
+        causal=True,
+        return_softmax=False,
+    )
+
+    cu_seq_lens = cu_seq_lens.cpu().tolist()
+    ref_output = ref_multi_query_kv_attention(
+        cu_seq_lens,
+        query,
+        key,
+        value,
+        dtype,
+    )
+    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+
+
 def test_multi_query_cached_kv_attention(
     num_queries: int,
     num_heads: int,
@@ -379,6 +451,20 @@ def test_attention(seed: int) -> None:
                     head_size=head_size,
                     block_size=block_size,
                     num_blocks=1024,
+                    dtype=dtype,
+                )
+
+    for dtype in [torch.half]:
+        for block_size in [8, 16, 32]:
+            for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
+                print(f'Testing multi_query_kv_cached_attention_with_flashattn with '
+                      f'dtype={dtype}, block_size={block_size}, '
+                      f'head_size={head_size}')
+                test_multi_query_kv_cached_attention_with_flashattn(
+                    num_queries=11,
+                    num_heads=3,
+                    head_size=head_size,
+                    block_size=block_size,
                     dtype=dtype,
                 )
 
