@@ -456,12 +456,13 @@ def test_attention(seed: int) -> None:
 
     for dtype in [torch.half]:
         for block_size in [8, 16, 32]:
-            for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
+            # NOTE(woosuk): FlashAttention does not support head_size > 128.
+            for head_size in [64, 80, 96, 128]:
                 print(f'Testing multi_query_kv_cached_attention_with_flashattn with '
                       f'dtype={dtype}, block_size={block_size}, '
                       f'head_size={head_size}')
                 test_multi_query_kv_cached_attention_with_flashattn(
-                    num_queries=11,
+                    num_seqs=11,
                     num_heads=3,
                     head_size=head_size,
                     block_size=block_size,
