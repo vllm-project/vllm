@@ -66,7 +66,7 @@ class GPTCacheFlowAttention(nn.Module):
         query_lens: List[int],
         kv_lens: List[int],
     ) -> None:
-        _, key_buffer, value_buffer = kv_buffer.unbind(dim=1)
+        query_buffer, key_buffer, value_buffer = kv_buffer.unbind(dim=1)
 
         num_pairs = len(query_lens)
         cum_query_len = 0
@@ -81,8 +81,10 @@ class GPTCacheFlowAttention(nn.Module):
                 value_cache,
                 slots[cum_kv_len:cum_kv_len + kv_len],
             )
+            q_buffer = query_buffer[:query_len]
+            q_buffer.copy_(query[cum_query_len:cum_query_len + query_len])
             _flash_attn_forward(
-                query[cum_query_len:cum_query_len + query_len],
+                q_buffer,
                 key_buffer[:kv_len],
                 value_buffer[:kv_len],
                 output[cum_query_len:cum_query_len + query_len],
