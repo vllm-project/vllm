@@ -15,7 +15,7 @@ class BlockAllocator:
         block_size: int,
         num_blocks: int,
     ) -> None:
-        if block_size not in [8, 16, 32]:
+        if block_size not in [1, 2, 4, 8, 16, 32]:
             raise ValueError(f'Unsupported block size: {block_size}'
                              'The block size must be one of {8, 16, 32}.')
         self.device = device
