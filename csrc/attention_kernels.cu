@@ -29,7 +29,8 @@ __global__ void single_query_cached_kv_attention_kernel(
   const int* __restrict__ context_lens,   // [num_seqs]
   const int max_num_blocks_per_seq,
   const int q_stride) {
-  constexpr int THREAD_GROUP_SIZE = WARP_SIZE / BLOCK_SIZE;
+  constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
+  constexpr int NUM_TOKENS_PER_THREAD_GROUP = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   const int thread_idx = threadIdx.x;
   const int warp_idx = thread_idx / WARP_SIZE;
@@ -41,7 +42,7 @@ __global__ void single_query_cached_kv_attention_kernel(
 
   // A vector type to store a part of a key or a query.
   // The vector size is configured in such a way that the threads in a thread group
-  // fetch or comput 16 bytes at a time.
+  // fetch or compute 16 bytes at a time.
   // For example, if the size of a thread group is 4 and the data type is half,
   // then the vector size is 16 / (4 * sizeof(half)) == 2.
   constexpr int VEC_SIZE = MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)), 1);
@@ -90,37 +91,40 @@ __global__ void single_query_cached_kv_attention_kernel(
   // dot product with the query.
   for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
     const int physical_block_number = block_table[block_idx];
-    const int physical_block_offset = thread_group_idx % BLOCK_SIZE;
-    const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
 
     // Load a key to registers.
     // Each thread in a thread group has a different part of the key.
     // For example, if the the thread group size is 4, then the first thread in the group
     // has 0, 4, 8, ... th vectors of the key, and the second thread has 1, 5, 9, ... th
     // vectors of the key, and so on.
-    K_vec k_vecs[NUM_VECS_PER_THREAD];
-#pragma unroll
-    for (int i = 0; i < NUM_VECS_PER_THREAD; i++) {
-      const scalar_t* k_ptr = k_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
-                                      + head_idx * HEAD_SIZE * BLOCK_SIZE
-                                      + physical_block_offset * x;
-      const int vec_idx = thread_group_offset + i * THREAD_GROUP_SIZE;
-      const int offset1 = (vec_idx * VEC_SIZE) / x;
-      const int offset2 = (vec_idx * VEC_SIZE) % x;
-      k_vecs[i] = *reinterpret_cast<const K_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
-    }
+    for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
+      const int physical_block_offset = thread_group_idx % BLOCK_SIZE + i * WARP_SIZE;
+      const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
+      K_vec k_vecs[NUM_VECS_PER_THREAD];
 
-    // Compute dot product.
-    // This includes a reduction across the threads in the same thread group.
-    const float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs, k_vecs);
-    const bool mask = token_idx >= context_len;
-  
-    if (thread_group_offset == 0) {
-      // Store the partial reductions to shared memory.
-      // NOTE(woosuk): It is required to zero out the masked logits.
-      logits[token_idx] = mask ? 0.f : qk;
-      // Update the max value.
-      qk_max = mask ? qk_max : fmaxf(qk_max, qk);
+#pragma unroll
+      for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
+        const scalar_t* k_ptr = k_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
+                                        + head_idx * HEAD_SIZE * BLOCK_SIZE
+                                        + physical_block_offset * x;
+        const int vec_idx = thread_group_offset + j * THREAD_GROUP_SIZE;
+        const int offset1 = (vec_idx * VEC_SIZE) / x;
+        const int offset2 = (vec_idx * VEC_SIZE) % x;
+        k_vecs[j] = *reinterpret_cast<const K_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+      }
+
+      // Compute dot product.
+      // This includes a reduction across the threads in the same thread group.
+      const float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs, k_vecs);
+      const bool mask = token_idx >= context_len;
+    
+      if (thread_group_offset == 0) {
+        // Store the partial reductions to shared memory.
+        // NOTE(woosuk): It is required to zero out the masked logits.
+        logits[token_idx] = mask ? 0.f : qk;
+        // Update the max value.
+        qk_max = mask ? qk_max : fmaxf(qk_max, qk);
+      }
     }
   }
 
@@ -291,7 +295,7 @@ void single_query_cached_kv_attention_launcher(
   int max_num_blocks_per_seq = block_tables.size(1);
   int query_stride = query.stride(0);
 
-  int thread_group_size = WARP_SIZE / BLOCK_SIZE;
+  int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   assert(head_size % thread_group_size == 0);
 
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
@@ -341,6 +345,17 @@ void single_query_cached_kv_attention_launcher(
   }
 }
 
+#define CALL_KERNEL_LAUNCHER(T, BLOCK_SIZE)                         \
+  single_query_cached_kv_attention_launcher<T, BLOCK_SIZE>(         \ 
+        out,                                                        \
+        query,                                                      \
+        key_cache,                                                  \
+        value_cache,                                                \
+        scale,                                                      \
+        block_tables,                                               \
+        context_lens,                                               \
+        max_context_len);
+
 void single_query_cached_kv_attention(
   torch::Tensor& out,             // [num_seqs, num_heads, head_size]
   torch::Tensor& query,           // [num_seqs, num_heads, head_size]
@@ -355,69 +370,28 @@ void single_query_cached_kv_attention(
   if (query.element_size() == 2) {
     // Half.
     if (block_size == 1) {
-      single_query_cached_kv_attention_launcher<uint16_t, 1>(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        scale,
-        block_tables,
-        context_lens,
-        max_context_len);
+      CALL_KERNEL_LAUNCHER(uint16_t, 1);
     } else if (block_size == 2) {
-      single_query_cached_kv_attention_launcher<uint16_t, 2>(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        scale,
-        block_tables,
-        context_lens,
-        max_context_len);
+      CALL_KERNEL_LAUNCHER(uint16_t, 2);
     } else if (block_size == 4) {
-      single_query_cached_kv_attention_launcher<uint16_t, 4>(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        scale,
-        block_tables,
-        context_lens,
-        max_context_len);
+      CALL_KERNEL_LAUNCHER(uint16_t, 4);
     } else if (block_size == 8) {
-      single_query_cached_kv_attention_launcher<uint16_t, 8>(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        scale,
-        block_tables,
-        context_lens,
-        max_context_len);
+      CALL_KERNEL_LAUNCHER(uint16_t, 8);
     } else if (block_size == 16) {
-      single_query_cached_kv_attention_launcher<uint16_t, 16>(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        scale,
-        block_tables,
-        context_lens,
-        max_context_len);
+      CALL_KERNEL_LAUNCHER(uint16_t, 16);
     } else if (block_size == 32) {
-      single_query_cached_kv_attention_launcher<uint16_t, 32>(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        scale,
-        block_tables,
-        context_lens,
-        max_context_len);
+      CALL_KERNEL_LAUNCHER(uint16_t, 32);
+    } else if (block_size == 64) {
+      CALL_KERNEL_LAUNCHER(uint16_t, 64);
+    } else if (block_size == 128) {
+      CALL_KERNEL_LAUNCHER(uint16_t, 128);
+    } else if (block_size == 256) {
+      CALL_KERNEL_LAUNCHER(uint16_t, 256);
     } else {
       assert(false);
     }
   } else {
+    // Float.
     assert(false);
   }
 }
