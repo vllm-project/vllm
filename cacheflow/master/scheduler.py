@@ -125,7 +125,8 @@ class Scheduler:
 
         # Swap in the sequence groups in the SWAPPED state if possible.
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
-        while self.swapped:
+        # FCFS
+        while self.swapped and not blocks_to_swap_out:
             seq_group = self.swapped[0]
             # If the sequence group has been preempted in this step, stop.
             if seq_group in preempted:
