@@ -20,9 +20,6 @@ class BuddyAllocator:
         token_block_size: int,
         num_token_blocks: int,
     ) -> None:
-        if token_block_size not in [8, 16, 32]:
-            raise ValueError(f'Unsupported block size: {token_block_size}'
-                             'The block size must be one of {8, 16, 32}.')
         self.device = device
         self.token_block_size = token_block_size
         self.num_token_blocks = num_token_blocks

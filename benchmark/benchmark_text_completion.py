@@ -270,6 +270,7 @@ if __name__ == '__main__':
             f'{model_name}-tp{args.tensor_parallel_size}',
             sample_dir,
             f'orca-{args.len_estimator}',
+            f'block{args.block_size}',
             f'req-rate-{args.request_rate}',
             f'seed{args.seed}',
             f'duration-{args.duration}',
