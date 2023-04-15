@@ -263,11 +263,12 @@ if __name__ == '__main__':
         args.n1, args.n2, args.n3, args.n4, args.n6, args.n2_beam, args.n4_beam, args.n6_beam, args.n8_beam)
     if args.output_dir is None:
         args.output_dir = os.path.join(
-            '../exp',
+            '../block',
             dataset_name,
             f'{model_name}-tp{args.tensor_parallel_size}',
             sample_dir,
             'cacheflow',
+            f'block{args.block_size}',
             f'req-rate-{args.request_rate}',
             f'seed{args.seed}',
             f'duration-{args.duration}',
