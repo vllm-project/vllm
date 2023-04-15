@@ -73,7 +73,7 @@ class OPTAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(
-            q, k, v, key_cache, value_cache, input_metadata, qkv, cache_event)
+            q, k, v, key_cache, value_cache, qkv, input_metadata, cache_event)
         output, _ = self.out_proj(attn_output)
         return output
 
