@@ -75,8 +75,7 @@ def main(args: argparse.Namespace):
     server.step()
 
     # Warm up.
-    logger.info('Warming up.')
-    num_warmup_requests = 8
+    num_warmup_requests = args.num_warmup_requests
     warmup_input_len = 8
     warmup_output_len = 32
     warmup_sampling_params = SamplingParams(
@@ -92,11 +91,15 @@ def main(args: argparse.Namespace):
     )
     for _ in range(num_warmup_requests):
         frontend._add_query([0] * warmup_input_len, warmup_sampling_params)
-    server.add_sequence_groups(frontend.get_inputs())
-    while True:
-        updated_seq_groups = server.step()
-        if not server.has_unfinished_requests():
-            break
+    if num_warmup_requests > 0:
+        logger.info('Warming up.')
+        server.add_sequence_groups(frontend.get_inputs())
+        while True:
+            updated_seq_groups = server.step()
+            if not server.has_unfinished_requests():
+                break
+    else:
+        logger.info('Skip warming up.')
 
     # Start benchmarking.
     logger.info('Start benchmarking.')
@@ -250,6 +253,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='CacheFlow simple server.')
     parser = add_server_arguments(parser) 
     parser.add_argument('--output-dir', type=str, help='path to output directory', default=None)
+    parser.add_argument('--num-warmup-requests', type=int, help='number of warmup requests', default=8)
 
     parser.add_argument('--num-prefix-examples', type=int, help='number of examples to use in prefix', required=True)
     parser.add_argument('--dataset', type=str, help='path to dataset', default='wmt16')
