@@ -180,9 +180,9 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--pipeline-parallel-size', '-pp', type=int, default=1, help='number of pipeline stages')
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1, help='number of tensor parallel replicas')
     # KV cache arguments
-    parser.add_argument('--block-size', type=int, default=8, choices=[8, 16, 32], help='token block size')
+    parser.add_argument('--block-size', type=int, default=16, choices=[1, 2, 4, 8, 16, 32, 64, 128, 256], help='token block size')
     # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
-    parser.add_argument('--dtype', type=str, default='half', choices=['half', 'float'], help='data type')
+    parser.add_argument('--dtype', type=str, default='half', choices=['half'], help='data type')
     # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
