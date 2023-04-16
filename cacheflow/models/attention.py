@@ -66,9 +66,12 @@ class GPTCacheFlowAttention(nn.Module):
         query_lens: List[int],
         kv_lens: List[int],
     ) -> None:
+        #print("###", kv_buffer.shape)
         query_buffer, key_buffer, value_buffer = kv_buffer.unbind(dim=1)
+        #print("###>", query_buffer.shape, query_lens, kv_lens)
 
         num_pairs = len(query_lens)
+        assert num_pairs <= 1
         cum_query_len = 0
         cum_kv_len = 0
         for i in range(num_pairs):
@@ -81,22 +84,46 @@ class GPTCacheFlowAttention(nn.Module):
                 value_cache,
                 slots[cum_kv_len:cum_kv_len + kv_len],
             )
-            q_buffer = query_buffer[:query_len]
-            q_buffer.copy_(query[cum_query_len:cum_query_len + query_len])
+            #q_buffer = query_buffer[:query_len]
+            #q_buffer.copy_(query[cum_query_len:cum_query_len + query_len])
+            prefix_len = 8
+            print('query_len', query_len)
+            print('kv_len', kv_len)
+            output.resize_(query_buffer[:kv_len].shape)
+            print('shapes_qo', query_buffer[:kv_len].shape, output[cum_query_len:cum_query_len+kv_len].shape)
+            assert query_len + prefix_len == kv_len
+            #query_buffer[:query_len] = query[cum_query_len:cum_query_len + query_len]
+            query_buffer[prefix_len:query_len+prefix_len] = query[cum_query_len:cum_query_len + query_len]
+            #_flash_attn_forward(
+            #    query_buffer[:query_len+prefix_len],
+            #    key_buffer[:kv_len],
+            #    value_buffer[:kv_len],
+            #    output[cum_query_len:cum_query_len + query_len+prefix_len],
+            #    torch.tensor([0, query_len+prefix_len], dtype=torch.int, device=query.device),
+            #    torch.tensor([0, kv_len], dtype=torch.int, device=query.device),
+            #    query_len+prefix_len,
+            #    kv_len,
+            #    dropout_p=0.0,
+            #    softmax_scale=self.scale,
+            #    causal=True,
+            #    return_softmax=False,
+            #)
             _flash_attn_forward(
-                q_buffer,
+                query_buffer[:kv_len],
                 key_buffer[:kv_len],
                 value_buffer[:kv_len],
-                output[cum_query_len:cum_query_len + query_len],
-                torch.tensor([0, query_len], dtype=torch.int, device=query.device),
+                output[cum_query_len:cum_query_len + kv_len],
                 torch.tensor([0, kv_len], dtype=torch.int, device=query.device),
-                query_len,
+                torch.tensor([0, kv_len], dtype=torch.int, device=query.device),
+                kv_len,
                 kv_len,
                 dropout_p=0.0,
                 softmax_scale=self.scale,
                 causal=True,
                 return_softmax=False,
             )
+            output[:query_len] = output[prefix_len:prefix_len+query_len].clone()
+
 
             cum_query_len += query_len
             cum_kv_len += kv_len
@@ -154,6 +181,7 @@ class GPTCacheFlowAttention(nn.Module):
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
+            print("[num_prompt_tokens]")
             self.multi_query_kv_attention(
                 output[:num_prompt_tokens],
                 query[:num_prompt_tokens],
@@ -167,6 +195,15 @@ class GPTCacheFlowAttention(nn.Module):
         if cache_event is not None:
             cache_event.wait()
 
+        num_query_tokens = input_metadata.num_query_tokens
+        if num_query_tokens > 0:
+            start = num_prompt_tokens
+            end = num_prompt_tokens + num_query_tokens
+            #query[start:end] = 0
+            #key[start:end] = 0
+            #value[start:end] = 0
+            #output[start:end] = 0
+
         # Reshape the keys and values and store them in the cache.
         num_valid_tokens = input_metadata.num_valid_tokens
         if num_valid_tokens > 0:
@@ -178,8 +215,22 @@ class GPTCacheFlowAttention(nn.Module):
                 value_cache,
                 input_metadata.slot_mapping,
             )
+            ####  TEST
+            #_, _key_buffer, _value_buffer = kv_buffer.clone().unbind(dim=1)
+            #cum_kv_len = 0
+            #kv_len = input_metadata.prefix_context_lens[0]
+            #print("kv_len:", kv_len, "num_valid_tokens:", num_valid_tokens)
+            #cache_ops.gather_cached_kv(
+            #    _key_buffer[:kv_len],
+            #    _value_buffer[:kv_len],
+            #    key_cache,
+            #    value_cache,
+            #    slots[cum_kv_len:cum_kv_len + kv_len],
+            #)
+
 
         # Compute the attetion op for prompt with cached prefix.
+
         num_query_tokens = input_metadata.num_query_tokens
         if num_query_tokens > 0:
             start = num_prompt_tokens
@@ -194,8 +245,16 @@ class GPTCacheFlowAttention(nn.Module):
                 input_metadata.query_lens,
                 input_metadata.prefix_context_lens,
             )
+            #output[start:end] = 0
+
+            #print("!!!!!! m-min", num_prompt_tokens, num_query_tokens)
+            #m = min(num_prompt_tokens, num_query_tokens)
+            #output[start:start+m]=output[:m]
 
         if input_metadata.num_generation_tokens > 0:
+
+            #print("[seq_group]", len(input_metadata.seq_groups))
+            #print(f"gen: {input_metadata.num_generation_tokens}")
             # Compute the attention op for generation tokens.
             start = num_prompt_tokens + num_query_tokens
             end = num_valid_tokens
@@ -205,6 +264,9 @@ class GPTCacheFlowAttention(nn.Module):
                 key_cache,
                 value_cache,
                 input_metadata)
+            #m = min(num_prompt_tokens, end - start)
+            #print("!!!!!! m-min_2", num_prompt_tokens, num_query_tokens, num_valid_tokens)
+            #output[start:start+m] = output[:m]
 
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.

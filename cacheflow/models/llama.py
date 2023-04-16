@@ -97,9 +97,14 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
+        print(f"q. {q.shape}", q)
+        print(f"k. {k.shape}", k)
+        print(f"v. {v.shape}", v)
         attn_output = self.attn(
             positions, q, k, v, k_cache, v_cache, kv_buffer, input_metadata, cache_event)
+        print(f"attn_output. {attn_output.shape}", attn_output)
         output, _ = self.o_proj(attn_output)
+        print(f"output. {output.shape}", output)
         return output
 
 
@@ -184,6 +189,7 @@ class LlamaModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         for i in range(len(self.layers)):
+            print(f"layer {i} hidden state. {hidden_states.shape}: {hidden_states}")
             if cache_events is None:
                 cache_event = None
             else:
@@ -221,6 +227,7 @@ class LlamaForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
+        print(f"input_ids. {input_ids.shape}", input_ids)
         hidden_states = self.model(
             input_ids, positions, kv_caches, input_metadata, cache_events)
         next_tokens = self.sampler(

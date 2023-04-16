@@ -163,6 +163,9 @@ def generate_translation_requests(
         de = pair['de']
         example = f'{en} => {de}\n'
         prefix += example
+    prefix = "please explain quantum to me\nplease explain quantum mechanics in details"
+    prefix = "Q: Explain quantum mechanics in simple terms\nA: "
+    #prefix = "Q: please explain binary search in details\nA: "
     prefix_tokens = tokenizer.encode(prefix, add_special_tokens=True)
 
     # If the prefix length is not a multiple of the block size, truncate it.
@@ -176,13 +179,17 @@ def generate_translation_requests(
     # Tokenize the test set.
     test_set = load_dataset(dataset, 'de-en', split='test')
     tokenized = []
-    for data in test_set:
+    for i, data in enumerate(test_set):
         en = data['translation']['en'] + ' =>'
+        en = "Quantum mechanics is the study of very small. It" 
+        #en = " "
         # We skip the <start> token because the tokens will be appended to a prefix.
-        en_tokens = tokenizer.encode(en, add_special_tokens=False)
-        input_tokens = remainder_tokens + en_tokens
+        #en_tokens = tokenizer.encode(en, add_special_tokens=False)
+        #input_tokens = remainder_tokens + en_tokens
+        input_tokens = tokenizer.encode(prefix + en)[prefix_len:]
 
         de = data['translation']['de']
+        de = str(list(range(50)))
         output_tokens = tokenizer.encode(de, add_special_tokens=False)
 
         # Filter out too long sequences.
@@ -198,7 +205,7 @@ def generate_translation_requests(
     # Shuffle the requests.
     random.shuffle(tokenized)
     random_sampling_params_dict = {
-        'temperature': 0.0,
+        'temperature': 0, #0.7,
         'top_p': 1.0,
         'use_beam_search': False,
         'stop_token_ids': set(),

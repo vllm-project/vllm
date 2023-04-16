@@ -149,7 +149,7 @@ def main(args: argparse.Namespace):
             if not seq_group.is_finished():
                 continue
             # Print outputs.
-            # frontend.print_response(seq_group)
+            frontend.print_response(seq_group)
 
             arrival_time = seq_group.arrival_time
             finish_time = now
