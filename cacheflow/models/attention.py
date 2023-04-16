@@ -67,11 +67,10 @@ class GPTCacheFlowAttention(nn.Module):
         kv_lens: List[int],
     ) -> None:
         query_buffer, key_buffer, value_buffer = kv_buffer.unbind(dim=1)
-
+        output_buffer = torch.empty_like(query_buffer, device=query_buffer.device)
         num_pairs = len(query_lens)
 
-        # TODO: flash flow attention mask works differently when context_len > query_len
-
+        # TODO: flash flow attention mask works differently when context_len > query_len. this is a temp solution
         cum_query_len = 0
         cum_kv_len = 0
         for i in range(num_pairs):
@@ -85,21 +84,15 @@ class GPTCacheFlowAttention(nn.Module):
                 slots[cum_kv_len:cum_kv_len + kv_len],
             )
 
-
-            # TODO: this is temporary
-            assert num_pairs <= 1
             assert query_buffer.size(0) >= kv_len
             prefix_len = kv_len - query_len
-            output.resize_(query_buffer[:kv_len].shape)
             query_buffer[prefix_len:query_len+prefix_len] = query[cum_query_len:cum_query_len + query_len]
 
-            #q_buffer = query_buffer[:query_len]
-            #q_buffer.copy_(query[cum_query_len:cum_query_len + query_len])
             _flash_attn_forward(
                 query_buffer[:kv_len],
                 key_buffer[:kv_len],
                 value_buffer[:kv_len],
-                output[cum_query_len:cum_query_len + kv_len],
+                output_buffer[cum_query_len:cum_query_len + kv_len],
                 torch.tensor([0, kv_len], dtype=torch.int, device=query.device),
                 torch.tensor([0, kv_len], dtype=torch.int, device=query.device),
                 kv_len,
@@ -109,7 +102,7 @@ class GPTCacheFlowAttention(nn.Module):
                 causal=True,
                 return_softmax=False,
             )
-            output[:query_len] = output[prefix_len:prefix_len+query_len].clone()
+            output[cum_query_len:cum_query_len+query_len] = output_buffer[cum_query_len + prefix_len:cum_query_len + kv_len]
 
             cum_query_len += query_len
             cum_kv_len += kv_len
