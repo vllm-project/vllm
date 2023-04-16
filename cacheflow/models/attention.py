@@ -88,9 +88,8 @@ class GPTCacheFlowAttention(nn.Module):
 
             # TODO: this is temporary
             assert num_pairs <= 1
-            prefix_len = 8
             assert query_buffer.size(0) >= kv_len
-            assert query_len + prefix_len == kv_len
+            prefix_len = kv_len - query_len
             output.resize_(query_buffer[:kv_len].shape)
             query_buffer[prefix_len:query_len+prefix_len] = query[cum_query_len:cum_query_len + query_len]
 
@@ -110,7 +109,7 @@ class GPTCacheFlowAttention(nn.Module):
                 causal=True,
                 return_softmax=False,
             )
-            output[:query_len] = output[prefix_len:prefix_len+query_len].clone()
+            output[:query_len] = output[prefix_len:prefix_len+query_len]#.clone()
 
             cum_query_len += query_len
             cum_kv_len += kv_len
