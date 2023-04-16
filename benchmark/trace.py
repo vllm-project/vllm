@@ -152,7 +152,7 @@ def generate_translation_requests(
             f'number of training examples ({train_size}).')
 
     # Add instruction first.
-    prefix = 'Translate English to German:\n'
+    prefix = 'Please translate these following English sentence(s) to German sentence(s):\n'
 
     # Randomly sample examples from the training dataset and add them to the
     # prefix.

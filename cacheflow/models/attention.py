@@ -109,7 +109,7 @@ class GPTCacheFlowAttention(nn.Module):
                 causal=True,
                 return_softmax=False,
             )
-            output[:query_len] = output[prefix_len:prefix_len+query_len]#.clone()
+            output[:query_len] = output[prefix_len:prefix_len+query_len].clone()
 
             cum_query_len += query_len
             cum_kv_len += kv_len
