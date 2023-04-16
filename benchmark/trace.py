@@ -180,7 +180,9 @@ def generate_translation_requests(
         en = data['translation']['en'] + ' =>'
         # We skip the <start> token because the tokens will be appended to a prefix.
         en_tokens = tokenizer.encode(en, add_special_tokens=False)
-        input_tokens = remainder_tokens + en_tokens
+        # NOTE: with byte-pair encoding, encode(a) + encode(b) != encode(a + b) 
+        # input_tokens = remainder_tokens + en_tokens
+        input_tokens = tokenizer.encode(prefix + en)[prefix_len:]
 
         de = data['translation']['de']
         output_tokens = tokenizer.encode(de, add_special_tokens=False)
