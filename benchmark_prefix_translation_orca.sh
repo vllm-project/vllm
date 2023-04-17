@@ -15,7 +15,7 @@ for request_rate in 1 24 26 28 29 30 31 32; do
 done
 
 num_prefix=5
-for request_rate in 1 4 8 12 13 14; do
+for request_rate in 1 4 8 9 10 11 12 13; do
     python benchmark/benchmark_prefix_translation_orca.py \
         --model ~/hf-llama/llama-13b/ \
         --num-prefix-examples "$num_prefix" \
