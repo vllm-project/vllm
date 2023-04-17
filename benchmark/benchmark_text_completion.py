@@ -8,7 +8,7 @@ from typing import List
 from tqdm import tqdm
 from transformers import AutoConfig
 
-from benchmark.trace import generate_text_completion_requests
+from benchmark.trace import generate_translation_requests_orca
 from cacheflow.master.simple_frontend import SimpleFrontend
 from cacheflow.master.server import (Server, add_server_arguments,
                                      initialize_ray_cluster)
@@ -60,20 +60,13 @@ def main(args: argparse.Namespace):
         block_size=args.block_size,
     )
     # Generate requests.
-    requests = generate_text_completion_requests(
-        args.dataset,
-        args.request_rate,
-        args.duration,
-        args.seed,
-        args.n1,
-        args.n2,
-        args.n3,
-        args.n4,
-        args.n6,
-        args.n2_beam,
-        args.n4_beam,
-        args.n6_beam,
-        args.n8_beam,
+    requests = generate_translation_requests_orca(
+        model=args.model,
+        dataset=args.dataset,
+        num_examples=args.num_prefix_examples,
+        request_rate=args.request_rate,
+        duration=args.duration,
+        seed=args.seed,
     )
 
     # Warm up.
