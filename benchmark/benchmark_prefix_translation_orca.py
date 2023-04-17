@@ -120,6 +120,9 @@ def main(args: argparse.Namespace):
         for seq_group in updated_seq_groups:
             if not seq_group.is_finished():
                 continue
+            # Print outputs.
+            # frontend.print_response(seq_group)
+
             arrival_time = seq_group.arrival_time
             finish_time = now
             for seq in seq_group.get_seqs():
