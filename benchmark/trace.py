@@ -175,6 +175,7 @@ def generate_translation_requests_orca(
     ]
     assert num_examples <= len(examples)
     prefix += '\n'.join(examples[:num_examples]) + '\n'
+    print("Prefix length in tokens:", len(tokenizer.encode(prefix)))
 
     # Tokenize the test set.
     test_set = load_dataset(dataset, 'de-en', split='test')
