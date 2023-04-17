@@ -154,15 +154,38 @@ def generate_translation_requests(
     # Add instruction first.
     prefix = 'Please translate these following English sentence(s) to German sentence(s):\n'
 
-    # Randomly sample examples from the training dataset and add them to the
-    # prefix.
-    indices = np.random.choice(train_size, num_examples, replace=False).tolist()
-    for i in indices:
-        pair = train_set[i]['translation']
-        en = pair['en']
-        de = pair['de']
-        example = f'{en} => {de}\n'
-        prefix += example
+    # 8 fixed common examples of about the same length
+    # that was generated independently from the WMT16 dataset.
+    examples = [
+        ('The new shopping center has a wide variety of stores, including clothing, electronics, and a supermarket.'
+         ' => Das neue Einkaufszentrum bietet eine große Vielfalt an Geschäften, einschließlich Bekleidung, Elektronik und einem Supermarkt.'),
+        ('For a healthier lifestyle, try incorporating regular exercise, a balanced diet, and stress-reducing activities into your routine.'
+         ' => Für einen gesünderen Lebensstil versuchen Sie, regelmäßige Bewegung, eine ausgewogene Ernährung und stressreduzierende Aktivitäten in Ihre Routine einzubauen.'),
+        ('The library will be hosting a series of workshops on various topics, such as creative writing.'
+         ' => Die Bibliothek veranstaltet eine Reihe von Workshops zu verschiedenen Themen wie kreativem Schreiben.'),
+        ('The museum offers guided tours every day at 11:00 am and 4:00 pm, and admission is free on Sundays.'
+         ' => Das Museum bietet jeden Tag um 11:00 Uhr und 16:00 Uhr Führungen an, und der Eintritt ist sonntags kostenlos.'),
+        ('If you experience any technical difficulties during the conference, please don\'t hesitate to contact the support team.'
+         ' => Wenn Sie während der Konferenz technische Schwierigkeiten haben, zögern Sie bitte nicht, das Support-Team zu kontaktieren.'),
+        ('The local farmer\'s market offers fresh fruits, vegetables, and other produce directly from the farms every Saturday morning.'
+         ' => Der örtliche Bauernmarkt bietet jeden Samstagmorgen frische Früchte, Gemüse und andere landwirtschaftliche Produkte direkt von den Höfen an.'),
+        ('Remember to set your clocks one hour forward for daylight saving time this weekend to enjoy longer days and more sunlight.'
+         ' => Denken Sie daran, Ihre Uhren am Wochenende für die Sommerzeit eine Stunde vorzustellen, um längere Tage und mehr Sonnenlicht zu genießen.'),
+        ('The restaurant offers a diverse menu featuring international cuisine, including Italian, French, and Japanese dishes.'
+         ' => Das Restaurant bietet eine vielfältige Speisekarte mit internationaler Küche, einschließlich italienischer, französischer und japanischer Gerichte'),
+    ]
+    assert num_examples <= len(examples)
+    prefix += '\n'.join(examples[:num_examples]) + '\n'
+
+    ## Randomly sample examples from the training dataset and add them to the
+    ## prefix.
+    #indices = np.random.choice(train_size, num_examples, replace=False).tolist()
+    #for i in indices:
+    #    pair = train_set[i]['translation']
+    #    en = pair['en']
+    #    de = pair['de']
+    #    example = f'{en} => {de}\n'
+    #    prefix += example
     prefix_tokens = tokenizer.encode(prefix, add_special_tokens=True)
 
     # If the prefix length is not a multiple of the block size, truncate it.
