@@ -246,25 +246,15 @@ if __name__ == '__main__':
         raise ValueError('The ratios of requests must sum to 1.')
 
     model_name = get_model_name(args.model)
-    dataset_name = get_dataset_name(args.dataset)
-    if 'opt' in model_name:
-        if 'opt' not in args.dataset.lower():
-            raise ValueError(f'OPT models can only be used with OPT datasets.')
-    elif 'llama' in model_name:
-        if 'llama' not in args.dataset.lower():
-            raise ValueError(f'Llama models can only be used with Llama datasets.')
-
-    dataset_name = 'sharegpt' if 'sharegpt' in args.dataset else 'alpaca'
     sample_dir = get_sampling_dir_name(
         args.n1, args.n2, args.n3, args.n4, args.n6, args.n2_beam, args.n4_beam, args.n6_beam, args.n8_beam)
     if args.output_dir is None:
         args.output_dir = os.path.join(
-            '../exp',
-            dataset_name,
+            '../prefix_exp',
+            f'{args.dataset}-{args.num_prefix_examples}shot',
             f'{model_name}-tp{args.tensor_parallel_size}',
             sample_dir,
             f'orca-{args.len_estimator}',
-            f'block{args.block_size}',
             f'req-rate-{args.request_rate}',
             f'seed{args.seed}',
             f'duration-{args.duration}',
