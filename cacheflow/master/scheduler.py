@@ -214,6 +214,7 @@ class Scheduler:
                     num_physical_blocks = 0
                     num_physical_tokens = 0
                     num_reserved_tokens = 0
+                    num_internal_tokens = 0
                     for seq_group in self.running:
                         group_id = seq_group.group_id
                         sampling_params = self.sampling_params[group_id]
@@ -229,6 +230,8 @@ class Scheduler:
                                 if i < len(seq.logical_token_blocks):
                                     num_physical_tokens += seq.logical_token_blocks[i].num_tokens
                             
+                            reserved = seq.prompt_len + max_num_steps - seq.get_len()
+                            num_reserved_tokens += reserved    
                             if self.len_estimator == 'oracle':
                                 output_len = max_num_steps
                             elif self.len_estimator == 'power2':
@@ -238,8 +241,8 @@ class Scheduler:
                             else:
                                 assert False
                             allocated = min(seq.prompt_len + output_len, 2048)
-                            reserved = allocated - seq.get_len()
-                            num_reserved_tokens += reserved                            
+                            internal = allocated - (seq.prompt_len + max_num_steps)
+                            num_internal_tokens += internal
 
                     assert num_physical_blocks == num_used_gpu_blocks, \
                         f'{num_physical_blocks} != {num_used_gpu_blocks}'
@@ -248,6 +251,7 @@ class Scheduler:
                     self.stats.num_physical_blocks.append(num_physical_blocks)
                     self.stats.num_physical_tokens.append(num_physical_tokens)
                     self.stats.num_reserved_tokens.append(num_reserved_tokens)
+                    self.stats.num_internal_tokens.append()
 
         return (blocks_to_swap_in,
                 blocks_to_swap_out,
@@ -505,6 +509,7 @@ class Stats:
         self.num_physical_blocks: List[int] = []
         self.num_physical_tokens: List[int] = []
         self.num_reserved_tokens: List[int] = []
+        self.num_internal_tokens: List[int] = []
 
     def reset(
         self,
@@ -533,6 +538,7 @@ class Stats:
             'num_physical_blocks': self.num_physical_blocks,
             'num_physical_tokens': self.num_physical_tokens,
             'num_reserved_tokens': self.num_reserved_tokens,
+            'num_internal_tokens': self.num_internal_tokens,
         }
 
     def save(self, output_dir: str) -> None:
