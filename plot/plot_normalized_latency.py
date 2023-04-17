@@ -8,6 +8,7 @@ import numpy as np
 
 
 SYSTEMS = [
+    'FT',
     'orca-constant',
     'orca-power2',
     'orca-oracle',
@@ -15,6 +16,7 @@ SYSTEMS = [
 ]
 
 SYSTEM_TO_LABEL = {
+    'FT': 'FT',
     'orca-constant': 'Orca (Max)',
     'orca-power2': 'Orca (Pow2)',
     'orca-oracle': 'Orca (Oracle)',
@@ -22,6 +24,7 @@ SYSTEM_TO_LABEL = {
 }
 
 SYSTEM_TO_COLOR = {
+    'FT': 'gray',
     'orca-constant': 'red',
     'orca-power2': 'orange',
     'orca-oracle': 'green',
@@ -29,6 +32,7 @@ SYSTEM_TO_COLOR = {
 }
 
 SYSTEM_TO_MARKER = {
+    'FT': '.',
     'orca-constant': 'x',
     'orca-power2': '^',
     'orca-oracle': 's',
@@ -78,13 +82,15 @@ def get_model(save_dir: str) -> Tuple[str, int]:
 
 def get_system(save_dir: str) -> str:
     save_dir = os.path.abspath(save_dir)
-    dir_names = save_dir.split('/')
+    dir_names = save_dir.split('/')[6:]
 
     for dir_name in dir_names:
         if dir_name.startswith('orca-'):
             return dir_name
         if dir_name == 'cacheflow':
             return dir_name
+        if dir_name == 'ft':
+            return 'FT'
     raise ValueError(f'Cannot find system in {save_dir}')
 
 
@@ -99,6 +105,17 @@ def get_sampling(save_dir: str) -> str:
             if dir_name[1:].isdigit():
                 return dir_name
     raise ValueError(f'Cannot find sampling method in {save_dir}')
+
+def get_dataset(save_dir: str) -> str:
+    save_dir = os.path.abspath(save_dir)
+    dir_names = save_dir.split('/')
+
+    for dir_name in dir_names:
+        if dir_name == 'alpaca':
+            return 'alpaca'
+        if dir_name == 'sharegpt':
+            return 'sharegpt'
+    raise ValueError(f'Cannot find dataset in {save_dir}')
 
 
 def plot_normalized_latency(
@@ -120,9 +137,12 @@ def plot_normalized_latency(
             continue
         if f'seed{seed}' not in root:
             continue
-        if f'duration-{duration}' not in root:
+        if f'duration-{duration}' not in root and 'duration-900' not in root:
+            continue
+        if 'unused' in root:
             continue
         save_dirs.append(root)
+    print(save_dirs)
 
     # Plot normalized latency.
     perf_per_system: Dict[str, Tuple[List[float], List[float]]] = {}
@@ -147,8 +167,8 @@ def plot_normalized_latency(
         perf_per_system[system_name][0].append(request_rate)
         perf_per_system[system_name][1].append(normalized_latency)
 
-        print('#seqs', len(per_seq_norm_latencies))
-        print(f'{save_dir}: {normalized_latency:.3f} s')
+        # print('#seqs', len(per_seq_norm_latencies))
+        # print(f'{save_dir}: {normalized_latency:.3f} s')
 
 
     # Plot normalized latency.
@@ -184,13 +204,14 @@ def plot_normalized_latency(
 
     plt.legend(
         handles, labels,
-        ncol=4, fontsize=12, loc='upper center', bbox_to_anchor=(0.5, 1.15),
+        ncol=5, fontsize=12, loc='upper center', bbox_to_anchor=(0.5, 1.15),
         columnspacing=0.5, handletextpad=0.5, handlelength=1.5, frameon=False, borderpad=0)
 
     # Save figure.
     model, tp = get_model(exp_dir)
     sampling = get_sampling(exp_dir)
-    figname = f'{model}-tp{tp}-{sampling}.{format}'
+    dataset = get_dataset(exp_dir)
+    figname = f'{dataset}-{model}-tp{tp}-{sampling}.{format}'
     os.makedirs('./figures', exist_ok=True)
     plt.savefig(os.path.join('figures', figname), bbox_inches='tight')
     print(f'Saved figure to ./figures/{figname}')
