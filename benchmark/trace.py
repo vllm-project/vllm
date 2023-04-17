@@ -205,7 +205,6 @@ def generate_translation_requests_orca(
         'stop_token_ids': set(),
         'num_logprobs': 0,
         'context_window_size': None,
-        'prefix_id': 0, # FIXME
     }
     requests = []
     for timestamp, pair in zip(timestamps, tokenized):
