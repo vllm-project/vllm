@@ -224,6 +224,7 @@ if __name__ == '__main__':
     parser.add_argument('--output-dir', type=str, help='path to output directory', default=None)
     parser.add_argument('--len-estimator', type=str, choices=['oracle', 'power2', 'constant'], required=True)
 
+    parser.add_argument('--num-prefix-examples', type=int, help='number of examples to use in prefix', required=True)
     parser.add_argument('--dataset', type=str, help='path to dataset', default='wmt16')
     parser.add_argument('--request-rate', type=float, help='reqs/sec', required=True)
     parser.add_argument('--duration', type=int, help='duration in seconds', required=True)
