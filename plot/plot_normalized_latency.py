@@ -16,9 +16,9 @@ SYSTEMS = [
 
 SYSTEM_TO_LABEL = {
     'orca-constant': 'Orca (Max)',
-    'orca-power2': 'Orca (Next power of 2)',
+    'orca-power2': 'Orca (Pow2)',
     'orca-oracle': 'Orca (Oracle)',
-    'cacheflow': 'CacheFlow',
+    'cacheflow': 'KVFlow',
 }
 
 SYSTEM_TO_COLOR = {
@@ -177,6 +177,15 @@ def plot_normalized_latency(
             plt.ylim(top=ylim)
         else:
             plt.ylim(bottom=0, top=ylim)
+
+    handles, labels = plt.gca().get_legend_handles_labels()
+    handles = reversed(handles)
+    labels = reversed(labels)
+
+    plt.legend(
+        handles, labels,
+        ncol=4, fontsize=12, loc='upper center', bbox_to_anchor=(0.5, 1.15),
+        columnspacing=0.5, handletextpad=0.5, handlelength=1.5, frameon=False, borderpad=0)
 
     # Save figure.
     model, tp = get_model(exp_dir)
