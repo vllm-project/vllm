@@ -3,12 +3,13 @@ import os
 import pickle
 from typing import Any, Dict, List, Optional, Tuple
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
 
 SYSTEMS = [
-    'FT',
+    'FasterTransformer',
     'orca-constant',
     'orca-power2',
     'orca-oracle',
@@ -16,7 +17,7 @@ SYSTEMS = [
 ]
 
 SYSTEM_TO_LABEL = {
-    'FT': 'FT',
+    'FasterTransformer': 'FasterTransformer',
     'orca-constant': 'Orca (Max)',
     'orca-power2': 'Orca (Pow2)',
     'orca-oracle': 'Orca (Oracle)',
@@ -24,7 +25,7 @@ SYSTEM_TO_LABEL = {
 }
 
 SYSTEM_TO_COLOR = {
-    'FT': 'gray',
+    'FasterTransformer': 'gray',
     'orca-constant': 'red',
     'orca-power2': 'orange',
     'orca-oracle': 'green',
@@ -32,12 +33,33 @@ SYSTEM_TO_COLOR = {
 }
 
 SYSTEM_TO_MARKER = {
-    'FT': '.',
+    'FasterTransformer': '.',
     'orca-constant': 'x',
     'orca-power2': '^',
     'orca-oracle': 's',
     'cacheflow': 'o',
 }
+
+MODEL_SHOW_NAME = {
+    'opt-13b': 'OPT-13B, 1 GPU',
+    'opt-66b': 'OPT-66B, 4 GPUs',
+    'opt-175b': 'OPT-175B, 8 GPUs',
+}
+
+DATASET_SHOW_NAME = {
+    'sharegpt': 'ShareGPT',
+    'alpaca': 'Alpaca',
+}
+
+MODEL_RANK = {
+    'opt-13b': 0,
+    'opt-66b': 1,
+    'opt-175b': 2,
+}
+
+
+def get_alpha_enum(i: int):
+    return '(' + chr(ord('a') + i) + ')'
 
 
 def get_results(save_dir: str) -> List[Dict[str, Any]]:
@@ -90,7 +112,7 @@ def get_system(save_dir: str) -> str:
         if dir_name == 'cacheflow':
             return dir_name
         if dir_name == 'ft':
-            return 'FT'
+            return 'FasterTransformer'
     raise ValueError(f'Cannot find system in {save_dir}')
 
 
@@ -118,13 +140,32 @@ def get_dataset(save_dir: str) -> str:
     raise ValueError(f'Cannot find dataset in {save_dir}')
 
 
+def in_subset(save_dir: str, subset: str):
+    if subset == 'n1-alpaca':
+        return get_sampling(save_dir) == 'n1' and get_dataset(save_dir) == "alpaca"
+    elif subset == 'n1-sharegpt':
+        return get_sampling(save_dir) == 'n1' and get_dataset(save_dir) == "sharegpt"
+    elif subset == 'parallel':
+        if get_dataset(save_dir) != "alpaca":
+            return False
+        sampling = get_sampling(save_dir)
+        return sampling == 'n2' or sampling == 'n4' or sampling == 'n6'
+    elif subset == 'beam':
+        if get_dataset(save_dir) != "alpaca":
+            return False
+        sampling = get_sampling(save_dir)
+        return sampling == 'n2-beam' or sampling == 'n4-beam' or sampling == 'n6-beam'
+
+
 def plot_normalized_latency(
     exp_dir: str,
+    subset: str,
     duration: int,
     seed: int,
     warmup: int,
     xlim: Optional[float],
     ylim: Optional[float],
+    label_offset: int,
     log_scale: bool,
     format: str,
 ) -> None:
@@ -141,11 +182,15 @@ def plot_normalized_latency(
             continue
         if 'unused' in root:
             continue
+        if not in_subset(root, subset):
+            continue
         save_dirs.append(root)
-    print(save_dirs)
+    # print(save_dirs)
 
-    # Plot normalized latency.
-    perf_per_system: Dict[str, Tuple[List[float], List[float]]] = {}
+    # Collect data points
+    plot_names = []
+    # model -> system -> (request_rate, normalized_latency)
+    perf: Dict[str, Dict[str, Tuple[List[float], List[float]]]] = {}
     for save_dir in save_dirs:
         per_seq_norm_latencies = []
         results = get_results(save_dir)
@@ -161,57 +206,73 @@ def plot_normalized_latency(
 
         request_rate = get_request_rate(save_dir)
         normalized_latency = np.mean(per_seq_norm_latencies)
+
+        model_name = get_model(save_dir)[0]
+        if model_name not in perf:
+            perf[model_name] = {}
+            plot_names.append(model_name)
         system_name = get_system(save_dir)
-        if system_name not in perf_per_system:
-            perf_per_system[system_name] = ([], [])
-        perf_per_system[system_name][0].append(request_rate)
-        perf_per_system[system_name][1].append(normalized_latency)
+        if system_name not in perf[model_name]:
+            perf[model_name][system_name] = ([], [])
+        perf[model_name][system_name][0].append(request_rate)
+        perf[model_name][system_name][1].append(normalized_latency)
 
         # print('#seqs', len(per_seq_norm_latencies))
         # print(f'{save_dir}: {normalized_latency:.3f} s')
 
 
     # Plot normalized latency.
-    plt.figure(figsize=(6, 4))
-    for system_name in reversed(SYSTEMS):
-        if system_name not in perf_per_system:
-            continue
-        # Sort by request rate.
-        request_rates, normalized_latencies = perf_per_system[system_name]
-        request_rates, normalized_latencies = zip(*sorted(zip(request_rates, normalized_latencies)))
-        label = SYSTEM_TO_LABEL[system_name]
-        color = SYSTEM_TO_COLOR[system_name]
-        marker = SYSTEM_TO_MARKER[system_name]
-        plt.plot(request_rates, normalized_latencies, label=label, color=color, marker=marker)
+    plot_names = sorted(plot_names, key=lambda x: MODEL_RANK[x])
+    fig, axs = plt.subplots(1, 3)
+    for i, (model_name, ax) in enumerate(zip(plot_names, axs)):
+        curves = []
+        legends = []
+        for system_name in SYSTEMS:
+            if system_name not in perf[model_name]:
+                continue
+            # Sort by request rate.
+            request_rates, normalized_latencies = perf[model_name][system_name]
+            request_rates, normalized_latencies = zip(*sorted(zip(request_rates, normalized_latencies)))
+            label = SYSTEM_TO_LABEL[system_name]
+            color = SYSTEM_TO_COLOR[system_name]
+            marker = SYSTEM_TO_MARKER[system_name]
+            curve = ax.plot(request_rates, normalized_latencies, label=label, color=color, marker=marker, markersize=4)
+            curves.append(curve[0])
+            legends.append(label)
 
-    # plt.legend()
-    plt.xlabel('Request rate (req/s)', fontsize=12)
-    plt.ylabel('Normalized latency (s/token)', fontsize=12)
-
-    if log_scale:
-        plt.yscale('log')
-    if xlim is not None:
-        plt.xlim(left=0, right=xlim)
-    if ylim is not None:
+        enum = get_alpha_enum(i + label_offset)
+        model_show_name = MODEL_SHOW_NAME[model_name]
+        dataset = DATASET_SHOW_NAME[get_dataset(save_dir)]
+        ax.set_xlabel(f'Request rate (req/s)\n\n{enum} {model_show_name}, {dataset}', fontsize=10)
+        ax.tick_params(axis='both', which='major', labelsize=10)
+        ax.tick_params(axis='both', which='minor', labelsize=10)
         if log_scale:
-            plt.ylim(top=ylim)
-        else:
-            plt.ylim(bottom=0, top=ylim)
+            ax.set_yscale('log')
+        if xlim is not None:
+            ax.set_xlim(left=0, right=xlim)
+        if ylim is not None:
+            if log_scale:
+                ax.set_ylim(top=ylim)
+            else:
+                ax.set_ylim(bottom=0, top=ylim)
+        ax.grid(linestyle='--')
 
-    handles, labels = plt.gca().get_legend_handles_labels()
-    handles = reversed(handles)
-    labels = reversed(labels)
+        # handles, labels = plt.gca().get_legend_handles_labels()
+        # handles = reversed(handles)
+        # labels = reversed(labels)
 
-    plt.legend(
-        handles, labels,
-        ncol=5, fontsize=12, loc='upper center', bbox_to_anchor=(0.5, 1.15),
-        columnspacing=0.5, handletextpad=0.5, handlelength=1.5, frameon=False, borderpad=0)
+        # plt.legend(
+        #     handles, labels,
+        #     ncol=5, fontsize=10, loc='upper center', bbox_to_anchor=(0.5, 1.15),
+        #     columnspacing=0.5, handletextpad=0.5, handlelength=1.5, frameon=False, borderpad=0)
+
+    fig.text(0.08, 0.5, 'Normalized latency\n       (s/token)', va='center', rotation='vertical', fontsize=10)
+    if subset != 'n1-alpaca':
+        fig.legend(curves, legends, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 1.3), fontsize=10, frameon=False)
 
     # Save figure.
-    model, tp = get_model(exp_dir)
-    sampling = get_sampling(exp_dir)
-    dataset = get_dataset(exp_dir)
-    figname = f'{dataset}-{model}-tp{tp}-{sampling}.{format}'
+    fig.set_size_inches((18, 1.5))
+    figname = f'{subset}.{format}'
     os.makedirs('./figures', exist_ok=True)
     plt.savefig(os.path.join('figures', figname), bbox_inches='tight')
     print(f'Saved figure to ./figures/{figname}')
@@ -220,14 +281,17 @@ def plot_normalized_latency(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('exp_dir', type=str)
+    parser.add_argument('--subset', choices=['n1-alpaca', 'n1-sharegpt'], required=True)
     parser.add_argument('--duration', type=int, required=True)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--warmup', type=int, default=60)
     parser.add_argument('--xlim', type=float, required=False, default=None)
-    parser.add_argument('--ylim', type=float, required=False, default=None)
+    parser.add_argument('--ylim', type=float, required=False, default=1)
+    parser.add_argument('--label-offset', type=int, default=0)
     parser.add_argument('--log', action='store_true')
-    parser.add_argument('--format', choices=['png', 'pdf'], default='png')
+    parser.add_argument('--format', choices=['png', 'pdf'], default='pdf')
     args = parser.parse_args()
 
     plot_normalized_latency(
-        args.exp_dir, args.duration, args.seed, args.warmup, args.xlim, args.ylim, args.log, args.format)
+        args.exp_dir, args.subset, args.duration, args.seed, args.warmup,
+        args.xlim, args.ylim, args.label_offset, args.log, args.format)
