@@ -189,6 +189,8 @@ def plot_normalized_latency(
 
     # Collect data points
     plot_names = []
+    # model -> x_cut
+    x_top: Dict[str, float] = {}
     # model -> system -> (request_rate, normalized_latency)
     perf: Dict[str, Dict[str, Tuple[List[float], List[float]]]] = {}
     for save_dir in save_dirs:
@@ -216,6 +218,11 @@ def plot_normalized_latency(
             perf[model_name][system_name] = ([], [])
         perf[model_name][system_name][0].append(request_rate)
         perf[model_name][system_name][1].append(normalized_latency)
+
+        if model_name not in x_top:
+            x_top[model_name] = 0
+        if normalized_latency < 1.1:
+            x_top[model_name] = max(x_top[model_name], request_rate)
 
         # print('#seqs', len(per_seq_norm_latencies))
         # print(f'{save_dir}: {normalized_latency:.3f} s')
@@ -250,6 +257,8 @@ def plot_normalized_latency(
             ax.set_yscale('log')
         if xlim is not None:
             ax.set_xlim(left=0, right=xlim)
+        else:
+            ax.set_xlim(left=0, right=x_top[model_name] * 1.1)
         if ylim is not None:
             if log_scale:
                 ax.set_ylim(top=ylim)
