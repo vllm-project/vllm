@@ -137,6 +137,10 @@ def get_dataset(save_dir: str) -> str:
             return 'alpaca'
         if dir_name == 'sharegpt':
             return 'sharegpt'
+        if dir_name == 'prefix':
+            return 'prefix'
+        if dir_name == 'sharegpt_chat':
+            return 'sharegpt_chat'
     raise ValueError(f'Cannot find dataset in {save_dir}')
 
 
@@ -243,16 +247,16 @@ def plot_normalized_latency(
             label = SYSTEM_TO_LABEL[system_name]
             color = SYSTEM_TO_COLOR[system_name]
             marker = SYSTEM_TO_MARKER[system_name]
-            curve = ax.plot(request_rates, normalized_latencies, label=label, color=color, marker=marker, markersize=4)
+            curve = ax.plot(request_rates, normalized_latencies, label=label, color=color, marker=marker, markersize=6)
             curves.append(curve[0])
             legends.append(label)
 
         enum = get_alpha_enum(i + label_offset)
         model_show_name = MODEL_SHOW_NAME[model_name]
         dataset = DATASET_SHOW_NAME[get_dataset(save_dir)]
-        ax.set_xlabel(f'Request rate (req/s)\n\n{enum} {model_show_name}, {dataset}', fontsize=10)
-        ax.tick_params(axis='both', which='major', labelsize=10)
-        ax.tick_params(axis='both', which='minor', labelsize=10)
+        ax.set_xlabel(f'Request rate (req/s)\n\n{enum} {model_show_name}, {dataset}', fontsize=15)
+        ax.tick_params(axis='both', which='major', labelsize=15)
+        ax.tick_params(axis='both', which='minor', labelsize=15)
         if log_scale:
             ax.set_yscale('log')
         if xlim is not None:
@@ -272,12 +276,12 @@ def plot_normalized_latency(
 
         # plt.legend(
         #     handles, labels,
-        #     ncol=5, fontsize=10, loc='upper center', bbox_to_anchor=(0.5, 1.15),
+        #     ncol=5, fontsize=15, loc='upper center', bbox_to_anchor=(0.5, 1.15),
         #     columnspacing=0.5, handletextpad=0.5, handlelength=1.5, frameon=False, borderpad=0)
 
-    fig.text(0.08, 0.5, 'Normalized latency\n       (s/token)', va='center', rotation='vertical', fontsize=10)
+    fig.text(0.07, 0.5, 'Normalized latency\n       (s/token)', va='center', rotation='vertical', fontsize=15)
     if subset != 'n1-alpaca':
-        fig.legend(curves, legends, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 1.3), fontsize=10, frameon=False)
+        fig.legend(curves, legends, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 1.35), fontsize=15, frameon=False)
 
     # Save figure.
     fig.set_size_inches((18, 1.5))

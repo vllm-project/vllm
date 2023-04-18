@@ -137,11 +137,17 @@ def get_dataset(save_dir: str) -> str:
             return 'alpaca'
         if dir_name == 'sharegpt':
             return 'sharegpt'
-        if dir_name == 'prefix':
-            return 'prefix'
-        if dir_name == 'sharegpt_chat':
-            return 'sharegpt_chat'
     raise ValueError(f'Cannot find dataset in {save_dir}')
+
+
+def get_num_shot(save_dir: str) -> str:
+    save_dir = os.path.abspath(save_dir)
+    dir_names = save_dir.split('/')
+
+    for dir_name in dir_names:
+        if dir_name.startswith('wmt'):
+            return dir_name.split('-')[1][:-4]
+    raise ValueError(f'Cannot find shot number in {save_dir}')
 
 
 def in_subset(save_dir: str, subset: str):
@@ -159,6 +165,8 @@ def in_subset(save_dir: str, subset: str):
             return False
         sampling = get_sampling(save_dir)
         return sampling == 'n2-beam' or sampling == 'n4-beam' or sampling == 'n6-beam'
+    elif subset == 'prefix':
+        return 'wmt' in save_dir
 
 
 def plot_normalized_latency(
@@ -193,9 +201,9 @@ def plot_normalized_latency(
 
     # Collect data points
     plot_names = []
-    # sampling -> x_cut
+    # num_shot -> x_cut
     x_top: Dict[str, float] = {}
-    # sampling -> system -> (request_rate, normalized_latency)
+    # num_shot -> system -> (request_rate, normalized_latency)
     perf: Dict[str, Dict[str, Tuple[List[float], List[float]]]] = {}
     for save_dir in save_dirs:
         per_seq_norm_latencies = []
@@ -213,20 +221,20 @@ def plot_normalized_latency(
         request_rate = get_request_rate(save_dir)
         normalized_latency = np.mean(per_seq_norm_latencies)
 
-        sampling = get_sampling(save_dir)
-        if sampling not in perf:
-            perf[sampling] = {}
-            plot_names.append(sampling)
+        num_shot = get_num_shot(save_dir)
+        if num_shot not in perf:
+            perf[num_shot] = {}
+            plot_names.append(num_shot)
         system_name = get_system(save_dir)
-        if system_name not in perf[sampling]:
-            perf[sampling][system_name] = ([], [])
-        perf[sampling][system_name][0].append(request_rate)
-        perf[sampling][system_name][1].append(normalized_latency)
+        if system_name not in perf[num_shot]:
+            perf[num_shot][system_name] = ([], [])
+        perf[num_shot][system_name][0].append(request_rate)
+        perf[num_shot][system_name][1].append(normalized_latency)
 
-        if sampling not in x_top:
-            x_top[sampling] = 0
+        if num_shot not in x_top:
+            x_top[num_shot] = 0
         if normalized_latency < 1.1:
-            x_top[sampling] = max(x_top[sampling], request_rate)
+            x_top[num_shot] = max(x_top[num_shot], request_rate)
 
         # print('#seqs', len(per_seq_norm_latencies))
         # print(f'{save_dir}: {normalized_latency:.3f} s')
@@ -234,15 +242,15 @@ def plot_normalized_latency(
 
     # Plot normalized latency.
     plot_names = sorted(plot_names)
-    fig, axs = plt.subplots(1, 3)
-    for i, (sampling, ax) in enumerate(zip(plot_names, axs)):
+    fig, axs = plt.subplots(1, 2)
+    for i, (num_shot, ax) in enumerate(zip(plot_names, axs)):
         curves = []
         legends = []
         for system_name in SYSTEMS:
-            if system_name not in perf[sampling]:
+            if system_name not in perf[num_shot]:
                 continue
             # Sort by request rate.
-            request_rates, normalized_latencies = perf[sampling][system_name]
+            request_rates, normalized_latencies = perf[num_shot][system_name]
             request_rates, normalized_latencies = zip(*sorted(zip(request_rates, normalized_latencies)))
             label = SYSTEM_TO_LABEL[system_name]
             color = SYSTEM_TO_COLOR[system_name]
@@ -252,20 +260,17 @@ def plot_normalized_latency(
             legends.append(label)
 
         enum = get_alpha_enum(i + label_offset)
-        dataset = DATASET_SHOW_NAME[get_dataset(save_dir)]
-        if subset == 'parallel':
-            sampling_name = 'parallel generation (parallel size = ' + sampling[1:] + ')'
-        elif subset == 'beam':
-            sampling_name = 'beam search (beam width = ' + sampling.split('-')[0][1:] + ')'
-        ax.set_xlabel(f'Request rate (req/s)\n\n{enum} {sampling_name}', fontsize=15)
-        ax.tick_params(axis='both', which='major', labelsize=15)
-        ax.tick_params(axis='both', which='minor', labelsize=15)
+        if subset == 'prefix':
+            sub_name = num_shot + '-shot prefix prompt'
+        ax.set_xlabel(f'Request rate (req/s)\n\n{enum} {sub_name}', fontsize=14)
+        ax.tick_params(axis='both', which='major', labelsize=14)
+        ax.tick_params(axis='both', which='minor', labelsize=14)
         if log_scale:
             ax.set_yscale('log')
         if xlim is not None:
             ax.set_xlim(left=0, right=xlim)
         else:
-            ax.set_xlim(left=0, right=x_top[sampling] * 1.1)
+            ax.set_xlim(left=0, right=x_top[num_shot] * 1.1)
         if ylim is not None:
             if log_scale:
                 ax.set_ylim(top=ylim)
@@ -279,15 +284,16 @@ def plot_normalized_latency(
 
         # plt.legend(
         #     handles, labels,
-        #     ncol=5, fontsize=15, loc='upper center', bbox_to_anchor=(0.5, 1.15),
+        #     ncol=5, fontsize=14, loc='upper center', bbox_to_anchor=(0.5, 1.15),
         #     columnspacing=0.5, handletextpad=0.5, handlelength=1.5, frameon=False, borderpad=0)
 
-    fig.text(0.07, 0.5, 'Normalized latency\n       (s/token)', va='center', rotation='vertical', fontsize=15)
-    if subset == 'parallel':
-        fig.legend(curves, legends, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 1.35), fontsize=15, frameon=False)
+    fig.text(-0.03, 0.5, 'Normalized latency\n       (s/token)', va='center', rotation='vertical', fontsize=14)
+    if subset == 'prefix':
+        fig.legend(curves, legends, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 1.18), fontsize=14, frameon=False)
+    # fig.subplots_adjust(hspace=0.6)
 
     # Save figure.
-    fig.set_size_inches((18, 1.5))
+    fig.set_size_inches((6, 2))
     figname = f'{subset}.{format}'
     os.makedirs('./figures', exist_ok=True)
     plt.savefig(os.path.join('figures', figname), bbox_inches='tight')
@@ -297,8 +303,8 @@ def plot_normalized_latency(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('exp_dir', type=str)
-    parser.add_argument('--subset', choices=['parallel', 'beam'], required=True)
-    parser.add_argument('--duration', type=int, required=True)
+    parser.add_argument('--subset', choices=['prefix'], default='prefix')
+    parser.add_argument('--duration', type=int, default=1200)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--warmup', type=int, default=60)
     parser.add_argument('--xlim', type=float, required=False, default=None)
