@@ -27,9 +27,13 @@ class GPTNeoXAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.num_attention_heads = config.num_attention_heads
+        self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
-        self.head_size = self.hidden_size // self.num_attention_heads
+        self.head_size = self.hidden_size // self.total_num_heads
+
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
+        assert self.total_num_heads % tensor_model_parallel_world_size == 0
+        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
 
         self.query_key_value = ColumnParallelLinear(config.hidden_size,
                                                     3 * config.hidden_size,
@@ -53,10 +57,6 @@ class GPTNeoXAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
-
-        # qkv = qkv.view(-1, self.num_attention_heads, 3, self.head_size)
-        # qkv = qkv.permute(0, 2, 1, 3)
-        # qkv = qkv.reshape(-1, 3 * self.num_attention_heads * self.head_size).contiguous()
 
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
@@ -203,20 +203,23 @@ class GPTNeoXForCausalLM(nn.Module):
             if "query_key_value" in name:
                 # NOTE(woosuk): GPT-NeoX's fused QKV has the shape of
                 # [num_heads * 3 * head_size, num_heads * head_size], while the
-                # desirable shape is [3 * num_heads * head_size, num_heads * head_size].
+                # required shape is [3 * num_heads * head_size, num_heads * head_size].
                 # Thus, we need weight conversion.
                 loaded_weight = torch.from_numpy(
                     np.load(os.path.join(weights_path, name)))
-                # TODO(woosuk): Implement tensor parallelism.
+                shard_size = param.shape[0]
+                loaded_weight = loaded_weight[shard_size * tensor_model_parallel_rank
+                                              :shard_size * (tensor_model_parallel_rank + 1)]
+
                 num_heads = self.config.num_attention_heads
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // num_heads
                 if 'query_key_value.weight' in name:
-                    loaded_weight = loaded_weight.view(num_heads, 3, head_size, hidden_size)
+                    loaded_weight = loaded_weight.view(-1, 3, head_size, hidden_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1, hidden_size).contiguous()
                 elif 'query_key_value.bias' in name:
-                    loaded_weight = loaded_weight.view(num_heads, 3, head_size)
+                    loaded_weight = loaded_weight.view(-1, 3, head_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1).contiguous()
                 else:
