@@ -18,12 +18,14 @@ _MODELS = {
     'llama': LlamaForCausalLM,
     'opt': OPTForCausalLM,
     'stablelm': GPTNeoXForCausalLM,
+    'pythia': GPTNeoXForCausalLM,
 }
 
 _MEMORY_ANALYZERS = {
     'llama': LlamaMemoryAnalyzer,
     'opt': OPTMemoryAnalyzer,
     'stablelm': GPTNeoXMemoryAnalyzer,
+    'pythia': GPTNeoXMemoryAnalyzer,
 }
 
 
