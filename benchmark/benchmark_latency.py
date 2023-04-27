@@ -8,7 +8,7 @@ import torch
 
 from cacheflow.master.simple_frontend import SimpleFrontend
 from cacheflow.master.server import (Server, add_server_arguments,
-                                     initialize_ray_cluster)
+                                     initialize_cluster)
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
 
@@ -20,7 +20,7 @@ def main(args: argparse.Namespace):
 
     (num_nodes, num_devices_per_node, distributed_init_method,
     all_stage_devices) = (
-        initialize_ray_cluster(
+        initialize_cluster(
             address='local',
             pipeline_parallel_size=args.pipeline_parallel_size,
             tensor_parallel_size=args.tensor_parallel_size))
