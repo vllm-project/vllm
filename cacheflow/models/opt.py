@@ -327,4 +327,4 @@ class OPTForCausalLM(nn.Module):
 
     def initialize_dummy_weights(self) -> None:
         for param in self.state_dict().values():
-            param.data.uniform_(-0.1, 0.1)
+            param.data.uniform_(-1e-3, 1e-3)
