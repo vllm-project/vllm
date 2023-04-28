@@ -1,13 +1,14 @@
 from typing import Union
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers import AutoConfig
 
 from cacheflow.models.memory_analyzer import CacheFlowMemoryAnalyzer
+from cacheflow.models.memory_analyzer import GPTNeoXMemoryAnalyzer
 from cacheflow.models.memory_analyzer import LlamaMemoryAnalyzer
 from cacheflow.models.memory_analyzer import OPTMemoryAnalyzer
+from cacheflow.models.gpt_neox import GPTNeoXForCausalLM
 from cacheflow.models.llama import LlamaForCausalLM
 from cacheflow.models.opt import OPTForCausalLM
 from cacheflow.models.utils import get_torch_dtype
@@ -16,11 +17,15 @@ from cacheflow.models.utils import get_torch_dtype
 _MODELS = {
     'llama': LlamaForCausalLM,
     'opt': OPTForCausalLM,
+    'stablelm': GPTNeoXForCausalLM,
+    'pythia': GPTNeoXForCausalLM,
 }
 
 _MEMORY_ANALYZERS = {
     'llama': LlamaMemoryAnalyzer,
     'opt': OPTMemoryAnalyzer,
+    'stablelm': GPTNeoXMemoryAnalyzer,
+    'pythia': GPTNeoXMemoryAnalyzer,
 }
 
 
