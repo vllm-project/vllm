@@ -27,7 +27,7 @@ def main(args: argparse.Namespace):
     (num_nodes, num_devices_per_node, distributed_init_method,
     all_stage_devices) = (
         initialize_cluster(
-            address='local',
+            use_ray=args.use_ray,
             pipeline_parallel_size=args.pipeline_parallel_size,
             tensor_parallel_size=args.tensor_parallel_size))
 
@@ -50,6 +50,7 @@ def main(args: argparse.Namespace):
         all_stage_devices=all_stage_devices,
         gpu_memory=get_gpu_memory(),
         cpu_memory=get_cpu_memory(),
+        use_ray=args.use_ray,
         collect_stats=True,
         do_memory_analysis=args.do_memory_analysis,
     )
@@ -226,7 +227,8 @@ def get_sampling_dir_name(
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='CacheFlow simple server.')
+    parser = argparse.ArgumentParser(
+        description='Benchmark the performance on a series of requests.')
     parser = add_server_arguments(parser)
     parser.add_argument('--output-dir', type=str, help='path to output directory', default=None)
 
