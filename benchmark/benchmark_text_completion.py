@@ -11,6 +11,7 @@ from transformers import AutoConfig
 from benchmark.trace import generate_text_completion_requests
 from cacheflow.master.simple_frontend import SimpleFrontend
 from cacheflow.master.server import (Server, add_server_arguments,
+                                     process_server_arguments,
                                      initialize_cluster)
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
@@ -246,6 +247,7 @@ if __name__ == '__main__':
     parser.add_argument('--n6-beam', type=float, help='ratio of requests with n=6 & beam search', default=0.0)
     parser.add_argument('--n8-beam', type=float, help='ratio of requests with n=8 & beam search', default=0.0)
     args = parser.parse_args()
+    args = process_server_arguments(args)
     if args.n1 + args.n2 + args.n3 + args.n4 + args.n6 + args.n2_beam + args.n4_beam + args.n6_beam + args.n8_beam != 1.0:
         raise ValueError('The ratios of requests must sum to 1.')
 

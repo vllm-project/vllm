@@ -1,5 +1,5 @@
 import argparse
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import random
 
 import torch
@@ -117,7 +117,7 @@ class Server:
 
 def initialize_cluster(
     use_ray: bool = False,
-    address: str = 'auto',
+    address: Optional[str] = None,
     pipeline_parallel_size: int = 1,
     tensor_parallel_size: int = 1,
 ) -> Tuple[int, int, str, List[List[DeviceID]]]:
@@ -128,6 +128,8 @@ def initialize_cluster(
         num_nodes = 1
         num_devices_per_node = torch.cuda.device_count()
         port = random.randint(10000, 20000)
+        # We need to setup the distributed init method to make sure
+        # the distributed megatron code (e.g., get world size) works correctly.
         distributed_init_method = f"tcp://localhost:{port}"
         all_stage_devices = [[(0, None, 0)]]
         return (num_nodes, num_devices_per_node, distributed_init_method,
@@ -204,7 +206,7 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--model-path', type=str, default='~/.cacheflow/model_weights',
                         help='model path to download and load the weights')
     # Parallel arguments
-    parser.add_argument('--use-ray', action='store_true', help='use Ray for distributed training, required when using more than 1 GPU')
+    parser.add_argument('--use-ray', action='store_true', help='use Ray for distributed serving, will be automatically set when using more than 1 GPU')
     parser.add_argument('--pipeline-parallel-size', '-pp', type=int, default=1, help='number of pipeline stages')
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1, help='number of tensor parallel replicas')
     # KV cache arguments
@@ -218,3 +220,8 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--max-num-sequences', type=int, default=256, help='maximum number of sequences per iteration')
     parser.add_argument('--use-dummy-weights', action='store_true', help='use dummy values for model weights')
     return parser
+
+def process_server_arguments(args: argparse.Namespace):
+    if args.pipeline_parallel_size * args.tensor_parallel_size > 1:
+        args.use_ray = True
+    return args

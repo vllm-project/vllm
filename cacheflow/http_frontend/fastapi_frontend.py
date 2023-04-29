@@ -13,6 +13,7 @@ import uvicorn
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence, SequenceGroup
 from cacheflow.master.server import (Server, add_server_arguments,
+                                     process_server_arguments,
                                      initialize_cluster)
 from cacheflow.worker.controller import DeviceID
 from cacheflow.utils import Counter, get_gpu_memory, get_cpu_memory
@@ -156,6 +157,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=10002)
     parser = add_server_arguments(parser)
     args = parser.parse_args()
+    args = process_server_arguments(args)
 
     # TODO(zhuohan): Support pipeline parallelism.
     assert args.pipeline_parallel_size == 1, (

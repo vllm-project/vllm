@@ -8,6 +8,7 @@ import torch
 
 from cacheflow.master.simple_frontend import SimpleFrontend
 from cacheflow.master.server import (Server, add_server_arguments,
+                                     process_server_arguments,
                                      initialize_cluster)
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
@@ -99,6 +100,7 @@ if __name__ == '__main__':
     parser.add_argument('--n', type=int, default=1)
     parser.add_argument('--use-beam-search', action='store_true')
     args = parser.parse_args()
+    args = process_server_arguments(args)
     args.max_num_batched_tokens = max(
         args.max_num_batched_tokens, args.batch_size * args.input_len)
     print(args)
