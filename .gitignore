@@ -3,8 +3,11 @@
 *.egg-info/
 *.eggs/
 *.so
+*.log
+*.csv
 build/
 
 *.pkl
 *.png
 **/log.txt
+.vscode/
