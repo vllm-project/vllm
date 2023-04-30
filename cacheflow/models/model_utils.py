@@ -46,15 +46,13 @@ def get_model(
                 model = model_class(config)
                 model = model.cuda()
                 # NOTE(woosuk): For precise performance evaluation, we assign
-                # random values to the weights. 
+                # random values to the weights.
                 model.initialize_dummy_weights()
             else:
-                # Download model weights if it's not cached.
-                weights_dir = model_class.get_weights(model_name, path=path)
                 # Create a model instance.
                 model = model_class(config)
                 # Load the weights from the cached or downloaded files.
-                model.load_weights(weights_dir)
+                model.load_weights(model_name)
                 model = model.cuda()
             return model.eval(), torch_dtype
     raise ValueError(f'Unsupported model name: {model_name}')
