@@ -23,7 +23,7 @@ attention_extension = cpp_extension.CUDAExtension(
 )
 ext_modules.append(attention_extension)
 
-# Positional encodings.
+# Positional encoding kernels.
 positional_encoding_extension = cpp_extension.CUDAExtension(
     name='cacheflow.pos_encoding_ops',
     sources=['csrc/pos_encoding.cpp', 'csrc/pos_encoding_kernels.cu'],
@@ -39,6 +39,7 @@ layernorm_extension = cpp_extension.CUDAExtension(
 )
 ext_modules.append(layernorm_extension)
 
+# Activation kernels.
 activation_extension = cpp_extension.CUDAExtension(
     name='cacheflow.activation_ops',
     sources=['csrc/activation.cpp', 'csrc/activation_kernels.cu'],
