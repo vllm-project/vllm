@@ -175,6 +175,7 @@ __global__ void single_query_cached_kv_attention_kernel(
   constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
   constexpr int NUM_ROWS_PER_THREAD = (HEAD_SIZE + NUM_ROWS_PER_ITER - 1) / NUM_ROWS_PER_ITER;
 
+  // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
   float accs[NUM_ROWS_PER_THREAD];
 #pragma unroll
   for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
@@ -340,21 +341,55 @@ void single_query_cached_kv_attention_launcher(
       LAUNCH_ATTENTION_KERNEL(T, 256, BLOCK_SIZE, NUM_THREADS);
       break;
     default:
-      assert(false);
+      TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
   }
 }
 
 #define CALL_KERNEL_LAUNCHER(T, BLOCK_SIZE)                         \
   single_query_cached_kv_attention_launcher<T, BLOCK_SIZE>(         \ 
-        out,                                                        \
-        query,                                                      \
-        key_cache,                                                  \
-        value_cache,                                                \
-        scale,                                                      \
-        block_tables,                                               \
-        context_lens,                                               \
-        max_context_len);
+    out,                                                            \
+    query,                                                          \
+    key_cache,                                                      \
+    value_cache,                                                    \
+    scale,                                                          \
+    block_tables,                                                   \
+    context_lens,                                                   \
+    max_context_len);
+
+#define CALL_KERNEL_LAUNCHER_BLOCK_SIZE(T)                          \
+  switch (block_size) {                                             \
+    case 1:                                                         \
+      CALL_KERNEL_LAUNCHER(T, 1);                                   \
+      break;                                                        \
+    case 2:                                                         \
+      CALL_KERNEL_LAUNCHER(T, 2);                                   \
+      break;                                                        \
+    case 4:                                                         \
+      CALL_KERNEL_LAUNCHER(T, 4);                                   \
+      break;                                                        \
+    case 8:                                                         \
+      CALL_KERNEL_LAUNCHER(T, 8);                                   \
+      break;                                                        \
+    case 16:                                                        \
+      CALL_KERNEL_LAUNCHER(T, 16);                                  \
+      break;                                                        \
+    case 32:                                                        \
+      CALL_KERNEL_LAUNCHER(T, 32);                                  \
+      break;                                                        \
+    case 64:                                                        \
+      CALL_KERNEL_LAUNCHER(T, 64);                                  \
+      break;                                                        \
+    case 128:                                                       \
+      CALL_KERNEL_LAUNCHER(T, 128);                                 \
+      break;                                                        \
+    case 256:                                                       \
+      CALL_KERNEL_LAUNCHER(T, 256);                                 \
+      break;                                                        \
+    default:                                                        \
+      TORCH_CHECK(false, "Unsupported block size: ", block_size);   \
+      break;                                                        \
+  }
 
 void single_query_cached_kv_attention(
   torch::Tensor& out,             // [num_seqs, num_heads, head_size]
@@ -366,33 +401,14 @@ void single_query_cached_kv_attention(
   torch::Tensor& context_lens,    // [num_seqs]
   int block_size,
   int max_context_len) {
-  // TODO(woosuk): Support BF16.
-  if (query.element_size() == 2) {
-    // Half.
-    if (block_size == 1) {
-      CALL_KERNEL_LAUNCHER(uint16_t, 1);
-    } else if (block_size == 2) {
-      CALL_KERNEL_LAUNCHER(uint16_t, 2);
-    } else if (block_size == 4) {
-      CALL_KERNEL_LAUNCHER(uint16_t, 4);
-    } else if (block_size == 8) {
-      CALL_KERNEL_LAUNCHER(uint16_t, 8);
-    } else if (block_size == 16) {
-      CALL_KERNEL_LAUNCHER(uint16_t, 16);
-    } else if (block_size == 32) {
-      CALL_KERNEL_LAUNCHER(uint16_t, 32);
-    } else if (block_size == 64) {
-      CALL_KERNEL_LAUNCHER(uint16_t, 64);
-    } else if (block_size == 128) {
-      CALL_KERNEL_LAUNCHER(uint16_t, 128);
-    } else if (block_size == 256) {
-      CALL_KERNEL_LAUNCHER(uint16_t, 256);
-    } else {
-      assert(false);
-    }
+  if (query.dtype() == at::ScalarType::Half) {
+    CALL_KERNEL_LAUNCHER_BLOCK_SIZE(uint16_t);
+#ifdef ENABLE_BF16
+  } else if (query.dtype() == at::ScalarType::BFloat16) {
+    CALL_KERNEL_LAUNCHER_BLOCK_SIZE(__nv_bfloat16);
+#endif  // ENABLE_BF16
   } else {
-    // Float.
-    assert(false);
+    TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
   }
 }
 

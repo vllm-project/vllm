@@ -1,9 +1,22 @@
 import setuptools
+import torch
 from torch.utils import cpp_extension
+
+if not torch.cuda.is_available():
+    raise RuntimeError(
+        'Cannot find CUDA. '
+        'CUDA must be available in order to build the package.')
 
 CXX_FLAGS = ['-g']
 NVCC_FLAGS = ['-O2']
 
+# Enable bfloat16 support if the compute capability is >= 8.0.
+# TODO(woosuk): Consider the case where the machine has multiple GPUs with
+# different compute capabilities.
+compute_capability = torch.cuda.get_device_capability()
+major, minor = compute_capability
+if major >= 8:
+    NVCC_FLAGS.append('-DENABLE_BF16')
 
 ext_modules = []
 

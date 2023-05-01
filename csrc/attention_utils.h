@@ -41,7 +41,26 @@ template<>
 struct Vec<uint16_t, 8> {
     using Type = uint4;
 };
+#ifdef ENABLE_BF16
+template<>
+struct Vec<__nv_bfloat16, 1> {
+    using Type = __nv_bfloat16;
+};
+template<>
+struct Vec<__nv_bfloat16, 2> {
+    using Type = __nv_bfloat162;
+};
+template<>
+struct Vec<__nv_bfloat16, 4> {
+    using Type = bf16_4_t;
+};
+template<>
+struct Vec<__nv_bfloat16, 8> {
+    using Type = bf16_8_t;
+};
+#endif  // ENABLE_BF16
 
+// A vector type to store logits.
 template<typename T>
 struct FloatVec {};
 template<>
@@ -72,6 +91,24 @@ template<>
 struct FloatVec<uint4> {
     using Type = Float8_;
 };
+#ifdef ENABLE_BF16
+template<>
+struct FloatVec<__nv_bfloat16> {
+    using Type = float;
+};
+template<>
+struct FloatVec<__nv_bfloat162> {
+    using Type = float2;
+};
+template<>
+struct FloatVec<bf16_4_t> {
+    using Type = Float4_;
+};
+template<>
+struct FloatVec<bf16_8_t> {
+    using Type = Float8_;
+};
+#endif  // ENABLE_BF16
 
 template<int THREADS_PER_KEY, typename K_vec, int N>
 inline __device__ float qk_dot_(const K_vec (&q)[N], const K_vec (&k)[N])
