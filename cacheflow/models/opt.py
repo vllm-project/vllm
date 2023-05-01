@@ -1,15 +1,9 @@
 """1D OPT model compatible with HuggingFace weights."""
-import os
-import glob
-import filelock
-from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 from torch import nn
 from transformers import OPTConfig
-from huggingface_hub import snapshot_download
 
 from cacheflow.models import InputMetadata
 from cacheflow.models.attention import OPTCacheFlowAttention

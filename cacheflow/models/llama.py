@@ -1,11 +1,6 @@
 """1D LLaMA model compatible with HuggingFace weights."""
-import os
-import glob
-import filelock
-from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -282,33 +277,6 @@ class LlamaForCausalLM(nn.Module):
                     break
             assert param.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
-
-    @staticmethod
-    def get_weights(model_name: str, path: str):
-        if not os.path.isfile(os.path.join(model_name, "config.json")):
-            raise ValueError("LLaMA model's model_name has to be a path"
-                             "to the huggingface model's directory.")
-        path = os.path.join(model_name, f"np")
-        path = os.path.abspath(os.path.expanduser(path))
-        os.makedirs(path, exist_ok=True)
-        lock_path = os.path.join(path, "file_lock")
-        lock = filelock.FileLock(lock_path)
-
-        with lock:
-            test_weight_path = os.path.join(path, "model.embed_tokens.weight")
-            if os.path.exists(test_weight_path):
-                return path
-
-            bin_files = glob.glob(os.path.join(model_name, "*.bin"))
-
-            for bin_file in tqdm(bin_files, desc="Convert format"):
-                state = torch.load(bin_file, map_location="cpu")
-                for name, param in tqdm(state.items(), leave=False):
-                    param_path = os.path.join(path, name)
-                    with open(param_path, "wb") as f:
-                        np.save(f, param.cpu().detach().numpy())
-
-            return path
 
     def initialize_dummy_weights(self) -> None:
         for param in self.state_dict().values():
