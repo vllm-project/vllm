@@ -6,9 +6,8 @@ from typing import Union, Optional
 
 import numpy as np
 import torch
-os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
+from tqdm.auto import tqdm
 from huggingface_hub import snapshot_download
-from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     'half': torch.half,
@@ -31,6 +30,11 @@ def get_dtype_size(dtype: Union[torch.dtype, str]) -> int:
     return torch.tensor([], dtype=torch_dtype).element_size()
 
 
+class Disabledtqdm(tqdm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, disable=True)
+
+
 def hf_model_weights_iterator(model_name_or_path: str,
                               cache_dir: Optional[str] = None,
                               use_np_cache: bool = False):
@@ -46,7 +50,8 @@ def hf_model_weights_iterator(model_name_or_path: str,
         with lock:
             hf_folder = snapshot_download(model_name_or_path,
                                           allow_patterns="*.bin",
-                                          cache_dir=cache_dir)
+                                          cache_dir=cache_dir,
+                                          tqdm_class=Disabledtqdm)
     else:
         hf_folder = model_name_or_path
 
