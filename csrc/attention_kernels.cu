@@ -1,8 +1,8 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
+#include "attention_dtypes.h"
 #include "attention_utils.h"
-#include "cuda_primitives.h"
 #include "reduction_utils.h"
 
 #include <algorithm>
@@ -71,8 +71,8 @@ __global__ void single_query_cached_kv_attention_kernel(
 
   // Memory planning.
   extern __shared__ char shared_mem[];
-  // NOTE(woosuk): We use FP32 logits and accumulation.
-  float *logits = reinterpret_cast<float*>(shared_mem);
+  // NOTE(woosuk): We use FP32 for the softmax logits for better accuracy.
+  float* logits = reinterpret_cast<float*>(shared_mem);
   // Workspace for reduction.
   __shared__ float red_smem[2 * NUM_WARPS];
 
@@ -145,7 +145,7 @@ __global__ void single_query_cached_kv_attention_kernel(
   qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-      qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
+    qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
   }
   // Broadcast the max qk value to all threads.
   qk_max = __shfl_sync(uint32_t(-1), qk_max, 0);
@@ -169,12 +169,13 @@ __global__ void single_query_cached_kv_attention_kernel(
   // Each thread will fetch 16 bytes from the value cache at a time.
   constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);
   using V_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
-  using L_vec = typename FloatVec<V_vec>::Type;
+  using L_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
 
   constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;
   constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
   constexpr int NUM_ROWS_PER_THREAD = (HEAD_SIZE + NUM_ROWS_PER_ITER - 1) / NUM_ROWS_PER_ITER;
 
+  // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
   float accs[NUM_ROWS_PER_THREAD];
 #pragma unroll
   for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
@@ -185,7 +186,8 @@ __global__ void single_query_cached_kv_attention_kernel(
     const int physical_block_number = block_table[block_idx];
     const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
     const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
-    L_vec logits_vec = *reinterpret_cast<L_vec*>(logits + token_idx);
+    L_vec logits_vec;
+    convert_from_float(logits_vec, *reinterpret_cast<L_vec*>(logits + token_idx));
 
     const scalar_t* v_ptr = v_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
                                     + head_idx * HEAD_SIZE * BLOCK_SIZE;
@@ -195,7 +197,7 @@ __global__ void single_query_cached_kv_attention_kernel(
       if (row_idx < HEAD_SIZE) {
         const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
         V_vec v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
-        accs[i] += dot(logits_vec, cast_to_float(v_vec));
+        accs[i] += dot(logits_vec, v_vec);
       }
     }
   }
@@ -307,7 +309,7 @@ void single_query_cached_kv_attention_launcher(
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int padded_max_context_len = ((max_context_len + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
-  int logits_size = padded_max_context_len * sizeof(float);
+  int logits_size = padded_max_context_len * sizeof(T);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
   int shared_mem_size = std::max(logits_size, outputs_size);
 
