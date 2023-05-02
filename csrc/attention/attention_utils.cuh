@@ -1,11 +1,9 @@
 #pragma once
 
-#include "attention_dtypes.h"
+#include "attention_dtypes.cuh"
 
 #include <float.h>
 #include <type_traits>
-
-#define MMHA_USE_FP32_ACUM_FOR_OUT
 
 namespace cacheflow {
 
@@ -104,5 +102,3 @@ struct Qk_dot {
 };
 
 } // namespace cacheflow
-
-#undef MMHA_USE_FP32_ACUM_FOR_OUT

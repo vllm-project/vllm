@@ -1,8 +1,8 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#include "attention_dtypes.h"
-#include "attention/attention_utils.h"
+#include "attention_dtypes.cuh"
+#include "attention_utils.cuh"
 
 #include <algorithm>
 
@@ -13,7 +13,7 @@
 namespace cacheflow {
 
 // Utility function for attention softmax.
-template<int WARPS_PER_BLOCK, int WARP_SIZE = 32>
+template<int NUM_WARPS>
 inline __device__ float block_sum(float* red_smem, float sum) {
   // Decompose the thread index into warp / lane.
   int warp = threadIdx.x / WARP_SIZE;
@@ -34,13 +34,13 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   __syncthreads();
 
   // The warps compute the final sums.
-  if (lane < WARPS_PER_BLOCK) {
+  if (lane < NUM_WARPS) {
     sum = red_smem[lane];
   }
 
   // Parallel reduction inside the warp.
 #pragma unroll
-  for (int mask = WARPS_PER_BLOCK / 2; mask >= 1; mask /= 2) {
+  for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
     sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
   }
 
@@ -205,6 +205,7 @@ __global__ void single_query_cached_kv_attention_kernel(
   constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);
   using V_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
   using L_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
+  using Float_L_vec = typename FloatVec<L_vec>::Type;
 
   constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;
   constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
@@ -222,7 +223,7 @@ __global__ void single_query_cached_kv_attention_kernel(
     const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
     const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
     L_vec logits_vec;
-    convert_from_float(logits_vec, *reinterpret_cast<L_vec*>(logits + token_idx));
+    from_float(logits_vec, *reinterpret_cast<Float_L_vec*>(logits + token_idx));
 
     const scalar_t* v_ptr = v_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
                                     + head_idx * HEAD_SIZE * BLOCK_SIZE;
@@ -291,7 +292,7 @@ __global__ void single_query_cached_kv_attention_kernel(
     for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
       if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
-        convert_from_float(*(out_ptr + row_idx), accs[i]);
+        from_float(*(out_ptr + row_idx), accs[i]);
       }
     }
   }
@@ -383,7 +384,7 @@ void single_query_cached_kv_attention_launcher(
 }
 
 #define CALL_KERNEL_LAUNCHER(T, BLOCK_SIZE)                         \
-  single_query_cached_kv_attention_launcher<T, BLOCK_SIZE>(         \ 
+  single_query_cached_kv_attention_launcher<T, BLOCK_SIZE>(         \
     out,                                                            \
     query,                                                          \
     key_cache,                                                      \
@@ -437,11 +438,9 @@ void single_query_cached_kv_attention(
   torch::Tensor& context_lens,    // [num_seqs]
   int block_size,
   int max_context_len) {
-  // TODO(woosuk): Support BF16.
+  // TODO(woosuk): Support FP32 and BF16.
   if (query.dtype() == at::ScalarType::Half) {
     CALL_KERNEL_LAUNCHER_BLOCK_SIZE(uint16_t);
-  } else if (query.dtype() == at::ScalarType::Float) {
-    CALL_KERNEL_LAUNCHER_BLOCK_SIZE(float);
   } else {
     TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
   }
