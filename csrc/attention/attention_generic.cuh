@@ -4,6 +4,14 @@
 
 namespace cacheflow {
 
+// A vector type to store Q, K, V elements.
+template<typename T, int VEC_SIZE>
+struct Vec {};
+
+// A vector type to store FP32 accumulators.
+template<typename T>
+struct FloatVec {};
+
 // Template vector operations.
 template<typename Acc, typename A, typename B>
 inline __device__ Acc mul(A a, B b);

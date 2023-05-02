@@ -7,6 +7,42 @@
 
 namespace cacheflow {
 
+// FP16 vector types for Q, K, V.
+template<>
+struct Vec<uint16_t, 1> {
+    using Type = uint16_t;
+};
+template<>
+struct Vec<uint16_t, 2> {
+    using Type = uint32_t;
+};
+template<>
+struct Vec<uint16_t, 4> {
+    using Type = uint2;
+};
+template<>
+struct Vec<uint16_t, 8> {
+    using Type = uint4;
+};
+
+// FP32 accumulator vector types corresponding to Vec.
+template<>
+struct FloatVec<uint16_t> {
+    using Type = float;
+};
+template<>
+struct FloatVec<uint32_t> {
+    using Type = float2;
+};
+template<>
+struct FloatVec<uint2> {
+    using Type = Float4_;
+};
+template<>
+struct FloatVec<uint4> {
+    using Type = Float8_;
+};
+
 // Utility functions for type conversions.
 inline __device__ uint32_t h0_h0(uint16_t a) {
   uint32_t b;
