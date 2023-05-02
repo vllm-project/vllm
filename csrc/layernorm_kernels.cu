@@ -1,7 +1,7 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#include "reduction_utils.h"
+#include "reduction_utils.cuh"
 
 namespace cacheflow {
 
