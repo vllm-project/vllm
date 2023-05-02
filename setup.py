@@ -2,13 +2,13 @@ import setuptools
 import torch
 from torch.utils import cpp_extension
 
-if not torch.cuda.is_available():
-    raise RuntimeError(
-        'Cannot find CUDA. '
-        'CUDA must be available in order to build the package.')
-
 CXX_FLAGS = ['-g']
 NVCC_FLAGS = ['-O2']
+
+if not torch.cuda.is_available():
+    raise RuntimeError(
+        f'Cannot find CUDA at CUDA_HOME: {cpp_extension.CUDA_HOME}. '
+        'CUDA must be available in order to build the package.')
 
 # FIXME(woosuk): Consider the case where the machine has multiple GPUs with
 # different compute capabilities.
