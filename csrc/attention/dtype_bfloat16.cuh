@@ -1,7 +1,6 @@
 #pragma once
 
 #include "attention_generic.cuh"
-// #include "bfloat16_utils.cuh"
 #include "dtype_float32.cuh"
 
 #include <cuda_bf16.h>
