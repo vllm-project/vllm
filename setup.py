@@ -14,10 +14,6 @@ if not torch.cuda.is_available():
 # different compute capabilities.
 compute_capability = torch.cuda.get_device_capability()
 major, minor = compute_capability
-if major <= 6 or (major == 7 and minor < 5):
-    raise RuntimeError(
-        'CacheFlow requires CUDA compute capability >= 7.5. '
-        f'Found {major}.{minor}.')
 # Enable bfloat16 support if the compute capability is >= 8.0.
 if major >= 8:
     NVCC_FLAGS.append('-DENABLE_BF16')
