@@ -46,7 +46,9 @@ void rms_norm(
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+    at::ScalarType::Half,
+    at::ScalarType::BFloat16,
     input.scalar_type(),
     "rms_norm_kernel",
     [&] {

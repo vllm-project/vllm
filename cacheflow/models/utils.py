@@ -7,6 +7,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     'float': torch.float,
     'float16': torch.float16,
     'float32': torch.float32,
+    'bfloat16': torch.bfloat16,
 }
 
 
@@ -21,4 +22,3 @@ def get_torch_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
 def get_dtype_size(dtype: Union[torch.dtype, str]) -> int:
     torch_dtype = get_torch_dtype(dtype)
     return torch.tensor([], dtype=torch_dtype).element_size()
-
