@@ -2,8 +2,7 @@
 #include <ATen/cuda/CUDAContext.h>
 
 #include "attention_dtypes.h"
-#include "attention_utils.h"
-#include "reduction_utils.h"
+#include "attention/attention_utils.h"
 
 #include <algorithm>
 
@@ -12,6 +11,42 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 namespace cacheflow {
+
+// Utility function for attention softmax.
+template<int WARPS_PER_BLOCK, int WARP_SIZE = 32>
+inline __device__ float block_sum(float* red_smem, float sum) {
+  // Decompose the thread index into warp / lane.
+  int warp = threadIdx.x / WARP_SIZE;
+  int lane = threadIdx.x % WARP_SIZE;
+
+  // Compute the sum per warp.
+#pragma unroll
+  for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+    sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
+  }
+
+  // Warp leaders store the data to shared memory.
+  if (lane == 0) {
+    red_smem[warp] = sum;
+  }
+
+  // Make sure the data is in shared memory.
+  __syncthreads();
+
+  // The warps compute the final sums.
+  if (lane < WARPS_PER_BLOCK) {
+    sum = red_smem[lane];
+  }
+
+  // Parallel reduction inside the warp.
+#pragma unroll
+  for (int mask = WARPS_PER_BLOCK / 2; mask >= 1; mask /= 2) {
+    sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
+  }
+
+  // Broadcast to other threads.
+  return __shfl_sync(uint32_t(-1), sum, 0);
+}
 
 // Grid: (num_heads, num_seqs).
 template<
