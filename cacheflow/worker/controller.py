@@ -1,4 +1,4 @@
-from typing import Dict, List, Union, Tuple
+from typing import Dict, List, Union, Tuple, Optional
 
 try:
     import ray
@@ -29,8 +29,9 @@ class Controller:
         num_cpu_blocks: int,
         dtype: str,
         seed: int,
-        model_path: str,
+        cache_dir: Optional[str],
         use_dummy_weights: bool,
+        use_np_cache: bool,
         max_num_batched_tokens: int,
         use_ray: bool,
     ) -> None:
@@ -66,8 +67,9 @@ class Controller:
                 world_size=world_size,
                 tensor_parallel_size=tensor_parallel_size,
                 pipeline_parallel_size=pipeline_parallel_size,
-                model_path=model_path,
+                cache_dir=cache_dir,
                 use_dummy_weights=use_dummy_weights,
+                use_np_cache=use_np_cache,
                 max_num_batched_tokens=max_num_batched_tokens,
             )
             self.workers.append(worker)
