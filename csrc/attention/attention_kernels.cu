@@ -1,7 +1,7 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#include "attention_dtypes.cuh"
+#include "attention_dtypes.h"
 #include "attention_utils.cuh"
 
 #include <algorithm>
