@@ -9,57 +9,18 @@ from tqdm import tqdm
 from transformers import AutoConfig
 
 from benchmark.trace import generate_text_completion_requests
-from cacheflow.master.simple_frontend import SimpleFrontend
-from cacheflow.master.server import (Server, add_server_arguments,
-                                     process_server_arguments,
-                                     initialize_cluster)
+from cacheflow.master.server import (
+    add_server_arguments, process_server_arguments,
+    init_local_server_and_frontend_with_arguments)
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.utils import get_gpu_memory, get_cpu_memory
 
 
 logger = logging.getLogger(__name__)
 
 
 def main(args: argparse.Namespace):
-    assert args.pipeline_parallel_size == 1, (
-        'Pipeline parallelism is not supported yet.')
+    server, frontend = init_local_server_and_frontend_with_arguments(args)
 
-    (num_nodes, num_devices_per_node, distributed_init_method,
-    all_stage_devices) = (
-        initialize_cluster(
-            use_ray=args.use_ray,
-            pipeline_parallel_size=args.pipeline_parallel_size,
-            tensor_parallel_size=args.tensor_parallel_size))
-
-    # Create a server.
-    server = Server(
-        model=args.model,
-        model_path=args.model_path,
-        use_dummy_weights=args.use_dummy_weights,
-        pipeline_parallel_size=args.pipeline_parallel_size,
-        tensor_parallel_size=args.tensor_parallel_size,
-        block_size=args.block_size,
-        dtype=args.dtype,
-        seed=args.seed,
-        swap_space=args.swap_space,
-        max_num_batched_tokens=args.max_num_batched_tokens,
-        max_num_sequences=args.max_num_sequences,
-        num_nodes=num_nodes,
-        num_devices_per_node=num_devices_per_node,
-        distributed_init_method=distributed_init_method,
-        all_stage_devices=all_stage_devices,
-        gpu_memory=get_gpu_memory(),
-        cpu_memory=get_cpu_memory(),
-        use_ray=args.use_ray,
-        collect_stats=True,
-        do_memory_analysis=args.do_memory_analysis,
-    )
-
-    # Create a frontend.
-    frontend = SimpleFrontend(
-        model_name=args.model,
-        block_size=args.block_size,
-    )
     # Generate requests.
     requests = generate_text_completion_requests(
         args.dataset,

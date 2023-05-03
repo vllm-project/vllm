@@ -9,18 +9,21 @@ except ImportError:
     ray = None
 
 from cacheflow.master.scheduler import Scheduler
+from cacheflow.master.simple_frontend import SimpleFrontend
 from cacheflow.models import get_memory_analyzer
 from cacheflow.worker.controller import Controller, DeviceID
 from cacheflow.sequence import SequenceGroup
 from cacheflow.sampling_params import SamplingParams
+from cacheflow.utils import get_gpu_memory, get_cpu_memory
 
 
 class Server:
     def __init__(
         self,
         model: str,
-        model_path: str,
+        cache_dir: Optional[str],
         use_dummy_weights: bool,
+        use_np_cache: bool,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
         block_size: int,
@@ -78,8 +81,9 @@ class Server:
                 num_cpu_blocks=self.num_cpu_blocks,
                 dtype=dtype,
                 seed=seed,
-                model_path=model_path,
+                cache_dir=cache_dir,
                 use_dummy_weights=use_dummy_weights,
+                use_np_cache=use_np_cache,
                 max_num_batched_tokens=max_num_batched_tokens,
                 use_ray=use_ray,
             )
@@ -203,25 +207,72 @@ def initialize_cluster(
 def add_server_arguments(parser: argparse.ArgumentParser):
     # Model arguments
     parser.add_argument('--model', type=str, default='facebook/opt-125m', help='model name')
-    parser.add_argument('--model-path', type=str, default='~/.cacheflow/model_weights',
-                        help='model path to download and load the weights')
+    parser.add_argument('--cache-dir', type=str, default=None,
+                        help='cache dir to download and load the weights, '
+                             'default to the default cache dir of huggingface')
+    parser.add_argument('--use-np-cache', action='store_true',
+                        help='save a numpy copy of model weights for faster loading')
+    parser.add_argument('--use-dummy-weights', action='store_true', help='use dummy values for model weights')
+    # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
+    parser.add_argument('--dtype', type=str, default='half', choices=['half'], help='data type')
     # Parallel arguments
     parser.add_argument('--use-ray', action='store_true', help='use Ray for distributed serving, will be automatically set when using more than 1 GPU')
     parser.add_argument('--pipeline-parallel-size', '-pp', type=int, default=1, help='number of pipeline stages')
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1, help='number of tensor parallel replicas')
     # KV cache arguments
     parser.add_argument('--block-size', type=int, default=16, choices=[1, 2, 4, 8, 16, 32, 64, 128, 256], help='token block size')
-    # NOTE(woosuk): If FlashAttention is used, the float data type is not supported.
-    parser.add_argument('--dtype', type=str, default='half', choices=['half'], help='data type')
     # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
     parser.add_argument('--max-num-batched-tokens', type=int, default=2560, help='maximum number of batched tokens per iteration')
     parser.add_argument('--max-num-sequences', type=int, default=256, help='maximum number of sequences per iteration')
-    parser.add_argument('--use-dummy-weights', action='store_true', help='use dummy values for model weights')
     return parser
+
 
 def process_server_arguments(args: argparse.Namespace):
     if args.pipeline_parallel_size * args.tensor_parallel_size > 1:
         args.use_ray = True
     return args
+
+
+def init_local_server_and_frontend_with_arguments(args: argparse.Namespace):
+    # TODO(zhuohan): Support pipeline parallelism.
+    assert args.pipeline_parallel_size == 1, (
+        'Pipeline parallelism is not supported yet.')
+
+    (num_nodes, num_devices_per_node, distributed_init_method,
+    all_stage_devices) = (
+        initialize_cluster(
+            use_ray=args.use_ray,
+            pipeline_parallel_size=args.pipeline_parallel_size,
+            tensor_parallel_size=args.tensor_parallel_size))
+
+    # Create a server.
+    server = Server(
+        model=args.model,
+        cache_dir=args.cache_dir,
+        use_dummy_weights=args.use_dummy_weights,
+        use_np_cache=args.use_np_cache,
+        pipeline_parallel_size=args.pipeline_parallel_size,
+        tensor_parallel_size=args.tensor_parallel_size,
+        block_size=args.block_size,
+        dtype=args.dtype,
+        seed=args.seed,
+        swap_space=args.swap_space,
+        max_num_batched_tokens=args.max_num_batched_tokens,
+        max_num_sequences=args.max_num_sequences,
+        num_nodes=num_nodes,
+        num_devices_per_node=num_devices_per_node,
+        distributed_init_method=distributed_init_method,
+        all_stage_devices=all_stage_devices,
+        gpu_memory=get_gpu_memory(),
+        cpu_memory=get_cpu_memory(),
+        use_ray=args.use_ray,
+    )
+
+    # Create a frontend.
+    frontend = SimpleFrontend(
+        model_name=args.model,
+        block_size=args.block_size,
+    )
+    return server, frontend
