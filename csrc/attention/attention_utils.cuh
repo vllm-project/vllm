@@ -1,6 +1,6 @@
 #pragma once
 
-#include "attention_dtypes.cuh"
+#include "attention_dtypes.h"
 
 #include <float.h>
 #include <type_traits>
