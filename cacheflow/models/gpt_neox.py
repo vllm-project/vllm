@@ -1,18 +1,14 @@
 """1D GPT-NeoX model compatible with HuggingFace weights."""
-import os
-import glob
-import filelock
-from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 from torch import nn
-from huggingface_hub import snapshot_download
 
 from cacheflow.models import InputMetadata
 from cacheflow.models.attention import GPTNeoXCacheFlowAttention
 from cacheflow.models.sample import Sampler
+from cacheflow.models.utils import (hf_model_weights_iterator,
+                                    load_tensor_parallel_weights)
 from cacheflow.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from cacheflow.parallel_utils.tensor_parallel import (VocabParallelEmbedding,
@@ -196,17 +192,22 @@ class GPTNeoXForCausalLM(nn.Module):
     _column_parallel_weights = ["embed_in.weight", "embed_out.weight", "dense_h_to_4h.weight", "dense_h_to_4h.bias"]
     _row_parallel_weights = ["dense.weight", "dense_4h_to_h.weight"]
 
-    def load_weights(self, weights_path: str):
+    def load_weights(self, model_name_or_path: str,
+                     cache_dir: Optional[str] = None,
+                     use_np_cache: bool = False):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
-        for name, param in state_dict.items():
+        for name, loaded_weight in hf_model_weights_iterator(
+            model_name_or_path, cache_dir, use_np_cache):
+            if ("attention.bias" in name or "attention.masked_bias" in name
+                or "rotary_emb.inv_freq" in name):
+                continue
+            param = state_dict[name]
             if "query_key_value" in name:
                 # NOTE(woosuk): GPT-NeoX's fused QKV has the shape of
                 # [num_heads * 3 * head_size, num_heads * head_size], while the
                 # required shape is [3 * num_heads * head_size, num_heads * head_size].
                 # Thus, we need weight conversion.
-                loaded_weight = torch.from_numpy(
-                    np.load(os.path.join(weights_path, name)))
                 shard_size = param.shape[0]
                 loaded_weight = loaded_weight[shard_size * tensor_model_parallel_rank
                                               :shard_size * (tensor_model_parallel_rank + 1)]
@@ -223,55 +224,10 @@ class GPTNeoXForCausalLM(nn.Module):
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1).contiguous()
                 else:
-                    assert False
-            else:
-                loaded_weight = torch.from_numpy(
-                    np.load(os.path.join(weights_path, name)))
-                for p in self._column_parallel_weights:
-                    if p in name:
-                        shard_size = param.shape[0]
-                        loaded_weight = loaded_weight[
-                            shard_size * tensor_model_parallel_rank
-                            :shard_size * (tensor_model_parallel_rank + 1)]
-                        break
-                for p in self._row_parallel_weights:
-                    if p in name:
-                        shard_size = param.shape[1]
-                        loaded_weight = loaded_weight[
-                            :,
-                            shard_size * tensor_model_parallel_rank
-                            :shard_size * (tensor_model_parallel_rank + 1)]
-                        break
-
-            assert param.shape == loaded_weight.shape
-            param.data.copy_(loaded_weight)
-
-    @staticmethod
-    def get_weights(model_name: str, path: str):
-        path = os.path.join(path, f"{model_name}-np")
-        path = os.path.abspath(os.path.expanduser(path))
-        os.makedirs(path, exist_ok=True)
-        lock_path = os.path.join(path, "file_lock")
-        lock = filelock.FileLock(lock_path)
-
-        with lock:
-            test_weight_path = os.path.join(
-                path, "gpt_neox.embed_in.weight")
-            if os.path.exists(test_weight_path):
-                return path
-
-            folder = snapshot_download(model_name, allow_patterns="*.bin",
-                                       cache_dir=os.path.join(path, "cache"))
-            bin_files = glob.glob(os.path.join(folder, "*.bin"))
-
-            for bin_file in tqdm(bin_files, desc="Convert format"):
-                state = torch.load(bin_file, map_location="cpu")
-                for name, param in tqdm(state.items(), leave=False):
-                    param_path = os.path.join(path, name)
-                    with open(param_path, "wb") as f:
-                        np.save(f, param.cpu().detach().numpy())
-
-            return path
+                    raise ValueError(f"Unexpected weight name: {name}")
+            load_tensor_parallel_weights(param, loaded_weight, name,
+                                         self._column_parallel_weights,
+                                         self._row_parallel_weights)
 
     def initialize_dummy_weights(self) -> None:
         for param in self.state_dict().values():
