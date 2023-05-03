@@ -128,10 +128,15 @@ class GPT2Model(nn.Module):
         assert config.add_cross_attention == False
         assert config.scale_attn_by_inverse_layer_idx == False
         assert config.reorder_and_upcast_attn == False
-
         self.embed_dim = config.hidden_size
-        assert config.vocab_size == 50257
-        self.wte = VocabParallelEmbedding(50304, self.embed_dim)
+
+        # Optimization: While the vocab size of GPT-2 is 50257, we extend it
+        # to 50304 in order to make it divisible by 64.
+        # This improves performance since GPUs are faster if the dimension
+        # is divisible by 64. In addition, it allows us to shard the embedding
+        # layer across 2, 4, 8, or more GPUs.
+        vocab_size = ((config.vocab_size + 63) // 64) * 64
+        self.wte = VocabParallelEmbedding(vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList(
             [GPT2Block(config) for _ in range(config.num_hidden_layers)])
@@ -193,6 +198,7 @@ class GPT2LMHeadModel(nn.Module):
     def load_weights(self, model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
@@ -208,15 +214,8 @@ class GPT2LMHeadModel(nn.Module):
                 continue
             name = "transformer." + name
 
-            # Optimization: While the vocab size of GPT-2 is 50257, we
-            # extend it to 50304 to make it divisible by 64.
-            if name == "transformer.wte.weight":
-                extra_rows = torch.empty(47, loaded_weight.shape[1]).to(
-                    loaded_weight)
-                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
-
             # The HF's GPT-2 implementation uses Conv1D instead of Linear.
-            # Because of this, we need to transpose the weight.
+            # Because of this, we need to transpose the weights.
             for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
                 if conv1d_weight_name not in name:
                     continue
@@ -225,14 +224,35 @@ class GPT2LMHeadModel(nn.Module):
                 loaded_weight = loaded_weight.t()
             param = state_dict[name]
 
+            if name == "transformer.wte.weight":
+                # Consider padding in the vocab size.
+                padded_vocab_size = param.shape[0] * tensor_model_parallel_world_size
+                num_extra_rows = padded_vocab_size - self.config.vocab_size
+                extra_rows = torch.empty(num_extra_rows, loaded_weight.shape[1])
+                extra_rows = extra_rows.to(loaded_weight)
+                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
+
             # For the fused QKV linear layer, manually shard the weights.
             if "c_attn" in name:
-                # print(name, param.shape)
-                shard_size = param.shape[0]
-                # FIXME
-                loaded_weight = loaded_weight[shard_size * tensor_model_parallel_rank:
-                                              shard_size * (tensor_model_parallel_rank + 1)]
-                # print(name, loaded_weight.shape)
+                # GPT-2's fused QKV has the shape of [3 * num_heads * head_size, hidden_size].
+                # When tensor parallelism is used, we shard the weights along the head dimension.
+                total_num_heads = self.config.num_attention_heads
+                hidden_size = self.config.hidden_size
+                head_size = hidden_size // total_num_heads
+                num_heads = total_num_heads // tensor_model_parallel_world_size
+                head_start = tensor_model_parallel_rank * num_heads
+                head_end = (tensor_model_parallel_rank + 1) * num_heads
+
+                if name.endswith(".weight"):
+                    loaded_weight = loaded_weight.view(3, total_num_heads, head_size, hidden_size)
+                    loaded_weight = loaded_weight[:, head_start:head_end, :, :]
+                    loaded_weight = loaded_weight.reshape(-1, hidden_size)
+                elif name.endswith(".bias"):
+                    loaded_weight = loaded_weight.view(3, total_num_heads, head_size)
+                    loaded_weight = loaded_weight[:, head_start:head_end, :]
+                    loaded_weight = loaded_weight.reshape(-1)
+                else:
+                    raise ValueError(f"Unexpected parameter name {name}")
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights)
