@@ -72,8 +72,11 @@ class GPT2MLP(nn.Module):
                                         bias=True, input_is_parallel=True,
                                         perform_initialization=False)
 
-        assert config.activation_function == 'gelu_new'
-        self.act = torch.nn.GELU(approximate='tanh')
+        act_fn = config.activation_function
+        if act_fn != "gelu_new":
+            raise ValueError(f"Unsupported activation: {act_fn}. "
+                             "GPT-2 only supports gelu_new for now.")
+        self.act = torch.nn.GELU(approximate="tanh")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.c_fc(hidden_states)
