@@ -22,29 +22,29 @@ struct Float8_ {
 // FP32 vector types for Q, K, V.
 template<>
 struct Vec<float, 1> {
-    using Type = float;
+  using Type = float;
 };
 template<>
 struct Vec<float, 2> {
-    using Type = float2;
+  using Type = float2;
 };
 template<>
 struct Vec<float, 4> {
-    using Type = float4;
+  using Type = float4;
 };
 
 // FP32 accumulator vector types corresponding to Vec.
 template<>
 struct FloatVec<float> {
-    using Type = float;
+  using Type = float;
 };
 template<>
 struct FloatVec<float2> {
-    using Type = float2;
+  using Type = float2;
 };
 template<>
 struct FloatVec<float4> {
-    using Type = float4;
+  using Type = float4;
 };
 
 // Vector addition.
