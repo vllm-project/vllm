@@ -1,5 +1,4 @@
-#ifndef CACHEFLOW_REDUCTION_UTILS_H_
-#define CACHEFLOW_REDUCTION_UTILS_H_
+#pragma once
 
 namespace cacheflow {
 
@@ -33,5 +32,3 @@ __inline__ __device__ T blockReduceSum(T val) {
 }
 
 } // namespace cacheflow
-
-#endif  // CACHEFLOW_REDUCTION_UTILS_H_

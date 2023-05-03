@@ -1,5 +1,4 @@
-#ifndef CACHEFLOW_ATTENTION_ATTENTION_UTILS_H_
-#define CACHEFLOW_ATTENTION_ATTENTION_UTILS_H_
+#pragma once
 
 #include "attention_dtypes.cuh"
 
@@ -37,5 +36,3 @@ struct Qk_dot {
 };
 
 } // namespace cacheflow
-
-#endif  // CACHEFLOW_ATTENTION_ATTENTION_UTILS_H_

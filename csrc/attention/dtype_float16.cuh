@@ -1,5 +1,4 @@
-#ifndef CACHEFLOW_ATTENTION_DTYPE_FLOAT16_H_
-#define CACHEFLOW_ATTENTION_DTYPE_FLOAT16_H_
+#pragma once
 
 #include "attention_generic.cuh"
 #include "dtype_float32.cuh"
@@ -425,5 +424,3 @@ inline __device__ Float8_ to_float(uint4 u) {
 }
 
 } // namespace cacheflow
-
-#endif  // CACHEFLOW_ATTENTION_DTYPE_FLOAT16_H_
