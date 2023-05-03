@@ -205,8 +205,8 @@ class GPTNeoXForCausalLM(nn.Module):
             param = state_dict[name]
             if "query_key_value" in name:
                 # NOTE(woosuk): GPT-NeoX's fused QKV has the shape of
-                # [num_heads * 3 * head_size, num_heads * head_size], while the
-                # required shape is [3 * num_heads * head_size, num_heads * head_size].
+                # [num_heads * 3 * head_size, hidden_size], while the
+                # required shape is [3 * num_heads * head_size, hidden_size].
                 # Thus, we need weight conversion.
                 shard_size = param.shape[0]
                 loaded_weight = loaded_weight[shard_size * tensor_model_parallel_rank

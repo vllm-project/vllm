@@ -20,48 +20,24 @@ from cacheflow.sequence import SequenceOutputs
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class Conv1D(nn.Module):
-    """
-    1D-convolutional layer as defined by Radford et al. for OpenAI GPT (and also used in GPT-2).
-
-    Basically works like a linear layer but the weights are transposed.
-
-    Args:
-        nf (`int`): The number of output features.
-        nx (`int`): The number of input features.
-    """
-
-    def __init__(self, nf, nx):
-        super().__init__()
-        self.nf = nf
-        self.weight = nn.Parameter(torch.empty(nx, nf))
-        self.bias = nn.Parameter(torch.zeros(nf))
-        nn.init.normal_(self.weight, std=0.02)
-
-    def forward(self, x):
-        size_out = x.size()[:-1] + (self.nf,)
-        x = torch.addmm(self.bias, x.view(-1, x.size(-1)), self.weight)
-        x = x.view(size_out)
-        return x
-
-
 class GPT2Attention(nn.Module):
 
     def __init__(self, config: GPT2Config):
         super().__init__()
-        self.embed_dim = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
+        self.hidden_size = config.hidden_size
+        total_num_heads = config.num_attention_heads
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
+        assert total_num_heads % tensor_model_parallel_world_size == 0
+        self.num_heads = total_num_heads // tensor_model_parallel_world_size
+        self.head_dim = self.hidden_size // total_num_heads
         self.scale = self.head_dim ** -0.5
 
-        if self.head_dim * self.num_heads != self.embed_dim:
-            raise ValueError(
-                f"`embed_dim` must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
-            )
-
-        self.c_attn = Conv1D(3 * self.embed_dim, self.embed_dim)
-        self.c_proj = Conv1D(self.embed_dim, self.embed_dim)
+        self.c_attn = ColumnParallelLinear(self.hidden_size, 3 * self.hidden_size, bias=True,
+                                           gather_output=False,
+                                           perform_initialization=False)
+        self.c_proj = RowParallelLinear(self.hidden_size, self.hidden_size, bias=True,
+                                        input_is_parallel=True,
+                                        perform_initialization=False)
         self.attn = GPTCacheFlowAttention(scale=self.scale)
 
     def forward(
@@ -71,12 +47,12 @@ class GPT2Attention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        qkv = self.c_attn(hidden_states)
+        qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(
             q, k, v, key_cache, value_cache, input_metadata, cache_event)
-        attn_output = self.c_proj(attn_output)
+        attn_output, _ = self.c_proj(attn_output)
         return attn_output
 
 
@@ -89,15 +65,20 @@ class GPT2MLP(nn.Module):
     ):
         super().__init__()
         hidden_size = config.hidden_size
-        self.c_fc = Conv1D(intermediate_size, hidden_size)
-        self.c_proj = Conv1D(hidden_size, intermediate_size)
+        self.c_fc = ColumnParallelLinear(hidden_size, intermediate_size,
+                                         bias=True, gather_output=False,
+                                         perform_initialization=False)
+        self.c_proj = RowParallelLinear(intermediate_size, hidden_size,
+                                        bias=True, input_is_parallel=True,
+                                        perform_initialization=False)
+
         assert config.activation_function == 'gelu_new'
         self.act = torch.nn.GELU(approximate='tanh')
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.c_fc(hidden_states)
+        hidden_states, _ = self.c_fc(hidden_states)
         hidden_states = self.act(hidden_states)
-        hidden_states = self.c_proj(hidden_states)
+        hidden_states, _ = self.c_proj(hidden_states)
         return hidden_states
 
 
@@ -149,7 +130,8 @@ class GPT2Model(nn.Module):
         assert config.reorder_and_upcast_attn == False
 
         self.embed_dim = config.hidden_size
-        self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
+        assert config.vocab_size == 50257
+        self.wte = VocabParallelEmbedding(50304, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList(
             [GPT2Block(config) for _ in range(config.num_hidden_layers)])
@@ -189,7 +171,7 @@ class GPT2LMHeadModel(nn.Module):
         # TODO(zhuohan): create a new weight after implementing pipeline
         #                parallelism
         self.lm_head_weight = self.transformer.wte.weight
-        self.sampler = Sampler()
+        self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,
@@ -205,10 +187,8 @@ class GPT2LMHeadModel(nn.Module):
             self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens
 
-    # _column_parallel_weights = ["embed_tokens.weight", "fc1.weight", "fc1.bias"]
-    # _row_parallel_weights = ["out_proj.weight", "fc2.weight"]
-    _column_parallel_weights = []
-    _row_parallel_weights = []
+    _column_parallel_weights = ["wte.weight", "c_fc.weight", "c_fc.bias"]
+    _row_parallel_weights = ["c_proj.weight"]
 
     def load_weights(self, model_name_or_path: str,
                      cache_dir: Optional[str] = None,
@@ -228,25 +208,31 @@ class GPT2LMHeadModel(nn.Module):
                 continue
             name = "transformer." + name
 
-            # is_attention_weight = False
-            # for stride_id, att_weight_name in enumerate(["q_proj", "k_proj", "v_proj"]):
-            #     if att_weight_name not in name:
-            #         continue
-            #     param = state_dict[name.replace(att_weight_name, "qkv_proj")]
-            #     shard_size = param.shape[0] // 3
-            #     loaded_weight = loaded_weight[
-            #         shard_size * tensor_model_parallel_rank
-            #         :shard_size * (tensor_model_parallel_rank + 1)]
-            #     param_slice = param.data[shard_size * stride_id
-            #                              :shard_size * (stride_id + 1)]
-            #     assert param_slice.shape == loaded_weight.shape
-            #     param_slice.copy_(loaded_weight)
-            #     is_attention_weight = True
-            #     break
-            # if is_attention_weight:
-            #     continue
+            # Optimization: While the vocab size of GPT-2 is 50257, we
+            # extend it to 50304 to make it divisible by 64.
+            if name == "transformer.wte.weight":
+                extra_rows = torch.empty(47, loaded_weight.shape[1]).to(
+                    loaded_weight)
+                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
 
+            # The HF's GPT-2 implementation uses Conv1D instead of Linear.
+            # Because of this, we need to transpose the weight.
+            for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
+                if conv1d_weight_name not in name:
+                    continue
+                if not name.endswith(".weight"):
+                    continue
+                loaded_weight = loaded_weight.t()
             param = state_dict[name]
+
+            # For the fused QKV linear layer, manually shard the weights.
+            if "c_attn" in name:
+                # print(name, param.shape)
+                shard_size = param.shape[0]
+                # FIXME
+                loaded_weight = loaded_weight[shard_size * tensor_model_parallel_rank:
+                                              shard_size * (tensor_model_parallel_rank + 1)]
+                # print(name, loaded_weight.shape)
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights)
