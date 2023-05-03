@@ -8,6 +8,9 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 from huggingface_hub import snapshot_download
+from cacheflow.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank)
+
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     'half': torch.half,
@@ -89,3 +92,26 @@ def hf_model_weights_iterator(model_name_or_path: str,
             state = torch.load(bin_file, map_location="cpu")
             for name, param in state.items():
                 yield name, param
+
+
+def load_tensor_parallel_weights(param, loaded_weight, param_name,
+                                 column_parallel_weight_names,
+                                 row_parallel_weight_names):
+    tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+    for p in column_parallel_weight_names:
+        if p in param_name:
+            shard_size = param.shape[0]
+            loaded_weight = loaded_weight[
+                shard_size * tensor_model_parallel_rank
+                :shard_size * (tensor_model_parallel_rank + 1)]
+            break
+    for p in row_parallel_weight_names:
+        if p in param_name:
+            shard_size = param.shape[1]
+            loaded_weight = loaded_weight[
+                :,
+                shard_size * tensor_model_parallel_rank
+                :shard_size * (tensor_model_parallel_rank + 1)]
+            break
+    assert param.shape == loaded_weight.shape
+    param.data.copy_(loaded_weight)

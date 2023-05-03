@@ -10,7 +10,8 @@ from cacheflow.models.activation import SiluAndMul
 from cacheflow.models.attention import LlamaCacheFlowAttention
 from cacheflow.models.layernorm import RMSNorm
 from cacheflow.models.sample import Sampler
-from cacheflow.models.utils import hf_model_weights_iterator
+from cacheflow.models.utils import (hf_model_weights_iterator,
+                                    load_tensor_parallel_weights)
 from cacheflow.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from cacheflow.parallel_utils.tensor_parallel import (VocabParallelEmbedding,
@@ -260,23 +261,9 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             param = state_dict[name]
-            for p in self._column_parallel_weights:
-                if p in name:
-                    shard_size = param.shape[0]
-                    loaded_weight = loaded_weight[
-                        shard_size * tensor_model_parallel_rank
-                        :shard_size * (tensor_model_parallel_rank + 1)]
-                    break
-            for p in self._row_parallel_weights:
-                if p in name:
-                    shard_size = param.shape[1]
-                    loaded_weight = loaded_weight[
-                        :,
-                        shard_size * tensor_model_parallel_rank
-                        :shard_size * (tensor_model_parallel_rank + 1)]
-                    break
-            assert param.shape == loaded_weight.shape
-            param.data.copy_(loaded_weight)
+            load_tensor_parallel_weights(param, loaded_weight, name,
+                                         self._column_parallel_weights,
+                                         self._row_parallel_weights)
 
     def initialize_dummy_weights(self) -> None:
         for param in self.state_dict().values():
