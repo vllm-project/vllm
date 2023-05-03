@@ -1,8 +1,9 @@
-from typing import Union, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
 from transformers import AutoConfig
+from transformers import PretrainedConfig
 
 from cacheflow.models.memory_analyzer import CacheFlowMemoryAnalyzer
 from cacheflow.models.memory_analyzer import GPTNeoXMemoryAnalyzer
@@ -19,6 +20,7 @@ _MODELS = {
     'opt': OPTForCausalLM,
     'stablelm': GPTNeoXForCausalLM,
     'pythia': GPTNeoXForCausalLM,
+    'dolly-v2': GPTNeoXForCausalLM,
 }
 
 _MEMORY_ANALYZERS = {
@@ -26,19 +28,38 @@ _MEMORY_ANALYZERS = {
     'opt': OPTMemoryAnalyzer,
     'stablelm': GPTNeoXMemoryAnalyzer,
     'pythia': GPTNeoXMemoryAnalyzer,
+    'dolly-v2': GPTNeoXMemoryAnalyzer,
 }
+
+
+def _get_dtype(config: PretrainedConfig, dtype: str) -> torch.dtype:
+    config_dtype: torch.dtype = getattr(config, 'torch_dtype', torch.float32)
+    if dtype == 'default':
+        if config_dtype == torch.float32:
+            # Use FP16 for FP32 models as it is the de facto standard.
+            torch_dtype = torch.float16
+        else:
+            torch_dtype = config_dtype
+    else:
+        torch_dtype = get_torch_dtype(dtype)
+        if torch_dtype != config_dtype and config_dtype != torch.float32:
+            # TODO(woosuk): Allow using float16 for bfloat16 models and
+            # vice versa. Print a warning message and continue.
+            raise ValueError(
+                f'Cannot use {torch_dtype} for {config_dtype} model.')
+    return torch_dtype
 
 
 def get_model(
     model_name: str,
-    dtype: Union[torch.dtype, str],
+    dtype: str,
     cache_dir: Optional[str],
     use_dummy_weights: bool,
     use_np_cache: bool,
 ) -> nn.Module:
-    torch_dtype = get_torch_dtype(dtype)
-    torch.set_default_dtype(torch_dtype)
     config = AutoConfig.from_pretrained(model_name)
+    torch_dtype = _get_dtype(config, dtype)
+    torch.set_default_dtype(torch_dtype)
     for model_class_name, model_class in _MODELS.items():
         if model_class_name in model_name:
             if use_dummy_weights:
@@ -62,12 +83,13 @@ def get_model(
 def get_memory_analyzer(
     model_name: str,
     block_size: int,
-    dtype: Union[torch.dtype, str],
+    dtype: str,
     gpu_memory: int,
     cpu_memory: int,
     tensor_parallel_size: int = 1,
 ) -> CacheFlowMemoryAnalyzer:
-    torch_dtype = get_torch_dtype(dtype)
+    config = AutoConfig.from_pretrained(model_name)
+    torch_dtype = _get_dtype(config, dtype)
     for model_class, memory_analyzer in _MEMORY_ANALYZERS.items():
         if model_class in model_name:
             return memory_analyzer(
