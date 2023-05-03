@@ -6,7 +6,7 @@
 
 namespace cacheflow {
 
-// Define FP32 vector data types.
+// Define custom FP32 vector data types.
 struct Float4_ {
   float2 x;
   float2 y;
