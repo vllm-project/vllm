@@ -1,4 +1,5 @@
-#pragma once
+#ifndef CACHEFLOW_ATTENTION_ATTENTION_GENERIC_H_
+#define CACHEFLOW_ATTENTION_ATTENTION_GENERIC_H_
 
 #include <stdint.h>
 
@@ -45,3 +46,5 @@ inline __device__ void zero(T& dst) {
 }
 
 } // namespace cacheflow
+
+#endif  // CACHEFLOW_ATTENTION_ATTENTION_GENERIC_H_
