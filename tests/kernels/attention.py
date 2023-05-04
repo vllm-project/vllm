@@ -272,7 +272,7 @@ def test_attention(seed: int) -> None:
     torch.cuda.manual_seed(seed)
     for dtype in [torch.half, torch.bfloat16]:
         for block_size in [8, 16, 32, 64]:
-            for head_size in [64, 80, 96, 128, 256]:
+            for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
                 print(f'Testing single_query_cached_kv_attention with '
                       f'dtype={dtype}, block_size={block_size}, '
                       f'head_size={head_size}')
@@ -286,11 +286,11 @@ def test_attention(seed: int) -> None:
                 )
 
     for dtype in [torch.half, torch.bfloat16]:
-        for head_size in [64, 80, 96, 128, 256]:
+        for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
             print(f'Testing multi_query_kv_attention with dtype={dtype}, '
                   f'head_size={head_size}')
             test_multi_query_kv_attention(
-                num_seqs=11,
+                num_seqs=5,
                 num_heads=3,
                 head_size=head_size,
                 dtype=dtype,
