@@ -213,7 +213,7 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--use-np-cache', action='store_true',
                         help='save a numpy copy of model weights for faster loading')
     parser.add_argument('--use-dummy-weights', action='store_true', help='use dummy values for model weights')
-    # NOTE(woosuk): FlashAttention does not support float32.
+    # TODO(woosuk): Support FP32 for debugging.
     parser.add_argument('--dtype', type=str, default='half', choices=['half', 'bfloat16'], help='data type')
     # Parallel arguments
     parser.add_argument('--use-ray', action='store_true', help='use Ray for distributed serving, will be automatically set when using more than 1 GPU')
