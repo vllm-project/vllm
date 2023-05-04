@@ -132,13 +132,6 @@ class GPTCacheFlowAttention(nn.Module):
         return output.view(-1, num_heads * head_size)
 
 
-class OPTCacheFlowAttention(GPTCacheFlowAttention):
-    """OPT uses the same attention mechanism as GPT."""
-
-    def __init__(self, scale: float) -> None:
-        super().__init__(scale)
-
-
 class GPTNeoXCacheFlowAttention(GPTCacheFlowAttention):
     """Attention with GPT-NeoX style rotary embedding."""
 
@@ -196,7 +189,3 @@ class GPTNeoXCacheFlowAttention(GPTCacheFlowAttention):
             input_metadata,
             cache_event,
         )
-
-
-class LlamaCacheFlowAttention(GPTNeoXCacheFlowAttention):
-    """LLaMA uses the GPT-NeoX style rotary embedding."""
