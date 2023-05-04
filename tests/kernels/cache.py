@@ -142,15 +142,16 @@ def test_gather_cached_kv(
 
 @torch.inference_mode()
 def test_cache() -> None:
-    test_copy_blocks(
-        num_mappings=23, num_layers=7, num_heads=17, head_size=16,
-        block_size=8, num_blocks=1024, dtype=torch.half)
-    test_reshape_and_cache(
-        num_tokens=3, num_heads=2, head_size=16, block_size=8, num_blocks=2,
-        dtype=torch.half)
-    test_gather_cached_kv(
-        num_tokens=3, num_heads=2, head_size=16, block_size=8, num_blocks=2,
-        dtype=torch.half)
+    for dtype in [torch.half, torch.bfloat16, torch.float]:
+        test_copy_blocks(
+            num_mappings=23, num_layers=7, num_heads=17, head_size=16,
+            block_size=8, num_blocks=1024, dtype=dtype)
+        test_reshape_and_cache(
+            num_tokens=3, num_heads=2, head_size=16, block_size=8, num_blocks=2,
+            dtype=dtype)
+        test_gather_cached_kv(
+            num_tokens=3, num_heads=2, head_size=16, block_size=8, num_blocks=2,
+            dtype=dtype)
 
 
 if __name__ == '__main__':
