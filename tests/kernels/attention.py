@@ -286,7 +286,7 @@ def test_attention(seed: int) -> None:
                 )
 
     for dtype in [torch.half, torch.bfloat16]:
-        for head_size in [64, 80, 96, 128]:
+        for head_size in [64, 80, 96, 128, 256]:
             print(f'Testing multi_query_kv_attention with dtype={dtype}, '
                   f'head_size={head_size}')
             test_multi_query_kv_attention(
