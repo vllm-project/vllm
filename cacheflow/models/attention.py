@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -23,10 +23,9 @@ class GPTCacheFlowAttention(nn.Module):
         query: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
         key: torch.Tensor,                      # [num_prompt_tokens, num_heads, head_size]
         value: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
-        prompt_lens: List[int],
+        attn_bias: xops.AttentionBias,
     ) -> None:
-        # FIXME
-        attn_bias = xops.fmha.attn_bias.BlockDiagonalCausalMask.from_seqlens(prompt_lens)
+        # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(
             query.unsqueeze(0),
             key.unsqueeze(0),
@@ -36,6 +35,7 @@ class GPTCacheFlowAttention(nn.Module):
             scale=self.scale,
             op=self.attn_op,
         )
+        # TODO(woosuk): Unnecessary copy. Optimize.
         output.copy_(out.squeeze(0))
         return output
 
@@ -99,7 +99,7 @@ class GPTCacheFlowAttention(nn.Module):
                 query[:num_prompt_tokens],
                 key[:num_prompt_tokens],
                 value[:num_prompt_tokens],
-                input_metadata.prompt_lens,
+                input_metadata.attn_bias,
             )
 
         # Wait until the cache op is done.
