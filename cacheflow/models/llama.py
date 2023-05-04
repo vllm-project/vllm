@@ -192,7 +192,7 @@ class LlamaForCausalLM(nn.Module):
                                             bias=False,
                                             gather_output=False,
                                             perform_initialization=False)
-        self.sampler = Sampler()
+        self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,

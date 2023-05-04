@@ -72,6 +72,76 @@ class CacheFlowMemoryAnalyzer:
         return max_num_blocks
 
 
+class GPT2MemoryAnalyzer(CacheFlowMemoryAnalyzer):
+
+    def __init__(
+        self,
+        model_name: str,
+        block_size: int,
+        dtype: torch.dtype,
+        gpu_memory: int,
+        cpu_memory: int,
+        tensor_parallel_size: int,
+    ) -> None:
+        self.model_name = model_name
+        self.block_size = block_size
+        self.dtype = dtype
+        self.gpu_memory = gpu_memory
+        self.cpu_memory = cpu_memory
+        self.tensor_parallel_size = tensor_parallel_size
+
+        config = AutoConfig.from_pretrained(model_name)
+        self.num_layers = config.num_hidden_layers
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_size = config.hidden_size // self.num_heads
+        self.ffn_size = config.n_inner if config.n_inner is not None else 4 * self.hidden_size
+        self.vocab_size = config.vocab_size
+        self.max_position = config.max_position_embeddings
+
+    def get_param_size(self) -> int:
+        word_embedding = self.vocab_size * self.hidden_size // self.tensor_parallel_size
+        position_embedding = self.max_position * self.hidden_size
+
+        ln1 = 2 * self.hidden_size
+        q = self.hidden_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
+        k = self.hidden_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
+        v = self.hidden_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
+        out = self.hidden_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
+        mha = ln1 + q + k + v + out
+
+        ln2 = 2 * self.hidden_size
+        ffn1 = self.hidden_size * self.ffn_size // self.tensor_parallel_size + self.ffn_size
+        ffn2 = self.ffn_size * self.hidden_size // self.tensor_parallel_size + self.hidden_size
+        ffn = ln2 + ffn1 + ffn2
+
+        total = (word_embedding + position_embedding +
+                 self.num_layers * (mha + ffn))
+        dtype_size = get_dtype_size(self.dtype)
+        return dtype_size * total
+
+    def get_max_act_size(
+        self,
+        max_num_batched_tokens: int,
+    ) -> int:
+        # NOTE: We approxmiately calculate the maximum activation size by
+        # estimating
+        # 1) the maximum activation tensor size during inference
+        # 2) the residual tensor size during inference
+        # Here, we assume that FlashAttention is used and
+        # thus the attention maps are never materialized in GPU DRAM.
+        residual = max_num_batched_tokens * self.hidden_size
+        qkv = 3 * (max_num_batched_tokens * self.hidden_size) // self.tensor_parallel_size
+        ffn = max_num_batched_tokens * self.ffn_size // self.tensor_parallel_size
+        # Double the activation size for input and output.
+        max_act = 2 * (max(qkv, ffn) + residual)
+        # Size of output logits.
+        output_logits = 2 * (max_num_batched_tokens * self.vocab_size)
+        max_act = max(max_act, output_logits)
+        dtype_size = get_dtype_size(self.dtype)
+        return dtype_size * max_act
+
+
 class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
 
     def __init__(
