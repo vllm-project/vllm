@@ -214,7 +214,11 @@ def add_server_arguments(parser: argparse.ArgumentParser):
                         help='save a numpy copy of model weights for faster loading')
     parser.add_argument('--use-dummy-weights', action='store_true', help='use dummy values for model weights')
     # NOTE(woosuk): FlashAttention does not support float32.
-    parser.add_argument('--dtype', type=str, default='half', choices=['half', 'bfloat16'], help='data type')
+    parser.add_argument('--dtype', type=str, default='default', choices=['default', 'half', 'bfloat16'],
+                        help=('data type for model weights and activations. '
+                              'The "default" option will use FP16 precision '
+                              'for FP32 and FP16 models, and BF16 precision '
+                              'for BF16 models.'))
     # Parallel arguments
     parser.add_argument('--use-ray', action='store_true', help='use Ray for distributed serving, will be automatically set when using more than 1 GPU')
     parser.add_argument('--pipeline-parallel-size', '-pp', type=int, default=1, help='number of pipeline stages')
