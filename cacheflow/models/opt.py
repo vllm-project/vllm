@@ -234,7 +234,7 @@ class OPTForCausalLM(nn.Module):
         # TODO(zhuohan): create a new weight after implementing pipeline
         #                parallelism
         self.lm_head_weight = self.model.decoder.embed_tokens.weight
-        self.sampler = Sampler()
+        self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,

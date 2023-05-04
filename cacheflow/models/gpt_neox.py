@@ -173,7 +173,7 @@ class GPTNeoXForCausalLM(nn.Module):
         self.embed_out = ColumnParallelLinear(config.hidden_size, config.vocab_size,
                                               bias=False, gather_output=False,
                                               perform_initialization=False)
-        self.sampler = Sampler()
+        self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,
@@ -205,8 +205,8 @@ class GPTNeoXForCausalLM(nn.Module):
             param = state_dict[name]
             if "query_key_value" in name:
                 # NOTE(woosuk): GPT-NeoX's fused QKV has the shape of
-                # [num_heads * 3 * head_size, num_heads * head_size], while the
-                # required shape is [3 * num_heads * head_size, num_heads * head_size].
+                # [num_heads * 3 * head_size, hidden_size], while the
+                # required shape is [3 * num_heads * head_size, hidden_size].
                 # Thus, we need weight conversion.
                 shard_size = param.shape[0]
                 loaded_weight = loaded_weight[shard_size * tensor_model_parallel_rank
@@ -218,11 +218,11 @@ class GPTNeoXForCausalLM(nn.Module):
                 if 'query_key_value.weight' in name:
                     loaded_weight = loaded_weight.view(-1, 3, head_size, hidden_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1, hidden_size).contiguous()
+                    loaded_weight = loaded_weight.reshape(-1, hidden_size)
                 elif 'query_key_value.bias' in name:
                     loaded_weight = loaded_weight.view(-1, 3, head_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1).contiguous()
+                    loaded_weight = loaded_weight.reshape(-1)
                 else:
                     raise ValueError(f"Unexpected weight name: {name}")
             load_tensor_parallel_weights(param, loaded_weight, name,
