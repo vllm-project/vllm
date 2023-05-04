@@ -40,7 +40,7 @@ def _get_dtype(config: PretrainedConfig, dtype: str) -> torch.dtype:
     config_dtype: torch.dtype = getattr(config, 'torch_dtype', torch.float32)
     if dtype == 'default':
         if config_dtype == torch.float32:
-            # Use FP16 for FP32 models as it is the de facto standard.
+            # Following the common practice, we use float16 for float32 models.
             torch_dtype = torch.float16
         else:
             torch_dtype = config_dtype
