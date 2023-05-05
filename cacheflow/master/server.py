@@ -213,7 +213,7 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--use-np-cache', action='store_true',
                         help='save a numpy copy of model weights for faster loading')
     parser.add_argument('--use-dummy-weights', action='store_true', help='use dummy values for model weights')
-    # NOTE(woosuk): FlashAttention does not support float32.
+    # TODO(woosuk): Support FP32 for debugging.
     parser.add_argument('--dtype', type=str, default='default', choices=['default', 'half', 'bfloat16'],
                         help=('data type for model weights and activations. '
                               'The "default" option will use FP16 precision '

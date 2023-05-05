@@ -202,8 +202,8 @@ class OPTMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         # estimating
         # 1) the maximum activation tensor size during inference
         # 2) the residual tensor size during inference
-        # Here, we assume that FlashAttention is used and
-        # thus the attention maps are never materialized in GPU DRAM.
+        # Here, we assume that we use memory-efficient attention which
+        # does not materialize the attention maps in GPU DRAM.
         residual = max_num_batched_tokens * self.hidden_size
         qkv = 3 * (max_num_batched_tokens * self.hidden_size) // self.tensor_parallel_size
         ffn = max_num_batched_tokens * self.ffn_size // self.tensor_parallel_size
@@ -277,8 +277,8 @@ class LlamaMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         # estimating
         # 1) the maximum activation tensor size during inference
         # 2) the residual tensor size during inference
-        # Here, we assume that FlashAttention is used and
-        # thus the attention maps are never materialized in GPU DRAM.
+        # Here, we assume that we use memory-efficient attention which
+        # does not materialize the attention maps in GPU DRAM.
         residual = max_num_batched_tokens * self.hidden_size
         qkv = 3 * (max_num_batched_tokens * self.hidden_size) // self.tensor_parallel_size
         ffn = 2 * (max_num_batched_tokens * self.ffn_size) // self.tensor_parallel_size
@@ -353,8 +353,8 @@ class GPTNeoXMemoryAnalyzer(CacheFlowMemoryAnalyzer):
         # estimating
         # 1) the maximum activation tensor size during inference
         # 2) the residual tensor size during inference
-        # Here, we assume that FlashAttention is used and
-        # thus the attention maps are never materialized in GPU DRAM.
+        # Here, we assume that we use memory-efficient attention which
+        # does not materialize the attention maps in GPU DRAM.
         residual = max_num_batched_tokens * self.hidden_size
         qkv = 3 * (max_num_batched_tokens * self.hidden_size) // self.tensor_parallel_size
         ffn = 2 * (max_num_batched_tokens * self.ffn_size) // self.tensor_parallel_size
