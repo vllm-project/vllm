@@ -1,10 +1,10 @@
 # CacheFlow
 
-## Installation
+## Build from source
 
 ```bash
-pip install ninja psutil numpy sentencepiece ray torch transformers xformers
-pip install -e .
+pip install -r requirements.txt
+pip install -e .  # This may take several minutes.
 ```
 
 ## Test simple server
