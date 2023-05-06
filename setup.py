@@ -76,6 +76,7 @@ def get_requirements() -> List[str]:
 
 setuptools.setup(
     name="cacheflow",
+    python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
