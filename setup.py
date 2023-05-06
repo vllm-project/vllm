@@ -1,3 +1,5 @@
+from typing import List
+
 import setuptools
 import torch
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
@@ -64,8 +66,17 @@ activation_extension = CUDAExtension(
 )
 ext_modules.append(activation_extension)
 
+
+def get_requirements() -> List[str]:
+    """Get Python package dependencies from requirements.txt."""
+    with open("requirements.txt") as f:
+        requirements = f.read().strip().split("\n")
+    return requirements
+
+
 setuptools.setup(
     name="cacheflow",
+    install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
 )
