@@ -6,6 +6,7 @@ from torch.utils.cpp_extension import CUDA_HOME
 
 # Build custom operators.
 CXX_FLAGS = ["-g"]
+# TODO(woosuk): Should we use -O3?
 NVCC_FLAGS = ["-O2"]
 
 if not torch.cuda.is_available():
