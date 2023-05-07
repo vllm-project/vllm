@@ -2,7 +2,7 @@ import filelock
 import glob
 import json
 import os
-from typing import Optional
+from typing import Generator, List, Optional
 
 from huggingface_hub import snapshot_download
 import numpy as np
@@ -19,7 +19,7 @@ def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
     use_np_cache: bool = False,
-):
+) -> Generator[str, torch.Tensor]:
     # Prepare file lock directory to prevent multiple processes from
     # downloading the same model weights at the same time.
     lock_dir = cache_dir if cache_dir is not None else "/tmp"
@@ -73,13 +73,12 @@ def hf_model_weights_iterator(
                 yield name, param
 
 
-# TODO(woosuk): Annotate the types.
 def load_tensor_parallel_weights(
     param: torch.Tensor,
-    loaded_weight,
-    param_name,
-    column_parallel_weight_names,
-    row_parallel_weight_names,
+    loaded_weight: torch.Tensor,
+    param_name: str,
+    column_parallel_weight_names: List[str],
+    row_parallel_weight_names: List[str],
     tensor_model_parallel_rank: int,
 ) -> None:
     for p in column_parallel_weight_names:
