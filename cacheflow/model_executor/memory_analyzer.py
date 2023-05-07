@@ -1,7 +1,7 @@
 import torch
 from transformers import AutoConfig
 
-from cacheflow.models.utils import get_dtype_size
+from cacheflow.model_executor.utils import get_dtype_size
 
 _GiB = 1 << 30
 
