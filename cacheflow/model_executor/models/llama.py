@@ -10,7 +10,7 @@ from cacheflow.model_executor.input_metadata import InputMetadata
 from cacheflow.model_executor.layers.activation import SiluAndMul
 from cacheflow.model_executor.layers.layernorm import RMSNorm
 from cacheflow.model_executor.layers.attention import GPTNeoXCacheFlowAttention
-from cacheflow.model_executor.layers.sample import Sampler
+from cacheflow.model_executor.layers.sampler import Sampler
 from cacheflow.model_executor.weight_utils import (hf_model_weights_iterator,
                                                    load_tensor_parallel_weights)
 from cacheflow.model_executor.parallel_utils.parallel_state import (
