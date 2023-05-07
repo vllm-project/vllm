@@ -2,7 +2,7 @@ import filelock
 import glob
 import json
 import os
-from typing import Generator, List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download
 import numpy as np
@@ -11,6 +11,7 @@ from tqdm.auto import tqdm
 
 
 class Disabledtqdm(tqdm):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, disable=True)
 
@@ -19,7 +20,7 @@ def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
     use_np_cache: bool = False,
-) -> Generator[str, torch.Tensor]:
+) -> Iterator[Tuple[str, torch.Tensor]]:
     # Prepare file lock directory to prevent multiple processes from
     # downloading the same model weights at the same time.
     lock_dir = cache_dir if cache_dir is not None else "/tmp"
