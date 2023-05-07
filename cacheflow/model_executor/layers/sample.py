@@ -3,10 +3,10 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 
-from cacheflow.models import InputMetadata
+from cacheflow.model_executor.input_metadata import InputMetadata
+from cacheflow.model_executor.parallel_utils.tensor_parallel import gather_from_tensor_model_parallel_region
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceOutputs
-from cacheflow.parallel_utils.tensor_parallel import gather_from_tensor_model_parallel_region
 
 
 class Sampler(nn.Module):

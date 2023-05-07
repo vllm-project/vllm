@@ -5,16 +5,15 @@ import torch
 from torch import nn
 from transformers import GPT2Config
 
-from cacheflow.models import InputMetadata
-from cacheflow.models.attention import GPTCacheFlowAttention
-from cacheflow.models.sample import Sampler
-from cacheflow.models.utils import (hf_model_weights_iterator,
-                                    load_tensor_parallel_weights)
-from cacheflow.parallel_utils.parallel_state import (
+from cacheflow.model_executor.input_metadata import InputMetadata
+from cacheflow.model_executor.layers.attention import GPTCacheFlowAttention
+from cacheflow.model_executor.layers.sample import Sampler
+from cacheflow.model_executor.weight_utils import (hf_model_weights_iterator,
+                                                   load_tensor_parallel_weights)
+from cacheflow.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from cacheflow.parallel_utils.tensor_parallel import (VocabParallelEmbedding,
-                                                      ColumnParallelLinear,
-                                                      RowParallelLinear)
+from cacheflow.model_executor.parallel_utils.tensor_parallel import (
+    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from cacheflow.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
