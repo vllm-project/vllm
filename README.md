@@ -1,10 +1,10 @@
 # CacheFlow
 
-## Installation
+## Build from source
 
 ```bash
-pip install ninja psutil numpy sentencepiece ray torch transformers xformers
-pip install -e .
+pip install -r requirements.txt
+pip install -e .  # This may take several minutes.
 ```
 
 ## Test simple server
@@ -20,11 +20,6 @@ python simple_server.py --help
 ```
 
 ## FastAPI server
-
-Install the following additional dependencies:
-```bash
-pip install fastapi uvicorn
-```
 
 To start the server:
 ```bash
