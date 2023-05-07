@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers import GPTNeoXConfig
 
 from cacheflow.models import InputMetadata
 from cacheflow.models.attention import GPTNeoXCacheFlowAttention
@@ -21,7 +22,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 class GPTNeoXAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: GPTNeoXConfig):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
@@ -63,7 +64,7 @@ class GPTNeoXAttention(nn.Module):
 
 
 class GPTNeoXMLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: GPTNeoXConfig):
         super().__init__()
         self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
                                                   config.intermediate_size,
@@ -86,7 +87,7 @@ class GPTNeoXMLP(nn.Module):
 
 class GPTNeoXLayer(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: GPTNeoXConfig):
         super().__init__()
         self.use_parallel_residual = config.use_parallel_residual
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -129,7 +130,7 @@ class GPTNeoXLayer(nn.Module):
 
 
 class GPTNeoXModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: GPTNeoXConfig):
         super().__init__()
         self.config = config
 
