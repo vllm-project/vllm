@@ -10,7 +10,7 @@ from torch import _C
 from torch.cuda import _lazy_call, device as device_ctx_manager
 from torch.utils.checkpoint import detach_variable
 
-from cacheflow.parallel_utils.parallel_state import (
+from cacheflow.model_executor.parallel_utils.parallel_state import (
     get_data_parallel_rank,
     get_tensor_model_parallel_group,
     get_tensor_model_parallel_rank,
@@ -22,7 +22,7 @@ from .utils import (
     gather_split_1d_tensor,
 )
 
-from cacheflow.parallel_utils.utils import safely_set_viewless_tensor_data
+from cacheflow.model_executor.parallel_utils.utils import safely_set_viewless_tensor_data
 
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
