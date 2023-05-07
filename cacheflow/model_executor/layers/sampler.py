@@ -4,7 +4,8 @@ import torch
 import torch.nn as nn
 
 from cacheflow.model_executor.input_metadata import InputMetadata
-from cacheflow.model_executor.parallel_utils.tensor_parallel import gather_from_tensor_model_parallel_region
+from cacheflow.model_executor.parallel_utils.tensor_parallel import (
+    gather_from_tensor_model_parallel_region)
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceOutputs
 
@@ -27,7 +28,7 @@ class Sampler(nn.Module):
         # Get the logits for the next tokens.
         logits = torch.matmul(hidden_states, embedding.t())
         logits = gather_from_tensor_model_parallel_region(logits)
-        # Remove paddings in vocab.
+        # Remove paddings in vocab (if any).
         logits = logits[:, :self.vocab_size]
 
         # Apply temperature scaling.
