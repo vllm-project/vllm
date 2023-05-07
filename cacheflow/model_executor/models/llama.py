@@ -264,7 +264,3 @@ class LlamaForCausalLM(nn.Module):
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights)
-
-    def initialize_dummy_weights(self) -> None:
-        for param in self.state_dict().values():
-            param.data.uniform_(-1e-3, 1e-3)

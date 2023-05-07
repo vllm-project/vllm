@@ -11,6 +11,7 @@ from cacheflow.model_executor.memory_analyzer import (
 from cacheflow.model_executor.models import (
     GPT2LMHeadModel, GPTNeoXForCausalLM, LlamaForCausalLM, OPTForCausalLM)
 from cacheflow.model_executor.utils import get_torch_dtype
+from cacheflow.model_executor.weight_utils import initialize_dummy_weights
 
 
 _MODELS = {
@@ -73,7 +74,7 @@ def get_model(
                 model = model.cuda()
                 # NOTE(woosuk): For precise performance evaluation, we assign
                 # random values to the weights.
-                model.initialize_dummy_weights()
+                initialize_dummy_weights(model)
             else:
                 # Create a model instance.
                 model = model_class(config)

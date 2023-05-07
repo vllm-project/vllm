@@ -99,3 +99,12 @@ def load_tensor_parallel_weights(
             break
     assert param.shape == loaded_weight.shape
     param.data.copy_(loaded_weight)
+
+
+def initialize_dummy_weights(
+    model: torch.nn.Module,
+    low: float = -1e-3,
+    high: float = 1e-3,
+) -> None:
+    for param in model.state_dict().values():
+        param.data.uniform_(low, high)
