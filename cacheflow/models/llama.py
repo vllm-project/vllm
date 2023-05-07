@@ -79,7 +79,8 @@ class LlamaAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.attn = LlamaCacheFlowAttention(self.scaling, self.head_dim)
+        self.attn = LlamaCacheFlowAttention(self.num_heads, self.head_dim,
+                                            self.scaling, self.head_dim)
 
     def forward(
         self,

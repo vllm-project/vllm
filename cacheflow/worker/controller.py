@@ -24,9 +24,6 @@ class Controller:
         pipeline_parallel_size: int,
         distributed_init_method: str,
         model_name: str,
-        block_size: int,
-        num_gpu_blocks: int,
-        num_cpu_blocks: int,
         dtype: str,
         seed: int,
         cache_dir: Optional[str],
@@ -38,9 +35,6 @@ class Controller:
         self.stage_id = stage_id
         self.stage_devices = stage_devices
         self.model_name = model_name
-        self.block_size = block_size
-        self.num_gpu_blocks = num_gpu_blocks
-        self.num_cpu_blocks = num_cpu_blocks
         self.use_ray = use_ray
 
         # Which pipeline stage is this node assigned to?
@@ -57,9 +51,6 @@ class Controller:
                 worker_cls = Worker
             worker = worker_cls(
                 model_name=model_name,
-                block_size=block_size,
-                num_gpu_blocks=num_gpu_blocks,
-                num_cpu_blocks=num_cpu_blocks,
                 dtype=dtype,
                 seed=seed,
                 distributed_init_method=distributed_init_method,
@@ -73,6 +64,37 @@ class Controller:
                 max_num_batched_tokens=max_num_batched_tokens,
             )
             self.workers.append(worker)
+
+    def get_num_available_blocks(self, block_size: int, cpu_swap_space: int,
+                                 cache_block_memory_utilization: float = 0.90) -> List[Tuple[int, int]]:
+        all_worker_results = []
+        for worker in self.workers:
+            executor = (worker.get_num_available_blocks.remote
+                        if self.use_ray else worker.get_num_available_blocks)
+            result = executor(
+                block_size,
+                cpu_swap_space,
+                cache_block_memory_utilization,
+            )
+            all_worker_results.append(result)
+        if self.use_ray:
+            all_worker_results = ray.get(all_worker_results)
+        return all_worker_results
+
+    def init_cache_engine(self, block_size: int, num_gpu_blocks: int,
+                          num_cpu_blocks: int):
+        all_worker_futures = []
+        for worker in self.workers:
+            executor = (worker.init_cache_engine.remote
+                        if self.use_ray else worker.init_cache_engine)
+            future = executor(
+                block_size,
+                num_gpu_blocks,
+                num_cpu_blocks,
+            )
+            all_worker_futures.append(future)
+        if self.use_ray:
+            ray.get(all_worker_futures)
 
     def set_next(
         self,

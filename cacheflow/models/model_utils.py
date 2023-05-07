@@ -5,16 +5,12 @@ import torch.nn as nn
 from transformers import AutoConfig
 from transformers import PretrainedConfig
 
-from cacheflow.models.memory_analyzer import CacheFlowMemoryAnalyzer
-from cacheflow.models.memory_analyzer import GPT2MemoryAnalyzer
-from cacheflow.models.memory_analyzer import GPTNeoXMemoryAnalyzer
-from cacheflow.models.memory_analyzer import LlamaMemoryAnalyzer
-from cacheflow.models.memory_analyzer import OPTMemoryAnalyzer
 from cacheflow.models.gpt2 import GPT2LMHeadModel
 from cacheflow.models.gpt_neox import GPTNeoXForCausalLM
 from cacheflow.models.llama import LlamaForCausalLM
 from cacheflow.models.opt import OPTForCausalLM
 from cacheflow.models.utils import get_torch_dtype
+from cacheflow.models.utils import get_dtype_size
 
 
 _MODELS = {
@@ -24,15 +20,6 @@ _MODELS = {
     'stablelm': GPTNeoXForCausalLM,
     'pythia': GPTNeoXForCausalLM,
     'dolly-v2': GPTNeoXForCausalLM,
-}
-
-_MEMORY_ANALYZERS = {
-    'gpt2': GPT2MemoryAnalyzer,
-    'llama': LlamaMemoryAnalyzer,
-    'opt': OPTMemoryAnalyzer,
-    'stablelm': GPTNeoXMemoryAnalyzer,
-    'pythia': GPTNeoXMemoryAnalyzer,
-    'dolly-v2': GPTNeoXMemoryAnalyzer,
 }
 
 
@@ -84,19 +71,13 @@ def get_model(
     raise ValueError(f'Unsupported model name: {model_name}')
 
 
-def get_memory_analyzer(
-    model_name: str,
-    block_size: int,
-    dtype: str,
-    gpu_memory: int,
-    cpu_memory: int,
-    tensor_parallel_size: int = 1,
-) -> CacheFlowMemoryAnalyzer:
-    config = AutoConfig.from_pretrained(model_name)
-    torch_dtype = _get_dtype(config, dtype)
-    for model_class, memory_analyzer in _MEMORY_ANALYZERS.items():
-        if model_class in model_name:
-            return memory_analyzer(
-                model_name, block_size, torch_dtype, gpu_memory, cpu_memory,
-                tensor_parallel_size)
-    raise ValueError(f'Unsupported model name: {model_name}')
+def get_cache_block_size(block_size: int,
+                         num_heads: int,
+                         head_size: int,
+                         num_layers: int,
+                         dtype: str) -> int:
+    key_cache_block = block_size * num_heads * head_size
+    value_cache_block = key_cache_block
+    total = num_layers * (key_cache_block + value_cache_block)
+    dtype_size = get_dtype_size(dtype)
+    return dtype_size * total

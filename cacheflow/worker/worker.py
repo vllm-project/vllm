@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple, Optional
 import torch
 
 from cacheflow.models import get_model
+from cacheflow.models import get_cache_block_size
 from cacheflow.models import InputMetadata
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceGroupInputs
@@ -12,7 +13,7 @@ from cacheflow.parallel_utils.parallel_state import (
     initialize_model_parallel,
     initialize_all_reduce_launcher,
     get_tensor_model_parallel_world_size)
-from cacheflow.utils import set_random_seed
+from cacheflow.utils import set_random_seed, get_gpu_memory
 
 
 class Worker:
@@ -20,9 +21,6 @@ class Worker:
     def __init__(
         self,
         model_name: str,
-        block_size: int,
-        num_gpu_blocks: int,
-        num_cpu_blocks: int,
         dtype: str,
         seed: int,
         distributed_init_method: str,
@@ -41,7 +39,6 @@ class Worker:
                                           tensor_parallel_size,
                                           pipeline_parallel_size)
         self.worker_id = rank
-        self.block_size = block_size
         set_random_seed(seed)
 
         # Initialize the model.
@@ -50,8 +47,9 @@ class Worker:
             use_dummy_weights=use_dummy_weights, use_np_cache=use_np_cache)
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
+        self.max_num_batched_tokens = max_num_batched_tokens
         initialize_all_reduce_launcher(
-            max_num_batched_tokens, self.model.config.hidden_size, self.dtype)
+            self.max_num_batched_tokens, self.model.config.hidden_size, self.dtype)
         self.num_layers = self.model.config.num_hidden_layers
         assert self.model.config.num_attention_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.model.config.num_attention_heads // tensor_model_parallel_world_size
@@ -61,12 +59,85 @@ class Worker:
         # the random state is not affected by the model initialization.
         set_random_seed(seed)
 
+        # Uninitialized cache engine. Will be initialized with
+        # self.init_cache_engine().
+        self.block_size = None
+        self.cache_engine = None
+        self.cache_events = None
+        self.gpu_cache = None
+
+    @torch.inference_mode()
+    def get_num_available_blocks(
+        self, block_size: int, cpu_swap_space: int,
+        cache_block_memory_utilization: float = 0.90):
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+        # Profile memory usage with max_num_batched_tokens inputs. Each input
+        # includes a length one prompt.
+        n_sequences = self.max_num_batched_tokens
+        input_tokens = [0] * n_sequences
+        input_positions = [0] * n_sequences
+        input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
+        input_positions = _pad_to_alignment(input_positions, multiple_of=8)
+        input_tokens = torch.tensor(
+            input_tokens, dtype=torch.long, device='cuda')
+        input_positions = torch.tensor(
+            input_positions, dtype=torch.long, device='cuda')
+        seq_groups = [
+            ([i], SamplingParams.from_dict({})) for i in range(n_sequences)
+        ]
+        seq_logprobs = {i: 0.0 for i in range(n_sequences)}
+        prompt_lens = [1] * n_sequences
+        cumulative_prompt_lens = torch.tensor(list(range(0, n_sequences + 1)),
+                                              dtype=torch.int, device='cuda')
+        slot_mapping = torch.tensor([0] * n_sequences, dtype=torch.int,
+                                    device='cuda')
+        context_lens = torch.tensor([], dtype=torch.int, device='cuda')
+        max_context_len = 0
+        block_tables = torch.tensor([], dtype=torch.int, device='cuda')
+
+        input_metadata = InputMetadata(
+            seq_groups=seq_groups,
+            seq_logprobs=seq_logprobs,
+            prompt_lens=prompt_lens,
+            cumulative_prompt_lens=cumulative_prompt_lens,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            max_context_len=max_context_len,
+            block_tables=block_tables,
+        )
+
+        # Execute the model.
+        self.model(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=[(None, None)] * self.num_layers,
+            input_metadata=input_metadata,
+            cache_events=None,
+        )
+
+        peak_memory = torch.cuda.max_memory_allocated()
+        total_gpu_memory = get_gpu_memory()
+        cache_block_size = get_cache_block_size(block_size, self.num_heads,
+                                                self.head_size, self.num_layers,
+                                                self.dtype)
+        num_gpu_blocks = int((total_gpu_memory - peak_memory)
+                             * cache_block_memory_utilization
+                             // cache_block_size)
+        num_cpu_blocks = int(cpu_swap_space // cache_block_size)
+        torch.cuda.empty_cache()
+        return num_gpu_blocks, num_cpu_blocks
+
+    def init_cache_engine(self, block_size: int, num_gpu_blocks: int,
+                          num_cpu_blocks: int):
+        self.block_size = block_size
         self.cache_engine = CacheEngine(
             worker_id=self.worker_id,
             num_layers=self.num_layers,
             num_heads=self.num_heads,
             head_size=self.head_size,
-            block_size=block_size,
+            block_size=self.block_size,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             dtype=self.dtype,
@@ -100,7 +171,6 @@ class Worker:
     ) -> Tuple[torch.LongTensor, torch.LongTensor, InputMetadata]:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         seq_logprobs: Dict[int, float] = {}
-        sampling_params: Dict[int, SamplingParams] = {}
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []

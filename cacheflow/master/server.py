@@ -2,6 +2,7 @@ import argparse
 from typing import List, Tuple, Optional
 import random
 
+import numpy as np
 import torch
 try:
     import ray
@@ -10,11 +11,9 @@ except ImportError:
 
 from cacheflow.master.scheduler import Scheduler
 from cacheflow.master.simple_frontend import SimpleFrontend
-from cacheflow.models import get_memory_analyzer
 from cacheflow.worker.controller import Controller, DeviceID
 from cacheflow.sequence import SequenceGroup
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.utils import get_gpu_memory, get_cpu_memory
 
 
 class Server:
@@ -36,8 +35,6 @@ class Server:
         num_devices_per_node: int,
         distributed_init_method: str,
         all_stage_devices: List[List[DeviceID]],
-        gpu_memory: int,
-        cpu_memory: int,
         use_ray: bool,
         collect_stats: bool = False,
         do_memory_analysis: bool = False,
@@ -50,21 +47,6 @@ class Server:
             assert self.world_size == 1, (
                 "Only support single GPU without Ray.")
 
-        self.memory_analyzer = get_memory_analyzer(
-            model_name=model,
-            block_size=block_size,
-            dtype=dtype,
-            gpu_memory=gpu_memory,
-            cpu_memory=cpu_memory,
-            tensor_parallel_size=tensor_parallel_size,
-        )
-        self.num_gpu_blocks = self.memory_analyzer.get_max_num_gpu_blocks(
-            max_num_batched_tokens=max_num_batched_tokens)
-        self.num_cpu_blocks = self.memory_analyzer.get_max_num_cpu_blocks(
-            swap_space=swap_space)
-        print(f'# GPU blocks: {self.num_gpu_blocks}, '
-              f'# CPU blocks: {self.num_cpu_blocks}')
-
         # Create a controller for each pipeline stage.
         self.controllers: List[Controller] = []
         for i in range(pipeline_parallel_size):
@@ -76,9 +58,6 @@ class Server:
                 tensor_parallel_size=tensor_parallel_size,
                 distributed_init_method=distributed_init_method,
                 model_name=model,
-                block_size=block_size,
-                num_gpu_blocks=self.num_gpu_blocks,
-                num_cpu_blocks=self.num_cpu_blocks,
                 dtype=dtype,
                 seed=seed,
                 cache_dir=cache_dir,
@@ -88,6 +67,20 @@ class Server:
                 use_ray=use_ray,
             )
             self.controllers.append(controller)
+
+        # Initialize cache engine.
+        all_worker_num_available_blocks = []
+        for controller in self.controllers:
+            all_worker_num_available_blocks.extend(
+                controller.get_num_available_blocks(block_size, swap_space)
+            )
+        self.num_gpu_blocks = np.min([b[0] for b in all_worker_num_available_blocks])
+        self.num_cpu_blocks = np.min([b[1] for b in all_worker_num_available_blocks])
+        print(f'# GPU blocks: {self.num_gpu_blocks}, '
+              f'# CPU blocks: {self.num_cpu_blocks}')
+        for controller in self.controllers:
+            controller.init_cache_engine(block_size, self.num_gpu_blocks,
+                                         self.num_cpu_blocks)
 
         # Create a scheduler.
         self.scheduler = Scheduler(
@@ -204,6 +197,9 @@ def initialize_cluster(
             all_stage_devices)
 
 
+_GiB = 1 << 30
+
+
 def add_server_arguments(parser: argparse.ArgumentParser):
     # Model arguments
     parser.add_argument('--model', type=str, default='facebook/opt-125m', help='model name')
@@ -236,6 +232,7 @@ def add_server_arguments(parser: argparse.ArgumentParser):
 def process_server_arguments(args: argparse.Namespace):
     if args.pipeline_parallel_size * args.tensor_parallel_size > 1:
         args.use_ray = True
+    args.swap_space = args.swap_space * _GiB
     return args
 
 
@@ -269,8 +266,6 @@ def init_local_server_and_frontend_with_arguments(args: argparse.Namespace):
         num_devices_per_node=num_devices_per_node,
         distributed_init_method=distributed_init_method,
         all_stage_devices=all_stage_devices,
-        gpu_memory=get_gpu_memory(),
-        cpu_memory=get_cpu_memory(),
         use_ray=args.use_ray,
     )
 

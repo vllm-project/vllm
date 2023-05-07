@@ -16,7 +16,7 @@ from cacheflow.master.server import (Server, add_server_arguments,
                                      process_server_arguments,
                                      initialize_cluster)
 from cacheflow.worker.controller import DeviceID
-from cacheflow.utils import Counter, get_gpu_memory, get_cpu_memory
+from cacheflow.utils import Counter
 
 TIMEOUT_TO_PREVENT_DEADLOCK = 1 # seconds
 app = FastAPI()
@@ -68,8 +68,6 @@ class FastAPIServer:
             num_devices_per_node=num_devices_per_node,
             distributed_init_method=distributed_init_method,
             all_stage_devices=all_stage_devices,
-            gpu_memory=get_gpu_memory(),
-            cpu_memory=get_cpu_memory(),
             use_ray=server_use_ray,
         )
 
