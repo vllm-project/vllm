@@ -21,11 +21,6 @@ python simple_server.py --help
 
 ## FastAPI server
 
-Install the following additional dependencies:
-```bash
-pip install fastapi uvicorn
-```
-
 To start the server:
 ```bash
 ray start --head
