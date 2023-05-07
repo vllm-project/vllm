@@ -10,7 +10,7 @@ from cacheflow.model_executor.memory_analyzer import (
     LlamaMemoryAnalyzer, OPTMemoryAnalyzer)
 from cacheflow.model_executor.models import (
     GPT2LMHeadModel, GPTNeoXForCausalLM, LlamaForCausalLM, OPTForCausalLM)
-from cacheflow.models.utils import get_torch_dtype
+from cacheflow.model_executor.utils import get_torch_dtype
 
 
 _MODELS = {
