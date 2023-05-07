@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 from transformers import AutoTokenizer
 
