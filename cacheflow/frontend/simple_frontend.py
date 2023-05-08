@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 
 from transformers import AutoTokenizer
 
+from cacheflow.frontend.utils import get_tokenizer
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence, SequenceGroup
 from cacheflow.utils import Counter
@@ -17,7 +18,7 @@ class SimpleFrontend:
     ) -> None:
         self.block_size = block_size
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer = get_tokenizer(model_name)
         self.seq_group_counter = Counter()
         self.seq_counter = Counter()
         self.inputs: List[Tuple[SequenceGroup, SamplingParams]] = []
