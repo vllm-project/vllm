@@ -4,7 +4,7 @@ import logging
 import sys
 
 
-_FORMAT = "%(levelname).1s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
+_FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 
