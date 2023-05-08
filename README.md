@@ -1,14 +1,10 @@
 # CacheFlow
 
-## Installation
+## Build from source
 
 ```bash
-pip install psutil numpy ray torch
-pip install git+https://github.com/huggingface/transformers  # Required for LLaMA.
-pip install sentencepiece  # Required for LlamaTokenizer.
-pip install ninja  # To parallelize the compilation of flash-attn.
-pip install flash-attn  # This may take up to 10 mins.
-pip install -e .
+pip install -r requirements.txt
+pip install -e .  # This may take several minutes.
 ```
 
 ## Test simple server
@@ -24,11 +20,6 @@ python simple_server.py --help
 ```
 
 ## FastAPI server
-
-Install the following additional dependencies:
-```bash
-pip install fastapi uvicorn
-```
 
 To start the server:
 ```bash
