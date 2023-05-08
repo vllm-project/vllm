@@ -1,10 +1,10 @@
 import argparse
-from typing import List
 
 from cacheflow.master.server import (
     add_server_arguments, process_server_arguments,
     init_local_server_and_frontend_with_arguments)
 from cacheflow.sampling_params import SamplingParams
+
 
 def main(args: argparse.Namespace):
     server, frontend = init_local_server_and_frontend_with_arguments(args)
