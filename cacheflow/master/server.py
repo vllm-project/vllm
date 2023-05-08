@@ -76,7 +76,7 @@ class Server:
         self.num_gpu_blocks = self.memory_analyzer.get_max_num_gpu_blocks(
             max_num_batched_tokens=max_num_batched_tokens)
         self.num_cpu_blocks = self.memory_analyzer.get_max_num_cpu_blocks(
-            swap_space=swap_space)
+            swap_space_gib=swap_space)
 
         # Create a controller for each pipeline stage.
         self.controllers: List[Controller] = []
