@@ -8,7 +8,7 @@ try:
 except ImportError:
     ray = None
 
-from cacheflow.logger import get_logger
+from cacheflow.logger import init_logger
 from cacheflow.master.scheduler import Scheduler
 from cacheflow.master.simple_frontend import SimpleFrontend
 from cacheflow.models import get_memory_analyzer
@@ -18,7 +18,7 @@ from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
 
 
-logger = get_logger(__name__)
+logger = init_logger(__name__)
 
 
 class Server:

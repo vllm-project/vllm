@@ -1,15 +1,15 @@
 import time
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 from transformers import AutoTokenizer
 
-from cacheflow.logger import get_logger
+from cacheflow.logger import init_logger
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence, SequenceGroup
 from cacheflow.utils import Counter
 
 
-logger = get_logger(__name__)
+logger = init_logger(__name__)
 
 
 class SimpleFrontend:

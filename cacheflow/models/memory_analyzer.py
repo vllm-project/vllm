@@ -1,11 +1,11 @@
 import torch
 from transformers import AutoConfig
 
-from cacheflow.logger import get_logger
+from cacheflow.logger import init_logger
 from cacheflow.models.utils import get_dtype_size
 
 
-logger = get_logger(__name__)
+logger = init_logger(__name__)
 
 _GiB = 1 << 30
 
