@@ -16,17 +16,17 @@ from cacheflow.model_executor.weight_utils import initialize_dummy_weights
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
-    'GPT2LMHeadModel': GPT2LMHeadModel,
-    'GPTNeoXForCausalLM': GPTNeoXForCausalLM,
-    'LlamaForCausalLM': LlamaForCausalLM,
-    'OPTForCausalLM': OPTForCausalLM,
+    "GPT2LMHeadModel": GPT2LMHeadModel,
+    "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
+    "LlamaForCausalLM": LlamaForCausalLM,
+    "OPTForCausalLM": OPTForCausalLM,
 }
 
 _MEMORY_ANALYZERS = {
-    'GPT2LMHeadModel': GPT2MemoryAnalyzer,
-    'GPTNeoXForCausalLM': GPTNeoXMemoryAnalyzer,
-    'LlamaForCausalLM': LlamaMemoryAnalyzer,
-    'OPTForCausalLM': OPTMemoryAnalyzer,
+    "GPT2LMHeadModel": GPT2MemoryAnalyzer,
+    "GPTNeoXForCausalLM": GPTNeoXMemoryAnalyzer,
+    "LlamaForCausalLM": LlamaMemoryAnalyzer,
+    "OPTForCausalLM": OPTMemoryAnalyzer,
 }
 
 
@@ -53,12 +53,12 @@ def _get_memory_analyzer(config: PretrainedConfig) -> CacheFlowMemoryAnalyzer:
 
 
 def _get_dtype(config: PretrainedConfig, dtype: str) -> torch.dtype:
-    # NOTE: getattr(config, 'torch_dtype', torch.float32) is not correct
+    # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
-    config_dtype = getattr(config, 'torch_dtype', None)
+    config_dtype = getattr(config, "torch_dtype", None)
     if config_dtype is None:
         config_dtype = torch.float32
-    if dtype == 'default':
+    if dtype == "default":
         if config_dtype == torch.float32:
             # Following the common practice, we use float16 for float32 models.
             torch_dtype = torch.float16
@@ -70,7 +70,7 @@ def _get_dtype(config: PretrainedConfig, dtype: str) -> torch.dtype:
             # TODO(woosuk): Allow using float16 for bfloat16 models and
             # vice versa. Print a warning message and continue.
             raise ValueError(
-                f'Cannot use {torch_dtype} for {config_dtype} model.')
+                f"Cannot use {torch_dtype} for {config_dtype} model.")
     return torch_dtype
 
 
