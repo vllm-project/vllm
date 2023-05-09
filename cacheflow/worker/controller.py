@@ -5,7 +5,7 @@ try:
 except ImportError:
     ray = None
 
-from cacheflow.master.scheduler import Scheduler
+from cacheflow.core.scheduler import Scheduler
 from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.worker.worker import Worker
 

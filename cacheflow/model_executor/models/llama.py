@@ -5,18 +5,18 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from cacheflow.models import InputMetadata
-from cacheflow.models.activation import SiluAndMul
-from cacheflow.models.attention import GPTNeoXCacheFlowAttention
-from cacheflow.models.layernorm import RMSNorm
-from cacheflow.models.sample import Sampler
-from cacheflow.models.utils import (hf_model_weights_iterator,
-                                    load_tensor_parallel_weights)
-from cacheflow.parallel_utils.parallel_state import (
+from cacheflow.sequence import SequenceOutputs
+from cacheflow.model_executor.input_metadata import InputMetadata
+from cacheflow.model_executor.layers.activation import SiluAndMul
+from cacheflow.model_executor.layers.layernorm import RMSNorm
+from cacheflow.model_executor.layers.attention import GPTNeoXCacheFlowAttention
+from cacheflow.model_executor.layers.sampler import Sampler
+from cacheflow.model_executor.weight_utils import (hf_model_weights_iterator,
+                                                   load_tensor_parallel_weights)
+from cacheflow.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from cacheflow.parallel_utils.tensor_parallel import (VocabParallelEmbedding,
-                                                      ColumnParallelLinear,
-                                                      RowParallelLinear)
+from cacheflow.model_executor.parallel_utils.tensor_parallel import (
+    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from cacheflow.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -263,8 +263,5 @@ class LlamaForCausalLM(nn.Module):
             param = state_dict[name]
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
-                                         self._row_parallel_weights)
-
-    def initialize_dummy_weights(self) -> None:
-        for param in self.state_dict().values():
-            param.data.uniform_(-1e-3, 1e-3)
+                                         self._row_parallel_weights,
+                                         tensor_model_parallel_rank)
