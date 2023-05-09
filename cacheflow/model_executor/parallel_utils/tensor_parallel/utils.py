@@ -3,8 +3,8 @@
 import torch
 from typing import List, Sequence
 
-from cacheflow.parallel_utils.utils import divide
-from cacheflow.parallel_utils import parallel_state
+from cacheflow.model_executor.parallel_utils.utils import divide
+from cacheflow.model_executor.parallel_utils import parallel_state
 
 def split_tensor_along_last_dim(
     tensor: torch.Tensor,

@@ -5,16 +5,13 @@ import torch.nn as nn
 from transformers import AutoConfig
 from transformers import PretrainedConfig
 
-from cacheflow.models.memory_analyzer import CacheFlowMemoryAnalyzer
-from cacheflow.models.memory_analyzer import GPT2MemoryAnalyzer
-from cacheflow.models.memory_analyzer import GPTNeoXMemoryAnalyzer
-from cacheflow.models.memory_analyzer import LlamaMemoryAnalyzer
-from cacheflow.models.memory_analyzer import OPTMemoryAnalyzer
-from cacheflow.models.gpt2 import GPT2LMHeadModel
-from cacheflow.models.gpt_neox import GPTNeoXForCausalLM
-from cacheflow.models.llama import LlamaForCausalLM
-from cacheflow.models.opt import OPTForCausalLM
-from cacheflow.models.utils import get_torch_dtype
+from cacheflow.model_executor.memory_analyzer import (
+    CacheFlowMemoryAnalyzer, GPT2MemoryAnalyzer, GPTNeoXMemoryAnalyzer,
+    LlamaMemoryAnalyzer, OPTMemoryAnalyzer)
+from cacheflow.model_executor.models import (
+    GPT2LMHeadModel, GPTNeoXForCausalLM, LlamaForCausalLM, OPTForCausalLM)
+from cacheflow.model_executor.utils import get_torch_dtype
+from cacheflow.model_executor.weight_utils import initialize_dummy_weights
 
 
 _MODELS = {
@@ -77,7 +74,7 @@ def get_model(
                 model = model.cuda()
                 # NOTE(woosuk): For precise performance evaluation, we assign
                 # random values to the weights.
-                model.initialize_dummy_weights()
+                initialize_dummy_weights(model)
             else:
                 # Create a model instance.
                 model = model_class(config)

@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import torch.nn.init as init
 from torch.nn.parameter import Parameter
 
-from cacheflow.parallel_utils.parallel_state import (
+from cacheflow.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_all_reduce_launcher,

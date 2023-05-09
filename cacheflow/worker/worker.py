@@ -2,18 +2,15 @@ from typing import Dict, List, Tuple, Optional
 
 import torch
 
-from cacheflow.models import get_model
-from cacheflow.models import InputMetadata
+from cacheflow.model_executor import get_model, InputMetadata, set_random_seed
+from cacheflow.model_executor.parallel_utils.parallel_state import (
+    initialize_model_parallel,
+    initialize_all_reduce_launcher,
+    get_tensor_model_parallel_world_size)
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import SequenceGroupInputs
 from cacheflow.sequence import SequenceOutputs
 from cacheflow.worker.cache_engine import CacheEngine
-from cacheflow.parallel_utils.parallel_state import (
-    initialize_model_parallel,
-    initialize_all_reduce_launcher,
-    get_tensor_model_parallel_world_size)
-from cacheflow.utils import set_random_seed
-
 
 class Worker:
 

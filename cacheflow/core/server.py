@@ -8,20 +8,21 @@ try:
 except ImportError:
     ray = None
 
+from cacheflow.core.scheduler import Scheduler
+from cacheflow.frontend.simple_frontend import SimpleFrontend
 from cacheflow.logger import init_logger
-from cacheflow.master.scheduler import Scheduler
-from cacheflow.master.simple_frontend import SimpleFrontend
-from cacheflow.models import get_memory_analyzer
-from cacheflow.worker.controller import Controller, DeviceID
+from cacheflow.model_executor import get_memory_analyzer
 from cacheflow.sequence import SequenceGroup
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
+from cacheflow.worker.controller import Controller, DeviceID
 
 
 logger = init_logger(__name__)
 
 
 class Server:
+
     def __init__(
         self,
         model: str,

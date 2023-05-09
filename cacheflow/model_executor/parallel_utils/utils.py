@@ -4,7 +4,7 @@ import operator
 
 import torch
 
-from cacheflow.parallel_utils import parallel_state
+from cacheflow.model_executor.parallel_utils import parallel_state
 
 
 def ensure_divisibility(numerator, denominator):
