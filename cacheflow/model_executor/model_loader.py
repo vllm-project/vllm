@@ -85,17 +85,16 @@ def get_model(
     torch_dtype = _get_dtype(config, dtype)
     torch.set_default_dtype(torch_dtype)
     model_class = _get_model_architecture(config)
+
+    # Create a model instance.
+    # The weights will be initialized as empty tensors.
+    model = model_class(config)
     if use_dummy_weights:
-        # Create a model instance.
-        # The weights will be initialized as empty tensors.
-        model = model_class(config)
         model = model.cuda()
         # NOTE(woosuk): For accurate performance evaluation, we assign
         # random values to the weights.
         initialize_dummy_weights(model)
     else:
-        # Create a model instance.
-        model = model_class(config)
         # Load the weights from the cached or downloaded files.
         model.load_weights(model_name, cache_dir, use_np_cache)
         model = model.cuda()
