@@ -70,6 +70,8 @@ class Worker:
     def get_num_available_blocks(
         self, block_size: int, cpu_swap_space: int,
         cache_block_memory_utilization: float):
+        # Profile the memory usage of the model and get the maximum number of
+        # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
@@ -114,6 +116,8 @@ class Worker:
             cache_events=None,
         )
 
+        # Calculate the number of blocks that can be allocated with the
+        # profiled peak memory.
         peak_memory = torch.cuda.max_memory_allocated()
         total_gpu_memory = get_gpu_memory()
         cache_block_size = get_cache_block_size(block_size, self.num_heads,
