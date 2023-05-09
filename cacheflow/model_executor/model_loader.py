@@ -14,7 +14,7 @@ from cacheflow.model_executor.utils import get_torch_dtype
 from cacheflow.model_executor.weight_utils import initialize_dummy_weights
 
 
-# TODO(woosuk): Lazy-load the models.
+# TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
     'GPT2LMHeadModel': GPT2LMHeadModel,
     'GPTNeoXForCausalLM': GPTNeoXForCausalLM,
