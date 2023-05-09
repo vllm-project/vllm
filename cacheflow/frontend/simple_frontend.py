@@ -1,11 +1,14 @@
 import time
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
-from transformers import AutoTokenizer
-
+from cacheflow.frontend.utils import get_tokenizer
+from cacheflow.logger import init_logger
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence, SequenceGroup
 from cacheflow.utils import Counter
+
+
+logger = init_logger(__name__)
 
 
 class SimpleFrontend:
@@ -17,7 +20,7 @@ class SimpleFrontend:
     ) -> None:
         self.block_size = block_size
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer = get_tokenizer(model_name)
         self.seq_group_counter = Counter()
         self.seq_counter = Counter()
         self.inputs: List[Tuple[SequenceGroup, SamplingParams]] = []
@@ -66,4 +69,4 @@ class SimpleFrontend:
             token_ids = seq.get_token_ids()
             output = self.tokenizer.decode(token_ids, skip_special_tokens=True)
             output = output.strip()
-            print(f'Seq {seq.seq_id}: {output!r}')
+            logger.info(f"Seq {seq.seq_id}: {output!r}")

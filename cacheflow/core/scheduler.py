@@ -4,8 +4,8 @@ import pickle
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from cacheflow.master.block_manager import BlockSpaceManager
-from cacheflow.master.policy import PolicyFactory
+from cacheflow.core.block_manager import BlockSpaceManager
+from cacheflow.core.policy import PolicyFactory
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence
 from cacheflow.sequence import SequenceGroup

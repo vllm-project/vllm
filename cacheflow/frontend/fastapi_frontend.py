@@ -1,22 +1,22 @@
 import argparse
 import asyncio
+import json
 import time
 from typing import List, Dict, Optional
-import json
 
-import ray
-from transformers import AutoTokenizer
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
+import ray
 import uvicorn
 
+from cacheflow.core.server import (Server, add_server_arguments,
+                                   process_server_arguments,
+                                   initialize_cluster)
+from cacheflow.frontend.utils import get_tokenizer
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence, SequenceGroup
-from cacheflow.master.server import (Server, add_server_arguments,
-                                     process_server_arguments,
-                                     initialize_cluster)
-from cacheflow.worker.controller import DeviceID
 from cacheflow.utils import Counter, get_gpu_memory, get_cpu_memory
+from cacheflow.worker.controller import DeviceID
 
 TIMEOUT_TO_PREVENT_DEADLOCK = 1 # seconds
 app = FastAPI()
@@ -44,7 +44,7 @@ class FastAPIServer:
     ):
         self.block_size = block_size
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model)
+        self.tokenizer = get_tokenizer(model)
         self.seq_group_counter = Counter()
         self.seq_counter = Counter()
         if server_use_ray:

@@ -7,7 +7,7 @@ from xformers import ops as xops
 from cacheflow import attention_ops
 from cacheflow import cache_ops
 from cacheflow import pos_encoding_ops
-from cacheflow.models import InputMetadata
+from cacheflow.model_executor.input_metadata import InputMetadata
 
 
 class GPTCacheFlowAttention(nn.Module):
