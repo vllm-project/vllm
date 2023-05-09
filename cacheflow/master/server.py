@@ -8,6 +8,7 @@ try:
 except ImportError:
     ray = None
 
+from cacheflow.logger import init_logger
 from cacheflow.master.scheduler import Scheduler
 from cacheflow.master.simple_frontend import SimpleFrontend
 from cacheflow.models import get_memory_analyzer
@@ -15,6 +16,9 @@ from cacheflow.worker.controller import Controller, DeviceID
 from cacheflow.sequence import SequenceGroup
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
+
+
+logger = init_logger(__name__)
 
 
 class Server:
@@ -42,6 +46,17 @@ class Server:
         collect_stats: bool = False,
         do_memory_analysis: bool = False,
     ):
+        logger.info(
+            "Initializing a server with config: "
+            f"model={model!r}, "
+            f"dtype={dtype}, "
+            f"use_dummy_weights={use_dummy_weights}, "
+            f"cache_dir={cache_dir}, "
+            f"use_np_cache={use_np_cache}, "
+            f"tensor_parallel_size={tensor_parallel_size}, "
+            f"block_size={block_size}, "
+            f"seed={seed})"
+        )
         self.num_nodes = num_nodes
         self.num_devices_per_node = num_devices_per_node
         self.world_size = pipeline_parallel_size * tensor_parallel_size
@@ -61,9 +76,7 @@ class Server:
         self.num_gpu_blocks = self.memory_analyzer.get_max_num_gpu_blocks(
             max_num_batched_tokens=max_num_batched_tokens)
         self.num_cpu_blocks = self.memory_analyzer.get_max_num_cpu_blocks(
-            swap_space=swap_space)
-        print(f'# GPU blocks: {self.num_gpu_blocks}, '
-              f'# CPU blocks: {self.num_cpu_blocks}')
+            swap_space_gib=swap_space)
 
         # Create a controller for each pipeline stage.
         self.controllers: List[Controller] = []
