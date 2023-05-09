@@ -10,9 +10,9 @@ def main(args: argparse.Namespace):
     server, frontend = init_local_server_and_frontend_with_arguments(args)
     # Test the following inputs.
     test_inputs = [
-        ('Ion Stoica is a', {'n': 4, 'use_beam_search': True, 'temperature': 0.0}),
-        ('UC Berkeley is', {'n': 3, 'temperature': 0.8, 'top_p': 0.99}),
-        ('The future of cloud computing is', {}),   # Use default parameters.
+        ("A robot may not injure a human being", {}),   # Use default parameters.
+        ("What is the meaning of life?", {"n": 3, "temperature": 0.8, "top_p": 0.99}),
+        ("It is only with the heart that one can see rightly", {"n": 4, "use_beam_search": True, "temperature": 0.0}),
     ]
     while True:
         if test_inputs:
