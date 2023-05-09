@@ -1,7 +1,11 @@
 import torch
 from transformers import AutoConfig
 
+from cacheflow.logger import init_logger
 from cacheflow.models.utils import get_dtype_size
+
+
+logger = init_logger(__name__)
 
 _GiB = 1 << 30
 
@@ -23,20 +27,20 @@ class CacheFlowMemoryAnalyzer:
 
     def get_max_num_cpu_blocks(
         self,
-        swap_space: int,
+        swap_space_gib: int,
     ) -> int:
-        swap_space = swap_space * _GiB
+        swap_space = swap_space_gib * _GiB
         cpu_memory = self.cpu_memory
         if swap_space > 0.8 * cpu_memory:
-            raise ValueError(f'The swap space ({swap_space / _GiB:.2f} GiB) '
+            raise ValueError(f'The swap space ({swap_space_gib:.2f} GiB) '
                              'takes more than 80% of the available memory '
                              f'({cpu_memory / _GiB:.2f} GiB).'
                              'Please check the swap space size.')
         if swap_space > 0.5 * cpu_memory:
-            print(f'WARNING: The swap space ({swap_space / _GiB:.2f} GiB) '
-                  'takes more than 50% of the available memory '
-                  f'({cpu_memory / _GiB:.2f} GiB).'
-                  'This may slow the system performance.')
+            logger.info(f'WARNING: The swap space ({swap_space_gib:.2f} GiB) '
+                        'takes more than 50% of the available memory '
+                        f'({cpu_memory / _GiB:.2f} GiB).'
+                        'This may slow the system performance.')
         max_num_blocks = swap_space // self.get_cache_block_size()
         return max_num_blocks
 
