@@ -12,8 +12,8 @@ from cacheflow.core.scheduler import Scheduler
 from cacheflow.frontend.simple_frontend import SimpleFrontend
 from cacheflow.logger import init_logger
 from cacheflow.model_executor import get_memory_analyzer
-from cacheflow.sequence import SequenceGroup
 from cacheflow.sampling_params import SamplingParams
+from cacheflow.sequence import SequenceGroup
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
 from cacheflow.worker.controller import Controller, DeviceID
 
