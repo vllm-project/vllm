@@ -90,7 +90,7 @@ def get_model(
         # The weights will be initialized as empty tensors.
         model = model_class(config)
         model = model.cuda()
-        # NOTE(woosuk): For precise performance evaluation, we assign
+        # NOTE(woosuk): For accurate performance evaluation, we assign
         # random values to the weights.
         initialize_dummy_weights(model)
     else:
