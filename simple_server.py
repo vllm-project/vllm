@@ -1,5 +1,4 @@
 import argparse
-from typing import List
 
 from cacheflow.core.server import (
     add_server_arguments, process_server_arguments,
