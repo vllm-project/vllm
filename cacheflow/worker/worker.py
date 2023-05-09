@@ -89,8 +89,6 @@ class Worker:
         ]
         seq_logprobs = {i: 0.0 for i in range(n_sequences)}
         prompt_lens = [1] * n_sequences
-        cumulative_prompt_lens = torch.tensor(list(range(0, n_sequences + 1)),
-                                              dtype=torch.int, device='cuda')
         slot_mapping = torch.tensor([0] * n_sequences, dtype=torch.int,
                                     device='cuda')
         context_lens = torch.tensor([], dtype=torch.int, device='cuda')
@@ -101,7 +99,6 @@ class Worker:
             seq_groups=seq_groups,
             seq_logprobs=seq_logprobs,
             prompt_lens=prompt_lens,
-            cumulative_prompt_lens=cumulative_prompt_lens,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             max_context_len=max_context_len,
