@@ -66,7 +66,7 @@ class Controller:
             self.workers.append(worker)
 
     def get_num_available_blocks(self, block_size: int, cpu_swap_space: int,
-                                 cache_block_memory_utilization: float = 0.90) -> List[Tuple[int, int]]:
+                                 cache_block_memory_utilization: float) -> List[Tuple[int, int]]:
         all_worker_results = []
         for worker in self.workers:
             executor = (worker.get_num_available_blocks.remote

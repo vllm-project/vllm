@@ -69,7 +69,7 @@ class Worker:
     @torch.inference_mode()
     def get_num_available_blocks(
         self, block_size: int, cpu_swap_space: int,
-        cache_block_memory_utilization: float = 0.90):
+        cache_block_memory_utilization: float):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
