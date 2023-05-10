@@ -330,7 +330,7 @@ class Scheduler:
 
                 # Append a new token to the sequence.
                 output = seq_outputs[seq.seq_id]
-                seq.append(output.output_token, output.logprobs)
+                seq.append_token(output.output_token, output.logprobs)
 
                 # Check if the sequence has generated a stop token.
                 if output.output_token in stop_token_ids:

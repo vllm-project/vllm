@@ -55,7 +55,7 @@ class Sequence:
             last_block.append(token_ids[:num_empty_slots])
             token_ids = token_ids[num_empty_slots:]
 
-    def append(self, token_id: int, logprobs: Dict[int, float]) -> None:
+    def append_token(self, token_id: int, logprobs: Dict[int, float]) -> None:
         assert token_id in logprobs
         self._append_tokens([token_id])
         self.output_logprobs.append(logprobs)
