@@ -127,7 +127,6 @@ class Scheduler:
 
         # Swap in the sequence groups in the SWAPPED state if possible.
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
-        # FCFS
         while self.swapped and not blocks_to_swap_out:
             seq_group = self.swapped[0]
             # If the sequence group has been preempted in this step, stop.
@@ -160,7 +159,6 @@ class Scheduler:
         # This is because we want to bound the amount of CPU memory taken by
         # the swapped sequence groups.
         if not self.swapped:
-            self.waiting = self.policy.sort_by_priority(now, self.waiting)
             while self.waiting:
                 seq_group = self.waiting[0]
                 # If the sequence group has been preempted in this step, stop.
@@ -401,7 +399,9 @@ class Scheduler:
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
             self.block_manager.free(seq)
-        self.waiting.append(seq_group)
+        # For FCFS, we insert the preempted sequence group to the front of the
+        # waiting queue.
+        self.waiting.insert(0, seq_group)
 
     def _preempt_by_swap(
         self,
