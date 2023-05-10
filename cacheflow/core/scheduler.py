@@ -9,7 +9,7 @@ from cacheflow.core.policy import PolicyFactory
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence
 from cacheflow.sequence import SequenceGroup
-from cacheflow.sequence import SequenceGroupInputs
+from cacheflow.sequence import SequenceGroupMetadata
 from cacheflow.sequence import SequenceOutputs
 from cacheflow.sequence import SequenceStatus
 
@@ -252,7 +252,7 @@ class Scheduler:
         prompt_group_ids = scheduler_output[3]
 
         # Create input data structures.
-        input_seq_groups: List[SequenceGroupInputs] = []
+        seq_group_metadata_list: List[SequenceGroupMetadata] = []
         updated_seq_groups: List[SequenceGroup] = self.running.copy()
 
         for seq_group in self.running:
@@ -274,7 +274,7 @@ class Scheduler:
                 # sequence length
                 seq_len = seq.get_len()
 
-            input_seq_group = SequenceGroupInputs(
+            seq_group_metadata = SequenceGroupMetadata(
                 group_id=group_id,
                 is_prompt=is_prompt,
                 input_tokens=input_tokens,
@@ -283,14 +283,14 @@ class Scheduler:
                 sampling_params=self.sampling_params[group_id],
                 block_tables=block_tables,
             )
-            input_seq_groups.append(input_seq_group)
+            seq_group_metadata_list.append(seq_group_metadata)
 
         # Execute the first stage of the pipeline.
-        if input_seq_groups or blocks_to_swap_in or blocks_to_swap_out:
+        if seq_group_metadata_list or blocks_to_swap_in or blocks_to_swap_out:
             # Swap in and swap out should never happen at the same time.
             assert not (blocks_to_swap_in and blocks_to_swap_out)
             self.controllers[0].execute_stage(
-                input_seq_groups,
+                seq_group_metadata_list,
                 blocks_to_swap_in=blocks_to_swap_in,
                 blocks_to_swap_out=blocks_to_swap_out,
                 blocks_to_copy=blocks_to_copy,

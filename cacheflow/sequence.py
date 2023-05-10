@@ -122,7 +122,7 @@ class SequenceGroup:
                 f'num_seqs={len(self.seqs)})')
 
 
-class SequenceGroupInputs:
+class SequenceGroupMetadata:
 
     def __init__(
         self,
