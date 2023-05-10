@@ -91,7 +91,6 @@ class Worker:
         initialize_model_parallel(tensor_parallel_size,
                                   pipeline_parallel_size)
 
-
     def prepare_inputs(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
