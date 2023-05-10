@@ -208,18 +208,18 @@ class Worker:
         blocks_to_copy: Dict[int, List[int]],
     ) -> Dict[int, SequenceOutputs]:
         # Issue cache operations.
-        command_issued = False
+        issued_command = False
         if blocks_to_swap_in:
             self.cache_engine.swap_in(blocks_to_swap_in)
-            command_issued = True
+            issued_command = True
         if blocks_to_swap_out:
             self.cache_engine.swap_out(blocks_to_swap_out)
-            command_issued = True
+            issued_command = True
         if blocks_to_copy:
             self.cache_engine.copy(blocks_to_copy)
-            command_issued = True
+            issued_command = True
 
-        if command_issued:
+        if issued_command:
             cache_events = self.cache_events
         else:
             cache_events = None
