@@ -1,8 +1,6 @@
 import enum
-import os
-import pickle
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from cacheflow.core.block_manager import BlockSpaceManager
 from cacheflow.logger import init_logger
@@ -347,7 +345,6 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.seqs:
             seq.status = SequenceStatus.RUNNING
-        # FIXME(woosuk): Support interactive generation.
         if seq_group.group_id not in self.num_steps:
             self.num_steps[seq_group.group_id] = 0
 
