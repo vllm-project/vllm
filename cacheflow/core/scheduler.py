@@ -9,8 +9,8 @@ from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import (Sequence, SequenceGroup, SequenceGroupMetadata,
                                 SequenceOutputs, SequenceStatus)
 
-
 logger = init_logger(__name__)
+
 _LOGGING_INTERVAL_SEC = 10
 
 
