@@ -202,7 +202,7 @@ class Worker:
     @torch.inference_mode()
     def execute_stage(
         self,
-        input_seq_groups: List[SequenceGroupMetadata],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
@@ -225,7 +225,7 @@ class Worker:
             cache_events = None
 
         # If there is no input, we don't need to execute the model.
-        if not input_seq_groups:
+        if not seq_group_metadata_list:
             if cache_events is not None:
                 for event in cache_events:
                     event.wait()
@@ -233,7 +233,7 @@ class Worker:
 
         # Prepare input tensors.
         input_tokens, input_positions, input_metadata = self.prepare_inputs(
-            input_seq_groups)
+            seq_group_metadata_list)
 
         # Execute the model.
         output = self.model(
