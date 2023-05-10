@@ -51,10 +51,9 @@ class Server:
             f"model={model!r}, "
             f"dtype={dtype}, "
             f"use_dummy_weights={use_dummy_weights}, "
-            f"cache_dir={cache_dir}, "
+            f"cache_dir={cache_dir!r}, "
             f"use_np_cache={use_np_cache}, "
             f"tensor_parallel_size={tensor_parallel_size}, "
-            f"block_size={block_size}, "
             f"seed={seed})"
         )
         self.num_nodes = num_nodes
