@@ -1,4 +1,4 @@
-from typing import Optional, Set, Dict
+from typing import Dict, Set
 
 
 class SamplingParams:
