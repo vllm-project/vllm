@@ -17,7 +17,6 @@ from cacheflow.sequence import SequenceGroup
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
 from cacheflow.worker.controller import Controller, DeviceID
 
-
 logger = init_logger(__name__)
 
 
