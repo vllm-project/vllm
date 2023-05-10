@@ -156,6 +156,9 @@ class Scheduler:
         # This is because we want to bound the amount of CPU memory taken by
         # the swapped sequence groups.
         if not self.swapped:
+            # Optimization: We do not sort the waiting queue since the preempted
+            # sequence groups are added to the front and the new sequence groups
+            # are added to the back.
             while self.waiting:
                 seq_group = self.waiting[0]
                 # If the sequence group has been preempted in this step, stop.
