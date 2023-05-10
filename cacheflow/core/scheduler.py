@@ -399,8 +399,8 @@ class Scheduler:
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
             self.block_manager.free(seq)
-        # For FCFS, we insert the preempted sequence group to the front of the
-        # waiting queue.
+        # NOTE: For FCFS, we insert the preempted sequence group to the front
+        # of the waiting queue.
         self.waiting.insert(0, seq_group)
 
     def _preempt_by_swap(
