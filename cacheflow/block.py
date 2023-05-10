@@ -27,7 +27,7 @@ class LogicalTokenBlock:
     def is_full(self) -> bool:
         return self.num_tokens == self.block_size
 
-    def append(self, token_ids: List[int]) -> None:
+    def append_tokens(self, token_ids: List[int]) -> None:
         assert len(token_ids) <= self.get_num_empty_slots()
         self.token_ids[self.num_tokens:self.num_tokens + len(token_ids)] = token_ids
         self.num_tokens += len(token_ids)

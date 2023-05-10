@@ -97,15 +97,15 @@ class BlockSpaceManager:
         for seq in seq_group.seqs:
             self.block_tables[seq.seq_id] = block_table.copy()
 
-    def can_append(self, seq_group: SequenceGroup) -> bool:
+    def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
         # for each sequence, we can append.
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
         return num_seqs <= num_free_gpu_blocks
 
-    def append(self, seq: Sequence) -> Optional[Tuple[int, int]]:
-        """Allocate a physical slot for the new token."""
+    def append_slot(self, seq: Sequence) -> Optional[Tuple[int, int]]:
+        """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
 
@@ -156,7 +156,7 @@ class BlockSpaceManager:
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
         # NOTE: Conservatively, we assume that every sequence will allocate
         # at least one free block right after the swap-in.
-        # NOTE: This should match the logic in can_append().
+        # NOTE: This should match the logic in can_append_slot().
         num_required_blocks = len(blocks) + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
