@@ -44,18 +44,16 @@ class Server:
         gpu_memory: int,
         cpu_memory: int,
         use_ray: bool,
-        collect_stats: bool = False,
-        do_memory_analysis: bool = False,
+        log_stats: bool,
     ):
         logger.info(
             "Initializing a server with config: "
             f"model={model!r}, "
             f"dtype={dtype}, "
             f"use_dummy_weights={use_dummy_weights}, "
-            f"cache_dir={cache_dir}, "
+            f"cache_dir={cache_dir!r}, "
             f"use_np_cache={use_np_cache}, "
             f"tensor_parallel_size={tensor_parallel_size}, "
-            f"block_size={block_size}, "
             f"seed={seed})"
         )
         self.num_nodes = num_nodes
@@ -111,8 +109,7 @@ class Server:
             num_cpu_blocks=self.num_cpu_blocks,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_sequences=max_num_sequences,
-            collect_stats=collect_stats,
-            do_memory_analysis=do_memory_analysis,
+            log_stats=log_stats,
         )
         # Connect the controllers.
         for i in range(len(self.controllers) - 1):
@@ -244,6 +241,7 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
     parser.add_argument('--max-num-batched-tokens', type=int, default=2560, help='maximum number of batched tokens per iteration')
     parser.add_argument('--max-num-sequences', type=int, default=256, help='maximum number of sequences per iteration')
+    parser.add_argument('--log-stats', action='store_true', help='log system statistics')
     return parser
 
 
@@ -286,6 +284,7 @@ def init_local_server_and_frontend_with_arguments(args: argparse.Namespace):
         gpu_memory=get_gpu_memory(),
         cpu_memory=get_cpu_memory(),
         use_ray=args.use_ray,
+        log_stats=args.log_stats,
     )
 
     # Create a frontend.
