@@ -105,7 +105,7 @@ class Scheduler:
         preempted: List[SequenceGroup] = []
         while self.running:
             seq_group = self.running.pop(0)
-            while not self.block_manager.can_append(seq_group):
+            while not self.block_manager.can_append_slot(seq_group):
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop(-1)
@@ -119,7 +119,7 @@ class Scheduler:
                     break
             else:
                 # Append new slots to the sequence group.
-                self._append(seq_group, blocks_to_copy)
+                self._append_slot(seq_group, blocks_to_copy)
                 running.append(seq_group)
         self.running = running
 
@@ -143,7 +143,7 @@ class Scheduler:
 
             seq_group = self.swapped.pop(0)
             self._swap_in(seq_group, blocks_to_swap_in)
-            self._append(seq_group, blocks_to_copy)
+            self._append_slot(seq_group, blocks_to_copy)
             self.running.append(seq_group)
 
         num_batched_tokens = sum(
@@ -360,13 +360,13 @@ class Scheduler:
         if seq_group.group_id not in self.num_steps:
             self.num_steps[seq_group.group_id] = 0
 
-    def _append(
+    def _append_slot(
         self,
         seq_group: SequenceGroup,
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            ret = self.block_manager.append(seq)
+            ret = self.block_manager.append_slot(seq)
             if ret is not None:
                 src_block, dst_block = ret
                 if src_block in blocks_to_copy:

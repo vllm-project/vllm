@@ -52,7 +52,7 @@ class Sequence:
                 last_block = self.logical_token_blocks[-1]
 
             num_empty_slots = last_block.get_num_empty_slots()
-            last_block.append(token_ids[:num_empty_slots])
+            last_block.append_tokens(token_ids[:num_empty_slots])
             token_ids = token_ids[num_empty_slots:]
 
     def append_token(self, token_id: int, logprobs: Dict[int, float]) -> None:
