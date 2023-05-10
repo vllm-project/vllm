@@ -222,7 +222,7 @@ class Scheduler:
                 cpu_cache_usage = 0.0
 
             logger.info(
-                f"Throughput: {avg_throughput:.2f} tokens/s, "
+                f"Throughput: {avg_throughput:.1f} tokens/s, "
                 f"Running: {len(self.running)} reqs, "
                 f"Swapped: {len(self.swapped)} reqs, "
                 f"Pending: {len(self.waiting)} reqs, "
