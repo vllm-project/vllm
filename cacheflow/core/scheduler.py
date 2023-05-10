@@ -6,11 +6,8 @@ from cacheflow.core.block_manager import BlockSpaceManager
 from cacheflow.logger import init_logger
 from cacheflow.core.policy import PolicyFactory
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.sequence import Sequence
-from cacheflow.sequence import SequenceGroup
-from cacheflow.sequence import SequenceGroupMetadata
-from cacheflow.sequence import SequenceOutputs
-from cacheflow.sequence import SequenceStatus
+from cacheflow.sequence import (Sequence, SequenceGroup, SequenceGroupMetadata,
+                                SequenceOutputs, SequenceStatus)
 
 
 logger = init_logger(__name__)
