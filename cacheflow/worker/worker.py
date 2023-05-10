@@ -12,6 +12,7 @@ from cacheflow.sequence import SequenceGroupMetadata
 from cacheflow.sequence import SequenceOutputs
 from cacheflow.worker.cache_engine import CacheEngine
 
+
 class Worker:
 
     def __init__(
