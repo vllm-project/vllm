@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 
-from cacheflow.master.server import (
+from cacheflow.core.server import (
     add_server_arguments, process_server_arguments,
     init_local_server_and_frontend_with_arguments)
 from cacheflow.sampling_params import SamplingParams
