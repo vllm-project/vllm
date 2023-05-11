@@ -89,15 +89,18 @@ class SamplingParams:
 
     @classmethod
     def from_dict(cls, d: Dict) -> "SamplingParams":
-        return cls(
-            n=d.get("n", 1),
-            presence_penalty=d.get("presence_penalty", 0.0),
-            frequency_penalty=d.get("frequency_penalty", 0.0),
-            temperature=d.get("temperature", 1.0),
-            top_p=d.get("top_p", 1.0),
-            top_k=d.get("top_k", -1),
-            use_beam_search=d.get("use_beam_search", False),
-            stop_token_ids=set(d.get("stop_token_ids", set())),
-            max_num_steps=d.get("max_num_steps", 16),
-            num_logprobs=d.get("num_logprobs", 0),
+        sampling_params = cls(
+            n=d.pop("n", 1),
+            presence_penalty=d.pop("presence_penalty", 0.0),
+            frequency_penalty=d.pop("frequency_penalty", 0.0),
+            temperature=d.pop("temperature", 1.0),
+            top_p=d.pop("top_p", 1.0),
+            top_k=d.pop("top_k", -1),
+            use_beam_search=d.pop("use_beam_search", False),
+            stop_token_ids=set(d.pop("stop_token_ids", set())),
+            max_num_steps=d.pop("max_num_steps", 16),
+            num_logprobs=d.pop("num_logprobs", 0),
         )
+        if d:
+            raise ValueError(f"Unrecognized keys in dict: {d.keys()}")
+        return sampling_params
