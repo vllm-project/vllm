@@ -1,4 +1,4 @@
-"""1D GPT-2 model compatible with HuggingFace weights."""
+"""GPT-2 model compatible with HuggingFace weights."""
 from typing import Dict, List, Optional, Tuple
 
 import torch

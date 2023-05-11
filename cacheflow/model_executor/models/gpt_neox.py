@@ -1,4 +1,4 @@
-"""1D GPT-NeoX model compatible with HuggingFace weights."""
+"""GPT-NeoX model compatible with HuggingFace weights."""
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -63,6 +63,7 @@ class GPTNeoXAttention(nn.Module):
 
 
 class GPTNeoXMLP(nn.Module):
+
     def __init__(self, config: GPTNeoXConfig):
         super().__init__()
         self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,

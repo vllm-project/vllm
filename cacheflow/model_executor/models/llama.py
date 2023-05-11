@@ -1,4 +1,4 @@
-"""1D LLaMA model compatible with HuggingFace weights."""
+"""LLaMA model compatible with HuggingFace weights."""
 from typing import Dict, List, Optional, Tuple
 
 import torch
