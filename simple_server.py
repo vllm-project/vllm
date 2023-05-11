@@ -18,7 +18,7 @@ def main(args: argparse.Namespace):
     while True:
         if test_inputs:
             text, sampling_params_dict = test_inputs.pop(0)
-            sampling_params = SamplingParams.from_dict(sampling_params_dict)
+            sampling_params = SamplingParams(**sampling_params_dict)
             sampling_params = frontend.add_eos_token(sampling_params)
             frontend.query(text, sampling_params)
         server.add_sequence_groups(frontend.get_inputs())
