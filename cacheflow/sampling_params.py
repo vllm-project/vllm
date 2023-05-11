@@ -1,5 +1,4 @@
 """Sampling parameters for text generation."""
-
 from typing import Set
 
 
