@@ -21,7 +21,7 @@ def main(args: argparse.Namespace):
         'top_p': 1.0,
         'use_beam_search': args.use_beam_search,
         'stop_token_ids': set(),
-        'max_num_steps': args.output_len,
+        'max_tokens': args.output_len,
     }
     sampling_params = SamplingParams.from_dict(sampling_params_dict)
     print(sampling_params)
