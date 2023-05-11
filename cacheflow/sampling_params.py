@@ -6,6 +6,8 @@ class SamplingParams:
     def __init__(
         self,
         n: int,
+        presence_penalty: float,
+        frequency_penalty: float,
         temperature: float,
         top_p: float,
         top_k: int,
@@ -16,6 +18,12 @@ class SamplingParams:
     ) -> None:
         if n < 1:
             raise ValueError(f"n must be at least 1, got {n}.")
+        if not -2.0 <= presence_penalty <= 2.0:
+            raise ValueError(
+                f"presence_penalty must be in [-2, 2], got {presence_penalty}.")
+        if not -2.0 <= frequency_penalty <= 2.0:
+            raise ValueError(
+                f"frequency_penalty must be in [-2, 2], got {frequency_penalty}.")
         if temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negative, got {temperature}.")
@@ -57,6 +65,8 @@ class SamplingParams:
                     "top_k must be -1 when using greedy sampling.")
 
         self.n = n
+        self.presence_penalty = presence_penalty
+        self.frequency_penalty = frequency_penalty
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
@@ -67,6 +77,8 @@ class SamplingParams:
 
     def __repr__(self) -> str:
         return (f"SamplingParams(n={self.n}, "
+                f"presence_penalty={self.presence_penalty}, "
+                f"frequency_penalty={self.frequency_penalty}, "
                 f"temperature={self.temperature}, "
                 f"top_p={self.top_p}, "
                 f"top_k={self.top_k},"
@@ -79,6 +91,8 @@ class SamplingParams:
     def from_dict(cls, d: Dict) -> "SamplingParams":
         return cls(
             n=d.get("n", 1),
+            presence_penalty=d.get("presence_penalty", 0.0),
+            frequency_penalty=d.get("frequency_penalty", 0.0),
             temperature=d.get("temperature", 1.0),
             top_p=d.get("top_p", 1.0),
             top_k=d.get("top_k", -1),
