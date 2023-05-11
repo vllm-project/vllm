@@ -38,7 +38,7 @@ class Sampler(nn.Module):
         presence_penalties, frequency_penalties = _get_penalties(input_metadata)
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
-        _apply_penalties(
+        logits = _apply_penalties(
             logits, output_tokens, presence_penalties, frequency_penalties,
             self.vocab_size)
 
