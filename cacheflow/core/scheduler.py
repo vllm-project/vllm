@@ -316,7 +316,7 @@ class Scheduler:
                     continue
 
                 # Check if the sequence has reached the maximum number of steps.
-                max_num_steps = self.sampling_params[group_id].max_num_steps
+                max_num_steps = self.sampling_params[group_id].max_tokens
                 if self.num_steps[group_id] == max_num_steps:
                     self._free_seq(seq)
                     continue

@@ -89,8 +89,8 @@ class FastAPIServer:
 
     async def generate(self, request_dict: Dict):
         # Preprocess the request.
-        prompt = request_dict["prompt"]
-        sampling_params = SamplingParams.from_dict(request_dict)
+        prompt = request_dict.pop("prompt")
+        sampling_params = SamplingParams(**request_dict)
         sampling_params.stop_token_ids.add(self.tokenizer.eos_token_id)
         token_ids = self.tokenizer.encode(prompt)
         seqs: List[Sequence] = []

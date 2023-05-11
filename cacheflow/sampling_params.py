@@ -5,16 +5,16 @@ class SamplingParams:
 
     def __init__(
         self,
-        n: int,
-        presence_penalty: float,
-        frequency_penalty: float,
-        temperature: float,
-        top_p: float,
-        top_k: int,
-        use_beam_search: bool,
-        stop_token_ids: Set[int],
-        max_num_steps: int,
-        num_logprobs: int,
+        n: int = 1,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = -1,
+        use_beam_search: bool = False,
+        stop_token_ids: Set[int] = set(),
+        max_tokens: int = 16,
+        logprobs: int = 0,
     ) -> None:
         if n < 1:
             raise ValueError(f"n must be at least 1, got {n}.")
@@ -32,12 +32,12 @@ class SamplingParams:
         if top_k < -1 or top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, "
                              f"got {top_k}.")
-        if max_num_steps < 1:
+        if max_tokens < 1:
             raise ValueError(
-                f"max_num_steps must be at least 1, got {max_num_steps}.")
-        if num_logprobs < 0:
+                f"max_tokens must be at least 1, got {max_tokens}.")
+        if logprobs < 0:
             raise ValueError(
-                f"num_logprobs must be non-negative, got {num_logprobs}.")
+                f"logprobs must be non-negative, got {logprobs}.")
 
         if use_beam_search:
             if n == 1:
@@ -72,8 +72,8 @@ class SamplingParams:
         self.top_k = top_k
         self.use_beam_search = use_beam_search
         self.stop_token_ids = stop_token_ids
-        self.max_num_steps = max_num_steps
-        self.num_logprobs = num_logprobs
+        self.max_tokens = max_tokens
+        self.logprobs = logprobs
 
     def __repr__(self) -> str:
         return (f"SamplingParams(n={self.n}, "
@@ -84,23 +84,5 @@ class SamplingParams:
                 f"top_k={self.top_k},"
                 f"use_beam_search={self.use_beam_search}, "
                 f"stop_token_ids={self.stop_token_ids}, "
-                f"max_num_steps={self.max_num_steps}, "
-                f"num_logprobs={self.num_logprobs}")
-
-    @classmethod
-    def from_dict(cls, d: Dict) -> "SamplingParams":
-        sampling_params = cls(
-            n=d.pop("n", 1),
-            presence_penalty=d.pop("presence_penalty", 0.0),
-            frequency_penalty=d.pop("frequency_penalty", 0.0),
-            temperature=d.pop("temperature", 1.0),
-            top_p=d.pop("top_p", 1.0),
-            top_k=d.pop("top_k", -1),
-            use_beam_search=d.pop("use_beam_search", False),
-            stop_token_ids=set(d.pop("stop_token_ids", set())),
-            max_num_steps=d.pop("max_num_steps", 16),
-            num_logprobs=d.pop("num_logprobs", 0),
-        )
-        if d:
-            raise ValueError(f"Unrecognized keys in dict: {d.keys()}")
-        return sampling_params
+                f"max_tokens={self.max_tokens}, "
+                f"logprobs={self.logprobs}")

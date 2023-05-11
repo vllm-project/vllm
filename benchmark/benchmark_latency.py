@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 
-from cacheflow.master.server import (
+from cacheflow.core.server import (
     add_server_arguments, process_server_arguments,
     init_local_server_and_frontend_with_arguments)
 from cacheflow.sampling_params import SamplingParams
@@ -15,15 +15,14 @@ from cacheflow.sampling_params import SamplingParams
 def main(args: argparse.Namespace):
     server, frontend = init_local_server_and_frontend_with_arguments(args)
 
-    sampling_params_dict = {
-        'n': args.n,
-        'temperature': 0.0 if args.use_beam_search else 1.0,
-        'top_p': 1.0,
-        'use_beam_search': args.use_beam_search,
-        'stop_token_ids': set(),
-        'max_num_steps': args.output_len,
-    }
-    sampling_params = SamplingParams.from_dict(sampling_params_dict)
+    sampling_params = SamplingParams(
+        n=args.n,
+        temperature=0.0 if args.use_beam_search else 1.0,
+        top_p=1.0,
+        use_beam_search=args.use_beam_search,
+        stop_token_ids=set(),
+        max_tokens=args.output_len,
+    )
     print(sampling_params)
     input_token_ids = [0] * args.input_len
 
@@ -31,7 +30,8 @@ def main(args: argparse.Namespace):
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
         for _ in range(args.batch_size):
-            frontend._add_query(input_token_ids, sampling_params)
+            dummy_prompt = ""
+            frontend._add_query(dummy_prompt, input_token_ids, sampling_params)
         server.add_sequence_groups(frontend.get_inputs())
         start_time = time.time()
         while True:
