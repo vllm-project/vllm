@@ -22,7 +22,6 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
 
         self.output_token_ids: List[int] = []
-        # Used for beam search.
         self.cumulative_logprobs = 0.0
 
     def get_len(self) -> int:
