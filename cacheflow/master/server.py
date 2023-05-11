@@ -76,6 +76,9 @@ class Server:
                 controller.get_num_available_blocks(
                     block_size, swap_space, cache_block_memory_utilization)
             )
+        # Since we use a shared centralized controller, we take the minimum
+        # number of blocks across all workers to make sure all the memory
+        # operators can be applied to all workers.
         self.num_gpu_blocks = np.min([b[0] for b in all_worker_num_available_blocks])
         self.num_cpu_blocks = np.min([b[1] for b in all_worker_num_available_blocks])
         print(f'# GPU blocks: {self.num_gpu_blocks}, '

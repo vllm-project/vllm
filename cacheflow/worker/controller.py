@@ -69,8 +69,10 @@ class Controller:
                                  cache_block_memory_utilization: float) -> List[Tuple[int, int]]:
         all_worker_results = []
         for worker in self.workers:
-            executor = (worker.get_num_available_blocks.remote
-                        if self.use_ray else worker.get_num_available_blocks)
+            executor = worker.get_num_available_blocks
+            if self.use_ray:
+                executor = executor.remote
+
             result = executor(
                 block_size,
                 cpu_swap_space,
@@ -85,8 +87,9 @@ class Controller:
                           num_cpu_blocks: int):
         all_worker_futures = []
         for worker in self.workers:
-            executor = (worker.init_cache_engine.remote
-                        if self.use_ray else worker.init_cache_engine)
+            executor = worker.init_cache_engine
+            if self.use_ray:
+                executor = executor.remote
             future = executor(
                 block_size,
                 num_gpu_blocks,

@@ -69,7 +69,7 @@ class Worker:
     @torch.inference_mode()
     def get_num_available_blocks(
         self, block_size: int, cpu_swap_space: int,
-        cache_block_memory_utilization: float):
+        cache_block_memory_utilization: float) -> Tuple[int, int]:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -77,9 +77,9 @@ class Worker:
 
         # Profile memory usage with max_num_batched_tokens inputs. Each input
         # includes a length one prompt.
-        n_sequences = self.max_num_batched_tokens
-        input_tokens = [0] * n_sequences
-        input_positions = [0] * n_sequences
+        num_seqs = self.max_num_batched_tokens
+        input_tokens = [0] * num_seqs
+        input_positions = [0] * num_seqs
         input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
         input_positions = _pad_to_alignment(input_positions, multiple_of=8)
         input_tokens = torch.tensor(
@@ -87,11 +87,11 @@ class Worker:
         input_positions = torch.tensor(
             input_positions, dtype=torch.long, device='cuda')
         seq_groups = [
-            ([i], SamplingParams.from_dict({})) for i in range(n_sequences)
+            ([i], SamplingParams.from_dict({})) for i in range(num_seqs)
         ]
-        seq_logprobs = {i: 0.0 for i in range(n_sequences)}
-        prompt_lens = [1] * n_sequences
-        slot_mapping = torch.tensor([0] * n_sequences, dtype=torch.int,
+        seq_logprobs = {i: 0.0 for i in range(num_seqs)}
+        prompt_lens = [1] * num_seqs
+        slot_mapping = torch.tensor([0] * num_seqs, dtype=torch.int,
                                     device='cuda')
         context_lens = torch.tensor([], dtype=torch.int, device='cuda')
         max_context_len = 0
@@ -118,6 +118,7 @@ class Worker:
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
+        torch.cuda.synchronize()
         peak_memory = torch.cuda.max_memory_allocated()
         total_gpu_memory = get_gpu_memory()
         cache_block_size = get_cache_block_size(block_size, self.num_heads,
