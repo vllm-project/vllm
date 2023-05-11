@@ -5,16 +5,16 @@ class SamplingParams:
 
     def __init__(
         self,
-        n: int,
-        presence_penalty: float,
-        frequency_penalty: float,
-        temperature: float,
-        top_p: float,
-        top_k: int,
-        use_beam_search: bool,
-        stop_token_ids: Set[int],
-        max_tokens: int,
-        logprobs: int,
+        n: int = 1,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = -1,
+        use_beam_search: bool = False,
+        stop_token_ids: Set[int] = set(),
+        max_tokens: int = 16,
+        logprobs: int = 0,
     ) -> None:
         if n < 1:
             raise ValueError(f"n must be at least 1, got {n}.")
@@ -86,21 +86,3 @@ class SamplingParams:
                 f"stop_token_ids={self.stop_token_ids}, "
                 f"max_tokens={self.max_tokens}, "
                 f"logprobs={self.logprobs}")
-
-    @classmethod
-    def from_dict(cls, d: Dict) -> "SamplingParams":
-        sampling_params = cls(
-            n=d.pop("n", 1),
-            presence_penalty=d.pop("presence_penalty", 0.0),
-            frequency_penalty=d.pop("frequency_penalty", 0.0),
-            temperature=d.pop("temperature", 1.0),
-            top_p=d.pop("top_p", 1.0),
-            top_k=d.pop("top_k", -1),
-            use_beam_search=d.pop("use_beam_search", False),
-            stop_token_ids=set(d.pop("stop_token_ids", set())),
-            max_tokens=d.pop("max_tokens", 16),
-            logprobs=d.pop("logprobs", 0),
-        )
-        if d:
-            raise ValueError(f"Unrecognized keys in dict: {d.keys()}")
-        return sampling_params
