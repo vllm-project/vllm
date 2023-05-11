@@ -35,10 +35,11 @@ class SimpleFrontend:
         sampling_params: SamplingParams,
     ) -> None:
         token_ids = self.tokenizer.encode(prompt)
-        self._add_query(token_ids, sampling_params)
+        self._add_query(prompt, token_ids, sampling_params)
 
     def _add_query(
         self,
+        prompt: str,
         token_ids: List[int],
         sampling_params: SamplingParams,
         arrival_time: Optional[float] = None,
@@ -48,7 +49,7 @@ class SimpleFrontend:
         seqs: List[Sequence] = []
         for _ in range(sampling_params.n):
             seq_id = next(self.seq_counter)
-            seq = Sequence(seq_id, token_ids, block_size=self.block_size)
+            seq = Sequence(seq_id, prompt, token_ids, block_size=self.block_size)
             seqs.append(seq)
 
         group_id = next(self.seq_group_counter)
