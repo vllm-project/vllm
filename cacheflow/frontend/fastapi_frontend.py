@@ -96,7 +96,7 @@ class FastAPIServer:
         seqs: List[Sequence] = []
         for _ in range(sampling_params.n):
             seq_id = next(self.seq_counter)
-            seq = Sequence(seq_id, token_ids, block_size=self.block_size)
+            seq = Sequence(seq_id, prompt, token_ids, block_size=self.block_size)
             seqs.append(seq)
 
         arrival_time = time.time()

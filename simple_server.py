@@ -11,8 +11,8 @@ def main(args: argparse.Namespace):
     # Test the following inputs.
     test_inputs = [
         ("A robot may not injure a human being", {}),   # Use default parameters.
-        ("To be or not to be,", {"temperature": 0.8, "top_k": 5}),
-        ("What is the meaning of life?", {"n": 2, "temperature": 0.8, "top_p": 0.95}),
+        ("To be or not to be,", {"temperature": 0.8, "top_k": 5, "presence_penalty": 0.2}),
+        ("What is the meaning of life?", {"n": 2, "temperature": 0.8, "top_p": 0.95, "frequency_penalty": 0.1}),
         ("It is only with the heart that one can see rightly", {"n": 3, "use_beam_search": True, "temperature": 0.0}),
     ]
     while True:
