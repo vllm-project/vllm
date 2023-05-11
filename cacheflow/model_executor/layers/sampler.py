@@ -162,10 +162,9 @@ def _apply_penalties(
 
     # We follow the definition in OpenAI API.
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits = logits[indices]
-    logits.sub_(frequency_penalties.unsqueeze(dim=1) * bin_counts)
+    logits[indices] -= frequency_penalties.unsqueeze(dim=1) * bin_counts
     presence_mask = nn.functional.threshold(bin_counts, 0.0, 1.0, inplace=True)
-    logits.sub_(presence_penalties.unsqueeze(dim=1) * presence_mask)
+    logits[indices] -= presence_penalties.unsqueeze(dim=1) * presence_mask
     return logits
 
 
