@@ -1,3 +1,4 @@
+"""Custom activation functions."""
 import torch
 import torch.nn as nn
 
@@ -5,6 +6,10 @@ from cacheflow import activation_ops
 
 
 class SiluAndMul(nn.Module):
+    """An activation function for SwiGLU.
+
+    The function computes x -> silu(x[:d]) * x[d:] where d = x.shape[1] // 2.
+    """
 
     def __init__(self):
         super().__init__()
