@@ -60,28 +60,21 @@ class SamplingParams:
 
     def _verity_beam_search(self) -> None:
         if self.n == 1:
-            raise ValueError(
-                "n must be greater than 1 when using beam search.")
+            raise ValueError("n must be greater than 1 when using beam search.")
         if self.temperature > 0.0:
-            raise ValueError(
-                "temperature must be 0 when using beam search.")
+            raise ValueError("temperature must be 0 when using beam search.")
         if self.top_p < 1.0:
-            raise ValueError(
-                "top_p must be 1 when using beam search.")
+            raise ValueError("top_p must be 1 when using beam search.")
         if self.top_k != -1:
-            raise ValueError(
-                "top_k must be -1 when using beam search.")
+            raise ValueError("top_k must be -1 when using beam search.")
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
-            raise ValueError(
-                "n must be 1 when using greedy sampling.")
+            raise ValueError("n must be 1 when using greedy sampling.")
         if self.top_p < 1.0:
-            raise ValueError(
-                "top_p must be 1 when using greedy sampling.")
+            raise ValueError("top_p must be 1 when using greedy sampling.")
         if self.top_k != -1:
-            raise ValueError(
-                "top_k must be -1 when using greedy sampling.")
+            raise ValueError("top_k must be -1 when using greedy sampling.")
 
     def __repr__(self) -> str:
         return (f"SamplingParams(n={self.n}, "
