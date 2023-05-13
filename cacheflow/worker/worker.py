@@ -69,7 +69,7 @@ class Worker:
     @torch.inference_mode()
     def get_num_available_blocks(
         self, block_size: int, cpu_swap_space: int,
-        cache_block_memory_utilization: float) -> Tuple[int, int]:
+        gpu_memory_utilization: float) -> Tuple[int, int]:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -124,9 +124,8 @@ class Worker:
         cache_block_size = get_cache_block_size(block_size, self.num_heads,
                                                 self.head_size, self.num_layers,
                                                 self.dtype)
-        num_gpu_blocks = int((total_gpu_memory - peak_memory)
-                             * cache_block_memory_utilization
-                             // cache_block_size)
+        num_gpu_blocks = int((total_gpu_memory * gpu_memory_utilization
+                              - peak_memory) // cache_block_size)
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks

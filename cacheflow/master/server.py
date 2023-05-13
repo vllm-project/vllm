@@ -29,7 +29,7 @@ class Server:
         dtype: str,
         seed: int,
         swap_space: int,
-        cache_block_memory_utilization: float,
+        gpu_memory_utilization: float,
         max_num_batched_tokens: int,
         max_num_sequences: int,
         num_nodes: int,
@@ -74,7 +74,7 @@ class Server:
         for controller in self.controllers:
             all_worker_num_available_blocks.extend(
                 controller.get_num_available_blocks(
-                    block_size, swap_space, cache_block_memory_utilization)
+                    block_size, swap_space, gpu_memory_utilization)
             )
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory
@@ -229,7 +229,7 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument('--swap-space', type=int, default=20, help='CPU swap space size (GiB) per GPU')
-    parser.add_argument('--cache-block-memory-utilization', type=float, default=0.9, help='the percentage of free GPU memory to be used for KV cache blocks')
+    parser.add_argument('--gpu-memory-utilization', type=float, default=0.95, help='the percentage of GPU memory to be used for the model executor')
     parser.add_argument('--max-num-batched-tokens', type=int, default=2560, help='maximum number of batched tokens per iteration')
     parser.add_argument('--max-num-sequences', type=int, default=256, help='maximum number of sequences per iteration')
     return parser
@@ -266,7 +266,7 @@ def init_local_server_and_frontend_with_arguments(args: argparse.Namespace):
         dtype=args.dtype,
         seed=args.seed,
         swap_space=args.swap_space,
-        cache_block_memory_utilization=args.cache_block_memory_utilization,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_sequences=args.max_num_sequences,
         num_nodes=num_nodes,

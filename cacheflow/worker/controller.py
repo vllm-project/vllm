@@ -66,7 +66,7 @@ class Controller:
             self.workers.append(worker)
 
     def get_num_available_blocks(self, block_size: int, cpu_swap_space: int,
-                                 cache_block_memory_utilization: float) -> List[Tuple[int, int]]:
+                                 gpu_memory_utilization: float) -> List[Tuple[int, int]]:
         all_worker_results = []
         for worker in self.workers:
             executor = worker.get_num_available_blocks
@@ -76,7 +76,7 @@ class Controller:
             result = executor(
                 block_size,
                 cpu_swap_space,
-                cache_block_memory_utilization,
+                gpu_memory_utilization,
             )
             all_worker_results.append(result)
         if self.use_ray:
