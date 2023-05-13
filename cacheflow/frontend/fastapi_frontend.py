@@ -42,6 +42,7 @@ class FastAPIServer:
         distributed_init_method: str,
         all_stage_devices: List[List[DeviceID]],
         server_use_ray: bool,
+        log_stats: bool,
     ):
         self.block_size = block_size
 
@@ -71,6 +72,7 @@ class FastAPIServer:
             distributed_init_method=distributed_init_method,
             all_stage_devices=all_stage_devices,
             use_ray=server_use_ray,
+            log_stats=log_stats,
         )
 
         self.running_seq_groups: Dict[int, SequenceGroup] = {}
@@ -190,6 +192,7 @@ if __name__ == "__main__":
         distributed_init_method=distributed_init_method,
         all_stage_devices=all_stage_devices,
         server_use_ray=args.use_ray,
+        log_stats=args.log_stats,
     )
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
