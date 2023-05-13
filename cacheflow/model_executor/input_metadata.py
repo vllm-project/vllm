@@ -1,17 +1,18 @@
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from cacheflow.sampling_params import SamplingParams
+from cacheflow.sequence import SequenceData
 
 
 class InputMetadata:
 
     def __init__(
         self,
-        seq_groups: List[Tuple[List[int], SamplingParams]],
-        seq_logprobs: Dict[int, float],                         # Seq id -> cumulative logprobs.
+        seq_groups: List[Tuple[List[int], SamplingParams]],     # List of (seq_ids, sampling_params).
+        seq_data: Dict[int, SequenceData],                      # Seq_id -> SequenceData.
         prompt_lens: List[int],
         slot_mapping: torch.Tensor,
         context_lens: torch.Tensor,
@@ -19,7 +20,7 @@ class InputMetadata:
         block_tables: torch.Tensor,
     ) -> None:
         self.seq_groups = seq_groups
-        self.seq_logprobs = seq_logprobs
+        self.seq_data = seq_data
         self.prompt_lens = prompt_lens
         self.slot_mapping = slot_mapping
         self.context_lens = context_lens
@@ -39,6 +40,7 @@ class InputMetadata:
         assert context_lens.shape[0] == self.num_generation_tokens
 
     def __repr__(self) -> str:
+        # Print only useful metadata.
         return (f'InputMetadata('
                 f'num_valid_tokens={self.num_valid_tokens}, '
                 f'num_prompt_tokens={self.num_prompt_tokens}, '

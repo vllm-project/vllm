@@ -1,47 +1,26 @@
-import os
+import filelock
 import glob
 import json
-import filelock
-from typing import Union, Optional
+import os
+from typing import Iterator, List, Optional, Tuple
 
+from huggingface_hub import snapshot_download
 import numpy as np
 import torch
 from tqdm.auto import tqdm
-from huggingface_hub import snapshot_download
-from cacheflow.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank)
-
-
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    'half': torch.half,
-    'float': torch.float,
-    'float16': torch.float16,
-    'float32': torch.float32,
-    'bfloat16': torch.bfloat16,
-}
-
-
-def get_torch_dtype(dtype: Union[torch.dtype, str]) -> torch.dtype:
-    if isinstance(dtype, str):
-        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype.lower()]
-    else:
-        torch_dtype = dtype
-    return torch_dtype
-
-
-def get_dtype_size(dtype: Union[torch.dtype, str]) -> int:
-    torch_dtype = get_torch_dtype(dtype)
-    return torch.tensor([], dtype=torch_dtype).element_size()
 
 
 class Disabledtqdm(tqdm):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, disable=True)
 
 
-def hf_model_weights_iterator(model_name_or_path: str,
-                              cache_dir: Optional[str] = None,
-                              use_np_cache: bool = False):
+def hf_model_weights_iterator(
+    model_name_or_path: str,
+    cache_dir: Optional[str] = None,
+    use_np_cache: bool = False,
+) -> Iterator[Tuple[str, torch.Tensor]]:
     # Prepare file lock directory to prevent multiple processes from
     # downloading the same model weights at the same time.
     lock_dir = cache_dir if cache_dir is not None else "/tmp"
@@ -95,10 +74,14 @@ def hf_model_weights_iterator(model_name_or_path: str,
                 yield name, param
 
 
-def load_tensor_parallel_weights(param, loaded_weight, param_name,
-                                 column_parallel_weight_names,
-                                 row_parallel_weight_names):
-    tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+def load_tensor_parallel_weights(
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    param_name: str,
+    column_parallel_weight_names: List[str],
+    row_parallel_weight_names: List[str],
+    tensor_model_parallel_rank: int,
+) -> None:
     for p in column_parallel_weight_names:
         if p in param_name:
             shard_size = param.shape[0]
@@ -116,3 +99,12 @@ def load_tensor_parallel_weights(param, loaded_weight, param_name,
             break
     assert param.shape == loaded_weight.shape
     param.data.copy_(loaded_weight)
+
+
+def initialize_dummy_weights(
+    model: torch.nn.Module,
+    low: float = -1e-3,
+    high: float = 1e-3,
+) -> None:
+    for param in model.state_dict().values():
+        param.data.uniform_(low, high)

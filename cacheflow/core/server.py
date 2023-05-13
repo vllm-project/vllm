@@ -9,14 +9,18 @@ try:
 except ImportError:
     ray = None
 
-from cacheflow.master.scheduler import Scheduler
-from cacheflow.master.simple_frontend import SimpleFrontend
-from cacheflow.worker.controller import Controller, DeviceID
-from cacheflow.sequence import SequenceGroup
+from cacheflow.core.scheduler import Scheduler
+from cacheflow.frontend.simple_frontend import SimpleFrontend
+from cacheflow.logger import init_logger
 from cacheflow.sampling_params import SamplingParams
+from cacheflow.sequence import SequenceGroup
+from cacheflow.worker.controller import Controller, DeviceID
+
+logger = init_logger(__name__)
 
 
 class Server:
+
     def __init__(
         self,
         model: str,
@@ -37,9 +41,18 @@ class Server:
         distributed_init_method: str,
         all_stage_devices: List[List[DeviceID]],
         use_ray: bool,
-        collect_stats: bool = False,
-        do_memory_analysis: bool = False,
+        log_stats: bool,
     ):
+        logger.info(
+            "Initializing a server with config: "
+            f"model={model!r}, "
+            f"dtype={dtype}, "
+            f"use_dummy_weights={use_dummy_weights}, "
+            f"cache_dir={cache_dir!r}, "
+            f"use_np_cache={use_np_cache}, "
+            f"tensor_parallel_size={tensor_parallel_size}, "
+            f"seed={seed})"
+        )
         self.num_nodes = num_nodes
         self.num_devices_per_node = num_devices_per_node
         self.world_size = pipeline_parallel_size * tensor_parallel_size
@@ -95,8 +108,7 @@ class Server:
             num_cpu_blocks=self.num_cpu_blocks,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_sequences=max_num_sequences,
-            collect_stats=collect_stats,
-            do_memory_analysis=do_memory_analysis,
+            log_stats=log_stats,
         )
         # Connect the controllers.
         for i in range(len(self.controllers) - 1):
@@ -232,6 +244,7 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--gpu-memory-utilization', type=float, default=0.95, help='the percentage of GPU memory to be used for the model executor')
     parser.add_argument('--max-num-batched-tokens', type=int, default=2560, help='maximum number of batched tokens per iteration')
     parser.add_argument('--max-num-sequences', type=int, default=256, help='maximum number of sequences per iteration')
+    parser.add_argument('--log-stats', action='store_true', help='log system statistics')
     return parser
 
 
@@ -274,6 +287,7 @@ def init_local_server_and_frontend_with_arguments(args: argparse.Namespace):
         distributed_init_method=distributed_init_method,
         all_stage_devices=all_stage_devices,
         use_ray=args.use_ray,
+        log_stats=args.log_stats,
     )
 
     # Create a frontend.

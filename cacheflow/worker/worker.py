@@ -1,19 +1,18 @@
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from cacheflow.models import get_model
-from cacheflow.models import get_cache_block_size
-from cacheflow.models import InputMetadata
-from cacheflow.sampling_params import SamplingParams
-from cacheflow.sequence import SequenceGroupInputs
-from cacheflow.sequence import SequenceOutputs
-from cacheflow.worker.cache_engine import CacheEngine
-from cacheflow.parallel_utils.parallel_state import (
+from cacheflow.model_executor import (get_model, get_cache_block_size,
+                                      InputMetadata, set_random_seed)
+from cacheflow.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel,
     initialize_all_reduce_launcher,
     get_tensor_model_parallel_world_size)
-from cacheflow.utils import set_random_seed, get_gpu_memory
+from cacheflow.sampling_params import SamplingParams
+from cacheflow.sequence import (SequenceData, SequenceGroupMetadata,
+                                SequenceOutputs)
+from cacheflow.worker.cache_engine import CacheEngine
+from cacheflow.utils import get_gpu_memory
 
 
 class Worker:
@@ -78,6 +77,7 @@ class Worker:
         # Profile memory usage with max_num_batched_tokens inputs. Each input
         # includes a length one prompt.
         num_seqs = self.max_num_batched_tokens
+        seq_data = {i: SequenceData([0]) for i in range(num_seqs)}
         input_tokens = [0] * num_seqs
         input_positions = [0] * num_seqs
         input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
@@ -89,7 +89,6 @@ class Worker:
         seq_groups = [
             ([i], SamplingParams.from_dict({})) for i in range(num_seqs)
         ]
-        seq_logprobs = {i: 0.0 for i in range(num_seqs)}
         prompt_lens = [1] * num_seqs
         slot_mapping = torch.tensor([0] * num_seqs, dtype=torch.int,
                                     device='cuda')
@@ -99,7 +98,7 @@ class Worker:
 
         input_metadata = InputMetadata(
             seq_groups=seq_groups,
-            seq_logprobs=seq_logprobs,
+            seq_data=seq_data,
             prompt_lens=prompt_lens,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
@@ -146,7 +145,6 @@ class Worker:
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
 
-
     def init_distributed_environment(self,
                                      distributed_init_method: str,
                                      rank: int,
@@ -165,32 +163,30 @@ class Worker:
         initialize_model_parallel(tensor_parallel_size,
                                   pipeline_parallel_size)
 
-
     def prepare_inputs(
         self,
-        input_seq_groups: List[SequenceGroupInputs],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.LongTensor, torch.LongTensor, InputMetadata]:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
-        seq_logprobs: Dict[int, float] = {}
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
-        for input_seq_group in input_seq_groups:
-            if not input_seq_group.is_prompt:
+        for seq_group_metadata in seq_group_metadata_list:
+            if not seq_group_metadata.is_prompt:
                 continue
 
-            seq_ids = list(input_seq_group.input_tokens.keys())
-            sampling_params = input_seq_group.sampling_params
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
-            seq_logprobs.update(input_seq_group.seq_logprobs)
 
             # Use any sequence in the group.
             seq_id = seq_ids[0]
 
-            prompt_tokens = input_seq_group.input_tokens[seq_id]
+            seq_data = seq_group_metadata.seq_data[seq_id]
+            prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
@@ -200,7 +196,7 @@ class Worker:
             input_positions.extend(range(len(prompt_tokens)))
 
             # Compute the slot mapping.
-            block_table = input_seq_group.block_tables[seq_id]
+            block_table = seq_group_metadata.block_tables[seq_id]
             for i in range(prompt_len):
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
@@ -212,31 +208,30 @@ class Worker:
         max_num_blocks_per_seq = 0
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
-        for input_seq_group in input_seq_groups:
-            if input_seq_group.is_prompt:
+        for seq_group_metadata in seq_group_metadata_list:
+            if seq_group_metadata.is_prompt:
                 continue
 
-            seq_ids = list(input_seq_group.input_tokens.keys())
-            sampling_params = input_seq_group.sampling_params
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
-            seq_logprobs.update(input_seq_group.seq_logprobs)
 
             for seq_id in seq_ids:
-                assert len(input_seq_group.input_tokens[seq_id]) == 1
-                generation_token = input_seq_group.input_tokens[seq_id][0]
+                seq_data = seq_group_metadata.seq_data[seq_id]
+                generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
 
-                position = input_seq_group.context_len - 1
+                context_len = seq_data.get_len()
+                position = context_len - 1
                 input_positions.append(position)
 
-                block_table = input_seq_group.block_tables[seq_id]
+                block_table = seq_group_metadata.block_tables[seq_id]
                 generation_block_tables.append(block_table)
 
-                max_context_len = max(
-                    max_context_len, input_seq_group.context_len)
+                max_context_len = max(max_context_len, context_len)
                 max_num_blocks_per_seq = max(
                     max_num_blocks_per_seq, len(block_table))
-                context_lens.append(input_seq_group.context_len)
+                context_lens.append(context_len)
 
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
@@ -263,9 +258,13 @@ class Worker:
         block_tables_tensor = torch.tensor(
             padded_block_tables, dtype=torch.int, device='cuda')
 
+        seq_data: Dict[int, SequenceData] = {}
+        for seq_group_metadata in seq_group_metadata_list:
+            seq_data.update(seq_group_metadata.seq_data)
+
         input_metadata = InputMetadata(
             seq_groups=seq_groups,
-            seq_logprobs=seq_logprobs,
+            seq_data=seq_data,
             prompt_lens=prompt_lens,
             slot_mapping=slot_mapping_tensor,
             context_lens=context_lens_tensor,
@@ -277,30 +276,30 @@ class Worker:
     @torch.inference_mode()
     def execute_stage(
         self,
-        input_seq_groups: List[SequenceGroupInputs],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
     ) -> Dict[int, SequenceOutputs]:
         # Issue cache operations.
-        command_issued = False
+        issued_cache_op = False
         if blocks_to_swap_in:
             self.cache_engine.swap_in(blocks_to_swap_in)
-            command_issued = True
+            issued_cache_op = True
         if blocks_to_swap_out:
             self.cache_engine.swap_out(blocks_to_swap_out)
-            command_issued = True
+            issued_cache_op = True
         if blocks_to_copy:
             self.cache_engine.copy(blocks_to_copy)
-            command_issued = True
+            issued_cache_op = True
 
-        if command_issued:
+        if issued_cache_op:
             cache_events = self.cache_events
         else:
             cache_events = None
 
         # If there is no input, we don't need to execute the model.
-        if not input_seq_groups:
+        if not seq_group_metadata_list:
             if cache_events is not None:
                 for event in cache_events:
                     event.wait()
@@ -308,7 +307,7 @@ class Worker:
 
         # Prepare input tensors.
         input_tokens, input_positions, input_metadata = self.prepare_inputs(
-            input_seq_groups)
+            seq_group_metadata_list)
 
         # Execute the model.
         output = self.model(

@@ -1,22 +1,22 @@
 import argparse
 import asyncio
+import json
 import time
 from typing import List, Dict, Optional
-import json
 
-import ray
-from transformers import AutoTokenizer
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
+import ray
 import uvicorn
 
+from cacheflow.core.server import (Server, add_server_arguments,
+                                   process_server_arguments,
+                                   initialize_cluster)
+from cacheflow.frontend.utils import get_tokenizer
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import Sequence, SequenceGroup
-from cacheflow.master.server import (Server, add_server_arguments,
-                                     process_server_arguments,
-                                     initialize_cluster)
-from cacheflow.worker.controller import DeviceID
 from cacheflow.utils import Counter
+from cacheflow.worker.controller import DeviceID
 
 TIMEOUT_TO_PREVENT_DEADLOCK = 1 # seconds
 app = FastAPI()
@@ -45,7 +45,7 @@ class FastAPIServer:
     ):
         self.block_size = block_size
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model)
+        self.tokenizer = get_tokenizer(model)
         self.seq_group_counter = Counter()
         self.seq_counter = Counter()
         if server_use_ray:
@@ -89,14 +89,14 @@ class FastAPIServer:
 
     async def generate(self, request_dict: Dict):
         # Preprocess the request.
-        prompt = request_dict["prompt"]
-        sampling_params = SamplingParams.from_dict(request_dict)
+        prompt = request_dict.pop("prompt")
+        sampling_params = SamplingParams(**request_dict)
         sampling_params.stop_token_ids.add(self.tokenizer.eos_token_id)
         token_ids = self.tokenizer.encode(prompt)
         seqs: List[Sequence] = []
         for _ in range(sampling_params.n):
             seq_id = next(self.seq_counter)
-            seq = Sequence(seq_id, token_ids, block_size=self.block_size)
+            seq = Sequence(seq_id, prompt, token_ids, block_size=self.block_size)
             seqs.append(seq)
 
         arrival_time = time.time()

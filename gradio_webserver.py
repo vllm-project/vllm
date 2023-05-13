@@ -10,7 +10,7 @@ def http_bot(prompt):
     headers = {"User-Agent": "Cacheflow Client"}
     pload = {
         "prompt": prompt,
-        "max_num_steps": 128,
+        "max_tokens": 128,
     }
     response = requests.post(args.model_url, headers=headers, json=pload, stream=True)
 
