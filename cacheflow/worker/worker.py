@@ -87,7 +87,7 @@ class Worker:
         input_positions = torch.tensor(
             input_positions, dtype=torch.long, device='cuda')
         seq_groups = [
-            ([i], SamplingParams.from_dict({})) for i in range(num_seqs)
+            ([i], SamplingParams()) for i in range(num_seqs)
         ]
         prompt_lens = [1] * num_seqs
         slot_mapping = torch.tensor([0] * num_seqs, dtype=torch.int,
