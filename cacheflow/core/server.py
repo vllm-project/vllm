@@ -94,8 +94,8 @@ class Server:
         # operators can be applied to all workers.
         self.num_gpu_blocks = np.min([b[0] for b in all_worker_num_available_blocks])
         self.num_cpu_blocks = np.min([b[1] for b in all_worker_num_available_blocks])
-        print(f'# GPU blocks: {self.num_gpu_blocks}, '
-              f'# CPU blocks: {self.num_cpu_blocks}')
+        logger.info(f'# GPU blocks: {self.num_gpu_blocks}, '
+                    f'# CPU blocks: {self.num_cpu_blocks}')
         for controller in self.controllers:
             controller.init_cache_engine(block_size, self.num_gpu_blocks,
                                          self.num_cpu_blocks)
