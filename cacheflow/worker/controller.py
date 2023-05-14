@@ -1,13 +1,11 @@
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 try:
     import ray
 except ImportError:
     ray = None
 
-from cacheflow.core.scheduler import Scheduler
 from cacheflow.worker.worker import Worker
-
 
 DeviceID = Tuple[int, str, int] # rank, node resource (node IP), device id
 
@@ -47,7 +45,7 @@ class Controller:
         self.is_last_stage = False
 
         self.workers: List[Worker] = []
-        for rank, node_resource, device_id in stage_devices:
+        for rank, node_resource, _ in stage_devices:
             if self.use_ray:
                 worker_cls = ray.remote(num_cpus=0,
                                         num_gpus=1,
@@ -73,14 +71,7 @@ class Controller:
             )
             self.workers.append(worker)
 
-    def set_next(
-        self,
-        next_node: Union['Controller', 'Scheduler'],
-    ) -> None:
-        self.next_node = next_node
-        self.is_last_stage = isinstance(next_node, Scheduler)
-
-    def execute_stage(self, *args, **kwargs) -> None:
+    def execute_stage(self, *args, **kwargs):
         all_outputs = []
         for worker in self.workers:
             executor = (worker.execute_stage.remote
@@ -96,8 +87,5 @@ class Controller:
         for other_output in all_outputs[1:]:
             assert output == other_output
 
-        if self.is_last_stage:
-            self.next_node.post_step(output)
-        else:
-            # TODO: Support pipeline parallelism.
-            assert False
+        # TODO: Support pipeline parallelism.
+        return output

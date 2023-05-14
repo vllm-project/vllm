@@ -32,7 +32,6 @@ class Scheduler:
 
     def __init__(
         self,
-        controllers: List,
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
@@ -40,7 +39,6 @@ class Scheduler:
         max_num_sequences: int,
         log_stats: bool,
     ) -> None:
-        self.controllers = controllers
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
         self.num_cpu_blocks = num_cpu_blocks
@@ -229,7 +227,7 @@ class Scheduler:
         return (blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy,
                 prompt_group_ids)
 
-    def step(self) -> List[SequenceGroup]:
+    def schedule(self) -> List[SequenceGroup]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.

@@ -102,7 +102,6 @@ class Server:
 
         # Create a scheduler.
         self.scheduler = Scheduler(
-            controllers=self.controllers,
             block_size=block_size,
             num_gpu_blocks=self.num_gpu_blocks,
             num_cpu_blocks=self.num_cpu_blocks,
@@ -110,10 +109,6 @@ class Server:
             max_num_sequences=max_num_sequences,
             log_stats=log_stats,
         )
-        # Connect the controllers.
-        for i in range(len(self.controllers) - 1):
-            self.controllers[i].set_next(self.controllers[i + 1])
-        self.controllers[-1].set_next(self.scheduler)
 
     def add_sequence_groups(
         self,
@@ -122,7 +117,7 @@ class Server:
         self.scheduler.add_sequence_groups(sequence_groups)
 
     def step(self):
-        return self.scheduler.step()
+        return self.scheduler.schedule()
 
     def has_unfinished_requests(self):
         return (self.scheduler.waiting or self.scheduler.running or
