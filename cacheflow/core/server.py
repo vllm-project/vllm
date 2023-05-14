@@ -59,9 +59,9 @@ class Server:
         self.num_devices_per_node = num_devices_per_node
         self.world_size = pipeline_parallel_size * tensor_parallel_size
 
-        if not use_ray:
-            assert self.world_size == 1, (
-                "Only support single GPU without Ray.")
+        if not use_ray and self.world_size > 1:
+            raise ValueError(
+                "Ray must be installed to use distributed inference.")
 
         self.memory_analyzer = get_memory_analyzer(
             model_name=model,
