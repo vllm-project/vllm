@@ -1,4 +1,4 @@
-"""Utilities for loading and initializing model weights."""
+"""Utilities for downloading and initializing model weights."""
 import filelock
 import glob
 import json
