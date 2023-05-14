@@ -1,4 +1,4 @@
-"""A block manager that manages physical token blocks."""
+"""A block manager that manages token blocks."""
 from typing import Dict, List, Optional, Set, Tuple
 
 from cacheflow.block import PhysicalTokenBlock
