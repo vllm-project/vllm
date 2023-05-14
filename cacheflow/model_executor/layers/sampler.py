@@ -23,7 +23,8 @@ class Sampler(nn.Module):
     4. Apply temperature scaling.
     5. Apply top-p and top-k truncation.
     6. Sample the next tokens.
-    Here, the sampling parameters can be different for each prompt in the batch.
+    Here, each sequence group within the batch can have different sampling
+    parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
     """
 
     def __init__(self, vocab_size: int) -> None:
