@@ -1,12 +1,12 @@
 import argparse
-from typing import List, Tuple, Optional
 import random
+from typing import List, Optional, Tuple
 
-import torch
 try:
     import ray
 except ImportError:
     ray = None
+import torch
 
 from cacheflow.core.scheduler import Scheduler
 from cacheflow.frontend.simple_frontend import SimpleFrontend
