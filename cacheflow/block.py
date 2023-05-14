@@ -1,8 +1,9 @@
+"""Token blocks."""
 from typing import List
 
 from cacheflow.utils import Device
 
-BLANK_TOKEN_ID = -1
+_BLANK_TOKEN_ID = -1
 
 
 class LogicalTokenBlock:
@@ -15,7 +16,7 @@ class LogicalTokenBlock:
         self.block_number = block_number
         self.block_size = block_size
 
-        self.token_ids = [BLANK_TOKEN_ID] * block_size
+        self.token_ids = [_BLANK_TOKEN_ID] * block_size
         self.num_tokens = 0
 
     def is_empty(self) -> bool:
