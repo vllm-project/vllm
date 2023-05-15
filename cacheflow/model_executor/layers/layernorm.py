@@ -7,7 +7,8 @@ from cacheflow import layernorm_ops
 
 class RMSNorm(nn.Module):
     """Root mean square normalization.
-    
+
+    Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
     Refer to https://arxiv.org/abs/1910.07467
     """
 
