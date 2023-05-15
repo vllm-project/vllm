@@ -9,8 +9,9 @@ from cacheflow.utils import Device
 class BlockAllocator:
     """Manages free physical token blocks for a device.
 
-    The allocator maintains a LIFO queue of free blocks and allocates a block
-    when requested. When a block is freed, it is added to the free block queue.
+    The allocator maintains a list of free blocks and allocates a block when
+    requested. When a block is freed, its reference count is decremented. If
+    the reference count becomes zero, the block is added back to the free list.
     """
 
     def __init__(
