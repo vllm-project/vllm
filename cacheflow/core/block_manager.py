@@ -25,7 +25,7 @@ class BlockAllocator:
         self.num_blocks = num_blocks
 
         # Initialize the free blocks.
-        self.free_blocks = []
+        self.free_blocks: List[PhysicalTokenBlock] = []
         for i in range(num_blocks):
             block = PhysicalTokenBlock(
                 device=device, block_number=i, block_size=block_size)
