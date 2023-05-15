@@ -22,15 +22,16 @@ class GPTCacheFlowAttention(nn.Module):
     |<--------------- num_prompt_tokens -------------->|<--------- num_generation_tokens --------->|
     |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--generation_0-->|...|<--generation_M-1-->|<--padding-->|
 
-    The prompts might have different lengths, but the generation tokens have
-    length 1. The paddings are used to make the input lengths a multiple of 8.
+    The prompts might have different lengths, while the generation tokens always
+    have length 1. The paddings are appended to make the input length a multiple
+    of 8, which is desirable for Tensor Cores.
 
-    Specifically, the class does the following:
+    The class does the following:
     1. Perform multi_query_kv_attention for the prompts. This operation does
         not use the KV cache.
     2. Wait for the cache operations (e.g., swap, copy) to finish. The cache
         operations are issued by the cache engine before executing the forward
-        pass of the model.
+        pass of the model, and they are executed asynchronously.
     3. Reshape and store the input key and value tensors in the KV cache.
     4. Perform single_query_cached_kv_attention for the generation tokens.
         This operation reads the previous key and value tensors from the KV
