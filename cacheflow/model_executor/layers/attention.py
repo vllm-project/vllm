@@ -183,7 +183,7 @@ class GPTNeoXCacheFlowAttention(GPTCacheFlowAttention):
         torch_dtype = torch.get_default_dtype()
         cache = cache.to(torch_dtype)
         # Embedding size: [max_position, rotary_dim]
-        self.register_buffer('cos_sin_cache', cache, persistent=False)
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
 
     def forward(
         self,
