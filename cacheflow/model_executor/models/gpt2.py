@@ -1,7 +1,6 @@
 # coding=utf-8
-# Copyright 2023 The CacheFlow team.
 # Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
-#
+# Copyright 2023 The CacheFlow team.
 # Copyright 2018 The OpenAI Team Authors and HuggingFace Inc. team.
 # Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
 #

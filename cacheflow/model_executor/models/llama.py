@@ -1,7 +1,6 @@
 # coding=utf-8
-# Copyright 2023 The CacheFlow team.
 # Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
-#
+# Copyright 2023 The CacheFlow team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
