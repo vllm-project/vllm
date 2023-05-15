@@ -19,7 +19,7 @@ class GPTCacheFlowAttention(nn.Module):
     generation tokens, and the paddings.
 
     |<------------------------------------- num_valid_tokens ------------------------------------->|
-    |<--------------- num_prompt_tokens -------------->|<--------- num_generation_tokens --------->|
+    |<--------------- num_prompt_tokens -------------->|<------- num_generation_tokens (M) ------->|
     |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--generation_0-->|...|<--generation_M-1-->|<--padding-->|
 
     The prompts might have different lengths, while the generation tokens always
