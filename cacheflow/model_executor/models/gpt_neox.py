@@ -1,7 +1,6 @@
 # coding=utf-8
-# Copyright 2023 The CacheFlow team.
 # Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py
-#
+# Copyright 2023 The CacheFlow team.
 # Copyright 2022 EleutherAI The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
