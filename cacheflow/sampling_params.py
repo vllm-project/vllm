@@ -1,7 +1,37 @@
+"""Sampling parameters for text generation."""
 from typing import Set
 
 
 class SamplingParams:
+    """Sampling parameters for text generation.
+
+    Overall, we follow the sampling parameters from the OpenAI text completion
+    API (https://platform.openai.com/docs/api-reference/completions/create).
+    In addition, we support beam search, which is not supported by OpenAI.
+
+    Args:
+        n: Number of output sequences to generate from the given prompt. This is
+            regarded as the beam width when using beam search.
+        presence_penalty: Float that penalizes new tokens based on whether they
+            appear in the generated text so far. Values > 0 encourage the model
+            to use new tokens, while values < 0 encourage the model to repeat
+            tokens.
+        frequency_penalty: Float that penalizes new tokens based on their
+            frequency in the generated text so far. Values > 0 encourage the
+            model to use new tokens, while values < 0 encourage the model to
+            repeat tokens.
+        temperature: Float that controls the randomness of the sampling. Lower
+            values make the model more deterministic, while higher values make
+            the model more random. Zero means greedy sampling.
+        top_p: Float that controls the cumulative probability of the top tokens
+            to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
+        top_k: Integer that controls the number of top tokens to consider. Set
+            to -1 to consider all tokens.
+        use_beam_search: Whether to use beam search instead of sampling.
+        stop_token_ids: Set of token IDs that indicate the end of a sequence.
+        max_tokens: Maximum number of tokens to generate per output sequence.
+        logprobs: Number of log probabilities to return per output token.
+    """
 
     def __init__(
         self,

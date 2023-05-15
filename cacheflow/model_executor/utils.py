@@ -1,3 +1,4 @@
+"""Utils for model executor."""
 import random
 from typing import Union
 
@@ -9,11 +10,11 @@ from cacheflow.model_executor.parallel_utils.tensor_parallel import model_parall
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
-    'half': torch.half,
-    'float': torch.float,
-    'float16': torch.float16,
-    'float32': torch.float32,
-    'bfloat16': torch.bfloat16,
+    "half": torch.half,
+    "float": torch.float,
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
 }
 
 

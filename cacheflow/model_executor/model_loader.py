@@ -1,9 +1,9 @@
+"""Utilities for selecting and loading models."""
 from typing import Optional
 
 import torch
 import torch.nn as nn
-from transformers import AutoConfig
-from transformers import PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 
 from cacheflow.model_executor.memory_analyzer import (
     CacheFlowMemoryAnalyzer, GPT2MemoryAnalyzer, GPTNeoXMemoryAnalyzer,

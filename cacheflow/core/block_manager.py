@@ -1,13 +1,18 @@
+"""A block manager that manages token blocks."""
 from typing import Dict, List, Optional, Set, Tuple
 
 from cacheflow.block import PhysicalTokenBlock
-from cacheflow.sequence import Sequence
-from cacheflow.sequence import SequenceGroup
-from cacheflow.sequence import SequenceStatus
+from cacheflow.sequence import Sequence, SequenceGroup, SequenceStatus
 from cacheflow.utils import Device
 
 
 class BlockAllocator:
+    """Manages free physical token blocks for a device.
+
+    The allocator maintains a list of free blocks and allocates a block when
+    requested. When a block is freed, its reference count is decremented. If
+    the reference count becomes zero, the block is added back to the free list.
+    """
 
     def __init__(
         self,
@@ -20,24 +25,22 @@ class BlockAllocator:
         self.num_blocks = num_blocks
 
         # Initialize the free blocks.
-        # TODO(woosuk): Make this a priority queue.
-        self.free_blocks = [
-            PhysicalTokenBlock(device=device, block_number=i, block_size=block_size)
-            for i in range(num_blocks)
-        ]
+        self.free_blocks: List[PhysicalTokenBlock] = []
+        for i in range(num_blocks):
+            block = PhysicalTokenBlock(
+                device=device, block_number=i, block_size=block_size)
+            self.free_blocks.append(block)
 
     def allocate(self) -> PhysicalTokenBlock:
         if not self.free_blocks:
-            raise ValueError('Out of memory! '
-                             f'No more free blocks are available.')
+            raise ValueError("Out of memory! No free blocks are available.")
         block = self.free_blocks.pop()
         block.ref_count = 1
         return block
 
     def free(self, block: PhysicalTokenBlock) -> None:
         if block.ref_count == 0:
-            raise ValueError('Double free! '
-                             f'The block {block} is already freed.')
+            raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
             self.free_blocks.append(block)
@@ -51,6 +54,7 @@ BlockTable = List[PhysicalTokenBlock]
 
 
 class BlockSpaceManager:
+    """Manages the mapping between logical and physical token blocks."""
 
     def __init__(
         self,
@@ -66,9 +70,10 @@ class BlockSpaceManager:
         assert watermark >= 0.0
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
-        self.gpu_allocator = BlockAllocator(Device.GPU, block_size, num_gpu_blocks)
-        self.cpu_allocator = BlockAllocator(Device.CPU, block_size, num_cpu_blocks)
-
+        self.gpu_allocator = BlockAllocator(Device.GPU, block_size,
+                                            num_gpu_blocks)
+        self.cpu_allocator = BlockAllocator(Device.CPU, block_size,
+                                            num_cpu_blocks)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 

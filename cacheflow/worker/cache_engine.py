@@ -1,12 +1,20 @@
+"""CacheEngine class for managing the KV cache."""
 from typing import Dict, List, Tuple
 
 import torch
+
 from cacheflow import cache_ops
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class CacheEngine:
+    """Manages the KV cache.
+
+    This class is responsible for initializing and managing the GPU and CPU KV
+    caches. It also provides methods for performing KV cache operations, such
+    as swapping and copying.
+    """
 
     def __init__(
         self,

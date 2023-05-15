@@ -1,11 +1,17 @@
+"""Token blocks."""
 from typing import List
 
 from cacheflow.utils import Device
 
-BLANK_TOKEN_ID = -1
+_BLANK_TOKEN_ID = -1
 
 
 class LogicalTokenBlock:
+    """A block that stores a contiguous chunk of tokens from left to right.
+
+    Logical blocks are used to represent the states of the corresponding
+    physical blocks in the KV cache.
+    """
 
     def __init__(
         self,
@@ -15,7 +21,7 @@ class LogicalTokenBlock:
         self.block_number = block_number
         self.block_size = block_size
 
-        self.token_ids = [BLANK_TOKEN_ID] * block_size
+        self.token_ids = [_BLANK_TOKEN_ID] * block_size
         self.num_tokens = 0
 
     def is_empty(self) -> bool:
@@ -41,6 +47,7 @@ class LogicalTokenBlock:
 
 
 class PhysicalTokenBlock:
+    """Represents the state of a block in the KV cache."""
 
     def __init__(
         self,
