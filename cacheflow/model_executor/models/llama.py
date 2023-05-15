@@ -1,7 +1,7 @@
 """Inference-only LLaMA model compatible with HuggingFace weights.
 
 The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of th input.
+InputMetadata to extract the original 2D shape of the input.
 """
 from typing import Dict, List, Optional, Tuple
 
