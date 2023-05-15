@@ -15,7 +15,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""1D GPT-2 model compatible with HuggingFace weights."""
+"""Inference-only GPT-2 model compatible with HuggingFace weights.
+
+The input of the model is flattened to a 1D tensor of tokens. The model uses
+InputMetadata to extract the original 2D shape of the input.
+"""
 from typing import Dict, List, Optional, Tuple
 
 import torch
