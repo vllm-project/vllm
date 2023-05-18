@@ -1,3 +1,4 @@
+"""A GPU worker class."""
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -16,6 +17,12 @@ from cacheflow.utils import get_gpu_memory
 
 
 class Worker:
+    """A worker class that executes (a partition of) the model on a GPU.
+
+    Each worker is associated with a single GPU. The worker is responsible for
+    maintaining the KV cache and executing the model on the GPU. In case of
+    distributed inference, each worker is assigned a partition of the model.
+    """
 
     def __init__(
         self,

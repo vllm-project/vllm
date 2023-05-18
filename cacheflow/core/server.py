@@ -1,13 +1,13 @@
 import argparse
-from typing import List, Tuple, Optional
 import random
+from typing import List, Optional, Tuple
 
-import numpy as np
-import torch
 try:
     import ray
 except ImportError:
     ray = None
+import numpy as np
+import torch
 
 from cacheflow.core.scheduler import Scheduler
 from cacheflow.frontend.simple_frontend import SimpleFrontend
