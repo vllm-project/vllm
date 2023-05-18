@@ -1,4 +1,25 @@
-"""1D GPT-2 model compatible with HuggingFace weights."""
+# coding=utf-8
+# Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
+# Copyright 2023 The CacheFlow team.
+# Copyright 2018 The OpenAI Team Authors and HuggingFace Inc. team.
+# Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Inference-only GPT-2 model compatible with HuggingFace weights.
+
+The input of the model is flattened to a 1D tensor of tokens. The model uses
+InputMetadata to extract the original 2D shape of the input.
+"""
 from typing import Dict, List, Optional, Tuple
 
 import torch

@@ -5,7 +5,8 @@ import torch
 from cacheflow import cache_ops
 
 
-def test_copy_blocks(
+@torch.inference_mode()
+def run_copy_blocks(
     num_mappings: int,
     num_layers: int,
     num_heads: int,
@@ -60,7 +61,8 @@ def test_copy_blocks(
         assert torch.allclose(value_cache, cloned_value_cache)
 
 
-def test_reshape_and_cache(
+@torch.inference_mode()
+def run_reshape_and_cache(
     num_tokens: int,
     num_heads: int,
     head_size: int,
@@ -99,7 +101,8 @@ def test_reshape_and_cache(
     assert torch.allclose(value_cache, cloned_value_cache)
 
 
-def test_gather_cached_kv(
+@torch.inference_mode()
+def run_gather_cached_kv(
     num_tokens: int,
     num_heads: int,
     head_size: int,
@@ -140,19 +143,22 @@ def test_gather_cached_kv(
     assert torch.allclose(value, cloned_value)
 
 
-@torch.inference_mode()
-def test_cache() -> None:
+def test_copy_blocks() -> None:
     for dtype in [torch.half, torch.bfloat16, torch.float]:
-        test_copy_blocks(
+        run_copy_blocks(
             num_mappings=23, num_layers=7, num_heads=17, head_size=16,
             block_size=8, num_blocks=1024, dtype=dtype)
-        test_reshape_and_cache(
-            num_tokens=3, num_heads=2, head_size=16, block_size=8, num_blocks=2,
-            dtype=dtype)
-        test_gather_cached_kv(
+
+
+def test_reshape_and_cache() -> None:
+    for dtype in [torch.half, torch.bfloat16, torch.float]:
+        run_reshape_and_cache(
             num_tokens=3, num_heads=2, head_size=16, block_size=8, num_blocks=2,
             dtype=dtype)
 
 
-if __name__ == '__main__':
-    test_cache()
+def test_gather_cached_kv() -> None:
+    for dtype in [torch.half, torch.bfloat16, torch.float]:
+        run_gather_cached_kv(
+            num_tokens=3, num_heads=2, head_size=16, block_size=8, num_blocks=2,
+            dtype=dtype)
