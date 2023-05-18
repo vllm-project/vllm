@@ -38,7 +38,8 @@ class Worker:
                                           tensor_parallel_size,
                                           pipeline_parallel_size)
         self.worker_id = rank
-        set_random_seed(seed)
+        self.seed = seed
+        set_random_seed(self.seed)
 
         # Initialize the model.
         self.model, self.dtype = get_model(
@@ -127,6 +128,9 @@ class Worker:
                               - peak_memory) // cache_block_size)
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         torch.cuda.empty_cache()
+        # Reset the seed to ensure that the model output is not affected by
+        # the profiling.
+        set_random_seed(self.seed)
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, block_size: int, num_gpu_blocks: int,
