@@ -7,7 +7,7 @@ from transformers import PretrainedConfig
 
 from cacheflow.model_executor.models import (
     GPT2LMHeadModel, GPTNeoXForCausalLM, LlamaForCausalLM, OPTForCausalLM)
-from cacheflow.model_executor.utils import get_torch_dtype, get_dtype_size
+from cacheflow.model_executor.utils import get_torch_dtype
 from cacheflow.model_executor.weight_utils import initialize_dummy_weights
 
 
@@ -78,14 +78,3 @@ def get_model(
         model = model.cuda()
     return model.eval(), torch_dtype
 
-
-def get_cache_block_size(block_size: int,
-                         num_heads: int,
-                         head_size: int,
-                         num_layers: int,
-                         dtype: str) -> int:
-    key_cache_block = block_size * num_heads * head_size
-    value_cache_block = key_cache_block
-    total = num_layers * (key_cache_block + value_cache_block)
-    dtype_size = get_dtype_size(dtype)
-    return dtype_size * total
