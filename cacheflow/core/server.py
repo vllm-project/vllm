@@ -78,6 +78,7 @@ class Server:
                 use_dummy_weights=use_dummy_weights,
                 use_np_cache=use_np_cache,
                 max_num_batched_tokens=max_num_batched_tokens,
+                max_num_sequences=max_num_sequences,
                 use_ray=use_ray,
             )
             self.controllers.append(controller)
@@ -218,6 +219,7 @@ _GiB = 1 << 30
 
 
 def add_server_arguments(parser: argparse.ArgumentParser):
+    """Shared arguments for CacheFlow servers."""
     # Model arguments
     parser.add_argument('--model', type=str, default='facebook/opt-125m', help='model name')
     parser.add_argument('--cache-dir', type=str, default=None,
@@ -249,9 +251,11 @@ def add_server_arguments(parser: argparse.ArgumentParser):
 
 
 def process_server_arguments(args: argparse.Namespace):
+    """Post process the parsed arguments."""
     if args.pipeline_parallel_size * args.tensor_parallel_size > 1:
         args.use_ray = True
     args.swap_space = args.swap_space * _GiB
+    args.max_num_sequences = min(args.max_num_sequences, args.max_num_batched_tokens)
     return args
 
 

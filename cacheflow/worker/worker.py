@@ -36,6 +36,7 @@ class Worker:
         use_dummy_weights: bool,
         use_np_cache: bool,
         max_num_batched_tokens: int,
+        max_num_sequences: int,
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
     ) -> None:
@@ -57,6 +58,7 @@ class Worker:
         self.max_num_batched_tokens = max_num_batched_tokens
         initialize_all_reduce_launcher(
             self.max_num_batched_tokens, self.model.config.hidden_size, self.dtype)
+        self.max_num_sequences = max_num_sequences
         self.num_layers = self.model.config.num_hidden_layers
         assert self.model.config.num_attention_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.model.config.num_attention_heads // tensor_model_parallel_world_size
@@ -82,37 +84,28 @@ class Worker:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        # Profile memory usage with max_num_batched_tokens inputs. Each input
-        # includes a length one prompt.
-        num_seqs = self.max_num_batched_tokens
-        seq_data = {i: SequenceData([0]) for i in range(num_seqs)}
-        input_tokens = [0] * num_seqs
-        input_positions = [0] * num_seqs
-        input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
-        input_positions = _pad_to_alignment(input_positions, multiple_of=8)
-        input_tokens = torch.tensor(
-            input_tokens, dtype=torch.long, device='cuda')
-        input_positions = torch.tensor(
-            input_positions, dtype=torch.long, device='cuda')
-        seq_groups = [
-            ([i], SamplingParams()) for i in range(num_seqs)
-        ]
-        prompt_lens = [1] * num_seqs
-        slot_mapping = torch.tensor([0] * num_seqs, dtype=torch.int,
-                                    device='cuda')
-        context_lens = torch.tensor([], dtype=torch.int, device='cuda')
-        max_context_len = 0
-        block_tables = torch.tensor([], dtype=torch.int, device='cuda')
+        # Profile memory usage with max_num_sequences sequences and the total
+        # number of tokens equal to max_num_batched_tokens.
 
-        input_metadata = InputMetadata(
-            seq_groups=seq_groups,
-            seq_data=seq_data,
-            prompt_lens=prompt_lens,
-            slot_mapping=slot_mapping,
-            context_lens=context_lens,
-            max_context_len=max_context_len,
-            block_tables=block_tables,
-        )
+        # Enable top-k sampling to reflect the accurate memory usage.
+        sampling_params = SamplingParams(top_p=0.99,
+                                         top_k=self.model.config.vocab_size - 1)
+        seqs = []
+        for group_id in range(self.max_num_sequences):
+            seq_len = (self.max_num_batched_tokens // self.max_num_sequences +
+                       (group_id < self.max_num_batched_tokens %
+                        self.max_num_sequences))
+            seq_data = SequenceData([0] * seq_len)
+            seq = SequenceGroupMetadata(
+                group_id=group_id,
+                is_prompt=True,
+                seq_data={group_id: seq_data},
+                sampling_params=sampling_params,
+                block_tables=None,
+            )
+            seqs.append(seq)
+
+        input_tokens, input_positions, input_metadata = self.prepare_inputs(seqs)
 
         # Execute the model.
         self.model(
@@ -205,6 +198,12 @@ class Worker:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(range(len(prompt_tokens)))
+
+            if seq_group_metadata.block_tables is None:
+                # During memory profiling, the block tables are not initialized
+                # yet. In this case, we just use a dummy slot mapping.
+                slot_mapping.extend([0] * prompt_len)
+                continue
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]

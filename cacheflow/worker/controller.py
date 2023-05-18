@@ -29,6 +29,7 @@ class Controller:
         use_dummy_weights: bool,
         use_np_cache: bool,
         max_num_batched_tokens: int,
+        max_num_sequences: int,
         use_ray: bool,
     ) -> None:
         self.stage_id = stage_id
@@ -61,6 +62,7 @@ class Controller:
                 use_dummy_weights=use_dummy_weights,
                 use_np_cache=use_np_cache,
                 max_num_batched_tokens=max_num_batched_tokens,
+                max_num_sequences=max_num_sequences,
             )
             self.workers.append(worker)
 
