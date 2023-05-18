@@ -10,7 +10,7 @@ def ref_silu_and_mul(x: torch.Tensor) -> torch.Tensor:
 
 
 @torch.inference_mode()
-def test_silu_and_mul(
+def run_silu_and_mul(
     num_tokens: int,
     d: int,
     dtype: torch.dtype,
@@ -22,9 +22,9 @@ def test_silu_and_mul(
     assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
 
 
-if __name__ == '__main__':
+def test_silu_and_mul() -> None:
     for dtype in [torch.half, torch.bfloat16, torch.float]:
         for num_tokens in [7, 83, 2048]:
-            for d in [512, 4096, 13824]:
+            for d in [512, 4096, 5120, 13824]:
                 print(f'Testing dtype={dtype}, num_tokens={num_tokens}, d={d}')
-                test_silu_and_mul(num_tokens, d, dtype)
+                run_silu_and_mul(num_tokens, d, dtype)

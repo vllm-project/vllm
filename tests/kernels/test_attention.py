@@ -8,6 +8,7 @@ from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 from cacheflow import attention_ops
 
 MAX_SEQ_LEN = 4096
+TEST_SEED = 0
 
 
 def ref_masked_attention(
@@ -155,7 +156,8 @@ def ref_multi_query_cached_kv_attention(
     return ref_output
 
 
-def test_single_query_cached_kv_attention(
+@torch.inference_mode()
+def run_single_query_cached_kv_attention(
     num_tokens: int,
     num_heads: int,
     head_size: int,
@@ -223,7 +225,8 @@ def test_single_query_cached_kv_attention(
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
-def test_multi_query_kv_attention(
+@torch.inference_mode()
+def run_multi_query_kv_attention(
     num_seqs: int,
     num_heads: int,
     head_size: int,
@@ -264,19 +267,16 @@ def test_multi_query_kv_attention(
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
-@torch.inference_mode()
-def test_attention(seed: int) -> None:
-    # NOTE(woosuk): Even when the seed is fixed, there is a chance that
-    # the test fails due to the precision issue. Re-run the test if it fails.
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+def test_single_query_cached_kv_attention() -> None:
+    torch.random.manual_seed(TEST_SEED)
+    torch.cuda.manual_seed(TEST_SEED)
     for dtype in [torch.half, torch.bfloat16]:
         for block_size in [8, 16, 32, 64]:
             for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
                 print(f'Testing single_query_cached_kv_attention with '
                       f'dtype={dtype}, block_size={block_size}, '
                       f'head_size={head_size}')
-                test_single_query_cached_kv_attention(
+                run_single_query_cached_kv_attention(
                     num_tokens=37,
                     num_heads=3,
                     head_size=head_size,
@@ -285,17 +285,17 @@ def test_attention(seed: int) -> None:
                     dtype=dtype,
                 )
 
+
+def test_multi_query_kv_attention() -> None:
+    torch.random.manual_seed(TEST_SEED)
+    torch.cuda.manual_seed(TEST_SEED)
     for dtype in [torch.half, torch.bfloat16]:
         for head_size in [32, 64, 80, 96, 128, 160, 192, 256]:
             print(f'Testing multi_query_kv_attention with dtype={dtype}, '
                   f'head_size={head_size}')
-            test_multi_query_kv_attention(
+            run_multi_query_kv_attention(
                 num_seqs=5,
                 num_heads=3,
                 head_size=head_size,
                 dtype=dtype,
             )
-
-
-if __name__ == '__main__':
-    test_attention(seed=0)

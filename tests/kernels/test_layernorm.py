@@ -22,7 +22,7 @@ class RefRMSNorm(nn.Module):
 
 
 @torch.inference_mode()
-def test_rms_norm(
+def run_rms_norm(
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
@@ -41,13 +41,13 @@ def test_rms_norm(
     assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-5)
 
 
-if __name__ == '__main__':
+def test_rms_norm() -> None:
     for dtype in [torch.half, torch.bfloat16, torch.float]:
         for num_tokens in [7, 128, 2048]:
             for hidden_size in [13, 64, 1024, 5120]:
                 print(f'Testing RMS kernel with dtype={dtype}, num_tokens='
                       f'{num_tokens}, hidden_size={hidden_size}')
-                test_rms_norm(
+                run_rms_norm(
                     num_tokens=num_tokens,
                     hidden_size=hidden_size,
                     dtype=dtype,
