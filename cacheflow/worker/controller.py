@@ -1,9 +1,11 @@
-from typing import Dict, List, Union, Tuple
+from typing import List, Optional, Tuple, Union
 
-import ray
+try:
+    import ray
+except ImportError:
+    ray = None
 
-from cacheflow.master.scheduler import Scheduler
-from cacheflow.sequence import SequenceGroupInputs
+from cacheflow.core.scheduler import Scheduler
 from cacheflow.worker.worker import Worker
 
 
@@ -21,20 +23,19 @@ class Controller:
         pipeline_parallel_size: int,
         distributed_init_method: str,
         model_name: str,
-        block_size: int,
-        num_gpu_blocks: int,
-        num_cpu_blocks: int,
         dtype: str,
         seed: int,
-        model_path: str,
+        cache_dir: Optional[str],
+        use_dummy_weights: bool,
+        use_np_cache: bool,
         max_num_batched_tokens: int,
+        max_num_sequences: int,
+        use_ray: bool,
     ) -> None:
         self.stage_id = stage_id
         self.stage_devices = stage_devices
         self.model_name = model_name
-        self.block_size = block_size
-        self.num_gpu_blocks = num_gpu_blocks
-        self.num_cpu_blocks = num_cpu_blocks
+        self.use_ray = use_ray
 
         # Which pipeline stage is this node assigned to?
         self.is_first_stage = stage_id == 0
@@ -42,14 +43,14 @@ class Controller:
 
         self.workers: List[Worker] = []
         for rank, node_resource, device_id in stage_devices:
-            worker_cls = ray.remote(num_cpus=0,
-                                    num_gpus=1,
-                                    resources={node_resource: 1e-5})(Worker)
-            worker = worker_cls.remote(
+            if self.use_ray:
+                worker_cls = ray.remote(num_cpus=0,
+                                        num_gpus=1,
+                                        resources={node_resource: 1e-5})(Worker).remote
+            else:
+                worker_cls = Worker
+            worker = worker_cls(
                 model_name=model_name,
-                block_size=block_size,
-                num_gpu_blocks=num_gpu_blocks,
-                num_cpu_blocks=num_cpu_blocks,
                 dtype=dtype,
                 seed=seed,
                 distributed_init_method=distributed_init_method,
@@ -57,10 +58,47 @@ class Controller:
                 world_size=world_size,
                 tensor_parallel_size=tensor_parallel_size,
                 pipeline_parallel_size=pipeline_parallel_size,
-                model_path=model_path,
+                cache_dir=cache_dir,
+                use_dummy_weights=use_dummy_weights,
+                use_np_cache=use_np_cache,
                 max_num_batched_tokens=max_num_batched_tokens,
+                max_num_sequences=max_num_sequences,
             )
             self.workers.append(worker)
+
+    def get_num_available_blocks(self, block_size: int, cpu_swap_space: int,
+                                 gpu_memory_utilization: float) -> List[Tuple[int, int]]:
+        all_worker_results = []
+        for worker in self.workers:
+            executor = worker.get_num_available_blocks
+            if self.use_ray:
+                executor = executor.remote
+
+            result = executor(
+                block_size,
+                cpu_swap_space,
+                gpu_memory_utilization,
+            )
+            all_worker_results.append(result)
+        if self.use_ray:
+            all_worker_results = ray.get(all_worker_results)
+        return all_worker_results
+
+    def init_cache_engine(self, block_size: int, num_gpu_blocks: int,
+                          num_cpu_blocks: int):
+        all_worker_futures = []
+        for worker in self.workers:
+            executor = worker.init_cache_engine
+            if self.use_ray:
+                executor = executor.remote
+            future = executor(
+                block_size,
+                num_gpu_blocks,
+                num_cpu_blocks,
+            )
+            all_worker_futures.append(future)
+        if self.use_ray:
+            ray.get(all_worker_futures)
 
     def set_next(
         self,
@@ -69,24 +107,17 @@ class Controller:
         self.next_node = next_node
         self.is_last_stage = isinstance(next_node, Scheduler)
 
-    def execute_stage(
-        self,
-        input_seq_groups: List[SequenceGroupInputs],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-    ) -> None:
-        futures = []
+    def execute_stage(self, *args, **kwargs) -> None:
+        all_outputs = []
         for worker in self.workers:
-            future = worker.execute_stage.remote(
-                input_seq_groups,
-                blocks_to_swap_in,
-                blocks_to_swap_out,
-                blocks_to_copy,
-            )
-            futures.append(future)
+            executor = (worker.execute_stage.remote
+                        if self.use_ray else worker.execute_stage)
+            output = executor(*args, **kwargs)
+            all_outputs.append(output)
 
-        all_outputs = ray.get(futures)
+        if self.use_ray:
+            all_outputs = ray.get(all_outputs)
+
         # Make sure all workers have the same results.
         output = all_outputs[0]
         for other_output in all_outputs[1:]:
