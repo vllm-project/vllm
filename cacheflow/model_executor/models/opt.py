@@ -74,7 +74,8 @@ class OPTAttention(nn.Module):
         self.out_proj = RowParallelLinear(embed_dim, embed_dim, bias=bias,
                                           input_is_parallel=True,
                                           perform_initialization=False)
-        self.attn = GPTCacheFlowAttention(scale=self.scaling)
+        self.attn = GPTCacheFlowAttention(self.num_heads, self.head_dim,
+                                          scale=self.scaling)
 
     def forward(
         self,

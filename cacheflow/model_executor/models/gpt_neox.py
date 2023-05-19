@@ -62,7 +62,8 @@ class GPTNeoXAttention(nn.Module):
         scaling = self.head_size ** -0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0
-        self.attn = GPTNeoXCacheFlowAttention(scaling, rotary_dim)
+        self.attn = GPTNeoXCacheFlowAttention(self.num_heads, self.head_size,
+                                              scaling, rotary_dim)
 
     def forward(
         self,
