@@ -3,7 +3,8 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from cacheflow.model_executor import get_model, InputMetadata, set_random_seed
+from cacheflow.model_executor import (get_model, get_cache_block_size,
+                                      InputMetadata, set_random_seed)
 from cacheflow.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel,
     initialize_all_reduce_launcher,
@@ -12,6 +13,7 @@ from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import (SequenceData, SequenceGroupMetadata,
                                 SequenceOutputs)
 from cacheflow.worker.cache_engine import CacheEngine
+from cacheflow.utils import get_gpu_memory
 
 
 class Worker:
@@ -25,9 +27,6 @@ class Worker:
     def __init__(
         self,
         model_name: str,
-        block_size: int,
-        num_gpu_blocks: int,
-        num_cpu_blocks: int,
         dtype: str,
         seed: int,
         distributed_init_method: str,
@@ -37,6 +36,7 @@ class Worker:
         use_dummy_weights: bool,
         use_np_cache: bool,
         max_num_batched_tokens: int,
+        max_num_sequences: int,
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
     ) -> None:
@@ -46,8 +46,8 @@ class Worker:
                                           tensor_parallel_size,
                                           pipeline_parallel_size)
         self.worker_id = rank
-        self.block_size = block_size
-        set_random_seed(seed)
+        self.seed = seed
+        set_random_seed(self.seed)
 
         # Initialize the model.
         self.model, self.dtype = get_model(
@@ -55,8 +55,10 @@ class Worker:
             use_dummy_weights=use_dummy_weights, use_np_cache=use_np_cache)
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
+        self.max_num_batched_tokens = max_num_batched_tokens
         initialize_all_reduce_launcher(
-            max_num_batched_tokens, self.model.config.hidden_size, self.dtype)
+            self.max_num_batched_tokens, self.model.config.hidden_size, self.dtype)
+        self.max_num_sequences = max_num_sequences
         self.num_layers = self.model.config.num_hidden_layers
         assert self.model.config.num_attention_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.model.config.num_attention_heads // tensor_model_parallel_world_size
@@ -66,12 +68,80 @@ class Worker:
         # the random state is not affected by the model initialization.
         set_random_seed(seed)
 
+        # Uninitialized cache engine. Will be initialized with
+        # self.init_cache_engine().
+        self.block_size = None
+        self.cache_engine = None
+        self.cache_events = None
+        self.gpu_cache = None
+
+    @torch.inference_mode()
+    def get_num_available_blocks(
+        self, block_size: int, cpu_swap_space: int,
+        gpu_memory_utilization: float) -> Tuple[int, int]:
+        # Profile the memory usage of the model and get the maximum number of
+        # cache blocks that can be allocated with the remaining free memory.
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+        # Profile memory usage with max_num_sequences sequences and the total
+        # number of tokens equal to max_num_batched_tokens.
+
+        # Enable top-k sampling to reflect the accurate memory usage.
+        sampling_params = SamplingParams(top_p=0.99,
+                                         top_k=self.model.config.vocab_size - 1)
+        seqs = []
+        for group_id in range(self.max_num_sequences):
+            seq_len = (self.max_num_batched_tokens // self.max_num_sequences +
+                       (group_id < self.max_num_batched_tokens %
+                        self.max_num_sequences))
+            seq_data = SequenceData([0] * seq_len)
+            seq = SequenceGroupMetadata(
+                group_id=group_id,
+                is_prompt=True,
+                seq_data={group_id: seq_data},
+                sampling_params=sampling_params,
+                block_tables=None,
+            )
+            seqs.append(seq)
+
+        input_tokens, input_positions, input_metadata = self.prepare_inputs(seqs)
+
+        # Execute the model.
+        self.model(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=[(None, None)] * self.num_layers,
+            input_metadata=input_metadata,
+            cache_events=None,
+        )
+
+        # Calculate the number of blocks that can be allocated with the
+        # profiled peak memory.
+        torch.cuda.synchronize()
+        peak_memory = torch.cuda.max_memory_allocated()
+        total_gpu_memory = get_gpu_memory()
+        cache_block_size = get_cache_block_size(block_size, self.num_heads,
+                                                self.head_size, self.num_layers,
+                                                self.dtype)
+        num_gpu_blocks = int((total_gpu_memory * gpu_memory_utilization
+                              - peak_memory) // cache_block_size)
+        num_cpu_blocks = int(cpu_swap_space // cache_block_size)
+        torch.cuda.empty_cache()
+        # Reset the seed to ensure that the model output is not affected by
+        # the profiling.
+        set_random_seed(self.seed)
+        return num_gpu_blocks, num_cpu_blocks
+
+    def init_cache_engine(self, block_size: int, num_gpu_blocks: int,
+                          num_cpu_blocks: int):
+        self.block_size = block_size
         self.cache_engine = CacheEngine(
             worker_id=self.worker_id,
             num_layers=self.num_layers,
             num_heads=self.num_heads,
             head_size=self.head_size,
-            block_size=block_size,
+            block_size=self.block_size,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             dtype=self.dtype,
@@ -128,6 +198,12 @@ class Worker:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(range(len(prompt_tokens)))
+
+            if seq_group_metadata.block_tables is None:
+                # During memory profiling, the block tables are not initialized
+                # yet. In this case, we just use a dummy slot mapping.
+                slot_mapping.extend([0] * prompt_len)
+                continue
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]

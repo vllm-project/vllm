@@ -104,7 +104,8 @@ class LlamaAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.attn = GPTNeoXCacheFlowAttention(self.scaling, self.head_dim)
+        self.attn = GPTNeoXCacheFlowAttention(self.num_heads, self.head_dim,
+                                              self.scaling, rotary_dim=self.head_dim)
 
     def forward(
         self,
