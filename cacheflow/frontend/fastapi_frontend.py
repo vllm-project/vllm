@@ -83,7 +83,7 @@ class FastAPIServer:
         self.is_server_running = True
         updated_seq_groups = await self.server.step.remote()
         self.is_server_running = False
-        # Notify the waiting coroutines that there new outputs ready.
+        # Notify the waiting coroutines that there are new outputs ready.
         for seq_group in updated_seq_groups:
             group_id = seq_group.group_id
             self.running_seq_groups[group_id] = seq_group
@@ -121,7 +121,10 @@ class FastAPIServer:
             # Wait for new output. The group_event will be set in server_step
             # when there is new output available for the sequence group.
             # Added a timeout to prevent deadlock.
-            await asyncio.wait_for(group_event.wait(), timeout=TIMEOUT_TO_PREVENT_DEADLOCK)
+            try:
+                await asyncio.wait_for(group_event.wait(), timeout=TIMEOUT_TO_PREVENT_DEADLOCK)
+            except asyncio.TimeoutError:
+                continue
             # Reset the event to wait for the next output.
             group_event.clear()
             # Decode and return new outputs
