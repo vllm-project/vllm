@@ -2,6 +2,7 @@ import enum
 import time
 from typing import Dict, List, Optional, Tuple
 
+from cacheflow.config import CacheConfig, SchedulerConfig
 from cacheflow.core.block_manager import BlockSpaceManager
 from cacheflow.core.policy import PolicyFactory
 from cacheflow.logger import init_logger
@@ -28,31 +29,45 @@ class PreemptionMode(enum.Enum):
     RECOMPUTE = enum.auto()
 
 
+class SchedulerOutputs:
+
+    def __init__(
+        self,
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> None:
+        # Swap in and swap out should never happen at the same time.
+        assert not (blocks_to_swap_in and blocks_to_swap_out)
+
+        self.blocks_to_swap_in = blocks_to_swap_in
+        self.blocks_to_swap_out = blocks_to_swap_out
+        self.blocks_to_copy = blocks_to_copy
+
+    def is_empty(self) -> bool:
+        return (not self.blocks_to_swap_in
+                and not self.blocks_to_swap_out
+                and not self.blocks_to_copy)
+
+
 class Scheduler:
 
     def __init__(
         self,
-        block_size: int,
-        num_gpu_blocks: int,
-        num_cpu_blocks: int,
-        max_num_batched_tokens: int,
-        max_num_sequences: int,
+        scheduler_config: SchedulerConfig,
+        cache_config: CacheConfig,
         log_stats: bool,
     ) -> None:
-        self.block_size = block_size
-        self.num_gpu_blocks = num_gpu_blocks
-        self.num_cpu_blocks = num_cpu_blocks
-        self.max_num_batched_tokens = max_num_batched_tokens
-        self.max_num_sequences = max_num_sequences
-        self.log_stats = log_stats
+        self.server_config = scheduler_config
+        self.cache_config = cache_config
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name='fcfs')
         # Create the block space manager.
         self.block_manager = BlockSpaceManager(
-            block_size=block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            num_cpu_blocks=num_cpu_blocks,
+            block_size=self.cache_config.block_size,
+            num_gpu_blocks=self.cache_config.num_gpu_blocks,
+            num_cpu_blocks=self.cache_config.num_cpu_blocks,
         )
 
         # Sequence groups in the WAITING state.
@@ -70,7 +85,7 @@ class Scheduler:
         # List[timestamp, num_tokens]
         self.num_input_tokens: List[Tuple[float, int]] = []
 
-    def add_sequence_groups(
+    def add_seq_groups(
         self,
         seq_groups: List[Tuple[SequenceGroup, SamplingParams]],
     ) -> None:
@@ -79,9 +94,10 @@ class Scheduler:
             self.waiting.append(seq_group)
             self.sampling_params[seq_group.group_id] = sampling_params
 
-    def _schedule(
-        self,
-    ) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, List[int]], List[int]]:
+    def has_unfinished_seqs(self) -> bool:
+        return self.waiting or self.running or self.swapped
+
+    def _schedule(self) -> Tuple[SchedulerOutputs, List[int]]:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
@@ -134,8 +150,9 @@ class Scheduler:
 
             # The total number of sequences in the RUNNING state should not
             # exceed the maximum number of sequences.
-            num_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
-            if len(self.running) + num_seqs > self.max_num_sequences:
+            num_new_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
+            num_curr_seqs = len(self.running)
+            if num_curr_seqs + num_new_seqs > self.server_config.max_num_seqs:
                 break
 
             seq_group = self.swapped.pop(0)
@@ -175,8 +192,9 @@ class Scheduler:
 
                 # The total number of sequences in the RUNNING state should not
                 # exceed the maximum number of sequences.
-                num_seqs = seq_group.num_seqs(status=SequenceStatus.WAITING)
-                if len(self.running) + num_seqs > self.max_num_sequences:
+                num_new_seqs = seq_group.num_seqs(status=SequenceStatus.WAITING)
+                num_curr_seqs = len(self.running)
+                if num_curr_seqs + num_new_seqs > self.server_config.max_num_seqs:
                     break
 
                 seq_group = self.waiting.pop(0)
@@ -185,10 +203,15 @@ class Scheduler:
                 num_batched_tokens += num_prompt_tokens
                 prompt_group_ids.append(seq_group.group_id)
 
-        if not self.log_stats:
-            return (blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy,
-                    prompt_group_ids)
+        scheduler_outputs = SchedulerOutputs(
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+        )
+        if not self.server_config.log_stats:
+            return scheduler_outputs, prompt_group_ids
 
+        # TODO(woosuk): Move the below code to server.
         now = time.time()
         if num_batched_tokens > 0:
             self.num_input_tokens.append((now, num_batched_tokens))
@@ -223,24 +246,16 @@ class Scheduler:
                 f"Pending: {len(self.waiting)} reqs, "
                 f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
                 f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
+        return scheduler_outputs, prompt_group_ids
 
-        return (blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy,
-                prompt_group_ids)
-
-    def schedule(self) -> List[SequenceGroup]:
+    def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
-        scheduler_output = self._schedule()
-        blocks_to_swap_in = scheduler_output[0]
-        blocks_to_swap_out = scheduler_output[1]
-        blocks_to_copy = scheduler_output[2]
-        prompt_group_ids = scheduler_output[3]
+        scheduler_outputs, prompt_group_ids = self._schedule()
 
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        updated_seq_groups: List[SequenceGroup] = self.running.copy()
-
         for seq_group in self.running:
             group_id = seq_group.group_id
             is_prompt = group_id in prompt_group_ids
@@ -260,21 +275,9 @@ class Scheduler:
                 block_tables=block_tables,
             )
             seq_group_metadata_list.append(seq_group_metadata)
+        return seq_group_metadata_list, scheduler_outputs
 
-        # Execute the first stage of the pipeline.
-        if seq_group_metadata_list or blocks_to_swap_in or blocks_to_swap_out:
-            # Swap in and swap out should never happen at the same time.
-            assert not (blocks_to_swap_in and blocks_to_swap_out)
-            self.controllers[0].execute_stage(
-                seq_group_metadata_list,
-                blocks_to_swap_in=blocks_to_swap_in,
-                blocks_to_swap_out=blocks_to_swap_out,
-                blocks_to_copy=blocks_to_copy,
-            )
-
-        return updated_seq_groups
-
-    def post_step(
+    def update(
         self,
         seq_outputs: Dict[int, SequenceOutputs],
     ) -> None:
