@@ -3,59 +3,6 @@ from typing import Optional
 import torch
 from transformers import AutoConfig, PretrainedConfig
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.float16,
-    "float16": torch.float16,
-    "float": torch.float32,
-    "float32": torch.float32,
-    "bfloat16": torch.bfloat16,
-}
-
-
-def _get_and_verify_dtype(
-    config: PretrainedConfig,
-    dtype: str,
-) -> torch.dtype:
-    # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
-    # because config.torch_dtype can be None.
-    config_dtype = getattr(config, "torch_dtype", None)
-    if config_dtype is None:
-        config_dtype = torch.float32
-
-    dtype = dtype.lower()
-    if dtype == "default":
-        if config_dtype == torch.float32:
-            # Following the common practice, we use float16 for float32 models.
-            torch_dtype = torch.float16
-        else:
-            torch_dtype = config_dtype
-    else:
-        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
-
-    # Verify the dtype.
-    if torch_dtype != config_dtype:
-        if torch_dtype == torch.float32:
-            # Upcasting to float32 is allowed.
-            pass
-        elif config_dtype == torch.float32:
-            # Downcasting from float32 to float16 or bfloat16 is allowed.
-            pass
-        else:
-            # Casting between float16 and bfloat16 is not allowed.
-            raise ValueError(
-                f"Cannot use {torch_dtype} for {config_dtype} model.")
-
-    # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:
-        compute_capability = torch.cuda.get_device_capability()
-        if compute_capability[0] < 8:
-            gpu_name = torch.cuda.get_device_name()
-            raise ValueError(
-                "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}.")
-    return torch_dtype
-
 
 class ModelConfig:
 
@@ -125,6 +72,7 @@ class CacheConfig:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space = swap_space
 
+        # Will be set after profiling.
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
 
@@ -161,3 +109,57 @@ class SchedulerConfig:
     ) -> None:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_seqs = max_num_seqs
+
+
+_STR_DTYPE_TO_TORCH_DTYPE = {
+    "half": torch.float16,
+    "float16": torch.float16,
+    "float": torch.float32,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+
+
+def _get_and_verify_dtype(
+    config: PretrainedConfig,
+    dtype: str,
+) -> torch.dtype:
+    # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
+    # because config.torch_dtype can be None.
+    config_dtype = getattr(config, "torch_dtype", None)
+    if config_dtype is None:
+        config_dtype = torch.float32
+
+    dtype = dtype.lower()
+    if dtype == "default":
+        if config_dtype == torch.float32:
+            # Following the common practice, we use float16 for float32 models.
+            torch_dtype = torch.float16
+        else:
+            torch_dtype = config_dtype
+    else:
+        torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+
+    # Verify the dtype.
+    if torch_dtype != config_dtype:
+        if torch_dtype == torch.float32:
+            # Upcasting to float32 is allowed.
+            pass
+        elif config_dtype == torch.float32:
+            # Downcasting from float32 to float16 or bfloat16 is allowed.
+            pass
+        else:
+            # Casting between float16 and bfloat16 is not allowed.
+            raise ValueError(
+                f"Cannot use {torch_dtype} for {config_dtype} model.")
+
+    # Check if the GPU supports the dtype.
+    if torch_dtype == torch.bfloat16:
+        compute_capability = torch.cuda.get_device_capability()
+        if compute_capability[0] < 8:
+            gpu_name = torch.cuda.get_device_name()
+            raise ValueError(
+                "Bfloat16 is only supported on GPUs with compute capability "
+                f"of at least 8.0. Your {gpu_name} GPU has compute capability "
+                f"{compute_capability[0]}.{compute_capability[1]}.")
+    return torch_dtype
