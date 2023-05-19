@@ -10,7 +10,6 @@ from cacheflow.model_executor.memory_analyzer import (
     LlamaMemoryAnalyzer, OPTMemoryAnalyzer)
 from cacheflow.model_executor.models import (
     GPT2LMHeadModel, GPTNeoXForCausalLM, LlamaForCausalLM, OPTForCausalLM)
-from cacheflow.model_executor.utils import get_torch_dtype
 from cacheflow.model_executor.weight_utils import initialize_dummy_weights
 
 
@@ -50,28 +49,6 @@ def _get_memory_analyzer(config: PretrainedConfig) -> CacheFlowMemoryAnalyzer:
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MEMORY_ANALYZERS.keys())}"
     )
-
-
-def _get_dtype(config: PretrainedConfig, dtype: str) -> torch.dtype:
-    # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
-    # because config.torch_dtype can be None.
-    config_dtype = getattr(config, "torch_dtype", None)
-    if config_dtype is None:
-        config_dtype = torch.float32
-    if dtype == "default":
-        if config_dtype == torch.float32:
-            # Following the common practice, we use float16 for float32 models.
-            torch_dtype = torch.float16
-        else:
-            torch_dtype = config_dtype
-    else:
-        torch_dtype = get_torch_dtype(dtype)
-        if torch_dtype != config_dtype and config_dtype != torch.float32:
-            # TODO(woosuk): Allow using float16 for bfloat16 models and
-            # vice versa. Print a warning message and continue.
-            raise ValueError(
-                f"Cannot use {torch_dtype} for {config_dtype} model.")
-    return torch_dtype
 
 
 def get_model(
