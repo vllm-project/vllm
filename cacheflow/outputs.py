@@ -7,7 +7,7 @@ class StreamOutput:
 
     def __init__(
         self,
-        request_id: int,
+        request_id: str,
         token_id: int,
         done: bool = False,
     ) -> None:
