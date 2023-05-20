@@ -9,20 +9,20 @@ class CompletionOutput:
 
     def __init__(
         self,
-        output: str,
-        output_token_ids: List[int],
-        seq_logprobs: float,
+        text: str,
+        token_ids: List[int],
+        cumulative_logprobs: float,
         logprobs: List[Dict[int, float]],
     ) -> None:
-        self.output = output
-        self.output_token_ids = output_token_ids
-        self.seq_logprobs = seq_logprobs
+        self.text = text
+        self.token_ids = token_ids
+        self.cumulative_logprobs = cumulative_logprobs
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
-        return (f"CompletionOutput(output={self.output!r}, "
-                f"output_token_ids={self.output_token_ids}, "
-                f"seq_logprobs={self.seq_logprobs}, "
+        return (f"CompletionOutput(output={self.text!r}, "
+                f"token_ids={self.token_ids}, "
+                f"cumulative_logprobs={self.cumulative_logprobs}, "
                 f"logprobs={self.logprobs})")
 
 
