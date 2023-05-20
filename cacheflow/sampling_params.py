@@ -28,7 +28,9 @@ class SamplingParams:
         top_k: Integer that controls the number of top tokens to consider. Set
             to -1 to consider all tokens.
         use_beam_search: Whether to use beam search instead of sampling.
-        stop_token_ids: Set of token IDs that indicate the end of a sequence.
+        stop: Set of strings that stop the generation when they are generated.
+        ignore_eos: Whether to ignore the EOS token and continue generating
+            tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
     """
@@ -42,7 +44,8 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         use_beam_search: bool = False,
-        stop_token_ids: Set[int] = set(),
+        stop: Set[str] = set(),
+        ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: int = 0,
     ) -> None:
@@ -53,7 +56,8 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.use_beam_search = use_beam_search
-        self.stop_token_ids = stop_token_ids
+        self.stop = set(stop)
+        self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs
 
@@ -114,6 +118,7 @@ class SamplingParams:
                 f"top_p={self.top_p}, "
                 f"top_k={self.top_k},"
                 f"use_beam_search={self.use_beam_search}, "
-                f"stop_token_ids={self.stop_token_ids}, "
+                f"stop={self.stop}, "
+                f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
                 f"logprobs={self.logprobs})")
