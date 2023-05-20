@@ -31,6 +31,18 @@ class LLMServer:
         stage_devices: List[List[Any]],
         log_stats: bool = True,
     ) -> None:
+        logger.info(
+            "Initializing an LLM server with config: "
+            f"model={model_config.model!r}, "
+            f"dtype={model_config.dtype}, "
+            f"use_dummy_weights={model_config.use_dummy_weights}, "
+            f"download_dir={model_config.download_dir!r}, "
+            f"use_np_weights={model_config.use_np_weights}, "
+            f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
+            f"seed={model_config.seed})"
+        )
+        # TODO(woosuk): Print more configs in debug mode.
+
         self.model_config = model_config
         self.cache_config = cache_config
         self.parallel_config = parallel_config
@@ -39,15 +51,14 @@ class LLMServer:
 
         self._verify_args()
 
-        self.tokenizer = get_tokenizer(model_config.model_name)
+        self.tokenizer = get_tokenizer(model_config.model)
         self.seq_group_counter = Counter()
         self.seq_counter = Counter()
 
-        # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config, log_stats)
         # Create the parallel GPU workers.
         self.workers: List[Worker] = []
-        for rank, node_resource, _ in stage_devices:
+        assert len(stage_devices) == 1, "Only support one stage for now."
+        for rank, node_resource, _ in stage_devices[0]:
             worker_cls = Worker
             if self.parallel_config.use_ray:
                 worker_cls = ray.remote(
@@ -64,6 +75,11 @@ class LLMServer:
                 distributed_init_method,
             )
             self.workers.append(worker)
+        # Profile the memory usage and initialize the cache.
+        self._init_cache()
+
+        # Create the scheduler.
+        self.scheduler = Scheduler(scheduler_config, cache_config, log_stats)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -75,7 +91,7 @@ class LLMServer:
             get_all_outputs=True,
             block_size=self.cache_config.block_size,
             gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
-            swap_space=self.cache_config.swap_space,
+            cpu_swap_space=self.cache_config.swap_space,
         )
 
         # Since we use a shared centralized controller, we take the minimum
@@ -83,13 +99,14 @@ class LLMServer:
         # operators can be applied to all workers.
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
+        # FIXME(woosuk): Change to debug log.
         logger.info(f'# GPU blocks: {num_gpu_blocks}, '
                     f'# CPU blocks: {num_cpu_blocks}')
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         # Initialize the cache.
-        self._run_workers("init_cache", cache_config=self.cache_config)
+        self._run_workers("init_cache_engine", cache_config=self.cache_config)
 
     def add_request(
         self,
@@ -120,7 +137,7 @@ class LLMServer:
         seq_group = SequenceGroup(group_id, seqs, arrival_time)
 
         # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_groups([seq_group], sampling_params)
+        self.scheduler.add_seq_groups([(seq_group, sampling_params)])
 
     def add_requests(
         self,
