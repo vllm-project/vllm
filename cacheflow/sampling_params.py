@@ -63,8 +63,6 @@ class SamplingParams:
         elif self.temperature == 0.0:
             # Zero temperature means greedy sampling.
             self._verify_greedy_sampling()
-        if self.stream:
-            self._verity_steam()
 
     def _verify_args(self) -> None:
         if self.n < 1:
