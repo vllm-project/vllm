@@ -22,7 +22,7 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
 
         self.output_token_ids: List[int] = []
-        self.cumulative_logprobs = 0.0
+        self.cumulative_logprob = 0.0
 
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
@@ -89,7 +89,7 @@ class Sequence:
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.output_token_ids.append(token_id)
-        self.data.cumulative_logprobs += logprobs[token_id]
+        self.data.cumulative_logprob += logprobs[token_id]
 
     def get_len(self) -> int:
         return self.data.get_len()

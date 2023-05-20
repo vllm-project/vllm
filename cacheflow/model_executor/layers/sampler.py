@@ -397,7 +397,7 @@ def _sample(
 
             # Sample the next tokens.
             seq_logprobs = [
-                input_metadata.seq_data[seq_id].cumulative_logprobs
+                input_metadata.seq_data[seq_id].cumulative_logprob
                 for seq_id in seq_ids]
             parent_seq_ids, next_token_ids = _sample_from_generation_tokens(
                 seq_ids, prob, logprob, seq_logprobs, sampling_params)
