@@ -10,8 +10,8 @@ from cacheflow import cache_ops
 from cacheflow import pos_encoding_ops
 from cacheflow.model_executor.input_metadata import InputMetadata
 
-
 _SUPPORTED_HEAD_SIZES = [32, 64, 80, 96, 128, 160, 192, 256]
+
 
 class GPTCacheFlowAttention(nn.Module):
     """GPT-style multi-head attention.

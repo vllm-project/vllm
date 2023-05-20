@@ -116,4 +116,4 @@ class SamplingParams:
                 f"use_beam_search={self.use_beam_search}, "
                 f"stop_token_ids={self.stop_token_ids}, "
                 f"max_tokens={self.max_tokens}, "
-                f"logprobs={self.logprobs}")
+                f"logprobs={self.logprobs})")
