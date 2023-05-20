@@ -129,3 +129,23 @@ class CacheEngine:
         value_caches = [value_cache for _, value_cache in self.gpu_cache]
         # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
         cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
+
+    @staticmethod
+    def get_cache_block_size(
+        block_size: int,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+    ) -> int:
+        head_size = model_config.get_head_size()
+        num_heads = model_config.get_num_heads(parallel_config)
+        num_layers = model_config.get_num_layers(parallel_config)
+
+        key_cache_block = block_size * num_heads * head_size
+        value_cache_block = key_cache_block
+        total = num_layers * (key_cache_block + value_cache_block)
+        dtype_size = _get_dtype_size(model_config.dtype)
+        return dtype_size * total
+
+
+def _get_dtype_size(dtype: torch.dtype) -> int:
+    return torch.tensor([], dtype=dtype).element_size()
