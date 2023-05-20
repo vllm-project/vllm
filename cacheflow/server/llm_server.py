@@ -143,7 +143,7 @@ class LLMServer:
     def has_unfinished_requests(self) -> bool:
         return self.scheduler.has_unfinished_seqs()
 
-    def step(self) -> Tuple[List[StreamOutput], List[RequestOutput]]:
+    def step(self) -> List[RequestOutput]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         if (not seq_group_metadata_list) and scheduler_outputs.is_empty():
             # Nothing to do.
@@ -158,21 +158,16 @@ class LLMServer:
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
         # Update the scheduler.
-        running, finished = self.scheduler.update(output)
+        updated_seq_groups = self.scheduler.update(output)
 
         # Create the outputs.
-        stream_outputs: List[StreamOutput] = []
         request_outputs: List[RequestOutput] = []
-        for seq_group in (running + finished):
-            if seq_group.sampling_params.stream:
-                stream_output = StreamOutput.from_seq_group(seq_group)
-                stream_outputs.append(stream_output)
-            elif seq_group.is_finished():
-                # TODO(woosuk): Batch-decode the outputs for speedup.
-                request_output = RequestOutput.from_seq_group(
-                    seq_group, self.tokenizer)
-                request_outputs.append(request_output)
-        return stream_outputs, request_outputs
+        for seq_group in updated_seq_groups:
+            # TODO(woosuk): Batch-decode the outputs for speedup.
+            request_output = RequestOutput.from_seq_group(seq_group,
+                                                          self.tokenizer)
+            request_outputs.append(request_output)
+        return request_outputs
 
     def _run_workers(
         self,

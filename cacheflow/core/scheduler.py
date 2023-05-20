@@ -275,7 +275,7 @@ class Scheduler:
     def update(
         self,
         seq_outputs: Dict[int, SequenceOutputs],
-    ) -> Tuple[List[SequenceGroup], List[SequenceGroup]]:
+    ) -> List[SequenceGroup]:
         # Update the running sequences and free blocks.
         for seq_group in self.running:
             request_id = seq_group.request_id
@@ -318,16 +318,15 @@ class Scheduler:
                     continue
 
         # Update the running sequences.
+        updated = self.running.copy()
         running: List[SequenceGroup] = []
-        finished: List[SequenceGroup] = []
         for seq_group in self.running:
             if seq_group.is_finished():
-                finished.append(seq_group)
                 self._free_seq_group(seq_group)
             else:
                 running.append(seq_group)
         self.running = running
-        return self.running.copy(), finished
+        return updated
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
