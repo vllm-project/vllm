@@ -11,18 +11,18 @@ class CompletionOutput:
         self,
         text: str,
         token_ids: List[int],
-        cumulative_logprobs: float,
+        cumulative_logprob: float,
         logprobs: List[Dict[int, float]],
     ) -> None:
         self.text = text
         self.token_ids = token_ids
-        self.cumulative_logprobs = cumulative_logprobs
+        self.cumulative_logprob = cumulative_logprob
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
         return (f"CompletionOutput(output={self.text!r}, "
                 f"token_ids={self.token_ids}, "
-                f"cumulative_logprobs={self.cumulative_logprobs}, "
+                f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs})")
 
 
@@ -47,13 +47,26 @@ class RequestOutput:
         seq_group: SequenceGroup,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ) -> "RequestOutput":
-        outputs: List[CompletionOutput] = []
+        # Get the top-n sequences.
+        n = seq_group.sampling_params.n
         seqs = seq_group.get_seqs()
-        for seq in seqs:
+        if n == len(seqs):
+            top_n_seqs = seqs
+        else:
+            assert n < len(seqs)
+            top_n_seqs = sorted(
+                seqs,
+                key=lambda seq: seq.data.cumulative_logprob,
+                reverse=True,
+            )[:n]
+
+        # Create the outputs.
+        outputs: List[CompletionOutput] = []
+        for seq in top_n_seqs:
             output_token_ids = seq.data.output_token_ids
             output_str = tokenizer.decode(output_token_ids,
                                           skip_special_tokens=True)
-            seq_logprobs = seq.data.cumulative_logprobs
+            seq_logprob = seq.data.cumulative_logprob
 
             logprobs = seq.output_logprobs
             if seq_group.sampling_params.logprobs == 0:
@@ -61,13 +74,13 @@ class RequestOutput:
                 # always has the logprobs of the sampled tokens even if the
                 # logprobs are not requested.
                 logprobs = {}
-            output = CompletionOutput(output_str, output_token_ids,
-                                      seq_logprobs, logprobs)
+            output = CompletionOutput(output_str, output_token_ids, seq_logprob,
+                                      logprobs)
             outputs.append(output)
 
         # Every sequence in the sequence group should have the same prompt.
-        prompt = seqs[0].prompt
-        prompt_token_ids = seqs[0].data.prompt_token_ids
+        prompt = top_n_seqs[0].prompt
+        prompt_token_ids = top_n_seqs[0].data.prompt_token_ids
         return RequestOutput(seq_group.request_id, prompt, prompt_token_ids,
                              outputs, seq_group.is_finished())
 
