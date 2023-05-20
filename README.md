@@ -28,12 +28,12 @@ python examples/simple_server.py --help
 To start the server:
 ```bash
 ray start --head
-python -m cacheflow.entrypoint.fastapi_server
+python -m cacheflow.entrypoint.fastapi_server # --model <your_model>
 ```
 
 To test the server:
 ```bash
-python -m cacheflow.entrypoint.fastapi_server
+python test_cli_client.py
 ```
 
 ## Gradio web server
