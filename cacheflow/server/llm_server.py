@@ -1,5 +1,5 @@
 import time
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 try:
     import ray
@@ -10,6 +10,7 @@ from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
                               SchedulerConfig)
 from cacheflow.core.scheduler import Scheduler
 from cacheflow.logger import init_logger
+from cacheflow.outputs import RequestOutput, StreamOutput
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.tokenizer_utils import get_tokenizer
 from cacheflow.sequence import Sequence, SequenceGroup
@@ -134,10 +135,10 @@ class LLMServer:
 
         # Create the sequence group.
         group_id = next(self.seq_group_counter)
-        seq_group = SequenceGroup(group_id, seqs, arrival_time)
+        seq_group = SequenceGroup(group_id, seqs, sampling_params, arrival_time)
 
         # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_groups([(seq_group, sampling_params)])
+        self.scheduler.add_seq_group(seq_group)
 
     def add_requests(
         self,
@@ -162,13 +163,12 @@ class LLMServer:
     def has_unfinished_requests(self) -> bool:
         return self.scheduler.has_unfinished_seqs()
 
-    def step(self) -> List[SequenceGroup]:
+    def step(self) -> Tuple[List[StreamOutput], List[RequestOutput]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         if (not seq_group_metadata_list) and scheduler_outputs.is_empty():
             # Nothing to do.
-            return
+            return [], []
 
-        updated_seq_groups = self.scheduler.running.copy()
         # Execute the model.
         output = self._run_workers(
             "execute_model",
@@ -178,8 +178,21 @@ class LLMServer:
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
         # Update the scheduler.
-        self.scheduler.update(output)
-        return updated_seq_groups
+        running, finished = self.scheduler.update(output)
+
+        # Create the outputs.
+        stream_outputs: List[StreamOutput] = []
+        request_outputs: List[RequestOutput] = []
+        for seq_group in (running + finished):
+            if seq_group.sampling_params.stream:
+                stream_output = StreamOutput.from_seq_group(seq_group)
+                stream_outputs.append(stream_output)
+            elif seq_group.is_finished():
+                # TODO(woosuk): Batch-decode the outputs for speedup.
+                request_output = RequestOutput.from_seq_group(
+                    seq_group, self.tokenizer)
+                request_outputs.append(request_output)
+        return stream_outputs, request_outputs
 
     def _run_workers(
         self,
