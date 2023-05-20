@@ -84,7 +84,7 @@ class Worker:
                        (group_id < max_num_batched_tokens % max_num_seqs))
             seq_data = SequenceData([0] * seq_len)
             seq = SequenceGroupMetadata(
-                group_id=group_id,
+                request_id=str(group_id),
                 is_prompt=True,
                 seq_data={group_id: seq_data},
                 sampling_params=sampling_params,

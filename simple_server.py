@@ -1,4 +1,5 @@
 import argparse
+import uuid
 
 from cacheflow import (add_server_arguments, initialize_server_from_args,
                        SamplingParams)
@@ -25,7 +26,8 @@ def main(args: argparse.Namespace):
         # To test iteration-level scheduling, we add one request at each step.
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
-            server.add_request(prompt, sampling_params)
+            request_id = str(uuid.uuid4().hex[:8])
+            server.add_request(request_id, prompt, sampling_params)
 
         stream_outputs, request_outputs = server.step()
         assert not stream_outputs

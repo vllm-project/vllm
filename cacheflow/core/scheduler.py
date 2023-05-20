@@ -73,8 +73,8 @@ class Scheduler:
         self.waiting: List[SequenceGroup] = []
         # Sequence groups in the RUNNING state.
         self.running: List[SequenceGroup] = []
-        # Mapping: group_id -> num_steps.
-        self.num_steps: Dict[int, int] = {}
+        # Mapping: request_id -> num_steps.
+        self.num_steps: Dict[str, int] = {}
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
 
@@ -84,6 +84,7 @@ class Scheduler:
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
+        assert seq_group.request_id not in self.num_steps
         self.waiting.append(seq_group)
 
     def has_unfinished_seqs(self) -> bool:
@@ -158,7 +159,7 @@ class Scheduler:
         )
 
         # Join waiting sequences if possible.
-        prompt_group_ids: List[int] = []
+        prompt_group_ids: List[str] = []
         # NOTE(woosuk): The sequence groups in the SWAPPED state are strictly
         # prioritized over the sequence groups in the WAITING state.
         # This is because we want to bound the amount of CPU memory taken by
@@ -193,7 +194,7 @@ class Scheduler:
                 self._allocate(seq_group)
                 self.running.append(seq_group)
                 num_batched_tokens += num_prompt_tokens
-                prompt_group_ids.append(seq_group.group_id)
+                prompt_group_ids.append(seq_group.request_id)
 
         scheduler_outputs = SchedulerOutputs(
             blocks_to_swap_in=blocks_to_swap_in,
@@ -252,8 +253,7 @@ class Scheduler:
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for seq_group in self.running:
-            group_id = seq_group.group_id
-            is_prompt = group_id in prompt_group_ids
+            is_prompt = seq_group.request_id in prompt_group_ids
 
             seq_data: Dict[int, List[SequenceData]] = {}
             block_tables: Dict[int, List[int]] = {}
@@ -263,7 +263,7 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
 
             seq_group_metadata = SequenceGroupMetadata(
-                group_id=group_id,
+                request_id=seq_group.request_id,
                 is_prompt=is_prompt,
                 seq_data=seq_data,
                 sampling_params=seq_group.sampling_params,
@@ -278,8 +278,8 @@ class Scheduler:
     ) -> Tuple[List[SequenceGroup], List[SequenceGroup]]:
         # Update the running sequences and free blocks.
         for seq_group in self.running:
-            group_id = seq_group.group_id
-            self.num_steps[group_id] += 1
+            request_id = seq_group.request_id
+            self.num_steps[request_id] += 1
             stop_token_ids = seq_group.sampling_params.stop_token_ids
 
             # Process beam search results before processing the next tokens.
@@ -313,7 +313,7 @@ class Scheduler:
 
                 # Check if the sequence has reached the maximum number of steps.
                 max_num_steps = seq_group.sampling_params.max_tokens
-                if self.num_steps[group_id] == max_num_steps:
+                if self.num_steps[request_id] == max_num_steps:
                     self._free_seq(seq)
                     continue
 
@@ -333,8 +333,8 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.seqs:
             seq.status = SequenceStatus.RUNNING
-        if seq_group.group_id not in self.num_steps:
-            self.num_steps[seq_group.group_id] = 0
+        if seq_group.request_id not in self.num_steps:
+            self.num_steps[seq_group.request_id] = 0
 
     def _append_slot(
         self,
@@ -409,8 +409,7 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def _free_seq_group(self, seq_group: SequenceGroup) -> None:
-        group_id = seq_group.group_id
-        del self.num_steps[group_id]
+        del self.num_steps[seq_group.request_id]
 
     def _swap_in(
         self,

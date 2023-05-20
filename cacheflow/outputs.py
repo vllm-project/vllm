@@ -21,7 +21,7 @@ class StreamOutput:
         seq = seq_group.seqs[0]
         token_id = seq.get_last_token_id()
         done = seq_group.is_finished()
-        return StreamOutput(seq_group.group_id, token_id, done)
+        return StreamOutput(seq_group.request_id, token_id, done)
 
     def __repr__(self) -> str:
         return (f"StreamOutput(request_id={self.request_id}, "
@@ -66,7 +66,8 @@ class RequestOutput:
         seqs = seq_group.get_seqs()
         for seq in seqs:
             output_token_ids = seq.data.output_token_ids
-            output_str = tokenizer.decode(output_token_ids)
+            output_str = tokenizer.decode(output_token_ids,
+                                          skip_special_tokens=True)
             logprobs = seq.output_logprobs
 
             if seq_group.sampling_params.logprobs == 0:
@@ -81,7 +82,7 @@ class RequestOutput:
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = seqs[0].prompt
-        return RequestOutput(seq_group.group_id, prompt, outputs)
+        return RequestOutput(seq_group.request_id, prompt, outputs)
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "

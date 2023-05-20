@@ -53,7 +53,6 @@ class LLMServer:
         self._verify_args()
 
         self.tokenizer = get_tokenizer(model_config.model)
-        self.seq_group_counter = Counter()
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -111,6 +110,7 @@ class LLMServer:
 
     def add_request(
         self,
+        request_id: str,
         prompt: str,
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
@@ -134,31 +134,11 @@ class LLMServer:
         sampling_params.stop_token_ids.add(self.tokenizer.eos_token_id)
 
         # Create the sequence group.
-        group_id = next(self.seq_group_counter)
-        seq_group = SequenceGroup(group_id, seqs, sampling_params, arrival_time)
+        seq_group = SequenceGroup(request_id, seqs, sampling_params,
+                                  arrival_time)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
-
-    def add_requests(
-        self,
-        prompts: List[str],
-        sampling_params_list: List[SamplingParams],
-        arrival_times: Optional[List[float]] = None,
-    ) -> None:
-        if arrival_times is None:
-            arrival_time = time.time()
-            arrival_times = [arrival_time] * len(prompts)
-
-        # Use batched encoding to speed up.
-        prompt_token_ids_list = self.tokenizer(prompts).input_ids
-        for i in range(len(prompts)):
-            self.add_request(
-                prompts[i],
-                prompt_token_ids_list[i],
-                sampling_params_list[i],
-                arrival_times[i],
-            )
 
     def has_unfinished_requests(self) -> bool:
         return self.scheduler.has_unfinished_seqs()
