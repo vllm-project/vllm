@@ -30,8 +30,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
 
 def get_model(model_config: ModelConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
-    model_dtype = model_config.dtype
-    torch.set_default_dtype(model_dtype)
+    torch.set_default_dtype(model_config.dtype)
 
     # Create a model instance.
     # The weights will be initialized as empty tensors.
