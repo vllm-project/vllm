@@ -1,11 +1,11 @@
+# Copyright 2023 The CacheFlow team.
+# Adapted from https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """Model and data parallel groups."""
 
 import torch
 from typing import Optional
-
-from .utils import GlobalMemoryBuffer
 
 # Intra-layer model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
@@ -43,9 +43,6 @@ _PIPELINE_GLOBAL_RANKS = None
 # A list of global ranks for each data parallel group to ease calculation of the source
 # rank when broadcasting weights from src to all other data parallel ranks
 _DATA_PARALLEL_GLOBAL_RANKS = None
-
-# Memory buffers to avoid dynamic memory allocation
-_GLOBAL_MEMORY_BUFFER = None
 
 _ALL_REDUCE_LAUNCHER: Optional['GraphAllReduce'] = None
 
@@ -198,13 +195,6 @@ def initialize_model_parallel(
             _POSITION_EMBEDDING_GROUP = group
         if rank in ranks:
             _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
-
-    # Initialize global memory buffer
-    # This isn't really "parallel state" but there isn't another good place to
-    # put this. If we end up with a more generic initialization of megatron-core
-    # we could stick it there
-    _set_global_memory_buffer()
-
 
 def initialize_all_reduce_launcher(
     max_num_tokens: int,
@@ -495,17 +485,6 @@ def get_data_parallel_rank():
     """Return my rank for the data parallel group."""
     return torch.distributed.get_rank(group=get_data_parallel_group())
 
-def _set_global_memory_buffer():
-    """Initialize global buffer"""
-    global _GLOBAL_MEMORY_BUFFER
-    assert _GLOBAL_MEMORY_BUFFER is None, 'global memory buffer is already initialized'
-    _GLOBAL_MEMORY_BUFFER = GlobalMemoryBuffer()
-
-def get_global_memory_buffer():
-    """Return the global GlobalMemoryBuffer object"""
-    assert _GLOBAL_MEMORY_BUFFER is not None, 'global memory buffer is not initialized'
-    return _GLOBAL_MEMORY_BUFFER
-
 def get_all_reduce_launcher() -> 'GraphAllReduce':
     assert _ALL_REDUCE_LAUNCHER is not None, 'all reduce launcher is not initialized'
     return _ALL_REDUCE_LAUNCHER
@@ -536,8 +515,6 @@ def destroy_model_parallel():
     _MPU_TENSOR_MODEL_PARALLEL_RANK = None
     global _MPU_PIPELINE_MODEL_PARALLEL_RANK
     _MPU_PIPELINE_MODEL_PARALLEL_RANK = None
-    global _GLOBAL_MEMORY_BUFFER
-    _GLOBAL_MEMORY_BUFFER = None
 
 
 class GraphAllReduce:
