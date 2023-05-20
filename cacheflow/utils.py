@@ -1,6 +1,7 @@
 import enum
-
 import psutil
+import uuid
+
 import torch
 
 
@@ -29,3 +30,7 @@ def get_gpu_memory(gpu: int = 0) -> int:
 
 def get_cpu_memory() -> int:
     return psutil.virtual_memory().total
+
+
+def random_uuid() -> str:
+    return str(uuid.uuid4().hex)

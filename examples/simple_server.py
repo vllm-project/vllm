@@ -3,7 +3,7 @@ import uuid
 
 from cacheflow import (add_server_arguments, initialize_server_from_args,
                        SamplingParams)
-
+from cacheflow.utils import random_uuid
 
 def main(args: argparse.Namespace):
     # Initialize the server.
@@ -25,7 +25,7 @@ def main(args: argparse.Namespace):
         # To test iteration-level scheduling, we add one request at each step.
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
-            request_id = str(uuid.uuid4().hex[:8])
+            request_id = random_uuid()
             server.add_request(request_id, prompt, sampling_params)
 
         request_outputs = server.step()
