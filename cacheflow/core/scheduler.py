@@ -37,12 +37,11 @@ class SchedulerOutputs:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
-        # Swap in and swap out should never happen at the same time.
-        assert not (blocks_to_swap_in and blocks_to_swap_out)
-
         self.blocks_to_swap_in = blocks_to_swap_in
         self.blocks_to_swap_out = blocks_to_swap_out
         self.blocks_to_copy = blocks_to_copy
+        # Swap in and swap out should never happen at the same time.
+        assert not (blocks_to_swap_in and blocks_to_swap_out)
 
     def is_empty(self) -> bool:
         return (not self.blocks_to_swap_in
