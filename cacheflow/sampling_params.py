@@ -31,6 +31,7 @@ class SamplingParams:
         stop_token_ids: Set of token IDs that indicate the end of a sequence.
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
+        stream: Whether to stream the output tokens as they are generated.
     """
 
     def __init__(
@@ -45,6 +46,7 @@ class SamplingParams:
         stop_token_ids: Set[int] = set(),
         max_tokens: int = 16,
         logprobs: int = 0,
+        stream: bool = False,
     ) -> None:
         self.n = n
         self.presence_penalty = presence_penalty
@@ -56,6 +58,7 @@ class SamplingParams:
         self.stop_token_ids = stop_token_ids
         self.max_tokens = max_tokens
         self.logprobs = logprobs
+        self.stream = stream
 
         self._verify_args()
         if self.use_beam_search:
@@ -63,6 +66,8 @@ class SamplingParams:
         elif self.temperature == 0.0:
             # Zero temperature means greedy sampling.
             self._verify_greedy_sampling()
+        if self.stream:
+            self._verity_steam()
 
     def _verify_args(self) -> None:
         if self.n < 1:
@@ -105,6 +110,10 @@ class SamplingParams:
             raise ValueError("top_p must be 1 when using greedy sampling.")
         if self.top_k != -1:
             raise ValueError("top_k must be -1 when using greedy sampling.")
+
+    def _verity_steam(self) -> None:
+        if self.n > 1:
+            raise ValueError("n must be 1 when using stream.")
 
     def __repr__(self) -> str:
         return (f"SamplingParams(n={self.n}, "
