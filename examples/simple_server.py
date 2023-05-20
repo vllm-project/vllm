@@ -28,10 +28,10 @@ def main(args: argparse.Namespace):
             request_id = str(uuid.uuid4().hex[:8])
             server.add_request(request_id, prompt, sampling_params)
 
-        stream_outputs, request_outputs = server.step()
-        assert not stream_outputs
+        request_outputs = server.step()
         for request_output in request_outputs:
-            print(request_output)
+            if request_output.done:
+                print(request_output)
 
         if not (server.has_unfinished_requests() or test_prompts):
             break
