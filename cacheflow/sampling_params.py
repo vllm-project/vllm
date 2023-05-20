@@ -10,8 +10,11 @@ class SamplingParams:
     In addition, we support beam search, which is not supported by OpenAI.
 
     Args:
-        n: Number of output sequences to generate from the given prompt. This is
-            regarded as the beam width when using beam search.
+        n: Number of output sequences to return for the given prompt.
+        best_of: Number of output sequences that are generated from the prompt.
+            From these `best_of` sequences, the top `n` sequences are returned.
+            `best_of` must be greater than or equal to `n`. This is treated as
+            the beam width when `use_beam_search` is True.
         presence_penalty: Float that penalizes new tokens based on whether they
             appear in the generated text so far. Values > 0 encourage the model
             to use new tokens, while values < 0 encourage the model to repeat
@@ -38,6 +41,7 @@ class SamplingParams:
     def __init__(
         self,
         n: int = 1,
+        best_of: int = 1,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
         temperature: float = 1.0,
@@ -50,6 +54,7 @@ class SamplingParams:
         logprobs: int = 0,
     ) -> None:
         self.n = n
+        self.best_of = best_of
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty
         self.temperature = temperature
@@ -71,6 +76,9 @@ class SamplingParams:
     def _verify_args(self) -> None:
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        if self.best_of < self.n:
+            raise ValueError(f"best_of must be greater than or equal to n, "
+                             f"got n={self.n} and best_of={self.best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError("presence_penalty must be in [-2, 2], got "
                              f"{self.presence_penalty}.")
@@ -93,8 +101,9 @@ class SamplingParams:
                 f"logprobs must be non-negative, got {self.logprobs}.")
 
     def _verity_beam_search(self) -> None:
-        if self.n == 1:
-            raise ValueError("n must be greater than 1 when using beam search.")
+        if self.best_of == 1:
+            raise ValueError("best_of must be greater than 1 when using beam "
+                             f"search. Got {self.best_of}.")
         if self.temperature > 0.0:
             raise ValueError("temperature must be 0 when using beam search.")
         if self.top_p < 1.0:
@@ -103,8 +112,9 @@ class SamplingParams:
             raise ValueError("top_k must be -1 when using beam search.")
 
     def _verify_greedy_sampling(self) -> None:
-        if self.n > 1:
-            raise ValueError("n must be 1 when using greedy sampling.")
+        if self.best_of > 1:
+            raise ValueError("best_of must be 1 when using greedy sampling."
+                             f"Got {self.best_of}.")
         if self.top_p < 1.0:
             raise ValueError("top_p must be 1 when using greedy sampling.")
         if self.top_k != -1:
@@ -112,6 +122,7 @@ class SamplingParams:
 
     def __repr__(self) -> str:
         return (f"SamplingParams(n={self.n}, "
+                f"best_of={self.best_of}, "
                 f"presence_penalty={self.presence_penalty}, "
                 f"frequency_penalty={self.frequency_penalty}, "
                 f"temperature={self.temperature}, "
