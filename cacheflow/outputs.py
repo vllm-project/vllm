@@ -68,7 +68,15 @@ class RequestOutput:
             output_token_ids = seq.data.output_token_ids
             output_str = tokenizer.decode(output_token_ids)
             logprobs = seq.output_logprobs
-            output = CompletionOutput(output_str, logprobs)
+
+            if seq_group.sampling_params.logprobs == 0:
+                # NOTE: We need to take care of this case because the sequence
+                # always has the logprobs of the sampled tokens even if the
+                # logprobs are not requested.
+                output = CompletionOutput(output_str, logprobs={})
+            else:
+                # NOTE: The output has at most `logprobs + 1` number of tokens.
+                output = CompletionOutput(output_str, logprobs)
             outputs.append(output)
 
         # Every sequence in the sequence group should have the same prompt.
@@ -77,4 +85,4 @@ class RequestOutput:
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "
-                f"prompt={self.prompt}, outputs={self.outputs})")
+                f"prompt={self.prompt!r}, outputs={self.outputs})")
