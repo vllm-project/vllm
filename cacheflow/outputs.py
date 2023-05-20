@@ -20,7 +20,7 @@ class CompletionOutput:
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
-        return (f"CompletionOutput(output={self.text!r}, "
+        return (f"CompletionOutput(text={self.text!r}, "
                 f"token_ids={self.token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs})")
