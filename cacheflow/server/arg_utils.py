@@ -1,4 +1,5 @@
 import argparse
+from typing import Tuple
 
 from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
                               SchedulerConfig)
@@ -40,7 +41,9 @@ def add_server_arguments(parser: argparse.ArgumentParser):
     return parser
 
 
-def initialize_server_from_args(args: argparse.Namespace) -> LLMServer:
+def create_server_configs_from_args(
+    args: argparse.Namespace,
+) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
     # Post-process the parsed arguments.
     args.swap_space = args.swap_space * _GiB
     args.max_num_seqs = min(args.max_num_seqs, args.max_num_batched_tokens)
@@ -55,11 +58,17 @@ def initialize_server_from_args(args: argparse.Namespace) -> LLMServer:
                                      args.tensor_parallel_size, args.use_ray)
     scheduler_config = SchedulerConfig(args.max_num_batched_tokens,
                                        args.max_num_seqs)
+    return model_config, cache_config, parallel_config, scheduler_config
+
+
+def initialize_server_from_args(args: argparse.Namespace) -> LLMServer:
+    server_configs = create_server_configs_from_args(args)
+    parallel_config = server_configs[2]
+
     # Initialize the cluster.
     distributed_init_method, devices = initialize_cluster(parallel_config)
 
     # Create the LLM server.
-    server = LLMServer(model_config, cache_config, parallel_config,
-                       scheduler_config, distributed_init_method, devices,
+    server = LLMServer(*server_configs, distributed_init_method, devices,
                        log_stats=not args.disable_log_stats)
     return server

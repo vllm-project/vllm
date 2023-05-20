@@ -1,8 +1,7 @@
 import argparse
 
-from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import (
-    add_server_arguments, initialize_server_from_args)
+from cacheflow import (add_server_arguments, initialize_server_from_args,
+                       SamplingParams)
 
 
 def main(args: argparse.Namespace):
