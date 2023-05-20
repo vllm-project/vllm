@@ -5,8 +5,7 @@ import torch
 
 from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
                               SchedulerConfig)
-from cacheflow.model_executor import (get_model, get_cache_block_size,
-                                      InputMetadata, set_random_seed)
+from cacheflow.model_executor import get_model, InputMetadata, set_random_seed
 from cacheflow.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel, initialize_all_reduce_launcher)
 from cacheflow.sampling_params import SamplingParams
@@ -53,6 +52,7 @@ class Worker:
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None
+        self.block_size = None
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
@@ -75,11 +75,12 @@ class Worker:
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99,
                                          top_k=self.model.config.vocab_size - 1)
+        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        max_num_seqs = self.scheduler_config.max_num_seqs
         seqs = []
-        for group_id in range(self.max_num_sequences):
-            seq_len = (self.max_num_batched_tokens // self.max_num_sequences +
-                       (group_id < self.max_num_batched_tokens %
-                        self.max_num_sequences))
+        for group_id in range(max_num_seqs):
+            seq_len = (max_num_batched_tokens // max_num_seqs +
+                       (group_id < max_num_batched_tokens % max_num_seqs))
             seq_data = SequenceData([0] * seq_len)
             seq = SequenceGroupMetadata(
                 group_id=group_id,
@@ -93,10 +94,11 @@ class Worker:
         input_tokens, input_positions, input_metadata = self._prepare_inputs(seqs)
 
         # Execute the model.
+        num_layers = self.model_config.get_num_layers(self.parallel_config)
         self.model(
             input_ids=input_tokens,
             positions=input_positions,
-            kv_caches=[(None, None)] * self.num_layers,
+            kv_caches=[(None, None)] * num_layers,
             input_metadata=input_metadata,
             cache_events=None,
         )
@@ -106,9 +108,8 @@ class Worker:
         torch.cuda.synchronize()
         peak_memory = torch.cuda.max_memory_allocated()
         total_gpu_memory = get_gpu_memory()
-        cache_block_size = get_cache_block_size(block_size, self.num_heads,
-                                                self.head_size, self.num_layers,
-                                                self.dtype)
+        cache_block_size = CacheEngine.get_cache_block_size(
+            block_size, self.model_config, self.parallel_config)
         num_gpu_blocks = int((total_gpu_memory * gpu_memory_utilization
                               - peak_memory) // cache_block_size)
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
@@ -116,11 +117,12 @@ class Worker:
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.seed)
+        set_random_seed(self.model_config.seed)
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
+        self.block_size = cache_config.block_size
         self.cache_engine = CacheEngine(
             self.cache_config, self.model_config, self.parallel_config)
         self.cache_events = self.cache_engine.events
