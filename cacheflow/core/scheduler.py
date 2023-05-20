@@ -6,7 +6,6 @@ from cacheflow.config import CacheConfig, SchedulerConfig
 from cacheflow.core.block_manager import BlockSpaceManager
 from cacheflow.core.policy import PolicyFactory
 from cacheflow.logger import init_logger
-from cacheflow.sampling_params import SamplingParams
 from cacheflow.sequence import (Sequence, SequenceData, SequenceGroup,
                                 SequenceGroupMetadata, SequenceOutputs,
                                 SequenceStatus)
@@ -76,8 +75,6 @@ class Scheduler:
         self.running: List[SequenceGroup] = []
         # Mapping: group_id -> num_steps.
         self.num_steps: Dict[int, int] = {}
-        # Mapping: group_id -> sampling params.
-        self.sampling_params: Dict[int, SamplingParams] = {}
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
 
@@ -85,14 +82,9 @@ class Scheduler:
         # List[timestamp, num_tokens]
         self.num_input_tokens: List[Tuple[float, int]] = []
 
-    def add_seq_groups(
-        self,
-        seq_groups: List[Tuple[SequenceGroup, SamplingParams]],
-    ) -> None:
+    def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
-        for seq_group, sampling_params in seq_groups:
-            self.waiting.append(seq_group)
-            self.sampling_params[seq_group.group_id] = sampling_params
+        self.waiting.append(seq_group)
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
@@ -274,7 +266,7 @@ class Scheduler:
                 group_id=group_id,
                 is_prompt=is_prompt,
                 seq_data=seq_data,
-                sampling_params=self.sampling_params[group_id],
+                sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
             )
             seq_group_metadata_list.append(seq_group_metadata)
@@ -288,7 +280,7 @@ class Scheduler:
         for seq_group in self.running:
             group_id = seq_group.group_id
             self.num_steps[group_id] += 1
-            stop_token_ids = self.sampling_params[group_id].stop_token_ids
+            stop_token_ids = seq_group.sampling_params.stop_token_ids
 
             # Process beam search results before processing the next tokens.
             for seq in seq_group.seqs:
@@ -320,7 +312,7 @@ class Scheduler:
                     continue
 
                 # Check if the sequence has reached the maximum number of steps.
-                max_num_steps = self.sampling_params[group_id].max_tokens
+                max_num_steps = seq_group.sampling_params.max_tokens
                 if self.num_steps[group_id] == max_num_steps:
                     self._free_seq(seq)
                     continue
@@ -416,7 +408,6 @@ class Scheduler:
     def _free_seq_group(self, seq_group: SequenceGroup) -> None:
         group_id = seq_group.group_id
         del self.num_steps[group_id]
-        del self.sampling_params[group_id]
 
     def _swap_in(
         self,

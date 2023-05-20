@@ -117,10 +117,12 @@ class SequenceGroup:
         self,
         group_id: int,
         seqs: List[Sequence],
+        sampling_params: SamplingParams,
         arrival_time: float,
     ) -> None:
         self.group_id = group_id
         self.seqs = seqs
+        self.sampling_params = sampling_params
         self.arrival_time = arrival_time
 
     def get_seqs(
