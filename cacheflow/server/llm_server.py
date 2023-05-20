@@ -1,5 +1,5 @@
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional
 
 try:
     import ray
@@ -10,7 +10,7 @@ from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
                               SchedulerConfig)
 from cacheflow.core.scheduler import Scheduler
 from cacheflow.logger import init_logger
-from cacheflow.outputs import RequestOutput, StreamOutput
+from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.tokenizer_utils import get_tokenizer
 from cacheflow.sequence import Sequence, SequenceGroup
