@@ -1,5 +1,4 @@
 import argparse
-import uuid
 
 from cacheflow import (add_server_arguments, initialize_server_from_args,
                        SamplingParams)
