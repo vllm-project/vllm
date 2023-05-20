@@ -47,6 +47,7 @@ def initialize_cluster(
             if key.startswith('node:'):
                 valid_node_resources.append(key)
 
+    # Verify the parallel config.
     num_nodes = len(valid_node_resources)
     if parallel_config.world_size > num_nodes * num_devices_per_node:
         raise ValueError(
@@ -70,9 +71,9 @@ def initialize_cluster(
     distributed_init_method = None
     all_stage_devices = []
 
-    for i in range(parallel_config.pipeline_parallel_size):
+    for _ in range(parallel_config.pipeline_parallel_size):
         stage_devices = []
-        for j in range(parallel_config.tensor_parallel_size):
+        for _ in range(parallel_config.tensor_parallel_size):
             node_resource = valid_node_resources[current_node_id]
             stage_devices.append((rank, node_resource, current_device_id))
             if distributed_init_method is None:
