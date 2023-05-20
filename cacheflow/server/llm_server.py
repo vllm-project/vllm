@@ -147,7 +147,7 @@ class LLMServer:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         if (not seq_group_metadata_list) and scheduler_outputs.is_empty():
             # Nothing to do.
-            return [], []
+            return []
 
         # Execute the model.
         output = self._run_workers(
