@@ -28,7 +28,7 @@ python examples/simple_server.py --help
 To start the server:
 ```bash
 ray start --head
-python -m cacheflow.entrypoint.fastapi_server # --model <your_model>
+python -m cacheflow.entrypoints.fastapi_server # --model <your_model>
 ```
 
 To test the server:
