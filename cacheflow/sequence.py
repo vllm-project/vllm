@@ -115,12 +115,14 @@ class SequenceGroup:
 
     def __init__(
         self,
-        group_id: int,
+        request_id: str,
         seqs: List[Sequence],
+        sampling_params: SamplingParams,
         arrival_time: float,
     ) -> None:
-        self.group_id = group_id
+        self.request_id = request_id
         self.seqs = seqs
+        self.sampling_params = sampling_params
         self.arrival_time = arrival_time
 
     def get_seqs(
@@ -145,21 +147,22 @@ class SequenceGroup:
         return all(seq.status == SequenceStatus.FINISHED for seq in self.seqs)
 
     def __repr__(self) -> str:
-        return (f'SequenceGroup(group_id={self.group_id}, '
-                f'num_seqs={len(self.seqs)})')
+        return (f"SequenceGroup(request_id={self.request_id}, "
+                f"sampling_params={self.sampling_params}, "
+                f"num_seqs={len(self.seqs)})")
 
 
 class SequenceGroupMetadata:
 
     def __init__(
         self,
-        group_id: int,
+        request_id: str,
         is_prompt: bool,
         seq_data: Dict[int, SequenceData],      # Seq id -> sequence data.
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],     # Seq id -> list of physical block numbers.
     ) -> None:
-        self.group_id = group_id
+        self.request_id = request_id
         self.is_prompt = is_prompt
         self.seq_data = seq_data
         self.sampling_params = sampling_params

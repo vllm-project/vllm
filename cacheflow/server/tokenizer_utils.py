@@ -3,7 +3,6 @@ from typing import Union
 from transformers import (AutoConfig, AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
-
 _MODEL_TYPES_WITH_SLOW_TOKENIZER = [
     # LLaMA fast tokenizer has a bug related to protobuf.
     # See https://github.com/WoosukKwon/cacheflow/issues/80#issue-1698550554
