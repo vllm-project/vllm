@@ -1,4 +1,6 @@
-from typing import Dict, List
+from typing import Dict, List, Union
+
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from cacheflow.sequence import SequenceGroup
 
@@ -43,7 +45,7 @@ class RequestOutput:
     @staticmethod
     def from_seq_group(
         seq_group: SequenceGroup,
-        tokenizer,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ) -> "RequestOutput":
         outputs: List[CompletionOutput] = []
         seqs = seq_group.get_seqs()
