@@ -16,6 +16,7 @@ _MODEL_REGISTRY = {
     "OPTForCausalLM": OPTForCausalLM,
 }
 
+
 def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
