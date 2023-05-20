@@ -1,5 +1,4 @@
 import asyncio
-import json
 import time
 from typing import Any, Dict
 
@@ -75,16 +74,7 @@ class AsyncLLMServer:
 
             # Decode and return new outputs.
             request_output = self.request_outputs[request_id]
-            prompt = request_output.prompt
-            text_outputs = [
-                prompt + output.text
-                for output in request_output.outputs
-            ]
-            ret = {
-                "text": text_outputs,
-                "error": 0,
-            }
-            yield (json.dumps(ret) + "\0").encode("utf-8")
+            yield request_output
 
             # Once finished, release the resources of the sequence group.
             if request_output.done:

@@ -1,4 +1,5 @@
 import argparse
+import json
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 import uvicorn
@@ -15,7 +16,21 @@ app = FastAPI()
 @app.post("/generate")
 async def generate_stream(request: Request):
     request_dict = await request.json()
-    return StreamingResponse(server.generate(request_dict))
+
+    async def stream_results():
+        async for request_output in server.generate(request_dict):
+            prompt = request_output.prompt
+            text_outputs = [
+                prompt + output.text
+                for output in request_output.outputs
+            ]
+            ret = {
+                "text": text_outputs,
+                "error": 0,
+            }
+            yield (json.dumps(ret) + "\0").encode("utf-8")
+
+    return StreamingResponse(stream_results())
 
 
 if __name__ == "__main__":
