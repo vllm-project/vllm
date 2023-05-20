@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import json
 import time
-from typing import List, Dict, Optional
+from typing import Any, Dict
 import uuid
 
 from fastapi import FastAPI, Request
@@ -46,7 +46,7 @@ class FastAPIServer:
             self.request_outputs[request_id] = request_output
             self.request_events[request_id].set()
 
-    async def generate(self, request_dict: Dict):
+    async def generate(self, request_dict: Dict[str, Any]):
         # Preprocess the request.
         arrival_time = time.time()
         prompt = request_dict.pop("prompt")
