@@ -58,8 +58,9 @@ class Scheduler:
         cache_config: CacheConfig,
         log_stats: bool,
     ) -> None:
-        self.server_config = scheduler_config
+        self.scheduler_config = scheduler_config
         self.cache_config = cache_config
+        self.log_stats = log_stats
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name='fcfs')
@@ -152,7 +153,7 @@ class Scheduler:
             # exceed the maximum number of sequences.
             num_new_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
             num_curr_seqs = len(self.running)
-            if num_curr_seqs + num_new_seqs > self.server_config.max_num_seqs:
+            if num_curr_seqs + num_new_seqs > self.scheduler_config.max_num_seqs:
                 break
 
             seq_group = self.swapped.pop(0)
@@ -187,14 +188,14 @@ class Scheduler:
                 # If the number of batched tokens exceeds the limit, stop.
                 num_prompt_tokens = seq_group.seqs[0].get_len()
                 if (num_batched_tokens + num_prompt_tokens
-                    > self.max_num_batched_tokens):
+                    > self.scheduler_config.max_num_batched_tokens):
                     break
 
                 # The total number of sequences in the RUNNING state should not
                 # exceed the maximum number of sequences.
                 num_new_seqs = seq_group.num_seqs(status=SequenceStatus.WAITING)
                 num_curr_seqs = len(self.running)
-                if num_curr_seqs + num_new_seqs > self.server_config.max_num_seqs:
+                if num_curr_seqs + num_new_seqs > self.scheduler_config.max_num_seqs:
                     break
 
                 seq_group = self.waiting.pop(0)
@@ -208,7 +209,7 @@ class Scheduler:
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
         )
-        if not self.server_config.log_stats:
+        if not self.log_stats:
             return scheduler_outputs, prompt_group_ids
 
         # TODO(woosuk): Move the below code to server.
@@ -229,13 +230,16 @@ class Scheduler:
             else:
                 avg_throughput = 0.0
 
+            total_num_gpu_blocks = self.cache_config.num_gpu_blocks
             num_free_gpu_blocks = self.block_manager.get_num_free_gpu_blocks()
-            num_used_gpu_blocks = self.num_gpu_blocks - num_free_gpu_blocks
-            gpu_cache_usage = num_used_gpu_blocks / self.num_gpu_blocks
-            if self.num_cpu_blocks > 0:
+            num_used_gpu_blocks = total_num_gpu_blocks - num_free_gpu_blocks
+            gpu_cache_usage = num_used_gpu_blocks / total_num_gpu_blocks
+
+            total_num_cpu_blocks = self.cache_config.num_cpu_blocks
+            if total_num_cpu_blocks > 0:
                 num_free_cpu_blocks = self.block_manager.get_num_free_cpu_blocks()
-                num_used_cpu_blocks = self.num_cpu_blocks - num_free_cpu_blocks
-                cpu_cache_usage = num_used_cpu_blocks / self.num_cpu_blocks
+                num_used_cpu_blocks = total_num_cpu_blocks - num_free_cpu_blocks
+                cpu_cache_usage = num_used_cpu_blocks / total_num_cpu_blocks
             else:
                 cpu_cache_usage = 0.0
 
