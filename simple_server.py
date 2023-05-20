@@ -21,18 +21,17 @@ def main(args: argparse.Namespace):
          SamplingParams(n=3, use_beam_search=True, temperature=0.0)),
     ]
 
-    # Run the server. Here we assume that one request arrives at a time.
+    # Run the server.
     while True:
+        # To test iteration-level scheduling, we add one request at each step.
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
             server.add_request(prompt, sampling_params)
 
-        updated_seq_groups = server.step()
-        for seq_group in updated_seq_groups:
-            if seq_group.is_finished():
-                for seq in seq_group.seqs:
-                    token_ids = seq.get_token_ids()
-                    print(f"Seq {seq.seq_id}: {token_ids}")
+        stream_outputs, request_outputs = server.step()
+        assert not stream_outputs
+        for request_output in request_outputs:
+            print(request_output)
 
         if not (server.has_unfinished_requests() or test_prompts):
             break
