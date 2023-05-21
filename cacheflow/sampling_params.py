@@ -1,5 +1,5 @@
 """Sampling parameters for text generation."""
-from typing import List, Set, Union
+from typing import List, Union
 
 
 class SamplingParams:
@@ -31,7 +31,8 @@ class SamplingParams:
         top_k: Integer that controls the number of top tokens to consider. Set
             to -1 to consider all tokens.
         use_beam_search: Whether to use beam search instead of sampling.
-        stop: Set of strings that stop the generation when they are generated.
+        stop: List of strings that stop the generation when they are generated.
+            The returned output will not contain the stop strings.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
@@ -48,7 +49,7 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         use_beam_search: bool = False,
-        stop: Union[str, List[str], Set[str]] = set(),
+        stop: Union[str, List[str]] = [],
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: int = 0,
@@ -61,7 +62,7 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.use_beam_search = use_beam_search
-        self.stop = set(stop)
+        self.stop = [stop] if isinstance(stop, str) else list(stop)
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs
