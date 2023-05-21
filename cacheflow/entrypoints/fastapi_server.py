@@ -12,8 +12,7 @@ import uvicorn
 
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import (
-    add_server_arguments, create_server_configs_from_args)
+from cacheflow.server.arg_utils import add_server_arguments, ServerArgs
 from cacheflow.server.llm_server import LLMServer
 from cacheflow.server.ray_utils import initialize_cluster
 
@@ -119,7 +118,7 @@ if __name__ == "__main__":
     parser = add_server_arguments(parser)
     args = parser.parse_args()
 
-    server_configs = create_server_configs_from_args(args)
+    server_configs = ServerArgs.from_cli_args(args).create_server_configs()
     parallel_config = server_configs[2]
     distributed_init_method, stage_devices = initialize_cluster(parallel_config)
 

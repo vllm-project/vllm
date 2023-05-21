@@ -1,13 +1,13 @@
 import argparse
 import uuid
 
-from cacheflow import (add_server_arguments, initialize_server_from_args,
-                       SamplingParams)
+from cacheflow import add_server_arguments, ServerArgs, SamplingParams
 
 
 def main(args: argparse.Namespace):
     # Initialize the server.
-    server = initialize_server_from_args(args)
+    server_args = ServerArgs.from_cli_args(args)
+    server = server_args.initialize_server()
 
     # Test the following prompts.
     test_prompts = [
