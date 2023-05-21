@@ -31,6 +31,12 @@ class ServerArgs:
         self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
 
     @staticmethod
+    def add_cli_args(
+        parser: argparse.ArgumentParser,
+    ) -> argparse.ArgumentParser:
+        return _add_server_arguments(parser)
+
+    @staticmethod
     def from_cli_args(args: argparse.Namespace) -> "ServerArgs":
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(ServerArgs)]
@@ -68,8 +74,10 @@ class ServerArgs:
         return server
 
 
-def add_server_arguments(parser: argparse.ArgumentParser):
-    """Shared arguments for CacheFlow servers."""
+def _add_server_arguments(
+    parser: argparse.ArgumentParser,
+)-> argparse.ArgumentParser:
+    """Shared CLI arguments for CacheFlow servers."""
     # Model arguments
     parser.add_argument('--model', type=str, default='facebook/opt-125m',
                         help='name or path of the huggingface model to use')
