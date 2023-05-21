@@ -77,7 +77,7 @@ class AsyncLLMServer:
             yield request_output
 
             # Once finished, release the resources of the sequence group.
-            if request_output.done:
+            if request_output.finished():
                 del self.request_outputs[request_id]
                 del self.request_events[request_id]
                 # Kick the server if the server is not running. This is to

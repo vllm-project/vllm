@@ -11,7 +11,7 @@ def http_request():
         "use_beam_search": True,
         "temperature": 0.0,
     }
-    response = requests.post("http://localhost:10003/generate", headers=headers, json=pload, stream=True)
+    response = requests.post("http://localhost:10002/generate", headers=headers, json=pload, stream=True)
 
     for chunk in response.iter_lines(chunk_size=8192, decode_unicode=False, delimiter=b"\0"):
         if chunk:

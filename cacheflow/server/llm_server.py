@@ -195,6 +195,7 @@ class LLMServer:
                         # Truncate the output text so that the stop string is
                         # not included in the output.
                         seq.output_text = seq.output_text[:-len(stop_str)]
+                        seq.status = SequenceStatus.FINISHED_STOPPED
                         self.scheduler.free_seq(seq)
                         stopped = True
                         break
@@ -203,11 +204,13 @@ class LLMServer:
 
                 # Check if the sequence has reached max_tokens.
                 if seq.get_output_len() == sampling_params.max_tokens:
+                    seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
                     self.scheduler.free_seq(seq)
                     continue
                 # Check if the sequence has generated the EOS token.
                 if not sampling_params.ignore_eos:
                     if seq.get_last_token_id() == self.tokenizer.eos_token_id:
+                        seq.status = SequenceStatus.FINISHED_STOPPED
                         self.scheduler.free_seq(seq)
                         continue
 
@@ -223,10 +226,10 @@ class LLMServer:
             executor = getattr(worker, method)
             if self.parallel_config.use_ray:
                 executor = executor.remote
-    
+
             output = executor(*args, **kwargs)
             all_outputs.append(output)
-        
+
         if self.parallel_config.use_ray:
             all_outputs = ray.get(all_outputs)
 

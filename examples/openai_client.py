@@ -8,7 +8,7 @@ model = "facebook/opt-125m"
 stream = True
 
 completion = openai.Completion.create(
-    model=model, prompt="A robot may not injure a human being", echo=False, n=2,
+    model=model, prompt="A robot may not injure a human being", echo=False, n=2, logprobs=3,
     stream=stream)
 
 print("completion:", completion)

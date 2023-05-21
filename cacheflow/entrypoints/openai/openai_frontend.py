@@ -64,7 +64,8 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 @app.get("/v1/models")
 async def show_available_models():
-    model_cards = [ModelCard(id=served_model, root=served_model, permission=[ModelPermission()])]
+    model_cards = [ModelCard(id=served_model, root=served_model,
+                             permission=[ModelPermission()])]
     return ModelList(data=model_cards)
 
 @app.post("/v1/completions")
@@ -116,12 +117,12 @@ async def create_completion(request: CompletionRequest):
                     choices=[choice_data],
                 )
                 yield f"data: {response.json(exclude_unset=True, ensure_ascii=False)}\n\n"
-                if res.done:
+                if output.finish_reason is not None:
                     choice_data = CompletionResponseStreamChoice(
                         index=i,
                         text="",
                         logprobs=None,
-                        finish_reason="stop",
+                        finish_reason=output.finish_reason,
                     )
                     response = CompletionStreamResponse(
                         id=request_id,
@@ -129,7 +130,7 @@ async def create_completion(request: CompletionRequest):
                         model=model_name,
                         choices=[choice_data],
                     )
-                    yield f"data: {response.json(exclude_none=True, ensure_ascii=False)}\n\n"
+                    yield f"data: {response.json(exclude_unset=True, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
     if request.stream:
         generator = generate_completion_stream_generator()
