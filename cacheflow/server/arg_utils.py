@@ -21,11 +21,14 @@ class ServerArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     block_size: int = 16
-    swap_space: int = 4
+    swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.95
     max_num_batched_tokens: int = 2560
     max_num_seqs: int = 256
     disable_log_stats: bool = False
+
+    def __post_init__(self):
+        self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
 
     @staticmethod
     def from_cli_args(args: argparse.Namespace) -> "ServerArgs":
@@ -39,9 +42,6 @@ class ServerArgs:
     def create_server_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
-        # Post-process the parsed arguments.
-        self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
-
         # Initialize the configs.
         model_config = ModelConfig(
             self.model, self.download_dir, self.use_np_weights,
