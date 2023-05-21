@@ -7,18 +7,21 @@ class CompletionOutput:
 
     def __init__(
         self,
+        index: int,
         text: str,
         token_ids: List[int],
         cumulative_logprob: float,
         logprobs: List[Dict[int, float]],
     ) -> None:
+        self.index = index
         self.text = text
         self.token_ids = token_ids
         self.cumulative_logprob = cumulative_logprob
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
-        return (f"CompletionOutput(text={self.text!r}, "
+        return (f"CompletionOutput(index={self.index}, "
+                f"text={self.text!r}, "
                 f"token_ids={self.token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs})")
@@ -46,9 +49,9 @@ class RequestOutput:
         n = seq_group.sampling_params.n
         seqs = seq_group.get_seqs()
         assert n <= len(seqs)
-        seqs = sorted(
+        sorted_seqs = sorted(
             seqs, key=lambda seq: seq.get_cumulative_logprob(), reverse=True)
-        top_n_seqs = seqs[:n]
+        top_n_seqs = sorted_seqs[:n]
 
         # Create the outputs.
         outputs: List[CompletionOutput] = []
@@ -59,7 +62,7 @@ class RequestOutput:
                 # always has the logprobs of the sampled tokens even if the
                 # logprobs are not requested.
                 logprobs = {}
-            output = CompletionOutput(seq.output_text,
+            output = CompletionOutput(seqs.index(seq), seq.output_text,
                                       seq.get_output_token_ids(),
                                       seq.get_cumulative_logprob(), logprobs)
             outputs.append(output)
