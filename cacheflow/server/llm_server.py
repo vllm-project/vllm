@@ -30,7 +30,7 @@ class LLMServer:
         scheduler_config: SchedulerConfig,
         distributed_init_method: str,
         stage_devices: List[List[Any]],
-        log_stats: bool = True,
+        log_stats: bool,
     ) -> None:
         logger.info(
             "Initializing an LLM server with config: "
