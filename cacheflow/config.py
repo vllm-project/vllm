@@ -138,6 +138,8 @@ def _get_and_verify_dtype(
         else:
             torch_dtype = config_dtype
     else:
+        if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
+            raise ValueError(f"Unknown dtype: {dtype}")
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
     # Verify the dtype.
