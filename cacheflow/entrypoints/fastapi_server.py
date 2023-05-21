@@ -123,6 +123,7 @@ if __name__ == "__main__":
     parallel_config = server_configs[2]
     distributed_init_method, stage_devices = initialize_cluster(parallel_config)
 
-    server = FastAPIServer(
-        args.use_ray, *server_configs, distributed_init_method, stage_devices)
+    server = FastAPIServer(args.use_ray, *server_configs,
+                           distributed_init_method, stage_devices,
+                           log_stats=not args.disable_log_stats)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
