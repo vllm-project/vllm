@@ -1,6 +1,4 @@
-from typing import Dict, List, Union
-
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing import Dict, List
 
 from cacheflow.sequence import SequenceGroup
 
@@ -43,39 +41,27 @@ class RequestOutput:
         self.done = done
 
     @staticmethod
-    def from_seq_group(
-        seq_group: SequenceGroup,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    ) -> "RequestOutput":
+    def from_seq_group(seq_group: SequenceGroup) -> "RequestOutput":
         # Get the top-n sequences.
         n = seq_group.sampling_params.n
         seqs = seq_group.get_seqs()
-        if n == len(seqs):
-            top_n_seqs = seqs
-        else:
-            assert n < len(seqs)
-            top_n_seqs = sorted(
-                seqs,
-                key=lambda seq: seq.data.cumulative_logprob,
-                reverse=True,
-            )[:n]
+        assert n <= len(seqs)
+        seqs = sorted(
+            seqs, key=lambda seq: seq.get_cumulative_logprob(), reverse=True)
+        top_n_seqs = seqs[:n]
 
         # Create the outputs.
         outputs: List[CompletionOutput] = []
         for seq in top_n_seqs:
-            output_token_ids = seq.data.output_token_ids
-            output_str = tokenizer.decode(output_token_ids,
-                                          skip_special_tokens=True)
-            seq_logprob = seq.data.cumulative_logprob
-
             logprobs = seq.output_logprobs
             if seq_group.sampling_params.logprobs == 0:
                 # NOTE: We need to take care of this case because the sequence
                 # always has the logprobs of the sampled tokens even if the
                 # logprobs are not requested.
                 logprobs = {}
-            output = CompletionOutput(output_str, output_token_ids, seq_logprob,
-                                      logprobs)
+            output = CompletionOutput(seq.output_text,
+                                      seq.get_output_token_ids(),
+                                      seq.get_cumulative_logprob(), logprobs)
             outputs.append(output)
 
         # Every sequence in the sequence group should have the same prompt.
