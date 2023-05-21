@@ -81,15 +81,18 @@ async def create_completion(request: CompletionRequest):
     try:
         sampling_params = SamplingParams(
             n=request.n,
+            best_of=request.best_of,
             presence_penalty=request.presence_penalty,
             frequency_penalty=request.frequency_penalty,
             temperature=request.temperature,
             top_p=request.top_p,
             top_k=request.top_k,
+            stop=request.stop,
+            ignore_eos=request.ignore_eos,
             max_tokens=request.max_tokens,
-            logprobs=request.logprobs if request.logprobs else 0,
+            logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
-            # TODO(zhuohan): support stop, best_of, and logit_bias
+            # TODO(zhuohan): support logit_bias
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -100,7 +103,6 @@ async def create_completion(request: CompletionRequest):
     async def generate_completion_stream_generator():
         previous_texts = [""] * request.n
         async for res in result_generator:
-            print("res:", res)
             for i, output in enumerate(res.outputs):
                 delta_text = output.text[len(previous_texts[i]):]
                 previous_texts[i] = output.text

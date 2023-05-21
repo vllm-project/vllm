@@ -136,6 +136,7 @@ class CompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
     # Additional parameters supported by cacheflow
+    ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
 
 
