@@ -80,7 +80,7 @@ class BlockSpaceManager:
     def can_allocate(self, seq_group: SequenceGroup) -> bool:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
-        seq = seq_group.seqs[0]
+        seq = seq_group.get_seqs()[0]
         num_required_blocks = len(seq.logical_token_blocks)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         # Use watermark to avoid frequent cache eviction.
@@ -88,7 +88,7 @@ class BlockSpaceManager:
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same prompt.
-        seq = seq_group.seqs[0]
+        seq = seq_group.get_seqs()[0]
 
         # Allocate new physical token blocks that will store the prompt tokens.
         block_table: BlockTable = []
@@ -99,7 +99,7 @@ class BlockSpaceManager:
             block_table.append(block)
 
         # Assign the block table for each sequence.
-        for seq in seq_group.seqs:
+        for seq in seq_group.get_seqs():
             self.block_tables[seq.seq_id] = block_table.copy()
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
@@ -147,7 +147,7 @@ class BlockSpaceManager:
         # NOTE: Here, we assume that the physical blocks are only shared by
         # the sequences in the same group.
         blocks: Set[PhysicalTokenBlock] = set()
-        for seq in seq_group.seqs:
+        for seq in seq_group.get_seqs():
             if seq.status == SequenceStatus.FINISHED:
                 continue
             block_table = self.block_tables[seq.seq_id]
@@ -168,7 +168,7 @@ class BlockSpaceManager:
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # CPU block -> GPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
-        for seq in seq_group.seqs:
+        for seq in seq_group.get_seqs():
             if seq.status == SequenceStatus.FINISHED:
                 continue
             new_block_table: BlockTable = []
@@ -199,7 +199,7 @@ class BlockSpaceManager:
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # GPU block -> CPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
-        for seq in seq_group.seqs:
+        for seq in seq_group.get_seqs():
             if seq.status == SequenceStatus.FINISHED:
                 continue
             new_block_table: BlockTable = []
