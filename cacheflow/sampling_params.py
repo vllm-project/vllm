@@ -14,7 +14,8 @@ class SamplingParams:
         best_of: Number of output sequences that are generated from the prompt.
             From these `best_of` sequences, the top `n` sequences are returned.
             `best_of` must be greater than or equal to `n`. This is treated as
-            the beam width when `use_beam_search` is True.
+            the beam width when `use_beam_search` is True. By default, `best_of`
+            is set to `n`.
         presence_penalty: Float that penalizes new tokens based on whether they
             appear in the generated text so far. Values > 0 encourage the model
             to use new tokens, while values < 0 encourage the model to repeat
