@@ -8,7 +8,6 @@ def http_request():
     pload = {
         "prompt": prompt,
         "n": 4,
-        "best_of": 4,
         "use_beam_search": True,
         "temperature": 0.0,
     }
