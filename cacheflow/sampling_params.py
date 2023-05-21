@@ -1,5 +1,5 @@
 """Sampling parameters for text generation."""
-from typing import List, Union
+from typing import List, Optional, Union
 
 
 class SamplingParams:
@@ -42,7 +42,7 @@ class SamplingParams:
     def __init__(
         self,
         n: int = 1,
-        best_of: int = 1,
+        best_of: Optional[int] = None,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
         temperature: float = 1.0,
@@ -55,7 +55,7 @@ class SamplingParams:
         logprobs: int = 0,
     ) -> None:
         self.n = n
-        self.best_of = best_of
+        self.best_of = best_of if best_of is not None else n
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty
         self.temperature = temperature
