@@ -8,8 +8,6 @@ from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
 from cacheflow.server.llm_server import LLMServer
 from cacheflow.server.ray_utils import initialize_cluster
 
-_GiB = 1 << 30
-
 
 @dataclass
 class ServerArgs:
@@ -42,7 +40,6 @@ class ServerArgs:
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
         # Post-process the parsed arguments.
-        self.swap_space = self.swap_space * _GiB
         self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
 
         # Initialize the configs.
