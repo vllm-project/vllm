@@ -91,7 +91,7 @@ class LLMServer:
             get_all_outputs=True,
             block_size=self.cache_config.block_size,
             gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
-            cpu_swap_space=self.cache_config.swap_space,
+            cpu_swap_space=self.cache_config.swap_space_bytes,
         )
 
         # Since we use a shared centralized controller, we take the minimum
