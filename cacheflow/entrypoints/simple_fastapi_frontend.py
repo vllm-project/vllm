@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 import uvicorn
 
+from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.arg_utils import (
     add_server_arguments, create_server_configs_from_args)
 from cacheflow.server.async_llm_server import AsyncLLMServer
@@ -16,9 +17,12 @@ app = FastAPI()
 @app.post("/generate")
 async def generate_stream(request: Request):
     request_dict = await request.json()
+    prompt = request_dict.pop("prompt")
+    sampling_params = SamplingParams(**request_dict)
+    results_generator = server.generate(prompt, sampling_params)
 
     async def stream_results():
-        async for request_output in server.generate(request_dict):
+        async for request_output in results_generator:
             prompt = request_output.prompt
             text_outputs = [
                 prompt + output.text

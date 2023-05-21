@@ -124,6 +124,7 @@ class CompletionRequest(BaseModel):
     max_tokens: Optional[int] = 16
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
+    top_k: Optional[int] = -1
     n: Optional[int] = 1
     stream: Optional[bool] = False
     logprobs: Optional[int] = None

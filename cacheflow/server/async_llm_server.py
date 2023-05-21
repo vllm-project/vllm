@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Any, Dict
+from typing import Optional, Dict
 
 import ray
 
@@ -37,15 +37,15 @@ class AsyncLLMServer:
             self.request_outputs[request_id] = request_output
             self.request_events[request_id].set()
 
-    async def generate(self, request_dict: Dict[str, Any]):
+    async def generate(self, prompt: str, sampling_params: SamplingParams,
+                       request_id: Optional[str] = None) -> RequestOutput:
         # Preprocess the request.
         arrival_time = time.time()
-        prompt = request_dict.pop("prompt")
-        sampling_params = SamplingParams(**request_dict)
 
         # Create an event to notify us that there is new output from the
         # cacheflow server.
-        request_id = random_uuid()
+        if request_id is None:
+            request_id = random_uuid()
         request_event = asyncio.Event()
         self.request_events[request_id] = request_event
 
