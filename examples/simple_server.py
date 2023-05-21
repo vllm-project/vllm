@@ -1,13 +1,13 @@
 import argparse
 import uuid
 
-from cacheflow import ServerArgs, SamplingParams
+from cacheflow import ServerArgs, LLMServer, SamplingParams
 
 
 def main(args: argparse.Namespace):
     # Parse the CLI argument and initialize the server.
     server_args = ServerArgs.from_cli_args(args)
-    server = server_args.initialize_llm_server()
+    server = LLMServer.from_server_args(server_args)
 
     # Test the following prompts.
     test_prompts = [

@@ -5,8 +5,6 @@ from typing import Optional, Tuple
 
 from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
                               SchedulerConfig)
-from cacheflow.server.llm_server import LLMServer
-from cacheflow.server.ray_utils import initialize_cluster
 
 
 @dataclass
@@ -60,18 +58,6 @@ class ServerArgs:
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs)
         return model_config, cache_config, parallel_config, scheduler_config
-
-    def initialize_llm_server(self) -> LLMServer:
-        server_configs = self.create_server_configs()
-        parallel_config = server_configs[2]
-
-        # Initialize the cluster.
-        distributed_init_method, devices = initialize_cluster(parallel_config)
-
-        # Create the LLM server.
-        server = LLMServer(*server_configs, distributed_init_method, devices,
-                           log_stats=not self.disable_log_stats)
-        return server
 
 
 def _add_server_arguments(

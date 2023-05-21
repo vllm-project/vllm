@@ -12,6 +12,8 @@ from cacheflow.core.scheduler import Scheduler
 from cacheflow.logger import init_logger
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
+from cacheflow.server.arg_utils import ServerArgs
+from cacheflow.server.ray_utils import initialize_cluster
 from cacheflow.server.tokenizer_utils import get_tokenizer
 from cacheflow.sequence import Sequence, SequenceGroup, SequenceStatus
 from cacheflow.utils import Counter
@@ -106,6 +108,18 @@ class LLMServer:
 
         # Initialize the cache.
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
+
+    @staticmethod
+    def from_server_args(server_args: ServerArgs) -> "LLMServer":
+        # Create the server configs.
+        server_configs = server_args.create_server_configs()
+        parallel_config = server_configs[2]
+        # Initialize the cluster.
+        distributed_init_method, devices = initialize_cluster(parallel_config)
+        # Create the LLM server.
+        server = LLMServer(*server_configs, distributed_init_method, devices,
+                           log_stats=not server_args.disable_log_stats)
+        return server
 
     def add_request(
         self,
