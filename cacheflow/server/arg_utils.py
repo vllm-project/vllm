@@ -58,7 +58,7 @@ class ServerArgs:
                                            self.max_num_seqs)
         return model_config, cache_config, parallel_config, scheduler_config
 
-    def initialize_server(self) -> LLMServer:
+    def initialize_llm_server(self) -> LLMServer:
         server_configs = self.create_server_configs()
         parallel_config = server_configs[2]
 

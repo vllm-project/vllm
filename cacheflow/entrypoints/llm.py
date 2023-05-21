@@ -27,7 +27,7 @@ class LLM:
             seed=seed,
             **kwargs,
         )
-        self.llm_server = server_args.initialize_server()
+        self.llm_server = server_args.initialize_llm_server()
         self.request_counter = Counter()
 
     def generate(

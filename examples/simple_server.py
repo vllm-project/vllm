@@ -7,7 +7,7 @@ from cacheflow import add_server_arguments, ServerArgs, SamplingParams
 def main(args: argparse.Namespace):
     # Initialize the server.
     server_args = ServerArgs.from_cli_args(args)
-    server = server_args.initialize_server()
+    server = server_args.initialize_llm_server()
 
     # Test the following prompts.
     test_prompts = [
