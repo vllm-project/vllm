@@ -123,7 +123,7 @@ class LLMServer:
         # Create the sequences.
         block_size = self.cache_config.block_size
         seqs: List[Sequence] = []
-        for _ in range(sampling_params.n):
+        for _ in range(sampling_params.best_of):
             seq_id = next(self.seq_counter)
             seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
             seqs.append(seq)
