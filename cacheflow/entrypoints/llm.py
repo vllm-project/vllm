@@ -5,6 +5,7 @@ from tqdm import tqdm
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.arg_utils import ServerArgs
+from cacheflow.server.llm_server import LLMServer
 from cacheflow.utils import Counter
 
 
@@ -27,7 +28,7 @@ class LLM:
             seed=seed,
             **kwargs,
         )
-        self.llm_server = server_args.initialize_llm_server()
+        self.llm_server = LLMServer.from_server_args(server_args)
         self.request_counter = Counter()
 
     def generate(
