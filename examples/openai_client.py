@@ -5,13 +5,11 @@ model = "facebook/opt-125m"
 
 # create a chat completion
 
-stream = True
+stream = False
 
 completion = openai.Completion.create(
-    model=model, prompt="A robot may not injure a human being", echo=False, n=2, logprobs=3,
+    model=model, prompt="A robot may not injure a human being", echo=False, n=2,
     stream=stream)
-
-print("completion:", completion)
 
 # print the chat completion
 if stream:
@@ -19,4 +17,3 @@ if stream:
         print(c)
 else:
     print("completion:", completion)
-

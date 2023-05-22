@@ -27,7 +27,6 @@ from cacheflow.entrypoints.openai.protocol import (
     CompletionResponseChoice,
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
-    ErrorCode,
     ErrorResponse,
     ModelCard,
     ModelList,
@@ -41,9 +40,10 @@ served_model = None
 app = fastapi.FastAPI()
 
 
-def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
+def create_error_response(status_code: HTTPStatus,
+                          message: str) -> JSONResponse:
     return JSONResponse(
-        ErrorResponse(message=message).dict(),
+        ErrorResponse(message=message, type="invalid_request_error").dict(),
         status_code=status_code.value
     )
 
@@ -100,45 +100,84 @@ async def create_completion(request: CompletionRequest):
     result_generator = server.generate(prompt, sampling_params,
                                        request_id=request_id)
 
+    # Similar to the OpenAI API, when n != best_of, we do not stream the
+    # results. In addition, we do not stream the results when use beam search.
+    stream = (request.stream and request.n == request.best_of
+              and not request.use_beam_search)
+
+    def create_stream_response_json(index: int, text: str,
+                               log_probs: Optional[Dict] = None,
+                               finish_reason: Optional[str] = None):
+        choice_data = CompletionResponseStreamChoice(
+            index=index,
+            text=text,
+            logprobs=log_probs,
+            finish_reason=finish_reason,
+        )
+        response = CompletionStreamResponse(
+            id=request_id,
+            created=created_time,
+            model = model_name,
+            choices=[choice_data],
+        )
+        response_json = response.json(exclude_unset=True, ensure_ascii=False)
+        return response_json
+
     async def generate_completion_stream_generator():
         previous_texts = [""] * request.n
         async for res in result_generator:
-            for i, output in enumerate(res.outputs):
+            for output in res.outputs:
+                i = output.index
                 delta_text = output.text[len(previous_texts[i]):]
                 previous_texts[i] = output.text
-                choice_data = CompletionResponseStreamChoice(
+                response_json = create_stream_response_json(
                     index=i,
                     text=delta_text,
-                    logprobs=None,
-                    finish_reason=None,
                 )
-                response = CompletionStreamResponse(
-                    id=request_id,
-                    created=created_time,
-                    model = model_name,
-                    choices=[choice_data],
-                )
-                yield f"data: {response.json(exclude_unset=True, ensure_ascii=False)}\n\n"
+                yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
-                    choice_data = CompletionResponseStreamChoice(
+                    response_json = create_stream_response_json(
                         index=i,
                         text="",
-                        logprobs=None,
                         finish_reason=output.finish_reason,
                     )
-                    response = CompletionStreamResponse(
-                        id=request_id,
-                        created=created_time,
-                        model=model_name,
-                        choices=[choice_data],
-                    )
-                    yield f"data: {response.json(exclude_unset=True, ensure_ascii=False)}\n\n"
+                    yield f"data: {response_json}\n\n"
             yield "data: [DONE]\n\n"
-    if request.stream:
+
+    if stream:
         generator = generate_completion_stream_generator()
         return StreamingResponse(generator, media_type="text/event-stream")
-    else:
-        raise NotImplementedError("Not implemented yet.")
+
+    # Non-streaming response
+    final_res = None
+    async for res in result_generator:
+        final_res = res
+    assert final_res is not None
+    choices = []
+    for output in final_res.outputs:
+        choice_data = CompletionResponseChoice(
+            index=output.index,
+            text=output.text,
+            logprobs=None,
+            finish_reason=output.finish_reason,
+        )
+        choices.append(choice_data)
+    num_prompt_tokens = len(final_res.prompt_token_ids)
+    num_generated_tokens = sum(len(output.token_ids)
+                               for output in final_res.outputs)
+    usage = UsageInfo(
+        prompt_tokens=num_prompt_tokens,
+        completion_tokens=num_generated_tokens,
+        total_tokens=num_prompt_tokens + num_generated_tokens,
+    )
+    response = CompletionResponse(
+        id=request_id,
+        created=created_time,
+        model=model_name,
+        choices=choices,
+        usage=usage,
+    )
+    return response
 
 
 if __name__ == "__main__":
