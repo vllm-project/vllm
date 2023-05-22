@@ -34,13 +34,12 @@ class ServerArgs:
     ) -> argparse.ArgumentParser:
         return _add_server_arguments(parser)
 
-    @staticmethod
-    def from_cli_args(args: argparse.Namespace) -> "ServerArgs":
+    @classmethod
+    def from_cli_args(cls, args: argparse.Namespace) -> "ServerArgs":
         # Get the list of attributes of this dataclass.
-        attrs = [attr.name for attr in dataclasses.fields(ServerArgs)]
+        attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        server_args = ServerArgs(
-            **{attr: getattr(args, attr) for attr in attrs})
+        server_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return server_args
 
     def create_server_configs(

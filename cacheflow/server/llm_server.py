@@ -109,16 +109,16 @@ class LLMServer:
         # Initialize the cache.
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
 
-    @staticmethod
-    def from_server_args(server_args: ServerArgs) -> "LLMServer":
+    @classmethod
+    def from_server_args(cls, server_args: ServerArgs) -> "LLMServer":
         # Create the server configs.
         server_configs = server_args.create_server_configs()
         parallel_config = server_configs[2]
         # Initialize the cluster.
         distributed_init_method, devices = initialize_cluster(parallel_config)
         # Create the LLM server.
-        server = LLMServer(*server_configs, distributed_init_method, devices,
-                           log_stats=not server_args.disable_log_stats)
+        server = cls(*server_configs, distributed_init_method, devices,
+                     log_stats=not server_args.disable_log_stats)
         return server
 
     def add_request(
