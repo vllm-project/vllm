@@ -185,17 +185,12 @@ class LLMServer:
 
     def _decode_sequences(self, seq_groups: List[SequenceGroup]) -> None:
         # Batch-decode the sequence outputs.
-        seqs: List[Sequence] = []
         for seq_group in seq_groups:
-            seqs.extend(seq_group.get_seqs(status=SequenceStatus.RUNNING))
-        output_tokens_per_seq = []
-        for seq in seqs:
-            output_tokens_per_seq.append(seq.get_output_token_ids())
-        output_texts = self.tokenizer.batch_decode(output_tokens_per_seq,
-                                                   skip_special_tokens=True)
-        # Update the sequences with the output texts.
-        for seq, output_text in zip(seqs, output_texts):
-            seq.output_text = output_text
+            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                token_id = seq.get_last_token_id()
+                token = self.tokenizer.convert_ids_to_tokens(token_id, skip_special_tokens=True)
+                seq.output_tokens.append(token)
+                seq.output_text = self.tokenizer.convert_tokens_to_string(seq.output_tokens)
 
     def _stop_sequences(self, seq_groups: List[SequenceGroup]) -> None:
         # Stop the sequences.
