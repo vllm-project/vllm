@@ -96,18 +96,18 @@ class CacheConfig:
     ) -> None:
         total_cpu_memory = get_cpu_memory()
         # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel
-        # group are in the same node, which is not necessarily true.
+        # group are in the same node. However, the GPUs may span multiple nodes.
         num_gpus_per_node = parallel_config.tensor_parallel_size
         cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
 
         msg = (
-            "CPU memory allocated for the swap space is "
             f"{cpu_memory_usage / _GiB:.2f} GiB out of "
-            f"{total_cpu_memory / _GiB:.2f} GiB of total CPU memory.")
-        if cpu_memory_usage > 0.8 * total_cpu_memory:
-            raise ValueError("The swap space is too large. " + msg)
-        if cpu_memory_usage > 0.5 * total_cpu_memory:
-            logger.warn(msg + " This may cause CPU memory overflow.")
+            f"the {total_cpu_memory / _GiB:.2f} GiB total CPU memory is "
+            "allocated for the swap space.")
+        if cpu_memory_usage > 0.7 * total_cpu_memory:
+            raise ValueError("Too large swap space. " + msg)
+        elif cpu_memory_usage > 0.4 * total_cpu_memory:
+            logger.warn("Possibly too large swap space. " + msg)
 
 
 class ParallelConfig:
