@@ -5,8 +5,7 @@ from fastapi.responses import StreamingResponse
 import uvicorn
 
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import (
-    add_server_arguments, create_server_configs_from_args)
+from cacheflow.server.arg_utils import ServerArgs
 from cacheflow.server.async_llm_server import AsyncLLMServer
 from cacheflow.server.ray_utils import initialize_cluster
 
@@ -41,13 +40,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=10002)
-    parser = add_server_arguments(parser)
+    parser = ServerArgs.add_cli_args(parser)
     args = parser.parse_args()
 
-    server_configs = create_server_configs_from_args(args)
-    parallel_config = server_configs[2]
-    distributed_init_method, stage_devices = initialize_cluster(parallel_config)
+    server_args = ServerArgs.from_cli_args(args)
+    server = AsyncLLMServer.from_server_args(server_args)
 
-    server = AsyncLLMServer(
-        args.use_ray, *server_configs, distributed_init_method, stage_devices)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

@@ -6,6 +6,8 @@ import ray
 
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
+from cacheflow.server.arg_utils import ServerArgs
+from cacheflow.server.ray_utils import initialize_cluster
 from cacheflow.server.llm_server import LLMServer
 from cacheflow.utils import random_uuid
 
@@ -86,3 +88,16 @@ class AsyncLLMServer:
                 if not self.is_server_running:
                     await self.server_step()
                 break
+
+    @classmethod
+    def from_server_args(cls, server_args: ServerArgs) -> "AsyncLLMServer":
+        # Create the server configs.
+        server_configs = server_args.create_server_configs()
+        parallel_config = server_configs[2]
+        # Initialize the cluster.
+        distributed_init_method, devices = initialize_cluster(parallel_config)
+        # Create the LLM server.
+        server = cls(server_args.use_ray, *server_configs,
+                     distributed_init_method, devices,
+                     log_stats=not server_args.disable_log_stats)
+        return server
