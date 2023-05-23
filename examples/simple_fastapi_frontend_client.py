@@ -2,7 +2,7 @@ import requests
 import json
 
 def http_request():
-    prompt = "Ion Stoica is a"
+    prompt = "A robot may not injure a human being"
 
     headers = {"User-Agent": "Test Client"}
     pload = {
