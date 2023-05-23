@@ -1,5 +1,7 @@
 import argparse
 import json
+from typing import AsyncGenerator
+
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 import uvicorn
@@ -14,13 +16,13 @@ app = FastAPI()
 
 
 @app.post("/generate")
-async def generate_stream(request: Request):
+async def generate_stream(request: Request) -> StreamingResponse:
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
     sampling_params = SamplingParams(**request_dict)
     results_generator = server.generate(prompt, sampling_params)
 
-    async def stream_results():
+    async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
             prompt = request_output.prompt
             text_outputs = [
@@ -39,7 +41,7 @@ async def generate_stream(request: Request):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=10002)
+    parser.add_argument("--port", type=int, default=8001)
     parser = ServerArgs.add_cli_args(parser)
     args = parser.parse_args()
 
