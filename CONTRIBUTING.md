@@ -4,7 +4,7 @@ Thank you for your interest in contributing to CacheFlow!
 
 ## Setup for development
 
-### Installation for development
+### Build from source
 
 ```bash
 pip install -r requirements.txt
