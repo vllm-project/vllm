@@ -21,6 +21,9 @@ class CompletionOutput:
         self.logprobs = logprobs
         self.finish_reason = finish_reason
 
+    def finished(self) -> bool:
+        return self.finish_reason is not None
+
     def __repr__(self) -> str:
         return (f"CompletionOutput(index={self.index}, "
                 f"text={self.text!r}, "
@@ -63,16 +66,11 @@ class RequestOutput:
                 # always has the logprobs of the sampled tokens even if the
                 # logprobs are not requested.
                 logprobs = {}
-            if seq.status == SequenceStatus.FINISHED_STOPPED:
-                finish_reason = "stop"
-            elif seq.status == SequenceStatus.FINISHED_LENGTH_CAPPED:
-                finish_reason = "length"
-            else:
-                finish_reason = None
+            finshed_reason = SequenceStatus.get_finished_reason(seq.status)
             output = CompletionOutput(seqs.index(seq), seq.output_text,
                                       seq.get_output_token_ids(),
                                       seq.get_cumulative_logprob(), logprobs,
-                                      finish_reason)
+                                      finshed_reason)
             outputs.append(output)
 
         # Every sequence in the sequence group should have the same prompt.
@@ -87,4 +85,4 @@ class RequestOutput:
                 f"outputs={self.outputs})")
 
     def finished(self) -> bool:
-        return all(output.finish_reason is not None for output in self.outputs)
+        return all(output.finished() for output in self.outputs)

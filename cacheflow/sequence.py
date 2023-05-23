@@ -1,6 +1,6 @@
 import copy
 import enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from cacheflow.block import LogicalTokenBlock
 from cacheflow.sampling_params import SamplingParams
@@ -20,6 +20,15 @@ class SequenceStatus(enum.Enum):
             SequenceStatus.FINISHED_LENGTH_CAPPED,
         ]
 
+    @staticmethod
+    def get_finished_reason(status: "SequenceStatus") -> Union[str, None]:
+        if status == SequenceStatus.FINISHED_STOPPED:
+            finish_reason = "stop"
+        elif status == SequenceStatus.FINISHED_LENGTH_CAPPED:
+            finish_reason = "length"
+        else:
+            finish_reason = None
+        return finish_reason
 
 class SequenceData:
 

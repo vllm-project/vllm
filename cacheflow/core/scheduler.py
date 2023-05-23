@@ -296,7 +296,8 @@ class Scheduler:
         # from being modified by the caller.
         return self.running.copy()
 
-    def free_seq(self, seq: Sequence) -> None:
+    def free_seq(self, seq: Sequence, finish_status: SequenceStatus) -> None:
+        seq.status = finish_status
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:

@@ -1,7 +1,7 @@
 import enum
-import psutil
 import uuid
 
+import psutil
 import torch
 
 
