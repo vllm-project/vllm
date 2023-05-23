@@ -2,7 +2,6 @@ import argparse
 import requests
 import json
 
-
 def clear_line(n=1):
     LINE_UP = '\033[1A'
     LINE_CLEAR = '\x1b[2K'
@@ -17,6 +16,7 @@ def http_request(prompt: str, api_url: str, n: int = 1):
         "n": n,
         "use_beam_search": True,
         "temperature": 0.0,
+        "max_tokens": 16,
     }
     response = requests.post(api_url, headers=headers, json=pload, stream=True)
 
@@ -32,7 +32,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--n", type=int, default=4)
-    parser.add_argument("--prompt", type=str, default="A robot may not injure a human being")
+    parser.add_argument("--prompt", type=str, default="San Francisco is a")
     args = parser.parse_args()
     prompt = args.prompt
     api_url = f"http://{args.host}:{args.port}/generate"
@@ -44,5 +44,5 @@ if __name__ == "__main__":
         clear_line(num_printed_lines)
         num_printed_lines = 0
         for i, line in enumerate(h):
-            num_printed_lines += line.count("\n") + 1
-            print(f"Beam candidate {i:2}: {line}", flush=True)
+            num_printed_lines += 1
+            print(f"Beam candidate {i}: {line}", flush=True)
