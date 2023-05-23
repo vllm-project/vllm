@@ -27,22 +27,32 @@ pytest tests/
 
 ### Issue Reporting
 
-If you encounter a bug or have a feature request, please check our issues page first to see if someone else has already reported it. If not, please file a new issue, providing as much relevant information as possible.
+If you encounter a bug or have a feature request, please check our issues page first to see if someone else has already reported it.
+If not, please file a new issue, providing as much relevant information as possible.
 
 ### Pull Requests
 
 When submitting a pull request:
 
 1. Make sure your code has been rebased on top of the latest commit on the main branch.
-2. Include a detailed description of the changes in the pull request. Explain why you made the changes you did.
+2. Include a detailed description of the changes in the pull request.
+Explain why you made the changes you did.
 If your pull request fixes an open issue, please include a reference to it in the description.
+
+### Thank You
+
+Finally, thank you for taking the time to read these guidelines and for your interest in contributing to CacheFlow.
+Your contributions make CacheFlow a great tool for everyone!
 
 ### Code Reviews
 
-All submissions, including submissions by project members, require a code review. To make the review process as smooth as possible, please:
+All submissions, including submissions by project members, require a code review.
+To make the review process as smooth as possible, please:
 
-1. Keep your changes as concise as possible. If your pull request involves multiple unrelated changes, consider splitting it into separate pull requests.
-2. Respond to all comments within a reasonable time frame. If a comment isn't clear or you disagree with a suggestion, feel free to ask for clarification or discuss the suggestion.
+1. Keep your changes as concise as possible.
+If your pull request involves multiple unrelated changes, consider splitting it into separate pull requests.
+2. Respond to all comments within a reasonable time frame.
+If a comment isn't clear or you disagree with a suggestion, feel free to ask for clarification or discuss the suggestion.
 
 ## Coding Style Guide
 
