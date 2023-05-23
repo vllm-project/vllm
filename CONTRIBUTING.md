@@ -2,6 +2,27 @@
 
 Thank you for your interest in contributing to CacheFlow!
 
+## Setup for development
+
+### Installation for development
+
+```bash
+pip install -r requirements.txt
+pip install -e .  # This may take several minutes.
+```
+
+### Testing
+
+```bash
+pip install -r requirements-dev.txt
+
+# Static type checking
+mypy
+# Unit tests
+pytest tests/
+```
+**Note:** Currently, the repository does not pass the mypy tests.
+
 ## Contributing Guidelines
 
 ### Issue Reporting
@@ -22,26 +43,6 @@ All submissions, including submissions by project members, require a code review
 
 1. Keep your changes as concise as possible. If your pull request involves multiple unrelated changes, consider splitting it into separate pull requests.
 2. Respond to all comments within a reasonable time frame. If a comment isn't clear or you disagree with a suggestion, feel free to ask for clarification or discuss the suggestion.
-
-### Installation for development
-
-```bash
-pip install -r requirements.txt
-pip install -e .  # This may take several minutes.
-```
-
-### Testing
-
-```bash
-pip install -r requirements-dev.txt
-
-# Static type checking
-mypy
-# Unit tests
-pytest tests/
-```
-
-**Note:** Currently, the repository does not pass the mypy tests.
 
 ## Coding Style Guide
 
