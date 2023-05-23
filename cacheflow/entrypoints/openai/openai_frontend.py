@@ -15,7 +15,6 @@ import uvicorn
 from cacheflow.outputs import RequestOutput
 from cacheflow.server.arg_utils import ServerArgs
 from cacheflow.server.async_llm_server import AsyncLLMServer
-from cacheflow.server.ray_utils import initialize_cluster
 from cacheflow.server.tokenizer_utils import get_tokenizer
 from cacheflow.logger import init_logger
 from cacheflow.sampling_params import SamplingParams
