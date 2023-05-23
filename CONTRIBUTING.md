@@ -1,6 +1,20 @@
 # Contributing to CacheFlow
 
 Thank you for your interest in contributing to CacheFlow!
+Our community is open to everyone, and welcomes all kinds of contributions, no matter how small or large.
+Here's how you can participate and contribute to our project:
+
+1. Identify and report any issues or bugs.
+2. Request or add a new model.
+3. Suggest or implement new features.
+
+However, remember that contributions aren't just about code.
+We believe in the power of community support; thus, answering queries, assisting others, and enhancing the documentation are highly regarded and beneficial contributions.
+
+Finally, one of the most impactful ways to support us is by raising awareness about CacheFlow.
+Talk about it in your blog posts, highlighting how it's driving your incredible projects.
+Express your support on Twitter if CacheFlow aids you, or simply offer your appreciation by starring our repository.
+
 
 ## Setup for development
 
@@ -22,6 +36,7 @@ mypy
 pytest tests/
 ```
 **Note:** Currently, the repository does not pass the mypy tests.
+
 
 ## Contributing Guidelines
 
@@ -53,6 +68,7 @@ To make the review process as smooth as possible, please:
 If your pull request involves multiple unrelated changes, consider splitting it into separate pull requests.
 2. Respond to all comments within a reasonable time frame.
 If a comment isn't clear or you disagree with a suggestion, feel free to ask for clarification or discuss the suggestion.
+
 
 ## Coding Style Guide
 
