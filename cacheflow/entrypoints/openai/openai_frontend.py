@@ -272,6 +272,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--allowed-headers", type=json.loads, default=["*"], help="allowed headers"
     )
+    parser.add_argument("--served-model-name", type=str, default=None,
+                        help="The model name used in the API. If not specified, "
+                             "the model name will be the same as the "
+                             "huggingface name.")
     parser = ServerArgs.add_cli_args(parser)
     args = parser.parse_args()
 
@@ -285,7 +289,7 @@ if __name__ == "__main__":
 
     logger.info(f"args: {args}")
 
-    served_model = args.model
+    served_model = args.served_model_name or args.model
 
     server_args = ServerArgs.from_cli_args(args)
     server = AsyncLLMServer.from_server_args(server_args)
