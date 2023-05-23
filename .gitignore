@@ -6,6 +6,7 @@
 *.log
 *.csv
 build/
+docs/build/
 
 *.pkl
 *.png
