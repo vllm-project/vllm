@@ -40,23 +40,9 @@ def detokenize_incrementally(
     output_tokens = prev_output_tokens + [new_token]
 
     # Convert the tokens to a string.
-    # Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
-    sub_texts = []
-    current_sub_text = []
-    for token in output_tokens:
-        if skip_special_tokens and token in tokenizer.all_special_ids:
-            continue
-        if (hasattr(tokenizer, "added_tokens_encoder") and
-            token in tokenizer.added_tokens_encoder):
-            if current_sub_text:
-                sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
-                sub_texts.append(sub_text)
-                current_sub_text = []
-            sub_texts.append(token)
-        else:
-            current_sub_text.append(token)
-    if current_sub_text:
-        sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
-        sub_texts.append(sub_text)
-    output_text = " ".join(sub_texts)
+    # We optimize tokenizer._decode() by assuming that the tokenizer does not
+    # have added_tokens_encoder.
+    if hasattr(tokenizer, "added_tokens_encoder"):
+        assert not tokenizer.added_tokens_encoder
+    output_text = tokenizer.convert_tokens_to_string(output_tokens)
     return new_token, output_text

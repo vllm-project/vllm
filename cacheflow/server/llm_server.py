@@ -185,7 +185,7 @@ class LLMServer:
         return request_outputs
 
     def _decode_sequences(self, seq_groups: List[SequenceGroup]) -> None:
-        # Batch-decode the sequence outputs.
+        # Decode the sequence outputs.
         for seq_group in seq_groups:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 new_token, new_output_text = detokenize_incrementally(
