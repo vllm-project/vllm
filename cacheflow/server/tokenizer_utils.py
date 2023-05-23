@@ -3,6 +3,10 @@ from typing import List, Tuple, Union
 from transformers import (AutoConfig, AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
+from cacheflow.logger import init_logger
+
+logger = init_logger(__name__)
+
 _MODEL_TYPES_WITH_SLOW_TOKENIZER = [
     # LLaMA fast tokenizer has a bug related to protobuf.
     # See https://github.com/WoosukKwon/cacheflow/issues/80#issue-1698550554
@@ -17,6 +21,14 @@ def get_tokenizer(
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     config = AutoConfig.from_pretrained(model_name)
     if config.model_type in _MODEL_TYPES_WITH_SLOW_TOKENIZER:
+        if getattr(kwargs, "use_fast", False) == True:
+            raise ValueError(
+                f"Cannot use the fast tokenizer for {config.model_type} due to "
+                "bugs in the fast tokenizer.")
+        logger.info(
+            f"Using the slow tokenizer for {config.model_type} due to bugs in "
+            "the fast tokenizer. This could potentially lead to performance "
+            "degradation.")
         kwargs["use_fast"] = False
     return AutoTokenizer.from_pretrained(model_name, *args, **kwargs)
 
