@@ -45,6 +45,10 @@ pytest tests/
 If you encounter a bug or have a feature request, please check our issues page first to see if someone else has already reported it.
 If not, please file a new issue, providing as much relevant information as possible.
 
+### Coding Style Guide
+
+In general, we adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
+
 ### Pull Requests
 
 When submitting a pull request:
@@ -53,11 +57,6 @@ When submitting a pull request:
 2. Include a detailed description of the changes in the pull request.
 Explain why you made the changes you did.
 If your pull request fixes an open issue, please include a reference to it in the description.
-
-### Thank You
-
-Finally, thank you for taking the time to read these guidelines and for your interest in contributing to CacheFlow.
-Your contributions make CacheFlow a great tool for everyone!
 
 ### Code Reviews
 
@@ -69,7 +68,7 @@ If your pull request involves multiple unrelated changes, consider splitting it 
 2. Respond to all comments within a reasonable time frame.
 If a comment isn't clear or you disagree with a suggestion, feel free to ask for clarification or discuss the suggestion.
 
+### Thank You
 
-## Coding Style Guide
-
-In general, we adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
+Finally, thank you for taking the time to read these guidelines and for your interest in contributing to CacheFlow.
+Your contributions make CacheFlow a great tool for everyone!
