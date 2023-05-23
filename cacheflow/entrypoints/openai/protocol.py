@@ -1,5 +1,5 @@
-from typing import Literal, Optional, List, Dict, Any, Union
-from enum import IntEnum
+# Adapted from https://github.com/lm-sys/FastChat/blob/main/fastchat/protocol/openai_api_protocol.py
+from typing import Literal, Optional, List, Dict, Union
 
 import time
 
@@ -22,7 +22,7 @@ class ModelPermission(BaseModel):
     allow_create_engine: bool = False
     allow_sampling: bool = True
     allow_logprobs: bool = True
-    allow_search_indices: bool = True
+    allow_search_indices: bool = False
     allow_view: bool = True
     allow_fine_tuning: bool = False
     organization: str = "*"
@@ -34,15 +34,15 @@ class ModelCard(BaseModel):
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
-    owned_by: str = "fastchat"
+    owned_by: str = "cacheflow"
     root: Optional[str] = None
     parent: Optional[str] = None
-    permission: List[ModelPermission] = []
+    permission: List[ModelPermission] = Field(default_factory=list)
 
 
 class ModelList(BaseModel):
     object: str = "list"
-    data: List[ModelCard] = []
+    data: List[ModelCard] = Field(default_factory=list)
 
 
 class UsageInfo(BaseModel):
@@ -116,7 +116,7 @@ class CompletionRequest(BaseModel):
     stream: Optional[bool] = False
     logprobs: Optional[int] = None
     echo: Optional[bool] = False
-    stop: Optional[Union[str, List[str]]] = []
+    stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     best_of: Optional[int] = None
@@ -127,11 +127,18 @@ class CompletionRequest(BaseModel):
     use_beam_search: Optional[bool] = False
 
 
+class LogProbs(BaseModel):
+    text_offset: List[int] = Field(default_factory=list)
+    token_logprobs: List[Optional[float]] = Field(default_factory=list)
+    tokens: List[str] = Field(default_factory=list)
+    top_logprobs: List[Optional[Dict[str, float]]] = Field(default_factory=list)
+
+
 class CompletionResponseChoice(BaseModel):
     index: int
     text: str
-    logprobs: Optional[int] = None
-    finish_reason: Optional[Literal["stop", "length"]]
+    logprobs: Optional[LogProbs] = None
+    finish_reason: Optional[Literal["stop", "length"]] = None
 
 
 class CompletionResponse(BaseModel):
@@ -146,7 +153,7 @@ class CompletionResponse(BaseModel):
 class CompletionResponseStreamChoice(BaseModel):
     index: int
     text: str
-    logprobs: Optional[float] = None
+    logprobs: Optional[LogProbs] = None
     finish_reason: Optional[Literal["stop", "length"]] = None
 
 

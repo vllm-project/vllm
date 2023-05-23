@@ -3,15 +3,19 @@ openai.api_key = "EMPTY"
 openai.api_base = "http://localhost:8000/v1"
 model = "facebook/opt-125m"
 
-# create a chat completion
+# list models
+models = openai.Model.list()
+print(models)
+
+# create a completion
 
 stream = False
 
 completion = openai.Completion.create(
     model=model, prompt="A robot may not injure a human being", echo=False, n=2,
-    stream=stream)
+    stream=stream, logprobs=3)
 
-# print the chat completion
+# print the completion
 if stream:
     for c in completion:
         print(c)

@@ -1,9 +1,9 @@
-import asyncio
+# Adapted from https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/openai_api_server.py
+
 import argparse
-import asyncio
 import json
 import time
-from typing import Generator, Optional, Union, Dict, List, Any
+from typing import Optional, Dict, List, AsyncGenerator
 from http import HTTPStatus
 
 import fastapi
@@ -12,16 +12,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 
+from cacheflow.outputs import RequestOutput
 from cacheflow.server.arg_utils import (
     add_server_arguments, create_server_configs_from_args)
 from cacheflow.server.async_llm_server import AsyncLLMServer
 from cacheflow.server.ray_utils import initialize_cluster
+from cacheflow.server.tokenizer_utils import get_tokenizer
 from cacheflow.logger import init_logger
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import random_uuid
-
-
 from cacheflow.entrypoints.openai.protocol import (
+    LogProbs,
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,
@@ -62,17 +63,57 @@ async def check_model(request) -> Optional[JSONResponse]:
     )
     return ret
 
+
 @app.get("/v1/models")
 async def show_available_models():
     model_cards = [ModelCard(id=served_model, root=served_model,
                              permission=[ModelPermission()])]
     return ModelList(data=model_cards)
 
+
+def create_logprobs(token_ids: List[int],
+                    id_logprobs: List[Dict[int, float]],
+                    initial_text_offset: int = 0) -> LogProbs:
+    logprobs = LogProbs()
+    last_token_len = 0
+    for token_id, id_logprob in zip(token_ids, id_logprobs):
+        token = tokenizer.convert_ids_to_tokens(token_id)
+        logprobs.tokens.append(token)
+        logprobs.token_logprobs.append(id_logprob[token_id])
+        if len(logprobs.text_offset) == 0:
+            logprobs.text_offset.append(initial_text_offset)
+        else:
+            logprobs.text_offset.append(logprobs.text_offset[-1] + last_token_len)
+        last_token_len = len(token)
+
+        logprobs.top_logprobs.append(
+            {tokenizer.convert_ids_to_tokens(i): p
+             for i, p in id_logprob.items()})
+    return logprobs
+
+
 @app.post("/v1/completions")
 async def create_completion(request: CompletionRequest):
+    logger.info(f"Received completion request: {request}")
+
     error_check_ret = await check_model(request)
     if error_check_ret is not None:
         return error_check_ret
+
+    if request.echo:
+        # We do not support echo since the cacheflow server does not
+        # currently support getting the logprobs of prompt tokens.
+        return create_error_response(HTTPStatus.BAD_REQUEST,
+                                     "echo is not currently supported")
+
+    if request.suffix is not None:
+        return create_error_response(HTTPStatus.BAD_REQUEST,
+                                    "suffix is not currently supported")
+
+    if request.logit_bias is not None:
+        # TODO: support logit_bias in cacheflow server.
+        return create_error_response(HTTPStatus.BAD_REQUEST,
+                                     "logit_bias is not currently supported")
 
     model_name = request.model
     request_id = f"cmpl-{random_uuid()}"
@@ -92,7 +133,6 @@ async def create_completion(request: CompletionRequest):
             max_tokens=request.max_tokens,
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
-            # TODO(zhuohan): support logit_bias
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -102,43 +142,59 @@ async def create_completion(request: CompletionRequest):
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.
-    stream = (request.stream and request.n == request.best_of
-              and not request.use_beam_search)
+    stream = (request.stream and
+              (request.best_of is None or request.n == request.best_of) and
+              not request.use_beam_search)
 
-    def create_stream_response_json(index: int, text: str,
-                               log_probs: Optional[Dict] = None,
-                               finish_reason: Optional[str] = None):
+    def create_stream_response_json(index: int,
+                                    text: str,
+                                    logprobs: Optional[LogProbs] = None,
+                                    finish_reason: Optional[str] = None) -> str:
         choice_data = CompletionResponseStreamChoice(
             index=index,
             text=text,
-            logprobs=log_probs,
+            logprobs=logprobs,
             finish_reason=finish_reason,
         )
         response = CompletionStreamResponse(
             id=request_id,
             created=created_time,
-            model = model_name,
+            model=model_name,
             choices=[choice_data],
         )
-        response_json = response.json(exclude_unset=True, ensure_ascii=False)
+        response_json = response.json(ensure_ascii=False)
+
         return response_json
 
-    async def generate_completion_stream_generator():
+    async def generate_completion_stream_generator() -> AsyncGenerator[str, None]:
         previous_texts = [""] * request.n
+        previous_num_tokens = [0] * request.n
         async for res in result_generator:
+            res: RequestOutput
             for output in res.outputs:
                 i = output.index
                 delta_text = output.text[len(previous_texts[i]):]
+                if request.logprobs is not None:
+                    logprobs = create_logprobs(
+                        output.token_ids[previous_num_tokens[i]:],
+                        output.logprobs[previous_num_tokens[i]:],
+                        len(previous_texts[i]))
+                else:
+                    logprobs = None
                 previous_texts[i] = output.text
+                previous_num_tokens[i] = len(output.token_ids)
                 response_json = create_stream_response_json(
                     index=i,
                     text=delta_text,
+                    logprobs=logprobs,
                 )
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
+                    logprobs = LogProbs() if request.logprobs is not None else None
                     response_json = create_stream_response_json(
                         index=i,
                         text="",
+                        logprobs=logprobs,
                         finish_reason=output.finish_reason,
                     )
                     yield f"data: {response_json}\n\n"
@@ -155,13 +211,18 @@ async def create_completion(request: CompletionRequest):
     assert final_res is not None
     choices = []
     for output in final_res.outputs:
+        if request.logprobs is not None:
+            logprobs = create_logprobs(output.token_ids, output.logprobs)
+        else:
+            logprobs = None
         choice_data = CompletionResponseChoice(
             index=output.index,
             text=output.text,
-            logprobs=None,
+            logprobs=logprobs,
             finish_reason=output.finish_reason,
         )
         choices.append(choice_data)
+
     num_prompt_tokens = len(final_res.prompt_token_ids)
     num_generated_tokens = sum(len(output.token_ids)
                                for output in final_res.outputs)
@@ -216,6 +277,9 @@ if __name__ == "__main__":
     server_configs = create_server_configs_from_args(args)
     parallel_config = server_configs[2]
     distributed_init_method, stage_devices = initialize_cluster(parallel_config)
+
+    # A separate tokenizer to map token IDs to strings.
+    tokenizer = get_tokenizer(args.model)
 
     server = AsyncLLMServer(
         args.use_ray, *server_configs, distributed_init_method, stage_devices)
