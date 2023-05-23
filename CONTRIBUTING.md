@@ -17,7 +17,7 @@ pip install -r requirements-dev.txt
 # Static type checking
 mypy
 # Unit tests
-pytest tests
+pytest tests/
 ```
 
 **Note:** Currently, the repository does not pass the mypy tests.
