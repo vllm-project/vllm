@@ -9,11 +9,11 @@ print(models)
 
 # create a completion
 
-stream = False
+stream = True
 
 completion = openai.Completion.create(
     model=model, prompt="A robot may not injure a human being", echo=False, n=2,
-    stream=stream, logprobs=3)
+    best_of=3, stream=stream, logprobs=3)
 
 # print the completion
 if stream:

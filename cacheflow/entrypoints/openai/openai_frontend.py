@@ -66,6 +66,7 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 @app.get("/v1/models")
 async def show_available_models():
+    """Show available models. Right now we only have one model."""
     model_cards = [ModelCard(id=served_model, root=served_model,
                              permission=[ModelPermission()])]
     return ModelList(data=model_cards)
@@ -74,6 +75,7 @@ async def show_available_models():
 def create_logprobs(token_ids: List[int],
                     id_logprobs: List[Dict[int, float]],
                     initial_text_offset: int = 0) -> LogProbs:
+    """Create OpenAI-style logprobs."""
     logprobs = LogProbs()
     last_token_len = 0
     for token_id, id_logprob in zip(token_ids, id_logprobs):
@@ -107,6 +109,7 @@ async def create_completion(request: CompletionRequest):
                                      "echo is not currently supported")
 
     if request.suffix is not None:
+        # The language models we currently support do not support suffix.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                     "suffix is not currently supported")
 
@@ -166,7 +169,7 @@ async def create_completion(request: CompletionRequest):
 
         return response_json
 
-    async def generate_completion_stream_generator() -> AsyncGenerator[str, None]:
+    async def completion_stream_generator() -> AsyncGenerator[str, None]:
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
         async for res in result_generator:
@@ -200,12 +203,13 @@ async def create_completion(request: CompletionRequest):
                     yield f"data: {response_json}\n\n"
             yield "data: [DONE]\n\n"
 
+    # Streaming response
     if stream:
-        generator = generate_completion_stream_generator()
-        return StreamingResponse(generator, media_type="text/event-stream")
+        return StreamingResponse(completion_stream_generator(),
+                                 media_type="text/event-stream")
 
     # Non-streaming response
-    final_res = None
+    final_res: RequestOutput = None
     async for res in result_generator:
         final_res = res
     assert final_res is not None
@@ -238,6 +242,17 @@ async def create_completion(request: CompletionRequest):
         choices=choices,
         usage=usage,
     )
+
+    if request.stream:
+        # When user requests streaming but we don't stream, we still need to
+        # return a streaming response with a single event.
+        response_json = response.json(ensure_ascii=False)
+        async def fake_stream_generator() -> AsyncGenerator[str, None]:
+            yield f"data: {response_json}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(fake_stream_generator(),
+                                 media_type="text/event-stream")
+
     return response
 
 
