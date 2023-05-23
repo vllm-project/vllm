@@ -2,11 +2,11 @@
 
 Thank you for your interest in contributing to CacheFlow!
 Our community is open to everyone and welcomes all kinds of contributions, no matter how small or large.
-Here's how you can participate and contribute to our project:
+There are several ways you can contribute to the project:
 
-1. Identify and report any issues or bugs.
-2. Request or add a new model.
-3. Suggest or implement new features.
+- Identify and report any issues or bugs.
+- Request or add a new model.
+- Suggest or implement new features.
 
 However, remember that contributions aren't just about code.
 We believe in the power of community support; thus, answering queries, assisting others, and enhancing the documentation are highly regarded and beneficial contributions.
