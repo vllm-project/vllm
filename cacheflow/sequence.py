@@ -116,10 +116,11 @@ class Sequence:
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
 
-    def fork(self, child_seq: 'Sequence') -> 'Sequence':
+    def fork(self, child_seq: 'Sequence') -> None:
         child_seq.logical_token_blocks = copy.deepcopy(self.logical_token_blocks)
         child_seq.output_logprobs = copy.deepcopy(self.output_logprobs)
         child_seq.data = copy.deepcopy(self.data)
+        return None
 
     def __repr__(self) -> str:
         return (f'Sequence(seq_id={self.seq_id}, '
@@ -205,7 +206,9 @@ class SequenceOutputs:
                 f'output_token={self.output_token}), '
                 f'logprobs={self.logprobs}')
 
-    def __eq__(self, other: 'SequenceOutputs') -> bool:
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SequenceOutputs):
+            return NotImplemented
         return (self.seq_id == other.seq_id and
                 self.parent_seq_id == other.parent_seq_id and
                 self.output_token == other.output_token and
