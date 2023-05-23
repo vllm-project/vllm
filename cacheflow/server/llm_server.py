@@ -14,7 +14,8 @@ from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.arg_utils import ServerArgs
 from cacheflow.server.ray_utils import initialize_cluster
-from cacheflow.server.tokenizer_utils import get_tokenizer
+from cacheflow.server.tokenizer_utils import (get_tokenizer,
+                                              detokenize_incrementally)
 from cacheflow.sequence import Sequence, SequenceGroup, SequenceStatus
 from cacheflow.utils import Counter
 from cacheflow.worker.worker import Worker
@@ -187,10 +188,14 @@ class LLMServer:
         # Batch-decode the sequence outputs.
         for seq_group in seq_groups:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                token_id = seq.get_last_token_id()
-                token = self.tokenizer.convert_ids_to_tokens(token_id, skip_special_tokens=True)
-                seq.output_tokens.append(token)
-                seq.output_text = self.tokenizer.convert_tokens_to_string(seq.output_tokens)
+                new_token, new_output_text = detokenize_incrementally(
+                    self.tokenizer,
+                    seq.output_tokens,
+                    seq.get_last_token_id(),
+                    skip_special_tokens=True,
+                )
+                seq.output_tokens.append(new_token)
+                seq.output_text = new_output_text
 
     def _stop_sequences(self, seq_groups: List[SequenceGroup]) -> None:
         # Stop the sequences.
