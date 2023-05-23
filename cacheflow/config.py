@@ -101,8 +101,9 @@ class CacheConfig:
         cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
 
         msg = (
-            f"CPU memory usage for the swap space is {cpu_memory_usage / _GiB} "
-            f"GiB out of {total_cpu_memory / _GiB} GiB of total CPU memory.")
+            "CPU memory allocated for the swap space is "
+            f"{cpu_memory_usage / _GiB:.2f} GiB out of "
+            f"{total_cpu_memory / _GiB:.2f} GiB of total CPU memory.")
         if cpu_memory_usage > 0.8 * total_cpu_memory:
             raise ValueError("The swap space is too large. " + msg)
         if cpu_memory_usage > 0.5 * total_cpu_memory:
