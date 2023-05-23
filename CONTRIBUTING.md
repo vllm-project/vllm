@@ -1,7 +1,7 @@
 # Contributing to CacheFlow
 
 Thank you for your interest in contributing to CacheFlow!
-Our community is open to everyone, and welcomes all kinds of contributions, no matter how small or large.
+Our community is open to everyone and welcomes all kinds of contributions, no matter how small or large.
 Here's how you can participate and contribute to our project:
 
 1. Identify and report any issues or bugs.
