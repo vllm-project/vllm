@@ -8,3 +8,4 @@ transformers >= 4.28.0  # Required for LLaMA.
 xformers >= 0.0.19
 fastapi
 uvicorn
+pydantic  # Required for OpenAI server.

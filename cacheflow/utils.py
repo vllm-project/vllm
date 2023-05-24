@@ -1,4 +1,5 @@
 import enum
+import uuid
 
 import psutil
 import torch
@@ -31,3 +32,7 @@ def get_gpu_memory(gpu: int = 0) -> int:
 def get_cpu_memory() -> int:
     """Returns the total CPU memory of the node in bytes."""
     return psutil.virtual_memory().total
+
+
+def random_uuid() -> str:
+    return str(uuid.uuid4().hex)

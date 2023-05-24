@@ -1,5 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import torch
@@ -258,9 +258,9 @@ def _apply_top_p_top_k(
 
 def _get_topk_logprobs(
     logprobs: torch.Tensor,
-    num_logprobs: int,
+    num_logprobs: Optional[int],
 ) -> Dict[int, float]:
-    if num_logprobs == 0:
+    if num_logprobs is None or num_logprobs == 0:
         return {}
 
     topk_logprobs, topk_ids = torch.topk(logprobs, num_logprobs)
