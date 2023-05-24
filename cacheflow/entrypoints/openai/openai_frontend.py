@@ -1,10 +1,10 @@
-# Adapted from https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/openai_api_server.py
+# Adapted from https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/serve/openai_api_server.py
 
 import argparse
+from http import HTTPStatus
 import json
 import time
-from typing import Optional, Dict, List, AsyncGenerator
-from http import HTTPStatus
+from typing import AsyncGenerator, Dict, List, Optional
 
 import fastapi
 from fastapi.exceptions import RequestValidationError
