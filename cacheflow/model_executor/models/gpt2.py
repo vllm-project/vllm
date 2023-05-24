@@ -168,8 +168,8 @@ class GPT2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        position_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
@@ -204,8 +204,8 @@ class GPT2LMHeadModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        positions: torch.LongTensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],

@@ -31,7 +31,7 @@ class RequestOutput:
 
     def __init__(
         self,
-        request_id: int,
+        request_id: str,
         prompt: str,
         prompt_token_ids: List[int],
         outputs: List[CompletionOutput],

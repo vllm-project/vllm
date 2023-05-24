@@ -87,7 +87,7 @@ class Scheduler:
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
 
-    def _schedule(self) -> Tuple[SchedulerOutputs, List[int]]:
+    def _schedule(self) -> Tuple[SchedulerOutputs, List[str]]:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}

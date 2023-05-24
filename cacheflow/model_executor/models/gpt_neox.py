@@ -67,7 +67,7 @@ class GPTNeoXAttention(nn.Module):
 
     def forward(
         self,
-        position_ids: torch.LongTensor,
+        position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
@@ -118,7 +118,7 @@ class GPTNeoXLayer(nn.Module):
 
     def forward(
         self,
-        position_ids: torch.LongTensor,
+        position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
@@ -162,8 +162,8 @@ class GPTNeoXModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        position_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
@@ -199,8 +199,8 @@ class GPTNeoXForCausalLM(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        positions: torch.LongTensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],

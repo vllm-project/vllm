@@ -347,7 +347,7 @@ def _sample_from_generation_tokens(
         # Greedy sampling.
         assert len(seq_ids) == 1
         next_token_id = torch.argmax(probs, dim=-1)
-        next_token_ids = [next_token_id.item()]
+        next_token_ids = [int(next_token_id.item())]
         parent_seq_ids = seq_ids
     else:
         # Random sampling.

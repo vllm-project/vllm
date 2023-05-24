@@ -109,7 +109,7 @@ class LlamaAttention(nn.Module):
 
     def forward(
         self,
-        positions: torch.LongTensor,
+        positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
@@ -143,7 +143,7 @@ class LlamaDecoderLayer(nn.Module):
 
     def forward(
         self,
-        positions: torch.LongTensor,
+        positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
@@ -184,8 +184,8 @@ class LlamaModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        positions: torch.LongTensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
@@ -222,8 +222,8 @@ class LlamaForCausalLM(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        positions: torch.LongTensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],

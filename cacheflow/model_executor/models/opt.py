@@ -47,7 +47,7 @@ class OPTLearnedPositionalEmbedding(nn.Embedding):
         self.offset = 2
         super().__init__(num_embeddings + self.offset, embedding_dim)
 
-    def forward(self, positions: torch.LongTensor):
+    def forward(self, positions: torch.Tensor):
         return super().forward(positions + self.offset)
 
 
@@ -199,8 +199,8 @@ class OPTDecoder(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        positions: torch.LongTensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
@@ -235,8 +235,8 @@ class OPTModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        positions: torch.LongTensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
@@ -258,8 +258,8 @@ class OPTForCausalLM(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        positions: torch.LongTensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],

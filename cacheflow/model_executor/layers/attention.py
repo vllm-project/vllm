@@ -61,7 +61,7 @@ class GPTCacheFlowAttention(nn.Module):
         key: torch.Tensor,                      # [num_prompt_tokens, num_heads, head_size]
         value: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
         attn_bias: xops.AttentionBias,
-    ) -> None:
+    ) -> torch.Tensor:
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(
             query.unsqueeze(0),
@@ -197,7 +197,7 @@ class GPTNeoXCacheFlowAttention(GPTCacheFlowAttention):
 
     def forward(
         self,
-        positions: torch.LongTensor,            # [num_tokens]
+        positions: torch.Tensor,                # [num_tokens]
         query: torch.Tensor,                    # [num_tokens, num_heads * head_size]
         key: torch.Tensor,                      # [num_tokens, num_heads * head_size]
         value: torch.Tensor,                    # [num_tokens, num_heads * head_size]
