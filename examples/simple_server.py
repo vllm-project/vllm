@@ -1,7 +1,6 @@
 import argparse
 
 from cacheflow import ServerArgs, LLMServer, SamplingParams
-from cacheflow.utils import random_uuid
 
 
 def main(args: argparse.Namespace):
@@ -20,13 +19,15 @@ def main(args: argparse.Namespace):
          SamplingParams(n=3, best_of=3, use_beam_search=True, temperature=0.0)),
     ]
 
+    request_id = 0
+
     # Run the server.
     while True:
         # To test iteration-level scheduling, we add one request at each step.
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
-            request_id = random_uuid()
-            server.add_request(request_id, prompt, sampling_params)
+            server.add_request(str(request_id), prompt, sampling_params)
+            request_id += 1
 
         request_outputs = server.step()
         for request_output in request_outputs:
