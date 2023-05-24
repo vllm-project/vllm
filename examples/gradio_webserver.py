@@ -39,4 +39,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     demo = build_demo()
-    demo.queue(concurrency_count=100).launch(server_name=args.host, server_port=args.port, share=True)
+    demo.queue(concurrency_count=100).launch(server_name=args.host,
+                                             server_port=args.port,
+                                             share=True)

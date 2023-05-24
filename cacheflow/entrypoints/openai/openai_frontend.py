@@ -20,13 +20,13 @@ from cacheflow.logger import init_logger
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import random_uuid
 from cacheflow.entrypoints.openai.protocol import (
-    LogProbs,
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
     ErrorResponse,
+    LogProbs,
     ModelCard,
     ModelList,
     ModelPermission,
