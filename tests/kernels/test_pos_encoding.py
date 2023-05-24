@@ -49,7 +49,7 @@ class RefRotaryEmbeddingNeox(nn.Module):
 
     def forward(
         self,
-        positions: torch.LongTensor,    # [num_tokens]
+        positions: torch.Tensor,        # [num_tokens]
         query: torch.Tensor,            # [num_tokens, num_heads, head_size]
         key: torch.Tensor,              # [num_tokens, num_heads, head_size]
     ) -> Tuple[torch.Tensor, torch.Tensor]:

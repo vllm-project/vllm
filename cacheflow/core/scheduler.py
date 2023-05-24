@@ -87,7 +87,7 @@ class Scheduler:
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
 
-    def _schedule(self) -> Tuple[SchedulerOutputs, List[int]]:
+    def _schedule(self) -> Tuple[SchedulerOutputs, List[str]]:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
@@ -291,7 +291,7 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 # Append a new token to the sequence.
                 output = seq_outputs[seq.seq_id]
-                seq.append_token(output.output_token, output.logprobs)
+                seq.append_token_id(output.output_token, output.logprobs)
         # Return a shallow copy of the running queue to prevent the queue
         # from being modified by the caller.
         return self.running.copy()

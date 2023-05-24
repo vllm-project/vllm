@@ -40,7 +40,7 @@ class SequenceData:
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
 
-    def append_token(self, token_id: int, logprob: float) -> None:
+    def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
@@ -80,6 +80,7 @@ class Sequence:
 
         self.data = SequenceData(prompt_token_ids)
         self.output_logprobs: List[Dict[int, float]] = []
+        self.output_tokens: List[str] = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
@@ -108,11 +109,15 @@ class Sequence:
             last_block.append_tokens(token_ids[:num_empty_slots])
             token_ids = token_ids[num_empty_slots:]
 
-    def append_token(self, token_id: int, logprobs: Dict[int, float]) -> None:
+    def append_token_id(
+        self,
+        token_id: int,
+        logprobs: Dict[int, float],
+    ) -> None:
         assert token_id in logprobs
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
-        self.data.append_token(token_id, logprobs[token_id])
+        self.data.append_token_id(token_id, logprobs[token_id])
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -132,10 +137,11 @@ class Sequence:
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
 
-    def fork(self, child_seq: 'Sequence') -> 'Sequence':
+    def fork(self, child_seq: 'Sequence') -> None:
         child_seq.logical_token_blocks = copy.deepcopy(self.logical_token_blocks)
         child_seq.output_logprobs = copy.deepcopy(self.output_logprobs)
         child_seq.data = copy.deepcopy(self.data)
+        return None
 
     def __repr__(self) -> str:
         return (f'Sequence(seq_id={self.seq_id}, '
@@ -221,7 +227,9 @@ class SequenceOutputs:
                 f'output_token={self.output_token}), '
                 f'logprobs={self.logprobs}')
 
-    def __eq__(self, other: 'SequenceOutputs') -> bool:
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SequenceOutputs):
+            return NotImplemented
         return (self.seq_id == other.seq_id and
                 self.parent_seq_id == other.parent_seq_id and
                 self.output_token == other.output_token and
