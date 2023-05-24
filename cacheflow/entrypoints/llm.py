@@ -10,6 +10,28 @@ from cacheflow.utils import Counter
 
 
 class LLM:
+    """An LLM for generating texts from given prompts and sampling parameters.
+
+    This class includes a tokenizer, an LLM model (possibly distributed across
+    multiple GPUs), and GPU memory space allocated for intermediate states (aka
+    KV cache). Given a batch of prompts and sampling parameters, this class
+    generates texts from the LLM model, using an intelligent batching mechanism
+    and efficient memory management.
+
+    NOTE: This class is intended to be used for offline inference. For online
+    serving, use the `LLMServer` class instead.
+
+    Args:
+        model: The name or path of a huggingface transformers model.
+        tensor_parallel_size: The number of GPUs to use for distributed execution.
+        dtype: The data type to use for the model weights and activations.
+            Currently, we support `float16`, and `bfloat16`. If `default`, we
+            refer to torch_dtype in the model config and use `float16` for
+            `float16` and `float32` models, and `bfloat16` for `bfloat16` models.
+        seed: The seed to initialize the random states.
+
+    For more arguments, see `ServerArgs`.
+    """
 
     def __init__(
         self,
