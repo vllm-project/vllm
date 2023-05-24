@@ -1,26 +1,20 @@
-import argparse
 import asyncio
-import json
 import time
-from typing import Any, Dict
-import uuid
+from typing import Dict, Optional
 
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
 import ray
-import uvicorn
 
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.arg_utils import ServerArgs
 from cacheflow.server.llm_server import LLMServer
 from cacheflow.server.ray_utils import initialize_cluster
+from cacheflow.utils import random_uuid
 
 TIMEOUT_TO_PREVENT_DEADLOCK = 1 # seconds
-app = FastAPI()
 
 
-class FastAPIServer:
+class AsyncLLMServer:
 
     def __init__(self, server_use_ray: bool, *args, **kwargs) -> None:
         if server_use_ray:
@@ -45,15 +39,15 @@ class FastAPIServer:
             self.request_outputs[request_id] = request_output
             self.request_events[request_id].set()
 
-    async def generate(self, request_dict: Dict[str, Any]):
+    async def generate(self, prompt: str, sampling_params: SamplingParams,
+                       request_id: Optional[str] = None) -> RequestOutput:
         # Preprocess the request.
         arrival_time = time.time()
-        prompt = request_dict.pop("prompt")
-        sampling_params = SamplingParams(**request_dict)
 
         # Create an event to notify us that there is new output from the
         # cacheflow server.
-        request_id = str(uuid.uuid4().hex[:8])
+        if request_id is None:
+            request_id = random_uuid()
         request_event = asyncio.Event()
         self.request_events[request_id] = request_event
 
@@ -82,19 +76,10 @@ class FastAPIServer:
 
             # Decode and return new outputs.
             request_output = self.request_outputs[request_id]
-            prompt = request_output.prompt
-            text_outputs = [
-                prompt + output.text
-                for output in request_output.outputs
-            ]
-            ret = {
-                "text": text_outputs,
-                "error": 0,
-            }
-            yield (json.dumps(ret) + "\0").encode("utf-8")
+            yield request_output
 
             # Once finished, release the resources of the sequence group.
-            if request_output.done:
+            if request_output.finished():
                 del self.request_outputs[request_id]
                 del self.request_events[request_id]
                 # Kick the server if the server is not running. This is to
@@ -104,25 +89,15 @@ class FastAPIServer:
                     await self.server_step()
                 break
 
-
-@app.post("/generate")
-async def generate_stream(request: Request):
-    request_dict = await request.json()
-    return StreamingResponse(server.generate(request_dict))
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=10002)
-    parser = ServerArgs.add_cli_args(parser)
-    args = parser.parse_args()
-
-    server_configs = ServerArgs.from_cli_args(args).create_server_configs()
-    parallel_config = server_configs[2]
-    distributed_init_method, stage_devices = initialize_cluster(parallel_config)
-
-    server = FastAPIServer(args.use_ray, *server_configs,
-                           distributed_init_method, stage_devices,
-                           log_stats=not args.disable_log_stats)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    @classmethod
+    def from_server_args(cls, server_args: ServerArgs) -> "AsyncLLMServer":
+        # Create the server configs.
+        server_configs = server_args.create_server_configs()
+        parallel_config = server_configs[2]
+        # Initialize the cluster.
+        distributed_init_method, devices = initialize_cluster(parallel_config)
+        # Create the LLM server.
+        server = cls(server_args.use_ray, *server_configs,
+                     distributed_init_method, devices,
+                     log_stats=not server_args.disable_log_stats)
+        return server

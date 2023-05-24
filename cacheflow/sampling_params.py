@@ -53,7 +53,7 @@ class SamplingParams:
         stop: Union[str, List[str]] = [],
         ignore_eos: bool = False,
         max_tokens: int = 16,
-        logprobs: int = 0,
+        logprobs: Optional[int] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -98,7 +98,7 @@ class SamplingParams:
         if self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
-        if self.logprobs < 0:
+        if self.logprobs is not None and self.logprobs < 0:
             raise ValueError(
                 f"logprobs must be non-negative, got {self.logprobs}.")
 

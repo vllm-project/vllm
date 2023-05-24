@@ -148,7 +148,7 @@ class BlockSpaceManager:
         # the sequences in the same group.
         blocks: Set[PhysicalTokenBlock] = set()
         for seq in seq_group.get_seqs():
-            if seq.status == SequenceStatus.FINISHED:
+            if SequenceStatus.is_finished(seq.status):
                 continue
             block_table = self.block_tables[seq.seq_id]
             for block in block_table:
@@ -169,7 +169,7 @@ class BlockSpaceManager:
         # CPU block -> GPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs():
-            if seq.status == SequenceStatus.FINISHED:
+            if SequenceStatus.is_finished(seq.status):
                 continue
             new_block_table: BlockTable = []
             block_table = self.block_tables[seq.seq_id]
@@ -200,7 +200,7 @@ class BlockSpaceManager:
         # GPU block -> CPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs():
-            if seq.status == SequenceStatus.FINISHED:
+            if SequenceStatus.is_finished(seq.status):
                 continue
             new_block_table: BlockTable = []
             block_table = self.block_tables[seq.seq_id]
