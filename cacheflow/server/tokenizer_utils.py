@@ -53,13 +53,14 @@ def detokenize_incrementally(
 
     # Convert the tokens to a string.
     # Optimization: If the tokenizer does not have `added_tokens_encoder`,
-    # then we can just use `convert_tokens_to_string`.
+    # then we can directly use `convert_tokens_to_string`.
     if not getattr(tokenizer, "added_tokens_encoder", {}):
         output_text = tokenizer.convert_tokens_to_string(output_tokens)
         return new_token, output_text
 
     # Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
-    # NOTE(woosuk): The following code is slow.
+    # NOTE(woosuk): The following code is slow because it runs a for loop over
+    # the output_tokens.
     sub_texts = []
     current_sub_text = []
     for token in output_tokens:
