@@ -54,8 +54,7 @@ def detokenize_incrementally(
     # Convert the tokens to a string.
     # Optimization: If the tokenizer does not have `added_tokens_encoder`,
     # then we can just use `convert_tokens_to_string`.
-    if not (hasattr(tokenizer, "added_tokens_encoder") and 
-            tokenizer.added_tokens_encoder):
+    if not getattr(tokenizer, "added_tokens_encoder", {}):
         output_text = tokenizer.convert_tokens_to_string(output_tokens)
         return new_token, output_text
 
@@ -66,8 +65,7 @@ def detokenize_incrementally(
     for token in output_tokens:
         if skip_special_tokens and token in tokenizer.all_special_ids:
             continue
-        if (hasattr(tokenizer, "added_tokens_encoder") and
-            token in tokenizer.added_tokens_encoder):
+        if token in tokenizer.added_tokens_encoder:
             if current_sub_text:
                 sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
                 sub_texts.append(sub_text)
