@@ -84,6 +84,7 @@ class LLMServer:
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
+        self.cache_config.verify_with_parallel_config(self.parallel_config)
 
     def _init_cache(self) -> None:
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
