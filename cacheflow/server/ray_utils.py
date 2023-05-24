@@ -8,7 +8,7 @@ except ImportError:
 
 from cacheflow.config import ParallelConfig
 
-DeviceID = Tuple[int, str, int] # rank, node resource (node IP), device id
+DeviceID = Tuple[int, Optional[str], int]  # rank, node resource (node IP), device id
 
 
 def initialize_cluster(

@@ -132,7 +132,7 @@ class Worker:
     def _prepare_inputs(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.LongTensor, torch.LongTensor, InputMetadata]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -216,19 +216,14 @@ class Worker:
         input_positions = _pad_to_alignment(input_positions, multiple_of=8)
 
         # Convert to tensors.
-        tokens_tensor = torch.tensor(
-            input_tokens, dtype=torch.long, device='cuda')
-        positions_tensor = torch.tensor(
-            input_positions, dtype=torch.long, device='cuda')
-        slot_mapping_tensor = torch.tensor(
-            slot_mapping, dtype=torch.int, device='cuda')
-        context_lens_tensor = torch.tensor(
-            context_lens, dtype=torch.int, device='cuda')
+        tokens_tensor = torch.cuda.LongTensor(input_tokens)
+        positions_tensor = torch.cuda.LongTensor(input_positions)
+        slot_mapping_tensor = torch.cuda.IntTensor(slot_mapping)
+        context_lens_tensor = torch.cuda.IntTensor(context_lens)
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq)
             for block_table in generation_block_tables]
-        block_tables_tensor = torch.tensor(
-            padded_block_tables, dtype=torch.int, device='cuda')
+        block_tables_tensor = torch.cuda.IntTensor(padded_block_tables)
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
