@@ -44,15 +44,15 @@ def main(args: argparse.Namespace):
         n_words += len(response_new_words.split(" ")) - len(prompts[i].split(" "))
 
     time_seconds = time.time() - tik
-    print(f"Time (total): {time_seconds:.3f}s to finish, n_threadss: {args.n_threads}, "
+    print(f"Time (total): {time_seconds:.3f}s to finish, n_threads: {args.n_threads}, "
           f"throughput: {n_words / time_seconds} words/s.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-url", type=str, default="http://localhost:8001/generate")
-    parser.add_argument("--max-tokens", type=int, default=1024)
-    parser.add_argument("--n-threads", type=int, default=1)
+    parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument("--n-threads", type=int, default=128)
     args = parser.parse_args()
 
     main(args)
