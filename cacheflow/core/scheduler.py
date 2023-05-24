@@ -291,7 +291,7 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 # Append a new token to the sequence.
                 output = seq_outputs[seq.seq_id]
-                seq.append_token(output.output_token, output.logprobs)
+                seq.append_token_id(output.output_token, output.logprobs)
         return self.running.copy()
 
     def free_seq(self, seq: Sequence) -> None:
