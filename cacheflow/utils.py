@@ -29,5 +29,5 @@ def get_gpu_memory(gpu: int = 0) -> int:
 
 
 def get_cpu_memory() -> int:
-    """Returns the total CPU memory of the system in bytes."""
+    """Returns the total CPU memory of the node in bytes."""
     return psutil.virtual_memory().total
