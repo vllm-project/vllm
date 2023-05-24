@@ -1,9 +1,9 @@
 # Adapted from https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
-from typing import Literal, Optional, List, Dict, Union
-
 import time
+from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
+
 from cacheflow.utils import random_uuid
 
 
@@ -72,7 +72,6 @@ class CompletionRequest(BaseModel):
     max_tokens: Optional[int] = 16
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
-    top_k: Optional[int] = -1
     n: Optional[int] = 1
     stream: Optional[bool] = False
     logprobs: Optional[int] = None
@@ -84,6 +83,7 @@ class CompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
     # Additional parameters supported by cacheflow
+    top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
 
