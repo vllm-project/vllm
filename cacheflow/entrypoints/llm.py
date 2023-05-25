@@ -20,6 +20,7 @@ class LLM:
 
     NOTE: This class is intended to be used for offline inference. For online
     serving, use the `LLMServer` class instead.
+    NOTE: For the comprehensive list of arguments, see `ServerArgs`.
 
     Args:
         model: The name or path of a huggingface transformers model.
@@ -29,8 +30,6 @@ class LLM:
             refer to torch_dtype in the model config and use `float16` for
             `float16` and `float32` models, and `bfloat16` for `bfloat16` models.
         seed: The seed to initialize the random states.
-
-    For more arguments, see `ServerArgs`.
     """
 
     def __init__(
