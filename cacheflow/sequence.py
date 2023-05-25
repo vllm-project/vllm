@@ -1,6 +1,6 @@
 import copy
 import enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from cacheflow.block import LogicalTokenBlock
 from cacheflow.sampling_params import SamplingParams
@@ -10,8 +10,25 @@ class SequenceStatus(enum.Enum):
     WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()
-    FINISHED = enum.auto()
+    FINISHED_STOPPED = enum.auto()
+    FINISHED_LENGTH_CAPPED = enum.auto()
 
+    @staticmethod
+    def is_finished(status: "SequenceStatus") -> bool:
+        return status in [
+            SequenceStatus.FINISHED_STOPPED,
+            SequenceStatus.FINISHED_LENGTH_CAPPED,
+        ]
+
+    @staticmethod
+    def get_finished_reason(status: "SequenceStatus") -> Union[str, None]:
+        if status == SequenceStatus.FINISHED_STOPPED:
+            finish_reason = "stop"
+        elif status == SequenceStatus.FINISHED_LENGTH_CAPPED:
+            finish_reason = "length"
+        else:
+            finish_reason = None
+        return finish_reason
 
 class SequenceData:
 
@@ -20,11 +37,10 @@ class SequenceData:
         prompt_token_ids: List[int],
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
-
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
 
-    def append_token(self, token_id: int, logprob: float) -> None:
+    def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
@@ -64,6 +80,7 @@ class Sequence:
 
         self.data = SequenceData(prompt_token_ids)
         self.output_logprobs: List[Dict[int, float]] = []
+        self.output_tokens: List[str] = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
@@ -92,11 +109,15 @@ class Sequence:
             last_block.append_tokens(token_ids[:num_empty_slots])
             token_ids = token_ids[num_empty_slots:]
 
-    def append_token(self, token_id: int, logprobs: Dict[int, float]) -> None:
+    def append_token_id(
+        self,
+        token_id: int,
+        logprobs: Dict[int, float],
+    ) -> None:
         assert token_id in logprobs
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
-        self.data.append_token(token_id, logprobs[token_id])
+        self.data.append_token_id(token_id, logprobs[token_id])
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -161,7 +182,7 @@ class SequenceGroup:
         raise ValueError(f'Sequence {seq_id} not found.')
 
     def is_finished(self) -> bool:
-        return all(seq.status == SequenceStatus.FINISHED for seq in self.seqs)
+        return all(SequenceStatus.is_finished(seq.status) for seq in self.seqs)
 
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "

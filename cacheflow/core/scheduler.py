@@ -291,11 +291,13 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 # Append a new token to the sequence.
                 output = seq_outputs[seq.seq_id]
-                seq.append_token(output.output_token, output.logprobs)
+                seq.append_token_id(output.output_token, output.logprobs)
+        # Return a shallow copy of the running queue to prevent the queue
+        # from being modified by the caller.
         return self.running.copy()
 
-    def free_seq(self, seq: Sequence) -> None:
-        seq.status = SequenceStatus.FINISHED
+    def free_seq(self, seq: Sequence, finish_status: SequenceStatus) -> None:
+        seq.status = finish_status
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
