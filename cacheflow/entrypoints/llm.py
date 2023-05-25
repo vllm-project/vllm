@@ -60,6 +60,18 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
     ) -> List[RequestOutput]:
+        """Generates the completions for the input prompts.
+
+        NOTE: Batching is done automatically. For the best performance, 
+
+
+        Args:
+            prompts: A list of prompts 
+            use_tqdm: Whether to use tqdm to show progress.
+
+        Returns:
+            
+        """
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
