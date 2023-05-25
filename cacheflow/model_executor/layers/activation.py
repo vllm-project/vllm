@@ -6,7 +6,8 @@ from cacheflow import activation_ops
 
 _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU(),
-    "gelu_new": nn.GELU(approximate="tanh"),
+    "gelu_new": nn.GELU(approximate="tanh"),   # NOTE: This may introduce small rounding errors.
+    "gelu_fast": nn.GELU(approximate="tanh"),  # NOTE: This may introduce small rounding errors.
     "relu": nn.ReLU(),
 }
 
