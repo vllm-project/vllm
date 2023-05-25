@@ -1,3 +1,4 @@
 sphinx
+sphinx-book-theme
 sphinx-click
 sphinx-copybutton
