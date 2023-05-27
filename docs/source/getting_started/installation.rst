@@ -10,7 +10,8 @@ CacheFlow can run on systems that meet the following requirements:
 * GPU: compute capability 7.0 or higher (V100, T4, RTX20xx, A100, etc.)
 
 .. note::
-    Currently, CacheFlow does not support CUDA 12.
+    As of now, CacheFlow does not support CUDA 12.
+    If you are using Hopper or Lovelace GPUs, please use CUDA 11.8.
 
 .. tip::
     If you have trouble installing CacheFlow, we recommend using the NVIDIA PyTorch Docker image.
@@ -22,13 +23,13 @@ CacheFlow can run on systems that meet the following requirements:
 Install with pip
 ----------------
 
-Install CacheFlow using pip:
+You can install CacheFlow using pip:
 
 .. code-block:: console
 
     $ # (Optional) Create a new conda environment.
-    $ conda create -n cf python=3.8 -y
-    $ conda activate cf
+    $ conda create -n myenv python=3.8 -y
+    $ conda activate myenv
 
     $ # Install CacheFlow.
     $ pip install cacheflow
@@ -46,4 +47,4 @@ You can also build and install CacheFlow from source.
     $ git clone https://github.com/WoosukKwon/cacheflow.git
     $ cd cacheflow
     $ pip install -r requirements.txt
-    $ pip install -e .  # This may take several minutes.
+    $ pip install -e .  # This may take 5-10 minutes.
