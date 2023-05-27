@@ -1,28 +1,63 @@
-from typing import List
+import subprocess
+from typing import List, Set
 
+from packaging.version import parse, Version
 import setuptools
 import torch
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 from torch.utils.cpp_extension import CUDA_HOME
 
-
-# Build custom operators.
-CXX_FLAGS = ["-g"]
+# Compiler flags.
+CXX_FLAGS = ["-g", "-O2"]
 # TODO(woosuk): Should we use -O3?
 NVCC_FLAGS = ["-O2"]
+
 
 if not torch.cuda.is_available():
     raise RuntimeError(
         f"Cannot find CUDA at CUDA_HOME: {CUDA_HOME}. "
         "CUDA must be available in order to build the package.")
 
-# FIXME(woosuk): Consider the case where the machine has multiple GPUs with
-# different compute capabilities.
-compute_capability = torch.cuda.get_device_capability()
-major, minor = compute_capability
-# Enable bfloat16 support if the compute capability is >= 8.0.
-if major >= 8:
-    NVCC_FLAGS.append("-DENABLE_BF16")
+
+def get_nvcc_cuda_version(cuda_dir: str) -> Version:
+    """Get the CUDA version from nvcc.
+
+    Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
+    """
+    nvcc_output = subprocess.check_output([cuda_dir + "/bin/nvcc", "-V"],
+                                          universal_newlines=True)
+    output = nvcc_output.split()
+    release_idx = output.index("release") + 1
+    nvcc_cuda_version = parse(output[release_idx].split(",")[0])
+    return nvcc_cuda_version
+
+
+# Collect the compute capabilities of all available GPUs.
+device_count = torch.cuda.device_count()
+compute_capabilities: Set[int] = set()
+for i in range(device_count):
+    major, minor = torch.cuda.get_device_capability(i)
+    if major < 7:
+        raise RuntimeError(
+            "GPUs with compute capability less than 7.0 are not supported.")
+    compute_capabilities.add(major * 10 + minor)
+# If no GPU is available, add all supported compute capabilities.
+if not compute_capabilities:
+    compute_capabilities = {70, 75, 80, 86, 90}
+# Add target compute capabilities to NVCC flags.
+for capability in compute_capabilities:
+    NVCC_FLAGS += ["-gencode", f"arch=compute_{capability},code=sm_{capability}"]
+
+# Validate the NVCC CUDA version.
+nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
+if nvcc_cuda_version < Version("11.0"):
+    raise RuntimeError("CUDA 11.0 or higher is required to build the package.")
+if 86 in compute_capabilities and nvcc_cuda_version < Version("11.1"):
+    raise RuntimeError(
+        "CUDA 11.1 or higher is required for GPUs with compute capability 8.6.")
+if 90 in compute_capabilities and nvcc_cuda_version < Version("11.8"):
+    raise RuntimeError(
+        "CUDA 11.8 or higher is required for GPUs with compute capability 9.0.")
 
 ext_modules = []
 
