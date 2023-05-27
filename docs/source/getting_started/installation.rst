@@ -7,7 +7,7 @@ CacheFlow can run on systems that meet the following requirements:
 * OS: Linux
 * Python: 3.8 or higher
 * CUDA: 11.0 -- 11.8
-* GPU: compute capability 7.0 or higher (V100, T4, RTX20xx, A100, etc.)
+* GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, etc.)
 
 .. note::
     As of now, CacheFlow does not support CUDA 12.
