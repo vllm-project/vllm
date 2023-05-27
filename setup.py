@@ -1,5 +1,5 @@
 import subprocess
-from typing import List
+from typing import List, Set
 
 from packaging.version import parse, Version
 import setuptools
@@ -28,28 +28,33 @@ def get_nvcc_cuda_version(cuda_dir: str) -> Version:
                                           universal_newlines=True)
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
-    bare_metal_version = parse(output[release_idx].split(",")[0])
-    return bare_metal_version
+    nvcc_cuda_version = parse(output[release_idx].split(",")[0])
+    return nvcc_cuda_version
 
 
-# Check CUDA version.
+# Collect the compute capabilities of all available GPUs.
+device_count = torch.cuda.device_count()
+compute_capabilities: Set[int] = set()
+for i in range(device_count):
+    major, minor = torch.cuda.get_device_capability(i)
+    compute_capabilities.add(major * 10 + minor)
+# If no GPUs are available, add all supported compute capabilities.
+if not compute_capabilities:
+    compute_capabilities = {70, 75, 80, 86, 90}
+# Add target compute capabilities to NVCC flags.
+for capability in compute_capabilities:
+    NVCC_FLAGS += ["-gencode", f"arch=compute_{capability},code=sm_{capability}"]
+
+# Validate the NVCC CUDA version.
 nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
 if nvcc_cuda_version < Version("11.0"):
     raise RuntimeError("CUDA 11.0 or higher is required to build the package.")
-
-# Select architectures to compile for based on the NVCC CUDA version.
-# NOTE(woosuk): This will increase the build time as we compile for multiple
-# architectures, regardless of whether they are used or not.
-# CUDA 11.0 supports compute capability up to 8.0.
-NVCC_FLAGS += ["-gencode", "arch=compute_70,code=sm_70"]
-NVCC_FLAGS += ["-gencode", "arch=compute_75,code=sm_75"]
-NVCC_FLAGS += ["-gencode", "arch=compute_80,code=sm_80"]
-# Compute capability 8.6 is supported since CUDA 11.1.
-if nvcc_cuda_version >= Version("11.1"):
-    NVCC_FLAGS += ["-gencode", "arch=compute_86,code=sm_86"]
-# Compute capability 9.0 is supported since CUDA 11.8.
-if nvcc_cuda_version >= Version("11.8"):
-    NVCC_FLAGS += ["-gencode", "arch=compute_90,code=sm_90"]
+if 86 in compute_capabilities and nvcc_cuda_version < Version("11.1"):
+    raise RuntimeError(
+        "CUDA 11.1 or higher is required for GPUs with compute capability 8.6.")
+if 90 in compute_capabilities and nvcc_cuda_version < Version("11.8"):
+    raise RuntimeError(
+        "CUDA 11.8 or higher is required for GPUs with compute capability 9.0.")
 
 ext_modules = []
 
