@@ -41,7 +41,7 @@ for i in range(device_count):
         raise RuntimeError(
             "GPUs with compute capability less than 7.0 are not supported.")
     compute_capabilities.add(major * 10 + minor)
-# If no GPUs are available, add all supported compute capabilities.
+# If no GPU is available, add all supported compute capabilities.
 if not compute_capabilities:
     compute_capabilities = {70, 75, 80, 86, 90}
 # Add target compute capabilities to NVCC flags.
