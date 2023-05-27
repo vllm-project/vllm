@@ -6,15 +6,18 @@ CacheFlow can run on systems that meet the following requirements:
 
 * OS: Linux
 * Python: 3.8 or higher
-* CUDA: 11.3 or higher
+* CUDA: 11.0 -- 11.8
 * GPU: compute capability 7.0 or higher (V100, T4, RTX20xx, A100, etc.)
+
+.. note::
+    Currently, CacheFlow does not support CUDA 12.
 
 .. tip::
     If you have trouble installing CacheFlow, we recommend using the NVIDIA PyTorch Docker image.
 
     .. code-block:: console
 
-        $ docker run --gpus all -it --rm --shm-size=8g nvcr.io/nvidia/pytorch:23.04-py3
+        $ docker run --gpus all -it --rm --shm-size=8g nvcr.io/nvidia/pytorch:22.12-py3
 
 Install with pip
 ----------------
