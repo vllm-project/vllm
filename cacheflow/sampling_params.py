@@ -129,7 +129,7 @@ class SamplingParams:
                 f"frequency_penalty={self.frequency_penalty}, "
                 f"temperature={self.temperature}, "
                 f"top_p={self.top_p}, "
-                f"top_k={self.top_k},"
+                f"top_k={self.top_k}, "
                 f"use_beam_search={self.use_beam_search}, "
                 f"stop={self.stop}, "
                 f"ignore_eos={self.ignore_eos}, "
