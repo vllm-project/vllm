@@ -55,6 +55,7 @@ def main(args: argparse.Namespace):
     llm = LLM(
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
+        seed=args.seed,
     )
     tokenizer = llm.get_tokenizer()
     requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
