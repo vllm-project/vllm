@@ -88,9 +88,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Benchmark the latency of processing a single batch of "
-                    "requests till completion.")
+    parser = argparse.ArgumentParser(description="Benchmark the throughput.")
     parser.add_argument("--dataset", type=str, required=True,
                         help="Path to the dataset.")
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
