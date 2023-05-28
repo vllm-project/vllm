@@ -151,6 +151,9 @@ class LLMServer:
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
 
+    def get_num_unfinished_requests(self) -> int:
+        return self.scheduler.get_num_unfinished_seq_groups()
+
     def has_unfinished_requests(self) -> bool:
         return self.scheduler.has_unfinished_seqs()
 
