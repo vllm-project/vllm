@@ -1,5 +1,5 @@
 from cacheflow.entrypoints.llm import LLM
-from cacheflow.outputs import RequestOutput
+from cacheflow.outputs import RequestOutput, CompletionOutput
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.arg_utils import ServerArgs
 from cacheflow.server.llm_server import LLMServer
@@ -9,6 +9,7 @@ __all__ = [
     "LLM",
     "SamplingParams",
     "RequestOutput",
+    "CompletionOutput",
     "LLMServer",
     "ServerArgs",
     "initialize_cluster",
