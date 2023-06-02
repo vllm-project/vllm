@@ -7,10 +7,10 @@ from fastapi.responses import StreamingResponse
 import uvicorn
 
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import ServerArgs
+from cacheflow.server.arg_utils import AsyncServerArgs
 from cacheflow.server.async_llm_server import AsyncLLMServer
-from cacheflow.server.ray_utils import initialize_cluster
 
+TIMEOUT_KEEP_ALIVE = 5 # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1 # seconds
 app = FastAPI()
 
@@ -42,10 +42,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8001)
-    parser = ServerArgs.add_cli_args(parser)
+    parser = AsyncServerArgs.add_cli_args(parser)
     args = parser.parse_args()
 
-    server_args = ServerArgs.from_cli_args(args)
+    server_args = AsyncServerArgs.from_cli_args(args)
     server = AsyncLLMServer.from_server_args(server_args)
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="debug",
+                timeout_keep_alive=TIMEOUT_KEEP_ALIVE)

@@ -2,27 +2,32 @@ import asyncio
 import time
 from typing import Dict, Optional
 
-import ray
-
+from cacheflow.logger import init_logger
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import ServerArgs
+from cacheflow.server.arg_utils import AsyncServerArgs
 from cacheflow.server.llm_server import LLMServer
-from cacheflow.server.ray_utils import initialize_cluster
+from cacheflow.server.ray_utils import ray, initialize_cluster
 from cacheflow.utils import random_uuid
+
+logger = init_logger(__name__)
 
 TIMEOUT_TO_PREVENT_DEADLOCK = 1 # seconds
 
 
 class AsyncLLMServer:
 
-    def __init__(self, server_use_ray: bool, *args, **kwargs) -> None:
-        if server_use_ray:
-            remote_server_class = ray.remote(num_cpus=0)(LLMServer)
+    def __init__(self, worker_use_ray: bool, server_use_ray: bool,
+                 *args, **kwargs) -> None:
+        self.worker_use_ray = worker_use_ray
+        self.server_use_ray = server_use_ray
+        if not self.server_use_ray:
+            server_class = LLMServer
+        elif self.worker_use_ray:
+            server_class = ray.remote(num_cpus=0)(LLMServer).remote
         else:
-            remote_server_class = ray.remote(num_gpus=1)(LLMServer)
-        self.server = remote_server_class.remote(*args, **kwargs)
-
+            server_class = ray.remote(num_gpus=1)(LLMServer).remote
+        self.server = server_class(*args, **kwargs)
         # Request id -> request output.
         self.request_outputs: Dict[str, RequestOutput] = {}
         # Request id -> event to notify that there is new output.
@@ -31,7 +36,10 @@ class AsyncLLMServer:
 
     async def server_step(self):
         self.is_server_running = True
-        request_outputs = await self.server.step.remote()
+        if self.server_use_ray:
+            request_outputs = await self.server.step.remote()
+        else:
+            request_outputs = self.server.step()
         self.is_server_running = False
         # Notify the waiting coroutines that there are new outputs ready.
         for request_output in request_outputs:
@@ -51,9 +59,17 @@ class AsyncLLMServer:
         request_event = asyncio.Event()
         self.request_events[request_id] = request_event
 
+        logger.info(f"Received request {request_id}: "
+                    f"prompt: \"{prompt}\", "
+                    f"sampling params: {sampling_params}.")
+
         # Add the request into the cacheflow server's waiting queue.
-        await self.server.add_request.remote(
-            request_id, prompt, sampling_params, arrival_time=arrival_time)
+        if self.server_use_ray:
+            await self.server.add_request.remote(
+                request_id, prompt, sampling_params, arrival_time=arrival_time)
+        else:
+            self.server.add_request(
+                request_id, prompt, sampling_params, arrival_time=arrival_time)
 
         # The cacheflow server does not have a background loop that keeps
         # processing incoming requests. Therefore, we need to keep kicking
@@ -61,6 +77,7 @@ class AsyncLLMServer:
         while True:
             # Kick the server if the server is not running.
             if not self.is_server_running:
+                # logger.info(f"Request {request_id} kicking server.")
                 await self.server_step()
 
             # Wait for new output. The group_event will be set in server_step
@@ -90,14 +107,17 @@ class AsyncLLMServer:
                 break
 
     @classmethod
-    def from_server_args(cls, server_args: ServerArgs) -> "AsyncLLMServer":
+    def from_server_args(cls, server_args: AsyncServerArgs) -> "AsyncLLMServer":
         # Create the server configs.
         server_configs = server_args.create_server_configs()
         parallel_config = server_configs[2]
         # Initialize the cluster.
-        distributed_init_method, devices = initialize_cluster(parallel_config)
+        distributed_init_method, devices = initialize_cluster(
+            parallel_config, server_args.server_use_ray)
         # Create the LLM server.
-        server = cls(server_args.use_ray, *server_configs,
+        server = cls(server_args.worker_use_ray,
+                     server_args.server_use_ray,
+                     *server_configs,
                      distributed_init_method, devices,
                      log_stats=not server_args.disable_log_stats)
         return server

@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 
 from cacheflow.outputs import RequestOutput
-from cacheflow.server.arg_utils import ServerArgs
+from cacheflow.server.arg_utils import AsyncServerArgs
 from cacheflow.server.async_llm_server import AsyncLLMServer
 from cacheflow.server.tokenizer_utils import get_tokenizer
 from cacheflow.logger import init_logger
@@ -33,6 +33,7 @@ from cacheflow.entrypoints.openai.protocol import (
     UsageInfo,
 )
 
+TIMEOUT_KEEP_ALIVE = 5 # seconds
 
 logger = init_logger(__name__)
 served_model = None
@@ -276,7 +277,7 @@ if __name__ == "__main__":
                         help="The model name used in the API. If not specified, "
                              "the model name will be the same as the "
                              "huggingface name.")
-    parser = ServerArgs.add_cli_args(parser)
+    parser = AsyncServerArgs.add_cli_args(parser)
     args = parser.parse_args()
 
     app.add_middleware(
@@ -291,10 +292,11 @@ if __name__ == "__main__":
 
     served_model = args.served_model_name or args.model
 
-    server_args = ServerArgs.from_cli_args(args)
+    server_args = AsyncServerArgs.from_cli_args(args)
     server = AsyncLLMServer.from_server_args(server_args)
 
     # A separate tokenizer to map token IDs to strings.
     tokenizer = get_tokenizer(args.model)
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info",
+                timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
