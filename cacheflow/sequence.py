@@ -12,12 +12,14 @@ class SequenceStatus(enum.Enum):
     SWAPPED = enum.auto()
     FINISHED_STOPPED = enum.auto()
     FINISHED_LENGTH_CAPPED = enum.auto()
+    FINISHED_ABORTED = enum.auto()
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
         return status in [
             SequenceStatus.FINISHED_STOPPED,
             SequenceStatus.FINISHED_LENGTH_CAPPED,
+            SequenceStatus.FINISHED_ABORTED,
         ]
 
     @staticmethod
@@ -26,9 +28,12 @@ class SequenceStatus(enum.Enum):
             finish_reason = "stop"
         elif status == SequenceStatus.FINISHED_LENGTH_CAPPED:
             finish_reason = "length"
+        elif status == SequenceStatus.FINISHED_ABORTED:
+            finish_reason = "abort"
         else:
             finish_reason = None
         return finish_reason
+
 
 class SequenceData:
 
