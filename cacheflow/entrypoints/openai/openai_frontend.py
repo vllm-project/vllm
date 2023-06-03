@@ -7,6 +7,7 @@ import time
 from typing import AsyncGenerator, Dict, List, Optional
 
 import fastapi
+from fastapi import BackgroundTasks, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -94,7 +95,8 @@ def create_logprobs(token_ids: List[int],
 
 
 @app.post("/v1/completions")
-async def create_completion(request: CompletionRequest):
+async def create_completion(raw_request: Request):
+    request = CompletionRequest(**await raw_request.json())
     logger.info(f"Received completion request: {request}")
 
     error_check_ret = await check_model(request)
@@ -140,13 +142,16 @@ async def create_completion(request: CompletionRequest):
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
     result_generator = server.generate(prompt, sampling_params,
-                                       request_id=request_id)
+                                       request_id)
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.
     stream = (request.stream and
               (request.best_of is None or request.n == request.best_of) and
               not request.use_beam_search)
+
+    async def abort_request() -> None:
+        await server.abort(request_id)
 
     def create_stream_response_json(index: int,
                                     text: str,
@@ -204,12 +209,21 @@ async def create_completion(request: CompletionRequest):
 
     # Streaming response
     if stream:
+        background_tasks = BackgroundTasks()
+        # Abort the request if the client disconnects.
+        background_tasks.add_task(abort_request)
         return StreamingResponse(completion_stream_generator(),
-                                 media_type="text/event-stream")
+                                 media_type="text/event-stream",
+                                 background=background_tasks)
 
     # Non-streaming response
     final_res: RequestOutput = None
     async for res in result_generator:
+        if await raw_request.is_disconnected():
+            # Abort the request if the client disconnects.
+            await server.abort(request_id)
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         "Client disconnected")
         final_res = res
     assert final_res is not None
     choices = []
