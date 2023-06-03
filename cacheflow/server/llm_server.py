@@ -149,6 +149,9 @@ class LLMServer:
     def abort_request(self, request_id: str) -> None:
         self.scheduler.abort_seq_group(request_id)
 
+    def get_num_unfinished_requests(self) -> int:
+        return self.scheduler.get_num_unfinished_seq_groups()
+
     def has_unfinished_requests(self) -> bool:
         return self.scheduler.has_unfinished_seqs()
 

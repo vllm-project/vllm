@@ -7,11 +7,7 @@ from cacheflow.logger import init_logger
 
 logger = init_logger(__name__)
 
-_MODEL_TYPES_WITH_SLOW_TOKENIZER = [
-    # LLaMA fast tokenizer has a bug related to protobuf.
-    # See https://github.com/WoosukKwon/cacheflow/issues/80#issue-1698550554
-    "llama",
-]
+_MODEL_TYPES_WITH_SLOW_TOKENIZER = []
 
 
 def get_tokenizer(
@@ -20,7 +16,15 @@ def get_tokenizer(
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     config = AutoConfig.from_pretrained(model_name)
-    if config.model_type in _MODEL_TYPES_WITH_SLOW_TOKENIZER:
+    if config.model_type == "llama" and getattr(kwargs, "use_fast", True):
+        # LLaMA fast tokenizer causes protobuf errors in some environments.
+        # However, we found that the below LLaMA fast tokenizer works well in
+        # most environments.
+        model_name = "hf-internal-testing/llama-tokenizer"
+        logger.info(
+            f"Using the LLaMA fast tokenizer in '{model_name}' to avoid "
+            "potential protobuf errors.")
+    elif config.model_type in _MODEL_TYPES_WITH_SLOW_TOKENIZER:
         if getattr(kwargs, "use_fast", False) == True:
             raise ValueError(
                 f"Cannot use the fast tokenizer for {config.model_type} due to "
