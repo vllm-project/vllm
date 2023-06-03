@@ -68,8 +68,8 @@ class LLM:
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
-        NOTE: `LLM` automatically batches the given prompts, considering the
-        memory constraint. For the best performance, put all of your prompts
+        NOTE: This class automatically batches the given prompts, considering
+        the memory constraint. For the best performance, put all of your prompts
         into a single list and pass it to this method.
 
         Args:
