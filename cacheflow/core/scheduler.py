@@ -1,5 +1,4 @@
 import enum
-import itertools
 import time
 from typing import Dict, List, Optional, Tuple
 

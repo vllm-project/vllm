@@ -37,7 +37,6 @@ def main(args: argparse.Namespace):
     print(f"Time (POST): {time.time() - tik} s")
     n_words = 0
 
-    # if streaming:
     for i, response in enumerate(results):
         k = list(response.iter_lines(chunk_size=8192, decode_unicode=False, delimiter=b"\0"))
         response_new_words = json.loads(k[-2].decode("utf-8"))["text"][0]
