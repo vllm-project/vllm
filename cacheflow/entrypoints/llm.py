@@ -27,10 +27,10 @@ class LLM:
         model: The name or path of a HuggingFace Transformers model.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution.
-        dtype: The data type to use for the model weights and activations.
-            Currently, we support `float16` and `bfloat16`. If `default`, we
-            use the `torch_dtype` attribute of the model config. If the
-            `torch_dtype` is `float32`, we use `float16` instead.
+        dtype: The data type for the model weights and activations. Currently,
+            we support `float16` and `bfloat16`. If `default`, we use the
+            `torch_dtype` attribute of the model config. If the `torch_dtype`
+            is `float32`, we use `float16` instead.
         seed: The seed to initialize the random number generator for sampling.
     """
 
@@ -68,15 +68,21 @@ class LLM:
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
-        NOTE: Batching is done automatically. For the best performance, 
-
+        NOTE: `LLM` automatically batches the given prompts, considering the
+        memory constraint. For the best performance, put all of your prompts
+        into a single list and pass it to this method.
 
         Args:
-            prompts: A list of prompts 
-            use_tqdm: Whether to use tqdm to show progress.
+            prompts: A list of prompts to generate completions for.
+            sampling_params: The sampling parameters for text generation. If
+                None, we use the default sampling parameters.
+            prompt_token_ids: A list of token IDs for the prompts. If None, we
+                use the tokenizer to convert the prompts to token IDs.
+            use_tqdm: Whether to use tqdm to display the progress bar.
 
         Returns:
-            
+            A list of `RequestOutput` objects containing the generated
+            completions in the same order as the input prompts.
         """
         if isinstance(prompts, str):
             prompts = [prompts]
