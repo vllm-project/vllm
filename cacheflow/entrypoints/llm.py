@@ -39,11 +39,13 @@ class LLM:
 
     def generate(
         self,
-        prompts: List[str],
+        prompts: Union[str, List[str]],
         sampling_params: Optional[SamplingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
     ) -> List[RequestOutput]:
+        if isinstance(prompts, str):
+            prompts = [prompts]
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
