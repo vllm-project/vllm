@@ -61,7 +61,7 @@ The next step is to rewrite the :code:`forward` methods of your model by followi
     +    cache_events: Optional[List[torch.cuda.Event]],
     +) -> Dict[int, SequenceOutputs]:
 
-3. Fix the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors that contain the data for all input sequences.
+3. Fix the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
 4. Replace the attention operation with either :code:`GPTCacheFlowAttention` or :code:`GPTNeoXCacheFlowAttention` depending on the model's architecture.
 
 .. note::
