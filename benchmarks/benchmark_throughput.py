@@ -72,9 +72,9 @@ def main(args: argparse.Namespace):
         )
         # FIXME(woosuk): Do not use internal method.
         llm._add_request(
-            prompt="",
-            sampling_params=sampling_params,
+            prompt=None,
             prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
         )
 
     start = time.time()
@@ -85,7 +85,9 @@ def main(args: argparse.Namespace):
         len(prompt_token_ids) + output_len
         for prompt_token_ids, output_len in requests
     )
-    print(f"Throughput: {total_num_tokens / (end - start):.2f} tokens/s")
+    elapsed_time = end - start
+    print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
+          f"{total_num_tokens / elapsed_time:.2f} tokens/s")
 
 
 if __name__ == "__main__":

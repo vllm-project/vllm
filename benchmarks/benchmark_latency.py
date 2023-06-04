@@ -30,7 +30,6 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
     )
     print(sampling_params)
-    dummy_prompts = [""] * args.batch_size
     dummy_prompt_token_ids = [[0] * args.input_len] * args.batch_size
 
     def run_to_completion(profile: bool = False):
@@ -38,7 +37,8 @@ def main(args: argparse.Namespace):
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.time()
 
-        llm.generate(dummy_prompts, sampling_params, dummy_prompt_token_ids,
+        llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+                     sampling_params=sampling_params,
                      use_tqdm=False)
 
         end_time = time.time()
