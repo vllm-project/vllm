@@ -20,7 +20,7 @@ class LLM:
     mechanism and efficient memory management.
 
     NOTE: This class is intended to be used for offline inference. For online
-    serving, use the `LLMServer` class instead.
+    serving, use the `AsyncLLMServer` class instead.
     NOTE: For the comprehensive list of arguments, see `ServerArgs`.
 
     Args:
