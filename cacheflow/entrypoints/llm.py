@@ -61,7 +61,7 @@ class LLM:
 
     def generate(
         self,
-        prompts: Union[str, List[str]],
+        prompts: Optional[Union[str, List[str]]] = None,
         sampling_params: Optional[SamplingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
@@ -84,14 +84,27 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             completions in the same order as the input prompts.
         """
+        if prompts is None and prompt_token_ids is None:
+            raise ValueError("Either prompts or prompt_token_ids must be "
+                             "provided.")
         if isinstance(prompts, str):
+            # Convert a single prompt to a list.
             prompts = [prompts]
+        if prompts is not None and prompt_token_ids is not None:
+            if len(prompts) != len(prompt_token_ids):
+                raise ValueError("The lengths of prompts and prompt_token_ids "
+                                 "must be the same.")
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
+
         # Add requests to the server.
-        for i in range(len(prompts)):
-            prompt = prompts[i]
+        if prompts is not None:
+            num_requests = len(prompts)
+        else:
+            num_requests = len(prompt_token_ids)
+        for i in range(num_requests):
+            prompt = prompts[i] if prompts is not None else None
             if prompt_token_ids is None:
                 token_ids = None
             else:
@@ -101,7 +114,7 @@ class LLM:
 
     def _add_request(
         self,
-        prompt: str,
+        prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]],
     ) -> None:
