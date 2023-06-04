@@ -26,7 +26,7 @@ class LLM:
     Args:
         model: The name or path of a HuggingFace Transformers model.
         tensor_parallel_size: The number of GPUs to use for distributed
-            execution.
+            execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
             we support `float16` and `bfloat16`. If `default`, we use the
             `torch_dtype` attribute of the model config. If the `torch_dtype`
