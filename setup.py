@@ -8,6 +8,8 @@ import setuptools
 import torch
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
+ROOT_DIR = os.path.dirname(__file__)
+
 # Compiler flags.
 CXX_FLAGS = ["-g", "-O2"]
 # TODO(woosuk): Should we use -O3?
@@ -103,19 +105,23 @@ activation_extension = CUDAExtension(
 ext_modules.append(activation_extension)
 
 
+def get_path(*filepath) -> str:
+    return os.path.join(ROOT_DIR, *filepath)
+
+
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
-    with open("requirements.txt") as f:
+    with open(get_path("requirements.txt")) as f:
         requirements = f.read().strip().split("\n")
     return requirements
 
 
-def find_version(*filepath):
+def find_version(filepath: str):
     """Extract version information from the given filepath.
 
     Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
     """
-    with open(os.path.join(*filepath)) as fp:
+    with open(filepath) as fp:
         version_match = re.search(
             r"^__version__ = ['\"]([^'\"]*)['\"]", fp.read(), re.M)
         if version_match:
@@ -125,7 +131,7 @@ def find_version(*filepath):
 
 setuptools.setup(
     name="cacheflow",
-    version=find_version("cacheflow", "__init__.py"),
+    version=find_version(get_path("cacheflow", "__init__.py")),
     author="CacheFlow Team",
     license="Apache 2.0",
     description="CacheFlow: A high-performance LLM Serving System",
