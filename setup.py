@@ -1,3 +1,5 @@
+import os
+import re
 import subprocess
 from typing import List, Set
 
@@ -109,8 +111,41 @@ def get_requirements() -> List[str]:
     return requirements
 
 
+def find_version(*filepath):
+    """Extract version information from the given filepath.
+
+    Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
+    """
+    with open(os.path.join(*filepath)) as fp:
+        version_match = re.search(
+            r"^__version__ = ['\"]([^'\"]*)['\"]", fp.read(), re.M)
+        if version_match:
+            return version_match.group(1)
+        raise RuntimeError("Unable to find version string.")
+
+
 setuptools.setup(
     name="cacheflow",
+    version=find_version("cacheflow", "__init__.py"),
+    author="CacheFlow Team",
+    license="Apache 2.0",
+    description="CacheFlow: A high-performance LLM Serving System",
+    long_description="",  # FIXME: Add long description.
+    long_description_content_type="text/markdown",
+    project_urls={
+        "Homepage": "https://github.com/WoosukKwon/cacheflow",
+        "Documentation": "https://cacheflow.readthedocs.io/en/latest/",
+    },
+    classifiers=[
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "License :: OSI Approved :: Apache Software License",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    ],
+    packages=setuptools.find_packages(
+        exclude=("benchmarks", "csrc", "docs", "examples", "tests")
+    ),
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
