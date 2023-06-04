@@ -126,7 +126,7 @@ class LLMServer:
     def add_request(
         self,
         request_id: str,
-        prompt: str,
+        prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
@@ -134,6 +134,7 @@ class LLMServer:
         if arrival_time is None:
             arrival_time = time.time()
         if prompt_token_ids is None:
+            assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
         # Create the sequences.
