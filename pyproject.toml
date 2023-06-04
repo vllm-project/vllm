@@ -1,0 +1,3 @@
+[build-system]
+requires = ["ninja", "packaging", "setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
