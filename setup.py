@@ -6,8 +6,7 @@ from typing import List, Set
 from packaging.version import parse, Version
 import setuptools
 import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
-from torch.utils.cpp_extension import CUDA_HOME
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 # Compiler flags.
 CXX_FLAGS = ["-g", "-O2"]
