@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import subprocess
@@ -129,13 +130,18 @@ def find_version(filepath: str):
         raise RuntimeError("Unable to find version string.")
 
 
+def read_readme() -> str:
+    """Read the README file."""
+    return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+
+
 setuptools.setup(
     name="cacheflow",
     version=find_version(get_path("cacheflow", "__init__.py")),
     author="CacheFlow Team",
     license="Apache 2.0",
     description="CacheFlow: A high-performance LLM Serving System",
-    long_description="",  # FIXME: Add long description.
+    long_description=read_readme(),
     long_description_content_type="text/markdown",
     project_urls={
         "Homepage": "https://github.com/WoosukKwon/cacheflow",
