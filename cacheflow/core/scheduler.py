@@ -12,7 +12,7 @@ from cacheflow.sequence import (Sequence, SequenceData, SequenceGroup,
 
 logger = init_logger(__name__)
 
-_LOGGING_INTERVAL_SEC = 10
+_LOGGING_INTERVAL_SEC = 5
 
 
 class PreemptionMode(enum.Enum):
@@ -83,6 +83,18 @@ class Scheduler:
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
+
+    def abort_seq_group(self, request_id: str) -> None:
+        for state_queue in [self.waiting, self.running, self.swapped]:
+            for seq_group in state_queue:
+                if seq_group.request_id == request_id:
+                    # Remove the sequence group from the state queue.
+                    state_queue.remove(seq_group)
+                    for seq in seq_group.seqs:
+                        if seq.is_finished():
+                            continue
+                        self.free_seq(seq, SequenceStatus.FINISHED_ABORTED)
+                    return
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped

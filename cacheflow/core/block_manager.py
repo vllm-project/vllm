@@ -148,7 +148,7 @@ class BlockSpaceManager:
         # the sequences in the same group.
         blocks: Set[PhysicalTokenBlock] = set()
         for seq in seq_group.get_seqs():
-            if SequenceStatus.is_finished(seq.status):
+            if seq.is_finished():
                 continue
             block_table = self.block_tables[seq.seq_id]
             for block in block_table:
@@ -169,7 +169,7 @@ class BlockSpaceManager:
         # CPU block -> GPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs():
-            if SequenceStatus.is_finished(seq.status):
+            if seq.is_finished():
                 continue
             new_block_table: BlockTable = []
             block_table = self.block_tables[seq.seq_id]
@@ -200,7 +200,7 @@ class BlockSpaceManager:
         # GPU block -> CPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs():
-            if SequenceStatus.is_finished(seq.status):
+            if seq.is_finished():
                 continue
             new_block_table: BlockTable = []
             block_table = self.block_tables[seq.seq_id]
@@ -231,6 +231,9 @@ class BlockSpaceManager:
                 self.cpu_allocator.free(block)
 
     def free(self, seq: Sequence) -> None:
+        if seq.seq_id not in self.block_tables:
+            # Already freed or haven't been scheduled yet.
+            return
         block_table = self.block_tables[seq.seq_id]
         self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]
