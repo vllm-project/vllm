@@ -142,6 +142,9 @@ class Sequence:
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
 
+    def is_finished(self) -> bool:
+        return SequenceStatus.is_finished(self.status)
+
     def fork(self, child_seq: 'Sequence') -> None:
         child_seq.logical_token_blocks = copy.deepcopy(self.logical_token_blocks)
         child_seq.output_logprobs = copy.deepcopy(self.output_logprobs)
@@ -187,7 +190,7 @@ class SequenceGroup:
         raise ValueError(f'Sequence {seq_id} not found.')
 
     def is_finished(self) -> bool:
-        return all(SequenceStatus.is_finished(seq.status) for seq in self.seqs)
+        return all(seq.is_finished() for seq in self.seqs)
 
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "

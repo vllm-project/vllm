@@ -1,9 +1,10 @@
 import argparse
 import json
-
-import requests
 import threading
 import time
+
+import requests
+
 
 def main(args: argparse.Namespace):
     prompts = [f"Tell me a story with more than {''.join([str(i+1)] * 5)} words"

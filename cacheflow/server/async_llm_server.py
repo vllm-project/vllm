@@ -65,7 +65,7 @@ class AsyncLLMServer:
         self.request_events[request_id] = request_event
 
         logger.info(f"Received request {request_id}: "
-                    f"prompt: \"{prompt}\", "
+                    f"prompt: {prompt!r}, "
                     f"sampling params: {sampling_params}.")
 
         # Add the request into the cacheflow server's waiting queue.
@@ -101,6 +101,8 @@ class AsyncLLMServer:
 
             # Once finished, release the resources of the sequence group.
             if request_output.finished():
+                logger.info(f"Finished request {request_id}.")
+
                 del self.request_outputs[request_id]
                 del self.request_events[request_id]
                 # Kick the server if the server is not running. This is to
@@ -111,7 +113,11 @@ class AsyncLLMServer:
                 break
 
     async def abort(self, request_id: str) -> None:
-        logger.info(f"Finished or aborted request {request_id}.")
+        if request_id not in self.request_events:
+            # The request has already finished or been aborted.
+            return
+
+        logger.info(f"Aborted request {request_id}.")
 
         if self.server_use_ray:
             await self.server.abort_request.remote(request_id)

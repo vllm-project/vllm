@@ -85,23 +85,16 @@ class Scheduler:
         self.waiting.append(seq_group)
 
     def abort_seq_group(self, request_id: str) -> None:
-        seq_group_to_remove: Optional[SequenceGroup] = None
-        state_queue_to_remove_from: Optional[List[SequenceGroup]] = None
         for state_queue in [self.waiting, self.running, self.swapped]:
             for seq_group in state_queue:
                 if seq_group.request_id == request_id:
-                    seq_group_to_remove = seq_group
-                    state_queue_to_remove_from = state_queue
-                    break
-            if seq_group_to_remove is not None:
-                break
-        if seq_group_to_remove is None:
-            return
-
-        # Remove the sequence group from the state queue.
-        state_queue_to_remove_from.remove(seq_group_to_remove)
-        for seq in seq_group_to_remove.seqs:
-            self.free_seq(seq, SequenceStatus.FINISHED_ABORTED)
+                    # Remove the sequence group from the state queue.
+                    state_queue.remove(seq_group)
+                    for seq in seq_group.seqs:
+                        if seq.is_finished():
+                            continue
+                        self.free_seq(seq, SequenceStatus.FINISHED_ABORTED)
+                    return
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
