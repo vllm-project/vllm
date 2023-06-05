@@ -110,13 +110,6 @@ def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
 
-def get_requirements() -> List[str]:
-    """Get Python package dependencies from requirements.txt."""
-    with open(get_path("requirements.txt")) as f:
-        requirements = f.read().strip().split("\n")
-    return requirements
-
-
 def find_version(filepath: str):
     """Extract version information from the given filepath.
 
@@ -133,6 +126,13 @@ def find_version(filepath: str):
 def read_readme() -> str:
     """Read the README file."""
     return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+
+
+def get_requirements() -> List[str]:
+    """Get Python package dependencies from requirements.txt."""
+    with open(get_path("requirements.txt")) as f:
+        requirements = f.read().strip().split("\n")
+    return requirements
 
 
 setuptools.setup(
