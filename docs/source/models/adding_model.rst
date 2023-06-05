@@ -4,6 +4,7 @@ Adding a New Model
 ==================
 
 This document provides a high-level guide on the process of adding a new model into CacheFlow.
+For example, through this document you can add the `OPT model in HuggingFace <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ to `CacheFlow <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/model_executor/models/opt.py>`_.
 
 .. note::
     The complexity of adding a new model varies based on the model's architecture.
@@ -37,7 +38,7 @@ For example, you can use the code from the HuggingFace's `modeling_llama.py <htt
 
 The next step is to rewrite the :code:`forward` methods of your model by following the steps below:
 
-1. Prune out unnecessary code. For example, you can remove the code only used for training.
+1. Prune out unnecessary code. For example, you can remove the code that is only used for training.
 2. Change the input parameters:
 
 .. code-block:: diff
@@ -65,19 +66,20 @@ The next step is to rewrite the :code:`forward` methods of your model by followi
 4. Replace the attention operation with either :code:`GPTCacheFlowAttention` or :code:`GPTNeoXCacheFlowAttention` depending on the model's architecture.
 
 .. note::
-    As of now, CacheFlow supports the vanilla multi-head attention mechanism and its variant with rotary positional embeddings.
+    Currently, CacheFlow supports the vanilla multi-head attention mechanism and its variant with rotary positional embeddings.
     If your model uses a different attention mechanism, you need to implement a new attention layer in CacheFlow.
 
 
 3. (Optional) Add tensor parallelism support
 --------------------------------------------
 
-If your model is too large to fit into a single GPU, you can add tensor parallelism support to your model.
-To do so, you need to replace your model's linear and embedding layers with their tensor-parallel counterparts.
+If your model is too large to fit into a single GPU, you can use tensor parallelism to manage it.
+To do so, you need to substitute your model's linear and embedding layers with their tensor-parallel versions.
 For the embedding layer, you can simply replace :code:`nn.Embedding` with :code:`VocabParallelEmbedding`.
-For the linear layers, you need to replace them with either :code:`RowParallelLinear` or :code:`ColumnParallelLinear`.
-Typically, we use :code:`ColumnParallelLinear` for QKV linear layers and the first linear layers of the MLP blocks.
-We use :code:`RowParallelLinear` for the other linear layers.
+When it comes to the linear layers, you need to replace them with either :code:`RowParallelLinear` or :code:`ColumnParallelLinear`.
+Typically, :code:`ColumnParallelLinear` is used for QKV linear layers and the first linear layers of the MLP blocks.
+For the remaining linear layers, :code:`RowParallelLinear` is used.
+
 
 4. Implement the weight loading logic
 -------------------------------------
@@ -85,6 +87,7 @@ We use :code:`RowParallelLinear` for the other linear layers.
 The next step is to implement :code:`load_weights` method in your :code:`*ForCausalLM` class.
 This method should load the weights from the HuggingFace's checkpoint file and set them to the corresponding layers in your model.
 While the process is straightforward for most layers, the tensor-parallel layers require some additional care as you need to split the weights across multiple GPUs.
+
 
 5. Register your model
 ----------------------
