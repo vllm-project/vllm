@@ -164,7 +164,7 @@ def _get_and_verify_dtype(
         config_dtype = torch.float32
 
     dtype = dtype.lower()
-    if dtype == "default":
+    if dtype == "auto":
         if config_dtype == torch.float32:
             # Following the common practice, we use float16 for float32 models.
             torch_dtype = torch.float16
