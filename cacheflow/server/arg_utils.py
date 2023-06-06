@@ -49,7 +49,7 @@ class ServerArgs:
                             help='use dummy values for model weights')
         # TODO(woosuk): Support FP32.
         parser.add_argument('--dtype', type=str, default=ServerArgs.dtype,
-                            choices=['default', 'half', 'bfloat16'],
+                            choices=['default', 'half', 'bfloat16', 'float'],
                             help='data type for model weights and activations. '
                                  'The "default" option will use FP16 precision '
                                  'for FP32 and FP16 models, and BF16 precision '

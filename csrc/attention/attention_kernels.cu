@@ -441,8 +441,9 @@ void single_query_cached_kv_attention(
   torch::Tensor& context_lens,    // [num_seqs]
   int block_size,
   int max_context_len) {
-  // TODO(woosuk): Support FP32.
-  if (query.dtype() == at::ScalarType::Half) {
+  if (query.dtype() == at::ScalarType::Float) {
+    CALL_KERNEL_LAUNCHER_BLOCK_SIZE(float);
+  } else if (query.dtype() == at::ScalarType::Half) {
     CALL_KERNEL_LAUNCHER_BLOCK_SIZE(uint16_t);
   } else if (query.dtype() == at::ScalarType::BFloat16) {
     CALL_KERNEL_LAUNCHER_BLOCK_SIZE(__nv_bfloat16);
