@@ -67,7 +67,7 @@ class ServerArgs:
         # KV cache arguments
         parser.add_argument('--block-size', type=int,
                             default=ServerArgs.block_size,
-                            choices=[1, 2, 4, 8, 16, 32, 64, 128, 256],
+                            choices=[8, 16, 32, 64],
                             help='token block size')
         # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
         parser.add_argument('--seed', type=int, default=ServerArgs.seed,
