@@ -32,7 +32,7 @@ You can install CacheFlow using pip:
     $ conda activate myenv
 
     $ # Install CacheFlow.
-    $ pip install cacheflow
+    $ pip install cacheflow  # This may take 2-3 minutes.
 
 
 .. _build_from_source:
