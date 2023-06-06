@@ -270,7 +270,7 @@ def run_multi_query_kv_attention(
 def test_single_query_cached_kv_attention() -> None:
     torch.random.manual_seed(TEST_SEED)
     torch.cuda.manual_seed(TEST_SEED)
-    for dtype in [torch.half, torch.bfloat16]:
+    for dtype in [torch.half, torch.bfloat16, torch.float]:
         for block_size in [8, 16, 32]:
             for head_size in [64, 80, 96, 128]:
                 print(f'Testing single_query_cached_kv_attention with '
