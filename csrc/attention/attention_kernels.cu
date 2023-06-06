@@ -414,7 +414,7 @@ void single_query_cached_kv_attention_launcher(
     max_context_len);
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
-// 1, 2, 4, 128, 256.
+// 1, 2, 4, 64, 128, 256.
 #define CALL_KERNEL_LAUNCHER_BLOCK_SIZE(T)                          \
   switch (block_size) {                                             \
     case 8:                                                         \
@@ -425,9 +425,6 @@ void single_query_cached_kv_attention_launcher(
       break;                                                        \
     case 32:                                                        \
       CALL_KERNEL_LAUNCHER(T, 32);                                  \
-      break;                                                        \
-    case 64:                                                        \
-      CALL_KERNEL_LAUNCHER(T, 64);                                  \
       break;                                                        \
     default:                                                        \
       TORCH_CHECK(false, "Unsupported block size: ", block_size);   \
