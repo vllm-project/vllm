@@ -26,7 +26,7 @@ This gives you the ability to modify the codebase and test your model.
 ------------------------
 
 Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the `cacheflow/model_executor/models <https://github.com/WoosukKwon/cacheflow/tree/main/cacheflow/model_executor/models>`_ directory.
-For instance, you can use the code from the HuggingFace's `modeling_llama.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py>`_ file for the LLaMA models.
+For instance, CacheFlow's `OPT model <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/model_executor/models/opt.py>`_ was adpated from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
 
 .. warning::
     When copying the model code, make sure to review and adhere to the code's copyright and licensing terms.
