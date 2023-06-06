@@ -142,10 +142,12 @@ setuptools.setup(
     name="cacheflow",
     version=find_version(get_path("cacheflow", "__init__.py")),
     author="CacheFlow Team",
+    author_email="cacheflow@gmail.com",
     license="Apache 2.0",
     description="CacheFlow: A high-performance LLM Serving System",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
+    url="https://github.com/WoosukKwon/cacheflow",
     project_urls={
         "Homepage": "https://github.com/WoosukKwon/cacheflow",
         "Documentation": "https://cacheflow.readthedocs.io/en/latest/",
