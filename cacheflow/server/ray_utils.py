@@ -13,9 +13,18 @@ DeviceID = Tuple[int, Optional[str], int]  # rank, node resource (node IP), devi
 
 def initialize_cluster(
     parallel_config: ParallelConfig,
+    server_use_ray: bool = False,
     address: Optional[str] = None,
 ) -> Tuple[str, List[List[DeviceID]]]:
-    if not parallel_config.use_ray:
+    if parallel_config.worker_use_ray or server_use_ray:
+        if ray is None:
+            raise ImportError(
+                "Ray is not installed. Please install Ray to use distributed "
+                "serving.")
+        # Connect to a ray cluster.
+        ray.init(address=address)
+
+    if not parallel_config.worker_use_ray:
         # Initialize cluster locally.
         port = random.randint(10000, 20000)
         # We need to setup the distributed init method to make sure
@@ -23,13 +32,6 @@ def initialize_cluster(
         distributed_init_method = f"tcp://localhost:{port}"
         all_stage_devices = [[(0, None, 0)]]
         return distributed_init_method, all_stage_devices
-
-    if ray is None:
-        raise ImportError(
-            "Ray is not installed. Please install Ray to use distributed "
-            "serving.")
-    # Connect to a ray cluster.
-    ray.init(address=address)
 
     # Assume we have a uniform cluster that each node has the same number of
     # GPUs for now.
