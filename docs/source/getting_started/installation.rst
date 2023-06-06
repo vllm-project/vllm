@@ -47,4 +47,4 @@ You can also build and install CacheFlow from source.
     $ git clone https://github.com/WoosukKwon/cacheflow.git
     $ cd cacheflow
     $ pip install -r requirements.txt
-    $ pip install -e .  # This may take 5-10 minutes.
+    $ pip install -e .  # This may take 2-3 minutes.
