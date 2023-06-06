@@ -7,6 +7,7 @@
 *.csv
 build/
 docs/build/
+dist/
 
 *.pkl
 *.png

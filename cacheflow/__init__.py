@@ -5,6 +5,8 @@ from cacheflow.server.arg_utils import ServerArgs
 from cacheflow.server.llm_server import LLMServer
 from cacheflow.server.ray_utils import initialize_cluster
 
+__version__ = "0.1.0"
+
 __all__ = [
     "LLM",
     "SamplingParams",
