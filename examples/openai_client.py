@@ -1,14 +1,15 @@
 import openai
+
+# Modify OpenAI's API key and API base to use CacheFlow's API server.
 openai.api_key = "EMPTY"
 openai.api_base = "http://localhost:8000/v1"
 model = "facebook/opt-125m"
 
-# list models
+# Test list models API
 models = openai.Model.list()
-print(models)
+print("Models:", models)
 
-# create a completion
-
+# Test completion API
 stream = True
 completion = openai.Completion.create(
     model=model, prompt="A robot may not injure a human being", echo=False, n=2,
@@ -19,4 +20,4 @@ if stream:
     for c in completion:
         print(c)
 else:
-    print("completion:", completion)
+    print("Completion result:", completion)

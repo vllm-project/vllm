@@ -9,6 +9,7 @@ from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
 
 @dataclass
 class ServerArgs:
+    """Arguments for CacheFlow servers."""
     model: str
     download_dir: Optional[str] = None
     use_np_weights: bool = False
@@ -117,6 +118,7 @@ class ServerArgs:
 
 @dataclass
 class AsyncServerArgs(ServerArgs):
+    """Arguments for asynchronous CacheFlow servers."""
     server_use_ray: bool = False
 
     @staticmethod

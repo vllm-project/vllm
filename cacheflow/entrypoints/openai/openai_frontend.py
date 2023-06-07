@@ -96,6 +96,18 @@ def create_logprobs(token_ids: List[int],
 
 @app.post("/v1/completions")
 async def create_completion(raw_request: Request):
+    """Completion API similar to OpenAI's API.
+
+    See https://platform.openai.com/docs/api-reference/completions/create
+    for the API specification. This API mimics the OpenAI Completion API.
+
+    NOTE: Currently we do not support the following features:
+        - echo (since the cacheflow server does not currently support
+          getting the logprobs of prompt tokens)
+        - suffix (the language models we currently support do not support
+          suffix)
+        - logit_bias (to be supported in cacheflow server)
+    """
     request = CompletionRequest(**await raw_request.json())
     logger.info(f"Received completion request: {request}")
 
