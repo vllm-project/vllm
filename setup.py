@@ -66,6 +66,11 @@ if 90 in compute_capabilities and nvcc_cuda_version < Version("11.8"):
     raise RuntimeError(
         "CUDA 11.8 or higher is required for GPUs with compute capability 9.0.")
 
+# Use NVCC threads to parallelize the build.
+if nvcc_cuda_version >= Version("11.2"):
+    num_threads = min(os.cpu_count(), 8)
+    NVCC_FLAGS += ["--threads", str(num_threads)]
+
 ext_modules = []
 
 # Cache operations.
