@@ -35,7 +35,7 @@ You can install CacheFlow using pip:
     $ conda activate myenv
 
     $ # Install CacheFlow.
-    $ pip install cacheflow  # This may take 2-3 minutes.
+    $ pip install cacheflow  # This may take 5-10 minutes.
 
 
 .. _build_from_source:
@@ -49,4 +49,4 @@ You can also build and install CacheFlow from source.
 
     $ git clone https://github.com/WoosukKwon/cacheflow.git
     $ cd cacheflow
-    $ pip install -e .  # This may take 2-3 minutes.
+    $ pip install -e .  # This may take 5-10 minutes.
