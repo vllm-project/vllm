@@ -19,7 +19,7 @@ def initialize_cluster(
     """Initialize the distributed cluster probably with Ray.
 
     Args:
-        parallel_config: The configures for parallel execution.
+        parallel_config: The configurations for parallel execution.
         server_use_ray: Whether to use Ray for async server.
         ray_server_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.

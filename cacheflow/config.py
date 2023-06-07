@@ -17,11 +17,11 @@ class ModelConfig:
     Args:
         model: Name or path of the huggingface model to use.
         download_dir: Directory to download and load the weights, default to the
-            default cache dir of huggingface.
+            default cache directory of huggingface.
         use_np_weights: Save a numpy copy of model weights for faster loading.
             This can increase the disk usage by up to 2x.
         use_dummy_weights: Use dummy values for model weights (for profiling).
-        dtype: Data type for model weights and activations. The "default" option
+        dtype: Data type for model weights and activations. The "auto" option
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
         seed: Random seed for reproducibility.
@@ -82,13 +82,13 @@ class ModelConfig:
 
 
 class CacheConfig:
-    """Configuration for the cache.
+    """Configuration for the KV cache.
 
     Args:
         block_size: Size of a cache block in number of tokens.
         gpu_memory_utilization: Fraction of GPU memory to use for the
             CacheFlow execution.
-        swap_space: Size of the CPU swap space in GiB.
+        swap_space: Size of the CPU swap space per GPU (in GiB).
     """
     def __init__(
         self,
@@ -168,8 +168,8 @@ class SchedulerConfig:
     Args:
         max_num_batched_tokens: Maximum number of tokens to be processed in
             a single iteration.
-        max_num_seqs: Maximum number of sequences to be processed in
-            a single iteration.
+        max_num_seqs: Maximum number of sequences to be processed in a single
+            iteration.
     """
     def __init__(
         self,

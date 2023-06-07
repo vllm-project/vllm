@@ -22,7 +22,7 @@ async def generate_stream(request: Request) -> StreamingResponse:
 
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
-    - other fields: the sampling parameters (See SamplingParams for details).
+    - other fields: the sampling parameters (See `SamplingParams` for details).
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
