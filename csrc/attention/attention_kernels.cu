@@ -417,6 +417,15 @@ void single_query_cached_kv_attention_launcher(
 // 1, 2, 4, 64, 128, 256.
 #define CALL_KERNEL_LAUNCHER_BLOCK_SIZE(T)                          \
   switch (block_size) {                                             \
+    /* case 1:                         */                           \
+    /*   CALL_KERNEL_LAUNCHER(T, 1);   */                           \
+    /*   break;                        */                           \
+    /* case 2:                         */                           \
+    /*   CALL_KERNEL_LAUNCHER(T, 2);   */                           \
+    /*   break;                        */                           \
+    /* case 4:                         */                           \
+    /*   CALL_KERNEL_LAUNCHER(T, 4);   */                           \
+    /*   break;                        */                           \
     case 8:                                                         \
       CALL_KERNEL_LAUNCHER(T, 8);                                   \
       break;                                                        \
@@ -426,6 +435,15 @@ void single_query_cached_kv_attention_launcher(
     case 32:                                                        \
       CALL_KERNEL_LAUNCHER(T, 32);                                  \
       break;                                                        \
+    /* case 64:                        */                           \
+    /*   CALL_KERNEL_LAUNCHER(T, 64);  */                           \
+    /*   break;                        */                           \
+    /* case 128:                       */                           \
+    /*   CALL_KERNEL_LAUNCHER(T, 128); */                           \
+    /*   break;                        */                           \
+    /* case 256:                       */                           \
+    /*   CALL_KERNEL_LAUNCHER(T, 256); */                           \
+    /*   break;                        */                           \
     default:                                                        \
       TORCH_CHECK(false, "Unsupported block size: ", block_size);   \
       break;                                                        \
