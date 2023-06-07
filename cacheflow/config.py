@@ -12,6 +12,20 @@ _GiB = 1 << 30
 
 
 class ModelConfig:
+    """Configuration for the model.
+
+    Args:
+        model: Name or path of the huggingface model to use.
+        download_dir: Directory to download and load the weights, default to the
+            default cache directory of huggingface.
+        use_np_weights: Save a numpy copy of model weights for faster loading.
+            This can increase the disk usage by up to 2x.
+        use_dummy_weights: Use dummy values for model weights (for profiling).
+        dtype: Data type for model weights and activations. The "auto" option
+            will use FP16 precision for FP32 and FP16 models, and BF16 precision
+            for BF16 models.
+        seed: Random seed for reproducibility.
+    """
 
     def __init__(
         self,
@@ -68,7 +82,14 @@ class ModelConfig:
 
 
 class CacheConfig:
+    """Configuration for the KV cache.
 
+    Args:
+        block_size: Size of a cache block in number of tokens.
+        gpu_memory_utilization: Fraction of GPU memory to use for the
+            CacheFlow execution.
+        swap_space: Size of the CPU swap space per GPU (in GiB).
+    """
     def __init__(
         self,
         block_size: int,
@@ -111,7 +132,15 @@ class CacheConfig:
 
 
 class ParallelConfig:
+    """Configuration for the distributed execution.
 
+    Args:
+        pipeline_parallel_size: Number of pipeline parallel groups.
+        tensor_parallel_size: Number of tensor parallel groups.
+        worker_use_ray: Whether to use Ray for model workers. Will be set to
+            True if either pipeline_parallel_size or tensor_parallel_size is
+            greater than 1.
+    """
     def __init__(
         self,
         pipeline_parallel_size: int,
@@ -134,7 +163,14 @@ class ParallelConfig:
 
 
 class SchedulerConfig:
+    """Scheduler configuration.
 
+    Args:
+        max_num_batched_tokens: Maximum number of tokens to be processed in
+            a single iteration.
+        max_num_seqs: Maximum number of sequences to be processed in a single
+            iteration.
+    """
     def __init__(
         self,
         max_num_batched_tokens: int,

@@ -18,6 +18,12 @@ app = FastAPI()
 
 @app.post("/generate")
 async def generate_stream(request: Request) -> StreamingResponse:
+    """ Stream the results of the generation request.
+
+    The request should be a JSON object with the following fields:
+    - prompt: the prompt to use for the generation.
+    - other fields: the sampling parameters (See `SamplingParams` for details).
+    """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
     sampling_params = SamplingParams(**request_dict)
