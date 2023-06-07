@@ -18,7 +18,10 @@ CacheFlow can run on systems that meet the following requirements:
 
     .. code-block:: console
 
+        $ # Pull the Docker image with CUDA 11.8.
         $ docker run --gpus all -it --rm --shm-size=8g nvcr.io/nvidia/pytorch:22.12-py3
+
+    Inside the Docker container, please execute :code:`pip uninstall torch` before installing CacheFlow.
 
 Install with pip
 ----------------
