@@ -19,7 +19,7 @@ def main(args: argparse.Namespace):
          SamplingParams(n=3, best_of=3, use_beam_search=True, temperature=0.0)),
     ]
 
-    # Run the server.
+    # Run the server by calling `server.step()` manually.
     request_id = 0
     while True:
         # To test iteration-level scheduling, we add one request at each step.
