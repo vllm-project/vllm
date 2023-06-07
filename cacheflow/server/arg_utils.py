@@ -13,7 +13,7 @@ class ServerArgs:
     download_dir: Optional[str] = None
     use_np_weights: bool = False
     use_dummy_weights: bool = False
-    dtype: str = "default"
+    dtype: str = "auto"
     seed: int = 0
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
@@ -49,9 +49,9 @@ class ServerArgs:
                             help='use dummy values for model weights')
         # TODO(woosuk): Support FP32.
         parser.add_argument('--dtype', type=str, default=ServerArgs.dtype,
-                            choices=['default', 'half', 'bfloat16'],
+                            choices=['auto', 'half', 'bfloat16', 'float'],
                             help='data type for model weights and activations. '
-                                 'The "default" option will use FP16 precision '
+                                 'The "auto" option will use FP16 precision '
                                  'for FP32 and FP16 models, and BF16 precision '
                                  'for BF16 models.')
         # Parallel arguments
@@ -67,7 +67,7 @@ class ServerArgs:
         # KV cache arguments
         parser.add_argument('--block-size', type=int,
                             default=ServerArgs.block_size,
-                            choices=[1, 2, 4, 8, 16, 32, 64, 128, 256],
+                            choices=[8, 16, 32],
                             help='token block size')
         # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
         parser.add_argument('--seed', type=int, default=ServerArgs.seed,
