@@ -15,6 +15,7 @@ def get_tokenizer(
     *args,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    """Gets a tokenizer for the given model name via Huggingface."""
     config = AutoConfig.from_pretrained(model_name)
     if config.model_type == "llama" and getattr(kwargs, "use_fast", True):
         # LLaMA fast tokenizer causes protobuf errors in some environments.
