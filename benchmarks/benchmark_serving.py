@@ -66,6 +66,8 @@ def sample_requests(
     # Filter out too long sequences.
     filtered_dataset: List[Tuple[str, int]] = []
     for prompt, prompt_token_ids, output_len in tokenized_dataset:
+        if output_len == 0:
+            continue
         if len(prompt_token_ids) > 1024:
             continue
         if len(prompt_token_ids) + output_len > 2048:
@@ -131,11 +133,16 @@ async def send_request(
         raise ValueError(f"Unknown backend: {backend}")
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(api_url, headers=headers, json=pload) as response:
-            chunks = []
-            async for chunk, _ in response.content.iter_chunks():
-                chunks.append(chunk)
-        output = b"".join(chunks).decode("utf-8")
+        while True:
+            async with session.post(api_url, headers=headers, json=pload) as response:
+                chunks = []
+                async for chunk, _ in response.content.iter_chunks():
+                    chunks.append(chunk)
+            output = b"".join(chunks).decode("utf-8")
+            output = json.loads(output)
+
+            if "error" not in output:
+                break
 
 
 async def benchmark(
