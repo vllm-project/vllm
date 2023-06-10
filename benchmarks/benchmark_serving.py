@@ -1,3 +1,14 @@
+"""Benchmark the online serving throughput.
+
+On the server side, run:
+    python -m cacheflow.entrypoints.simple_fastapi_frontend \
+        --disable-log-requests --model <your_model>
+
+On the client side, run:
+    python benchmarks/benchmark_serving.py \
+        --tokenizer <your_model> --dataset <target_dataset> \
+        --request-rate <request_rate>
+"""
 import aiohttp
 import argparse
 import asyncio
@@ -131,7 +142,8 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--dataset", type=str, required=True,
                         help="Path to the dataset.")
-    parser.add_argument("--tokenizer", type=str, required=True)
+    parser.add_argument("--tokenizer", type=str, required=True,
+                        help="Name or path of the tokenizer.")
     parser.add_argument("--n", type=int, default=1,
                         help="Number of generated sequences per prompt.")
     parser.add_argument("--use-beam-search", action="store_true")
