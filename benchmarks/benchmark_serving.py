@@ -63,6 +63,26 @@ def sample_requests(
     return sampled_requests
 
 
+async def get_request(
+    input_requests: List[Tuple[str, int]],
+    request_rate: float,
+) -> AsyncGenerator[Tuple[str, int], None]:
+    input_requests = iter(input_requests)
+    while True:
+        try:
+            yield next(input_requests)
+        except StopIteration:
+            return
+
+        if request_rate == float("inf"):
+            # If the request rate is infinity, then we don't need to sleep.
+            continue
+        # Sample the interval between requests from an exponential distribution.
+        interval = np.random.exponential(1.0 / request_rate)
+        # The next request will be sent after the interval.
+        await asyncio.sleep(interval)
+
+
 async def send_request(
     api_url: str,
     prompt: str,
@@ -86,26 +106,6 @@ async def send_request(
             async for chunk, _ in response.content.iter_chunks():
                 chunks.append(chunk)
         output = b"".join(chunks).decode("utf-8")
-
-
-async def get_request(
-    input_requests: List[Tuple[str, int]],
-    request_rate: float,
-) -> AsyncGenerator[Tuple[str, int], None]:
-    input_requests = iter(input_requests)
-    while True:
-        try:
-            yield next(input_requests)
-        except StopIteration:
-            return
-
-        if request_rate == float("inf"):
-            # If the request rate is infinity, then we don't need to sleep.
-            continue
-        # Sample the interval between requests from an exponential distribution.
-        interval = np.random.exponential(1.0 / request_rate)
-        # The next request will be sent after the interval.
-        await asyncio.sleep(interval)
 
 
 async def benchmark(
