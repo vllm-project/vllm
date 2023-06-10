@@ -66,11 +66,12 @@ def sample_requests(
     # Filter out too long sequences.
     filtered_dataset: List[Tuple[str, int]] = []
     for prompt, prompt_token_ids, output_len in tokenized_dataset:
-        if output_len == 0:
+        prompt_len = len(prompt_token_ids)
+        if prompt_len < 4 or output_len < 4:
+            # Prune too short sequences.
             continue
-        if len(prompt_token_ids) > 1024:
-            continue
-        if len(prompt_token_ids) + output_len > 2048:
+        if prompt_len > 1024 or prompt_len + output_len > 2048:
+            # Prune too long sequences.
             continue
         filtered_dataset.append((prompt, output_len))
 
@@ -171,8 +172,14 @@ def main(args: argparse.Namespace):
     api_url = f"http://{args.host}:{args.port}/generate"
     tokenizer = get_tokenizer(args.tokenizer)
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
+
+    benchmark_start_time = time.time()
     asyncio.run(benchmark(args.backend, api_url, input_requests, args.n,
                           args.use_beam_search, args.request_rate))
+    benchmark_end_time = time.time()
+    benchmark_time = benchmark_end_time - benchmark_start_time
+    print(f"Total time: {benchmark_time:.2f} s")
+    print(f"Throughput: {args.num_prompts / benchmark_time:.2f} requests/s")
 
 
 if __name__ == "__main__":
