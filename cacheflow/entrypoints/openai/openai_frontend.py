@@ -233,7 +233,7 @@ async def create_completion(raw_request: Request):
     async for res in result_generator:
         if await raw_request.is_disconnected():
             # Abort the request if the client disconnects.
-            await server.abort(request_id)
+            await abort_request()
             return create_error_response(HTTPStatus.BAD_REQUEST,
                                          "Client disconnected")
         final_res = res
