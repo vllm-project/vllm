@@ -40,7 +40,7 @@ if __name__ == "__main__":
     api_url = f"http://{args.host}:{args.port}/generate"
     n = args.n
 
-    print(f"Prompt: {prompt}\n", flush=True)
+    print(f"Prompt: {prompt!r}\n", flush=True)
     num_printed_lines = 0
     for h in http_request(prompt, api_url, n):
         clear_line(num_printed_lines)
