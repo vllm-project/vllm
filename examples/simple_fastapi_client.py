@@ -1,11 +1,13 @@
 import argparse
-import requests
 import json
+
+import requests
+
 
 def clear_line(n=1):
     LINE_UP = '\033[1A'
     LINE_CLEAR = '\x1b[2K'
-    for i in range(n):
+    for _ in range(n):
         print(LINE_UP, end=LINE_CLEAR, flush=True)
 
 
@@ -45,4 +47,4 @@ if __name__ == "__main__":
         num_printed_lines = 0
         for i, line in enumerate(h):
             num_printed_lines += 1
-            print(f"Beam candidate {i}: {line}", flush=True)
+            print(f"Beam candidate {i}: {line!r}", flush=True)
