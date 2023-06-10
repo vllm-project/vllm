@@ -118,7 +118,7 @@ def main(args: argparse.Namespace):
     np.random.seed(args.seed)
 
     api_url = f"http://{args.host}:{args.port}/generate"
-    tokenizer = get_tokenizer(args.model)
+    tokenizer = get_tokenizer(args.tokenizer)
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
     asyncio.run(benchmark(api_url, input_requests, args.n, args.use_beam_search,
                           args.request_rate))
@@ -131,8 +131,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--dataset", type=str, required=True,
                         help="Path to the dataset.")
-    parser.add_argument("--model", type=str, default="facebook/opt-125m")
-    parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
+    parser.add_argument("--tokenizer", type=str, required=True)
     parser.add_argument("--n", type=int, default=1,
                         help="Number of generated sequences per prompt.")
     parser.add_argument("--use-beam-search", action="store_true")
