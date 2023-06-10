@@ -14,7 +14,6 @@ On the client side, run:
         --tokenizer <your_model> --dataset <target_dataset> \
         --request-rate <request_rate>
 """
-import aiohttp
 import argparse
 import asyncio
 import json
@@ -22,6 +21,7 @@ import random
 import time
 from typing import AsyncGenerator, List, Tuple
 
+import aiohttp
 import numpy as np
 from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase
 
@@ -63,15 +63,17 @@ def sample_requests(
         output_len = len(completion_token_ids[i])
         tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
 
-    # Filter out if the prompt length + output length is greater than 2048.
-    tokenized_dataset = [
-        (prompt, output_len)
-        for prompt, prompt_token_ids, output_len in tokenized_dataset
-        if len(prompt_token_ids) + output_len <= 2048
-    ]
+    # Filter out too long sequences.
+    filtered_dataset: List[Tuple[str, int]] = []
+    for prompt, prompt_token_ids, output_len in tokenized_dataset:
+        if len(prompt_token_ids) > 1024:
+            continue
+        if len(prompt_token_ids) + output_len > 2048:
+            continue
+        filtered_dataset.append((prompt, output_len))
 
     # Sample the requests.
-    sampled_requests = random.sample(tokenized_dataset, num_requests)
+    sampled_requests = random.sample(filtered_dataset, num_requests)
     return sampled_requests
 
 
