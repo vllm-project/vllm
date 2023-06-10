@@ -1,7 +1,7 @@
 import argparse
 import json
 import requests
-from typing import Generator, List
+from typing import Iterable, List
 
 def clear_line(n:int = 1) -> None:
     LINE_UP = '\033[1A'
@@ -19,12 +19,13 @@ def post_http_request(prompt: str, api_url: str, n: int = 1,
         "use_beam_search": True,
         "temperature": 0.0,
         "max_tokens": 16,
+        "stream": stream,
     }
     response = requests.post(api_url, headers=headers, json=pload, stream=True)
     return response
 
 
-def get_streaming_response(response: requests.Response) -> Generator[List[str]]:
+def get_streaming_response(response: requests.Response) -> Iterable[List[str]]:
     for chunk in response.iter_lines(chunk_size=8192, decode_unicode=False,
                                      delimiter=b"\0"):
         if chunk:
@@ -37,6 +38,7 @@ def get_response(response: requests.Response) -> List[str]:
     data = json.loads(response.content)
     output = data["text"]
     return output
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -56,7 +58,7 @@ if __name__ == "__main__":
 
     if stream:
         num_printed_lines = 0
-        for h in get_streaming_response(prompt, api_url, n):
+        for h in get_streaming_response(response):
             clear_line(num_printed_lines)
             num_printed_lines = 0
             for i, line in enumerate(h):

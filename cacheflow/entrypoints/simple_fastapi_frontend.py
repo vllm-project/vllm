@@ -27,8 +27,7 @@ async def generate(request: Request) -> Response:
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
-    if "stream" in request_dict:
-        stream = request_dict.pop("stream")
+    stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
     results_generator = server.generate(prompt, sampling_params, request_id)
