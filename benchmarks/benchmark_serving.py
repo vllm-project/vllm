@@ -117,6 +117,7 @@ async def send_request(
             "top_p": 1.0,
             "max_tokens": output_len,
             "ignore_eos": True,
+            "stream": False,
         }
     elif backend == "huggingface":
         assert n == 1
