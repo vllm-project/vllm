@@ -104,8 +104,8 @@ async def get_request(
             continue
         # Sample the interval between requests from an exponential distribution.
         interval = np.random.exponential(1.0 / request_rate)
-        # Make sure the next request is sent after the interval.
-        time.sleep(interval)
+        # The next request will be sent after the interval.
+        await asyncio.sleep(interval)
 
 
 async def benchmark(
