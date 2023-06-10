@@ -17,9 +17,16 @@ import random
 import time
 from typing import AsyncGenerator, List, Tuple
 
-from cacheflow.server.tokenizer_utils import get_tokenizer  # FIXME(woosuk)
 import numpy as np
-from transformers import PreTrainedTokenizerBase
+from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase
+
+
+def get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
+    config = AutoConfig.from_pretrained(model_name)
+    if config.model_type == "llama":
+        # A workaround for potential protobuf errors.
+        model_name = "hf-internal-testing/llama-tokenizer"
+    return AutoTokenizer.from_pretrained(model_name)
 
 
 def sample_requests(
