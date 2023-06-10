@@ -1,11 +1,16 @@
 """Benchmark the online serving throughput.
 
-On the server side, run:
+On the server side, run one of the following commands:
+    (CacheFlow backend)
     python -m cacheflow.entrypoints.simple_fastapi_frontend \
         --disable-log-requests --model <your_model>
 
+    (HuggingFace backend)
+    ./launch_hf_server.sh <your_model>
+
 On the client side, run:
     python benchmarks/benchmark_serving.py \
+        --backend <backend> \
         --tokenizer <your_model> --dataset <target_dataset> \
         --request-rate <request_rate>
 """
@@ -91,6 +96,7 @@ async def get_request(
 
 
 async def send_request(
+    backend: str,
     api_url: str,
     prompt: str,
     output_len: int,
@@ -98,15 +104,26 @@ async def send_request(
     use_beam_search: bool,
 ) -> None:
     headers = {"User-Agent": "Benchmark Client"}
-    pload = {
-        "prompt": prompt,
-        "n": n,
-        "use_beam_search": use_beam_search,
-        "temperature": 0.0 if use_beam_search else 1.0,
-        "top_p": 1.0,
-        "max_tokens": output_len,
-        "ignore_eos": True,
-    }
+    if backend == "cacheflow":
+        pload = {
+            "prompt": prompt,
+            "n": n,
+            "use_beam_search": use_beam_search,
+            "temperature": 0.0 if use_beam_search else 1.0,
+            "top_p": 1.0,
+            "max_tokens": output_len,
+            "ignore_eos": True,
+        }
+    elif backend == "huggingface":
+        assert n == 1
+        assert not use_beam_search
+        pload = {
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": output_len, "do_sample": True},
+        }
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
+
     async with aiohttp.ClientSession() as session:
         async with session.post(api_url, headers=headers, json=pload) as response:
             chunks = []
@@ -116,6 +133,7 @@ async def send_request(
 
 
 async def benchmark(
+    backend: str,
     api_url: str,
     input_requests: List[Tuple[str, int]],
     n: int,
@@ -124,8 +142,8 @@ async def benchmark(
 ) -> None:
     tasks: List[asyncio.Task] = []
     async for prompt, output_len in get_request(input_requests, request_rate):
-        task = asyncio.create_task(
-            send_request(api_url, prompt, output_len, n, use_beam_search))
+        task = asyncio.create_task(send_request(backend, api_url, prompt,
+                                                output_len, n, use_beam_search))
         tasks.append(task)
     await asyncio.gather(*tasks)
 
@@ -138,13 +156,15 @@ def main(args: argparse.Namespace):
     api_url = f"http://{args.host}:{args.port}/generate"
     tokenizer = get_tokenizer(args.tokenizer)
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
-    asyncio.run(benchmark(api_url, input_requests, args.n, args.use_beam_search,
-                          args.request_rate))
+    asyncio.run(benchmark(args.backend, api_url, input_requests, args.n,
+                          args.use_beam_search, args.request_rate))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Benchmark the online serving throughput.")
+    parser.add_argument("--backend", type=str, default="cacheflow",
+                        choices=["cacheflow", "huggingface"])
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--dataset", type=str, required=True,
