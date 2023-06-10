@@ -120,7 +120,6 @@ async def send_request(
         params = {
             "max_new_tokens": output_len,
             "do_sample": True,
-            "top_p": 1.0,
         }
         pload = {
             "inputs": prompt,
