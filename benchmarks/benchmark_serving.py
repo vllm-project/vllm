@@ -59,7 +59,7 @@ async def send_request(
     n: int,
     use_beam_search: bool,
 ) -> None:
-    headers = {"User-Agent": "Test Client"}
+    headers = {"User-Agent": "Benchmark Client"}
     pload = {
         "prompt": prompt,
         "n": n,
