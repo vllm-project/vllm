@@ -117,9 +117,14 @@ async def send_request(
     elif backend == "huggingface":
         assert n == 1
         assert not use_beam_search
+        params = {
+            "max_new_tokens": output_len,
+            "do_sample": True,
+            "top_p": 1.0,
+        }
         pload = {
             "inputs": prompt,
-            "parameters": {"max_new_tokens": output_len, "do_sample": True},
+            "parameters": params,
         }
     else:
         raise ValueError(f"Unknown backend: {backend}")
