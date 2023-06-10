@@ -142,6 +142,7 @@ async def send_request(
             output = b"".join(chunks).decode("utf-8")
             output = json.loads(output)
 
+            # Re-send the request if it failed.
             if "error" not in output:
                 break
 
