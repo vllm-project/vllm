@@ -134,7 +134,7 @@ async def send_request(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    timeout = aiohttp.ClientTimeout(total=3600)
+    timeout = aiohttp.ClientTimeout(total=3 * 3600)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
             async with session.post(api_url, headers=headers, json=pload) as response:
