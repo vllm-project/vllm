@@ -32,4 +32,4 @@ FluentFlow comes with many powerful features that include:
 ## Contributing
 
 As an open-source project in a fast-evolving field, we welcome any contributions and collaborations.
-For guidance on how to contribute, please check out [CONTRIBUTING.md]().
+For guidance on how to contribute, please check out [CONTRIBUTING.md](./CONTRIBUTING.md).
