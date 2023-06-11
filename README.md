@@ -6,7 +6,7 @@ FluentFlow has powered [LMSys Vicuna and Chatbot Arena](https://chat.lmsys.org) 
 
 ## Latest News
 
-- [2023/06] FluentFlow was officially released! Please check out our [blog post]() and [paper]().
+- [2023/06] FluentFlow was officially released! Please check out our [blog post](), [slides](), and [paper]().
 
 ## Getting Started
 
