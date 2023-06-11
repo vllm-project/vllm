@@ -18,7 +18,7 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`GPTNeoXForCausalLM`
     - GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM
   * - :code:`LlamaForCausalLM`
-    - LLaMA, Vicuna, Alpaca, Koala
+    - LLaMA, Vicuna, Alpaca, Koala, Guanaco
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
 
