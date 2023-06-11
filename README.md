@@ -21,7 +21,7 @@ Visit our [documentation]() to get started.
 FluentFlow comes with many powerful features that include:
 
 - Efficient block-based memory management
-- Intelligent batching mechanism
+- Advanced batching mechanism
 - Optimized CUDA kernels
 - Tensor parallelism support for multi-GPU inference
 - OpenAI-compatible API
