@@ -18,7 +18,8 @@ Visit our [documentation]() to get started.
 
 ## Key Features
 
-The key features of FluentFlow include:
+FluentFlow comes with many powerful features that include:
+
 - Efficient block-based memory management
 - Intelligent batching mechanism
 - Optimized CUDA kernels
