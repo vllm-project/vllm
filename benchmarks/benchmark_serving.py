@@ -105,14 +105,15 @@ async def send_request(
     api_url: str,
     prompt: str,
     output_len: int,
-    n: int,
+    best_of: int,
     use_beam_search: bool,
 ) -> None:
     headers = {"User-Agent": "Benchmark Client"}
     if backend == "cacheflow":
         pload = {
             "prompt": prompt,
-            "n": n,
+            "n": 1,
+            "best_of": best_of,
             "use_beam_search": use_beam_search,
             "temperature": 0.0 if use_beam_search else 1.0,
             "top_p": 1.0,
@@ -121,9 +122,9 @@ async def send_request(
             "stream": False,
         }
     elif backend == "huggingface":
-        assert n == 1
         assert not use_beam_search
         params = {
+            "best_of": best_of,
             "max_new_tokens": output_len,
             "do_sample": True,
         }
@@ -153,14 +154,15 @@ async def benchmark(
     backend: str,
     api_url: str,
     input_requests: List[Tuple[str, int]],
-    n: int,
+    best_of: int,
     use_beam_search: bool,
     request_rate: float,
 ) -> None:
     tasks: List[asyncio.Task] = []
     async for prompt, output_len in get_request(input_requests, request_rate):
         task = asyncio.create_task(send_request(backend, api_url, prompt,
-                                                output_len, n, use_beam_search))
+                                                output_len, best_of,
+                                                use_beam_search))
         tasks.append(task)
     await asyncio.gather(*tasks)
 
@@ -175,7 +177,7 @@ def main(args: argparse.Namespace):
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
 
     benchmark_start_time = time.time()
-    asyncio.run(benchmark(args.backend, api_url, input_requests, args.n,
+    asyncio.run(benchmark(args.backend, api_url, input_requests, args.best_of,
                           args.use_beam_search, args.request_rate))
     benchmark_end_time = time.time()
     benchmark_time = benchmark_end_time - benchmark_start_time
@@ -194,8 +196,9 @@ if __name__ == "__main__":
                         help="Path to the dataset.")
     parser.add_argument("--tokenizer", type=str, required=True,
                         help="Name or path of the tokenizer.")
-    parser.add_argument("--n", type=int, default=1,
-                        help="Number of generated sequences per prompt.")
+    parser.add_argument("--best-of", type=int, default=1,
+                        help="Generates `best_of` sequences per prompt and "
+                             "returns the best one.")
     parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument("--num-prompts", type=int, default=1000,
                         help="Number of prompts to process.")
