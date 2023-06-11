@@ -305,7 +305,10 @@ class ColumnParallelLinear(torch.nn.Module):
         """
         bias = self.bias if not self.skip_bias_add else None
 
-        input_parallel = copy_to_tensor_model_parallel_region(input_)
+        if get_tensor_model_parallel_world_size() == 1:
+            input_parallel = input_
+        else:
+            input_parallel = copy_to_tensor_model_parallel_region(input_)
         # Matrix multiply.
         output_parallel = F.linear(input_parallel, self.weight, bias)
         if self.gather_output:
