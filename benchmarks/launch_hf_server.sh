@@ -11,5 +11,6 @@ docker run --gpus all --shm-size 1g -p $PORT:80 \
            --sharded false  \
            --max-input-length 1024 \
            --max-total-tokens 2048 \
-           --max-concurrent-requests 1000 \
+           --max-best-of 5 \
+           --max-concurrent-requests 5000 \
            --max-batch-total-tokens $TOKENS
