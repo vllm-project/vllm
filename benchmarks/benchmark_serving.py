@@ -25,6 +25,9 @@ import aiohttp
 import numpy as np
 from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase
 
+# (prompt len, output len, latency)
+REQUEST_LATENCY: List[Tuple[int, int, float]] = []
+
 
 def get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
     config = AutoConfig.from_pretrained(model_name)
@@ -38,7 +41,7 @@ def sample_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
-) -> List[Tuple[str, int]]:
+) -> List[Tuple[str, int, int]]:
     # Load the dataset.
     with open(dataset_path) as f:
         dataset = json.load(f)
@@ -64,7 +67,7 @@ def sample_requests(
         tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
 
     # Filter out too long sequences.
-    filtered_dataset: List[Tuple[str, int]] = []
+    filtered_dataset: List[Tuple[str, int, int]] = []
     for prompt, prompt_token_ids, output_len in tokenized_dataset:
         prompt_len = len(prompt_token_ids)
         if prompt_len < 4 or output_len < 4:
@@ -73,7 +76,7 @@ def sample_requests(
         if prompt_len > 1024 or prompt_len + output_len > 2048:
             # Prune too long sequences.
             continue
-        filtered_dataset.append((prompt, output_len))
+        filtered_dataset.append((prompt, prompt_len, output_len))
 
     # Sample the requests.
     sampled_requests = random.sample(filtered_dataset, num_requests)
@@ -81,9 +84,9 @@ def sample_requests(
 
 
 async def get_request(
-    input_requests: List[Tuple[str, int]],
+    input_requests: List[Tuple[str, int, int]],
     request_rate: float,
-) -> AsyncGenerator[Tuple[str, int], None]:
+) -> AsyncGenerator[Tuple[str, int, int], None]:
     input_requests = iter(input_requests)
     while True:
         try:
@@ -92,9 +95,9 @@ async def get_request(
             return
 
         if request_rate == float("inf"):
-            # If the request rate is infinity, then we don't need to sleep.
+            # If the request rate is infinity, then we don't need to wait.
             continue
-        # Sample the interval between requests from an exponential distribution.
+        # Sample the request interval from the exponential distribution.
         interval = np.random.exponential(1.0 / request_rate)
         # The next request will be sent after the interval.
         await asyncio.sleep(interval)
@@ -104,10 +107,13 @@ async def send_request(
     backend: str,
     api_url: str,
     prompt: str,
+    prompt_len: int,
     output_len: int,
     best_of: int,
     use_beam_search: bool,
 ) -> None:
+    request_start_time = time.time()
+
     headers = {"User-Agent": "Benchmark Client"}
     if backend == "cacheflow":
         pload = {
@@ -149,20 +155,25 @@ async def send_request(
             if "error" not in output:
                 break
 
+    request_end_time = time.time()
+    request_latency = request_end_time - request_start_time
+    REQUEST_LATENCY.append((prompt_len, output_len, request_latency))
+
 
 async def benchmark(
     backend: str,
     api_url: str,
-    input_requests: List[Tuple[str, int]],
+    input_requests: List[Tuple[str, int, int]],
     best_of: int,
     use_beam_search: bool,
     request_rate: float,
 ) -> None:
     tasks: List[asyncio.Task] = []
-    async for prompt, output_len in get_request(input_requests, request_rate):
+    async for request in get_request(input_requests, request_rate):
+        prompt, prompt_len, output_len = request
         task = asyncio.create_task(send_request(backend, api_url, prompt,
-                                                output_len, best_of,
-                                                use_beam_search))
+                                                prompt_len, output_len,
+                                                best_of, use_beam_search))
         tasks.append(task)
     await asyncio.gather(*tasks)
 
@@ -183,6 +194,21 @@ def main(args: argparse.Namespace):
     benchmark_time = benchmark_end_time - benchmark_start_time
     print(f"Total time: {benchmark_time:.2f} s")
     print(f"Throughput: {args.num_prompts / benchmark_time:.2f} requests/s")
+
+    # Compute the latency statistics.
+    avg_latency = np.mean([latency for _, _, latency in REQUEST_LATENCY])
+    print(f"Average latency: {avg_latency:.2f} s")
+    avg_per_token_latency = np.mean([
+        latency / (prompt_len + output_len)
+        for prompt_len, output_len, latency in REQUEST_LATENCY
+    ])
+    print(f"Average latency per token: {avg_per_token_latency:.2f} s")
+    avg_per_output_token_latency = np.mean([
+        latency / output_len
+        for _, output_len, latency in REQUEST_LATENCY
+    ])
+    print("Average latency per output token: "
+          f"{avg_per_output_token_latency:.2f} s")
 
 
 if __name__ == "__main__":
