@@ -20,6 +20,7 @@ Visit our [documentation]() to get started.
 
 FluentFlow comes with many powerful features that include:
 
+- Seamless integration with popular HuggingFace models
 - Efficient block-based management for KV cache
 - Advanced batching mechanism
 - Optimized CUDA kernels
