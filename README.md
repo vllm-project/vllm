@@ -4,7 +4,7 @@ FluentFlow is a fast and easy-to-use library for LLM inference and serving.
 Using efficient memory management techniques, FluentFlow delivers x-x higher throughput than state-of-the-art systems.
 FluentFlow has powered [LMSys Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April, significantly reducing its operational costs.
 
-## News
+## Latest News
 
 - [2023/06] FluentFlow was officially released! Please check out our [blog post]() and [paper]().
 
