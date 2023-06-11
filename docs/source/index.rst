@@ -1,6 +1,24 @@
 Welcome to CacheFlow!
 =====================
 
+**CacheFlow** is a fast and easy-to-use library for LLM inference and serving.
+Using efficient memory management techniques, CacheFlow delivers x-x higher throughput than state-of-the-art systems.
+Its core features include:
+
+- Seamless integration with popular HuggingFace models
+- Efficient block-based management for KV cache
+- Advanced batching mechanism
+- Optimized CUDA kernels
+- Tensor parallelism support for multi-GPU inference
+- OpenAI-compatible API
+
+For more information, please refer to:
+
+* Blog post: ``
+* Slides: ``
+* Paper: `FluentFlow: Efficient Memory Management for Large Language Model Serving <https:>`_
+
+
 Documentation
 -------------
 
