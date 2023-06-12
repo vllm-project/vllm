@@ -6,7 +6,7 @@ CacheFlow is a high-throughput and memory-efficient inference server for large l
 Offline Batched Inference
 -------------------------
 
-We first show an example to use CacheFlow for offline batched inference. In this example, we will use CacheFlow to generate texts for a list of input prompts. This can be used to apply LLM on a large dataset. The code example can also be found in `examples/offline_inference.py <https://github.com/WoosukKwon/cacheflow/blob/main/examples/offline_inference.py>`_.
+We first show an example to use CacheFlow for offline batched inference. In this example, we will use CacheFlow to generate texts for a list of input prompts. This can be used to apply LLM on a large dataset.
 
 First, we import the ``LLM`` and ``SamplingParams`` classes from CacheFlow. ``LLM`` class is the main class for running offline inference jobs with CacheFlow server. ``SamplingParams`` class is used to specify the parameters for the sampling process.
 
@@ -45,9 +45,73 @@ We call ``llm.generate`` to generate the outputs with the given input prompts an
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
+The code example can also be found in `examples/offline_inference.py <https://github.com/WoosukKwon/cacheflow/blob/main/examples/offline_inference.py>`_.
+
+
 Simple FastAPI Server
 ---------------------
 
+CacheFlow can also be deployed as an LLM server. We provide an example server implementation using `FastAPI <https://fastapi.tiangolo.com/>`_ as an frontend at `cacheflow/entrypoints/simple_fastapi_frontend.py <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/entrypoints/simple_fastapi_frontend.py>`_. The server uses ``AsyncLLMServer`` class to support asynchronous processing of incoming requests. To start the server, run the following command:
+
+.. code-block:: bash
+
+    python -m cacheflow.entrypoints.simple_fastapi_frontend
+
+By default, this commands start the server at ``http://localhost:8001`` with the OPT-125M model. To query the model, run the following command:
+
+.. code-block:: bash
+
+    curl http://localhost:8001/generate \
+        -d '{
+            "prompt": "San Francisco is a",
+            "use_beam_search": true,
+            "n": 4,
+            "temperature": 0
+        }'
+
+For a more detailed client example, please refer to `examples/simple_fastapi_client.py <https://github.com/WoosukKwon/cacheflow/blob/main/examples/simple_fastapi_client.py>`_.
 
 OpenAI-Compatible Server
 ------------------------
+
+CacheFlow can be deployed as a server that mimics the OpenAI API protocol. This allows CacheFlow to be used as a drop-in replacement for applications using OpenAI API. To start an OpenAI-compatible server, run the following command:
+
+.. code-block:: bash
+
+    python -m cacheflow.entrypoints.openai.openai_frontend \
+        --model facebook/opt-125m
+
+By default, this commands start the server at ``http://localhost:8000``. You can specify the host and port with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the above command) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_ and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
+
+This server can be queried with the same format as OpenAI API. For example, you can list the models with the following command:
+
+.. code-block:: bash
+
+    curl http://localhost:8000/v1/models
+
+and query the model with the following command:
+
+.. code-block:: bash
+
+    curl http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "facebook/opt-125m",
+            "prompt": "San Francisco is a",
+            "max_tokens": 7,
+            "temperature": 0
+        }'
+
+Since this server is fully compatible with OpenAI API, you can use it as a drop-in replacement for applications using OpenAI API. For example, you can query the server with ``openai`` python package:
+
+.. code-block:: python
+
+    import openai
+    # Modify OpenAI's API key and API base to use CacheFlow's API server.
+    openai.api_key = "EMPTY"
+    openai.api_base = "http://localhost:8000/v1"
+    completion = openai.Completion.create(model="facebook/opt-125m",
+                                          prompt="San Francisco is a")
+    print("Completion result:", completion)
+
+For a more detailed client example, please refer to `examples/openai_client.py <https://github.com/WoosukKwon/cacheflow/blob/main/examples/openai_client.py>`_.
