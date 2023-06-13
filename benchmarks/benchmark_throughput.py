@@ -118,13 +118,21 @@ def run_hf(
 
     start = time.time()
     batch: List[str] = []
-    max_new_tokens = 0
-    for i, (prompt, _, output_len) in enumerate(requests):
+    max_prompt_len = 0
+    max_output_len = 0
+    for i in range(len(requests)):
+        prompt, prompt_len, output_len = requests[i]
         # Add the prompt to the batch.
         batch.append(prompt)
-        max_new_tokens = max(max_new_tokens, output_len)
+        max_prompt_len = max(max_prompt_len, prompt_len)
+        max_output_len = max(max_output_len, output_len)
         if len(batch) < max_batch_size and i != len(requests) - 1:
-            continue
+            # Check if we can add more requests to the batch.
+            _, next_prompt_len, next_output_len = requests[i + 1]
+            if (max(max_prompt_len, next_prompt_len) + max(
+                max_output_len, next_output_len)) <= 2048:
+                # We can add more requests to the batch.
+                continue
 
         # Generate the sequences.
         input_ids = tokenizer(batch, return_tensors="pt", padding=True)
@@ -136,13 +144,14 @@ def run_hf(
             temperature=1.0,
             top_p=1.0,
             use_cache=True,
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=max_output_len,
         )
         # Include the decoding time.
         tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
         # Clear the batch.
         batch = []
-        max_new_tokens = 0
+        max_prompt_len = 0
+        max_output_len = 0
     end = time.time()
     return end - start
 
