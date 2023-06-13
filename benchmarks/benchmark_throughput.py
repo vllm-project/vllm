@@ -9,6 +9,7 @@ from cacheflow import LLM, SamplingParams
 import torch
 from transformers import (AutoConfig, AutoTokenizer, AutoModelForCausalLM,
                           PreTrainedTokenizerBase)
+from tqdm import tqdm
 
 
 def get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
@@ -16,6 +17,9 @@ def get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
     if config.model_type == "llama":
         # A workaround for potential protobuf errors.
         model_name = "hf-internal-testing/llama-tokenizer"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer.pad_token = tokenizer.eos_token
+        return tokenizer
     return AutoTokenizer.from_pretrained(model_name)
 
 
@@ -116,6 +120,7 @@ def run_hf(
         model, torch_dtype=torch.float16)
     llm = llm.cuda()
 
+    pbar = tqdm(total=len(requests))
     start = time.time()
     batch: List[str] = []
     max_prompt_len = 0
@@ -135,10 +140,9 @@ def run_hf(
                 continue
 
         # Generate the sequences.
-        input_ids = tokenizer(batch, return_tensors="pt", padding=True)
-        input_ids = {k: v.cuda() for k, v in input_ids.items()}
+        input_ids = tokenizer(batch, return_tensors="pt", padding=True).input_ids
         llm_outputs = llm.generate(
-            **input_ids,
+            input_ids=input_ids.cuda(),
             do_sample=not use_beam_search,
             num_return_sequences=n,
             temperature=1.0,
@@ -148,6 +152,8 @@ def run_hf(
         )
         # Include the decoding time.
         tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
+        pbar.update(len(batch))
+
         # Clear the batch.
         batch = []
         max_prompt_len = 0
