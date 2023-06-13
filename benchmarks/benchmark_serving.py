@@ -1,11 +1,11 @@
-"""Benchmark the online serving throughput.
+"""Benchmark online serving throughput.
 
 On the server side, run one of the following commands:
     (CacheFlow backend)
     python -m cacheflow.entrypoints.simple_fastapi_frontend \
         --disable-log-requests --model <your_model>
 
-    (HuggingFace backend)
+    (TGI backend)
     ./launch_hf_server.sh <your_model>
 
 On the client side, run:
@@ -127,7 +127,7 @@ async def send_request(
             "ignore_eos": True,
             "stream": False,
         }
-    elif backend == "huggingface":
+    elif backend == "tgi":
         assert not use_beam_search
         params = {
             "best_of": best_of,
@@ -215,7 +215,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Benchmark the online serving throughput.")
     parser.add_argument("--backend", type=str, default="cacheflow",
-                        choices=["cacheflow", "huggingface"])
+                        choices=["cacheflow", "tgi"])
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--dataset", type=str, required=True,
