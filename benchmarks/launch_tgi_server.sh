@@ -1,8 +1,8 @@
 #!/bin/bash
 
 PORT=8001
-MODEL=$1        # huggyllama/llama-13b
-TOKENS=$2       # 8192
+MODEL=$1
+TOKENS=$2
 
 docker run --gpus all --shm-size 1g -p $PORT:80 \
            -v $PWD/data:/data \
