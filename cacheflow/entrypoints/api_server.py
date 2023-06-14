@@ -18,7 +18,7 @@ app = FastAPI()
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
-    """ Stream the results of the generation request.
+    """ Generate completion for the request.
 
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
@@ -74,7 +74,7 @@ async def generate(request: Request) -> Response:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--port", type=int, default=8000)
     parser = AsyncServerArgs.add_cli_args(parser)
     args = parser.parse_args()
 

@@ -38,7 +38,8 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Simple CacheFlow server.')
+    parser = argparse.ArgumentParser(
+        description='Demo on using the LLMServer class synchronously')
     parser = ServerArgs.add_cli_args(parser)
     args = parser.parse_args()
     main(args)
