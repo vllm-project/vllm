@@ -18,6 +18,7 @@ def get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
         # A workaround for potential protobuf errors.
         model_name = "hf-internal-testing/llama-tokenizer"
         tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
     return AutoTokenizer.from_pretrained(model_name)
