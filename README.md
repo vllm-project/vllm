@@ -1,30 +1,28 @@
-# FluentFlow
+# CacheFlow
 
-FluentFlow is a fast and easy-to-use library for LLM inference and serving.
-Using efficient memory management techniques, FluentFlow delivers x-x higher throughput than state-of-the-art systems.
-FluentFlow has powered [LMSys Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April, significantly reducing its operational costs.
+CacheFlow is a fast and easy-to-use library for LLM inference and serving.
 
 ## Latest News
 
-- [2023/06] FluentFlow was officially released! Please check out our [blog post](), [slides](), and [paper]().
+- [2023/06] We officially release CacheFlow, which has powered [LMSys Vicuna and Chatbot Arena]() since mid April! Please check out our [blog post](), [slides](), and [paper]().
 
 ## Getting Started
 
 Visit our [documentation]() to get started.
 - [Installation]()
 - [Quickstart]()
-- [OpenAI-compatible API]()
 - [Supported Models]()
 
 ## Key Features
 
-FluentFlow comes with many powerful features that include:
+CacheFlow comes with many powerful features that include:
 
 - Seamless integration with popular HuggingFace models
 - Efficient block-based management for KV cache
 - Advanced batching mechanism
 - Optimized CUDA kernels
 - Tensor parallelism support for multi-GPU inference
+- Efficient support for various decoding algorithms such as parallel sampling and beam search.
 - OpenAI-compatible API
 
 ## Performance
