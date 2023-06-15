@@ -1,3 +1,4 @@
+"""Benchmark the latency of processing a single batch of requests."""
 import argparse
 import time
 
