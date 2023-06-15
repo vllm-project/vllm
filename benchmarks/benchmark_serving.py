@@ -72,6 +72,8 @@ def sample_requests(
         prompt_len = len(prompt_token_ids)
         if prompt_len < 4 or output_len < 4:
             # Prune too short sequences.
+            # This is because TGI causes errors when the input or output length
+            # is too short.
             continue
         if prompt_len > 1024 or prompt_len + output_len > 2048:
             # Prune too long sequences.
