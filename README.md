@@ -4,7 +4,7 @@ CacheFlow is a fast and easy-to-use library for LLM inference and serving.
 
 ## Latest News
 
-- [2023/06] CacheFlow was officially released! Please check out our [blog post](), [slides](), and [paper]().
+- [2023/06] We officially released CacheFlow! CacheFlow has powered LMSys Vicuna and Chatbot Arena since mid April. Please check out our [blog post](), [slides](), and [paper]().
 
 ## Getting Started
 
