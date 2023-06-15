@@ -88,11 +88,8 @@ async def get_request(
     request_rate: float,
 ) -> AsyncGenerator[Tuple[str, int, int], None]:
     input_requests = iter(input_requests)
-    while True:
-        try:
-            yield next(input_requests)
-        except StopIteration:
-            return
+    for request in input_requests:
+        yield request
 
         if request_rate == float("inf"):
             # If the request rate is infinity, then we don't need to wait.
