@@ -120,6 +120,7 @@ class ServerArgs:
 class AsyncServerArgs(ServerArgs):
     """Arguments for asynchronous CacheFlow servers."""
     server_use_ray: bool = False
+    disable_log_requests: bool = False
 
     @staticmethod
     def add_cli_args(
@@ -129,4 +130,6 @@ class AsyncServerArgs(ServerArgs):
         parser.add_argument('--server-use-ray', action='store_true',
                             help='use Ray to start the LLM server in a '
                                  'separate process as the web server process.')
+        parser.add_argument('--disable-log-requests', action='store_true',
+                            help='disable logging requests')
         return parser
