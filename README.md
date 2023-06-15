@@ -22,7 +22,7 @@ CacheFlow comes with many powerful features that include:
 - Advanced batching mechanism
 - Optimized CUDA kernels
 - Tensor parallelism support for multi-GPU inference
-- Efficient support for various decoding algorithms such as parallel sampling and beam search.
+- Efficient support for various decoding algorithms such as parallel sampling and beam search
 - OpenAI-compatible API
 
 ## Performance
