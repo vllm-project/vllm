@@ -18,7 +18,7 @@ app = FastAPI()
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
-    """ Generate completion for the request.
+    """Generate completion for the request.
 
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
