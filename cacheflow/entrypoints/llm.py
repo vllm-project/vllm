@@ -6,7 +6,7 @@ from tqdm import tqdm
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.arg_utils import ServerArgs
-from cacheflow.server.llm_server import LLMServer
+from cacheflow.server.llm_server import LLMEngine
 from cacheflow.utils import Counter
 
 
@@ -20,7 +20,7 @@ class LLM:
     mechanism and efficient memory management.
 
     NOTE: This class is intended to be used for offline inference. For online
-    serving, use the `AsyncLLMServer` class instead.
+    serving, use the `AsyncLLMEngine` class instead.
     NOTE: For the comprehensive list of arguments, see `ServerArgs`.
 
     Args:
@@ -52,7 +52,7 @@ class LLM:
             seed=seed,
             **kwargs,
         )
-        self.llm_server = LLMServer.from_server_args(server_args)
+        self.llm_server = LLMEngine.from_server_args(server_args)
         self.request_counter = Counter()
 
     def get_tokenizer(

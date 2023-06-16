@@ -8,7 +8,7 @@ import uvicorn
 
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.arg_utils import AsyncServerArgs
-from cacheflow.server.async_llm_server import AsyncLLMServer
+from cacheflow.server.async_llm_server import AsyncLLMEngine
 from cacheflow.utils import random_uuid
 
 TIMEOUT_KEEP_ALIVE = 5 # seconds.
@@ -18,7 +18,7 @@ app = FastAPI()
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
-    """ Stream the results of the generation request.
+    """Generate completion for the request.
 
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
@@ -74,12 +74,12 @@ async def generate(request: Request) -> Response:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--port", type=int, default=8000)
     parser = AsyncServerArgs.add_cli_args(parser)
     args = parser.parse_args()
 
     server_args = AsyncServerArgs.from_cli_args(args)
-    server = AsyncLLMServer.from_server_args(server_args)
+    server = AsyncLLMEngine.from_server_args(server_args)
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="debug",
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
