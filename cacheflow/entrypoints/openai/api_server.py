@@ -15,7 +15,7 @@ import uvicorn
 
 from cacheflow.outputs import RequestOutput
 from cacheflow.server.arg_utils import AsyncServerArgs
-from cacheflow.server.async_llm_server import AsyncLLMServer
+from cacheflow.server.async_llm_server import AsyncLLMEngine
 from cacheflow.server.tokenizer_utils import get_tokenizer
 from cacheflow.logger import init_logger
 from cacheflow.sampling_params import SamplingParams
@@ -319,7 +319,7 @@ if __name__ == "__main__":
     served_model = args.served_model_name or args.model
 
     server_args = AsyncServerArgs.from_cli_args(args)
-    server = AsyncLLMServer.from_server_args(server_args)
+    server = AsyncLLMEngine.from_server_args(server_args)
 
     # A separate tokenizer to map token IDs to strings.
     tokenizer = get_tokenizer(args.model)

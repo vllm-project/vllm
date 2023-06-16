@@ -9,6 +9,7 @@ def http_bot(prompt):
     headers = {"User-Agent": "Cacheflow Client"}
     pload = {
         "prompt": prompt,
+        "stream": True,
         "max_tokens": 128,
     }
     response = requests.post(args.model_url, headers=headers, json=pload, stream=True)
@@ -34,8 +35,8 @@ def build_demo():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8002)
-    parser.add_argument("--model-url", type=str, default="http://localhost:8001/generate")
+    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--model-url", type=str, default="http://localhost:8000/generate")
     args = parser.parse_args()
 
     demo = build_demo()

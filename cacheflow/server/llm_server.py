@@ -18,7 +18,7 @@ from cacheflow.worker.worker import Worker
 logger = init_logger(__name__)
 
 
-class LLMServer:
+class LLMEngine:
     """An LLM server that receives requests and generates texts.
 
     This is the main class for the CacheFlow LLM server. It receives requests
@@ -29,7 +29,7 @@ class LLMServer:
     serving throughput.
 
     The `LLM` class wraps this class for offline batched inference and the
-    `AsyncLLMServer` class wraps this class for online serving.
+    `AsyncLLMEngine` class wraps this class for online serving.
 
     NOTE: The config arguments are derived from the `ServerArgs` class. For the
     comprehensive list of arguments, see `ServerArgs`.
@@ -135,7 +135,7 @@ class LLMServer:
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
 
     @classmethod
-    def from_server_args(cls, server_args: ServerArgs) -> "LLMServer":
+    def from_server_args(cls, server_args: ServerArgs) -> "LLMEngine":
         """Creates an LLM server from the server arguments."""
         # Create the server configs.
         server_configs = server_args.create_server_configs()
