@@ -50,7 +50,7 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--api-url", type=str, default="http://localhost:8001/generate")
+    parser.add_argument("--api-url", type=str, default="http://localhost:8000/generate")
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--n-threads", type=int, default=128)
     args = parser.parse_args()
