@@ -6,7 +6,7 @@ from cacheflow.logger import init_logger
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.server.arg_utils import AsyncServerArgs
-from cacheflow.server.llm_server import LLMServer
+from cacheflow.server.llm_server import LLMEngine
 from cacheflow.server.ray_utils import ray, initialize_cluster
 
 logger = init_logger(__name__)
@@ -14,36 +14,36 @@ logger = init_logger(__name__)
 TIMEOUT_TO_PREVENT_DEADLOCK = 1 # seconds
 
 
-class AsyncLLMServer:
-    """An asynchronous wrapper for LLMServer.
+class AsyncLLMEngine:
+    """An asynchronous wrapper for LLMEngine.
 
-    This class is used to wrap the LLMServer class to make it asynchronous. It
+    This class is used to wrap the LLMEngine class to make it asynchronous. It
     uses asyncio to create a background loop that keeps processing incoming
-    requests. The LLMServer is kicked by the generate method when there
+    requests. The LLMEngine is kicked by the generate method when there
     are requests in the waiting queue. The generate method yields the outputs
-    from the LLMServer to the caller.
+    from the LLMEngine to the caller.
 
-    NOTE: For the comprehensive list of arguments, see `LLMServer`.
+    NOTE: For the comprehensive list of arguments, see `LLMEngine`.
 
     Args:
         worker_use_ray: Whether to use Ray for model workers. Required for
             distributed execution. Should be the same as
             `parallel_config.worker_use_ray`.
-        server_use_ray: Whether to make LLMServer a Ray actor. If so, the
+        server_use_ray: Whether to make LLMEngine a Ray actor. If so, the
             async frontend will be executed in a separate process as the
             model workers.
-        *args, *kwargs: Arguments for LLMServer.
+        *args, *kwargs: Arguments for LLMEngine.
     """
     def __init__(self, worker_use_ray: bool, server_use_ray: bool,
                  *args, **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.server_use_ray = server_use_ray
         if not self.server_use_ray:
-            server_class = LLMServer
+            server_class = LLMEngine
         elif self.worker_use_ray:
-            server_class = ray.remote(num_cpus=0)(LLMServer).remote
+            server_class = ray.remote(num_cpus=0)(LLMEngine).remote
         else:
-            server_class = ray.remote(num_gpus=1)(LLMServer).remote
+            server_class = ray.remote(num_gpus=1)(LLMEngine).remote
         self.server = server_class(*args, **kwargs)
         # Request id -> request output.
         self.request_outputs: Dict[str, RequestOutput] = {}
@@ -83,8 +83,8 @@ class AsyncLLMServer:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
-        request into the waiting queue of the LLMServer and streams the outputs
-        from the LLMServer to the caller.
+        request into the waiting queue of the LLMEngine and streams the outputs
+        from the LLMEngine to the caller.
 
         Args:
             prompt: The prompt string. Can be None if prompt_token_ids is
@@ -95,7 +95,7 @@ class AsyncLLMServer:
                 use the tokenizer to convert the prompts to token IDs.
 
         Yields:
-            The output `RequestOutput` objects from the LLMServer for the
+            The output `RequestOutput` objects from the LLMEngine for the
             request.
         """
         # Preprocess the request.
@@ -195,7 +195,7 @@ class AsyncLLMServer:
             self.kicking_request_id = None
 
     @classmethod
-    def from_server_args(cls, server_args: AsyncServerArgs) -> "AsyncLLMServer":
+    def from_server_args(cls, server_args: AsyncServerArgs) -> "AsyncLLMEngine":
         """Creates an async LLM server from the server arguments."""
         # Create the server configs.
         server_configs = server_args.create_server_configs()
