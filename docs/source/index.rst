@@ -1,6 +1,8 @@
 Welcome to vLLM!
 ================
 
+vLLM is a high-throughput and memory-efficient inference and serving engine for large language models (LLM).
+
 Documentation
 -------------
 
