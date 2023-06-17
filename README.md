@@ -27,10 +27,12 @@ vLLM comes with many powerful features that include:
 
 ## Performance
 
+vLLM outperforms HuggingFace Transformers by up to 24x and Text Generation Inference by up to 3.5x, in terms of throughput.
+
 | | LLaMA-7B (A10G) | LLaMA-13B (A100) |
-| :- | :------: | :----: |
-| n=1 | ![](./assets/figures/perf_a10g_n1.png) | ![](./assets/figures/perf_a100_n1.png) |
-| n=3 | ![](./assets/figures/perf_a10g_n3.png) | ![](./assets/figures/perf_a100_n3.png) |
+| :-------: | :------: | :----: |
+| n = 1 | ![](./assets/figures/perf_a10g_n1.png) | ![](./assets/figures/perf_a100_n1.png) |
+| n = 3 | ![](./assets/figures/perf_a10g_n3.png) | ![](./assets/figures/perf_a100_n3.png) |
 
 
 ## Contributing
