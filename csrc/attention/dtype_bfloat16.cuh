@@ -1,7 +1,7 @@
 /*
  * Adapted from https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_template.hpp
  * and https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h
- * Copyright (c) 2023, The CacheFlow team.
+ * Copyright (c) 2023, The vLLM team.
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,7 +25,7 @@
 #include <cuda_fp16.h>
 #include <stdint.h>
 
-namespace cacheflow {
+namespace vllm {
 
 // Define custom BF16 vector data types.
 struct bf16_4_t {
@@ -420,4 +420,4 @@ inline __device__ void from_float(bf16_8_t& dst, Float8_ src) {
 #endif
 }
 
-} // namespace cacheflow
+} // namespace vllm

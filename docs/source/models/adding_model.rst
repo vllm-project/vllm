@@ -3,30 +3,30 @@
 Adding a New Model
 ==================
 
-This document provides a high-level guide on integrating a `HuggingFace Transformers <https://github.com/huggingface/transformers>`_ model into CacheFlow.
+This document provides a high-level guide on integrating a `HuggingFace Transformers <https://github.com/huggingface/transformers>`_ model into vLLM.
 
 .. note::
     The complexity of adding a new model depends heavily on the model's architecture.
-    The process is considerably straightforward if the model shares a similar architecture with an existing model in CacheFlow.
+    The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
     However, for models that include new operators (e.g., a new attention mechanism), the process can be a bit more complex.
 
 .. tip::
-    If you are encountering issues while integrating your model into CacheFlow, feel free to open an issue on our `GitHub <https://github.com/WoosukKwon/cacheflow/issues>`_ repository.
+    If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/WoosukKwon/vllm/issues>`_ repository.
     We will be happy to help you out!
 
 
-0. Fork the CacheFlow repository
+0. Fork the vLLM repository
 --------------------------------
 
-Start by forking our `GitHub <https://github.com/WoosukKwon/cacheflow/issues>`_ repository and then :ref:`build it from source <build_from_source>`.
+Start by forking our `GitHub <https://github.com/WoosukKwon/vllm/issues>`_ repository and then :ref:`build it from source <build_from_source>`.
 This gives you the ability to modify the codebase and test your model.
 
 
 1. Bring your model code
 ------------------------
 
-Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the `cacheflow/model_executor/models <https://github.com/WoosukKwon/cacheflow/tree/main/cacheflow/model_executor/models>`_ directory.
-For instance, CacheFlow's `OPT model <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/model_executor/models/opt.py>`_ was adpated from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
+Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the `vllm/model_executor/models <https://github.com/WoosukKwon/vllm/tree/main/vllm/model_executor/models>`_ directory.
+For instance, vLLM's `OPT model <https://github.com/WoosukKwon/vllm/blob/main/vllm/model_executor/models/opt.py>`_ was adpated from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
 
 .. warning::
     When copying the model code, make sure to review and adhere to the code's copyright and licensing terms.
@@ -62,11 +62,11 @@ Next, you need to rewrite the :code:`forward` methods of your model by following
     +) -> Dict[int, SequenceOutputs]:
 
 3. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
-4. Replace the attention operation with either :code:`GPTCacheFlowAttention` or :code:`GPTNeoXCacheFlowAttention`, depending on the model's architecture.
+4. Replace the attention operation with either :code:`GPTPagedAttention` or :code:`GPTNeoXPagedAttention`, depending on the model's architecture.
 
 .. note::
-    Currently, CacheFlow supports the basic multi-head attention mechanism and its variant with rotary positional embeddings.
-    If your model employs a different attention mechanism, you will need to implement a new attention layer in CacheFlow.
+    Currently, vLLM supports the basic multi-head attention mechanism and its variant with rotary positional embeddings.
+    If your model employs a different attention mechanism, you will need to implement a new attention layer in vLLM.
 
 
 3. (Optional) Implement tensor parallelism support
@@ -91,4 +91,4 @@ While the process is straightforward for most layers, the tensor-parallel layers
 5. Register your model
 ----------------------
 
-Finally, include your :code:`*ForCausalLM` class in `cacheflow/model_executor/models/__init__.py <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/model_executor/models/__init__.py>`_ and register it to the :code:`_MODEL_REGISTRY` in `cacheflow/model_executor/model_loader.py <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/model_executor/model_loader.py>`_.
+Finally, include your :code:`*ForCausalLM` class in `vllm/model_executor/models/__init__.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/model_executor/models/__init__.py>`_ and register it to the :code:`_MODEL_REGISTRY` in `vllm/model_executor/model_loader.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/model_executor/model_loader.py>`_.

@@ -11,7 +11,7 @@ def main(args: argparse.Namespace):
               for i in range(args.n_threads)]
 
     api_url = f"http://{args.host}:{args.port}/generate"
-    headers = {"User-Agent": "CacheFlow Benchmark Client"}
+    headers = {"User-Agent": "vLLM Benchmark Client"}
     ploads = [{
         "prompt": p,
         "max_tokens": args.max_tokens,
@@ -52,7 +52,7 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--n-threads", type=int, default=128)
     args = parser.parse_args()

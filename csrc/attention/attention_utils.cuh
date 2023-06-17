@@ -1,6 +1,6 @@
 /*
  * Adapted from https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_template.hpp
- * Copyright (c) 2023, The CacheFlow team.
+ * Copyright (c) 2023, The vLLM team.
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,7 +22,7 @@
 #include <float.h>
 #include <type_traits>
 
-namespace cacheflow {
+namespace vllm {
 
 // Q*K^T operation.
 template<int THREAD_GROUP_SIZE, typename Vec, int N>
@@ -52,4 +52,4 @@ struct Qk_dot {
   }
 };
 
-} // namespace cacheflow
+} // namespace vllm

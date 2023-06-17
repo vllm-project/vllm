@@ -1,6 +1,6 @@
 /*
  * Adapted from https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/reduce_kernel_utils.cuh
- * Copyright (c) 2023, The CacheFlow team.
+ * Copyright (c) 2023, The vLLM team.
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +17,7 @@
  */
 #pragma once
 
-namespace cacheflow {
+namespace vllm {
 
 template<typename T>
 __inline__ __device__ T warpReduceSum(T val) {
@@ -48,4 +48,4 @@ __inline__ __device__ T blockReduceSum(T val) {
   return val;
 }
 
-} // namespace cacheflow
+} // namespace vllm
