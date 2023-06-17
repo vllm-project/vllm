@@ -2,7 +2,7 @@
 
 On the server side, run one of the following commands:
     (CacheFlow backend)
-    python -m cacheflow.entrypoints.simple_fastapi_frontend \
+    python -m cacheflow.entrypoints.api_server \
         --disable-log-requests --model <your_model>
 
     (TGI backend)

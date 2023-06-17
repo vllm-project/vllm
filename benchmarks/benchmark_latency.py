@@ -14,7 +14,7 @@ def main(args: argparse.Namespace):
 
     # Process all the requests in a single batch if possible.
     # NOTE(woosuk): If the request cannot be processed in a single batch,
-    # the server will automatically process the request in multiple batches.
+    # the engine will automatically process the request in multiple batches.
     llm = LLM(
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,

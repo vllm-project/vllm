@@ -13,15 +13,15 @@ DeviceID = Tuple[int, Optional[str], int]  # rank, node resource (node IP), devi
 
 def initialize_cluster(
     parallel_config: ParallelConfig,
-    server_use_ray: bool = False,
-    ray_server_address: Optional[str] = None,
+    engine_use_ray: bool = False,
+    ray_address: Optional[str] = None,
 ) -> Tuple[str, List[List[DeviceID]]]:
     """Initialize the distributed cluster probably with Ray.
 
     Args:
         parallel_config: The configurations for parallel execution.
-        server_use_ray: Whether to use Ray for async server.
-        ray_server_address: The address of the Ray cluster. If None, uses
+        engine_use_ray: Whether to use Ray for async engine.
+        ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
 
     Returns:
@@ -31,13 +31,13 @@ def initialize_cluster(
         each worker in each pipeline stage. Each device ID is a tuple of
         (rank, node resource, device id).
     """
-    if parallel_config.worker_use_ray or server_use_ray:
+    if parallel_config.worker_use_ray or engine_use_ray:
         if ray is None:
             raise ImportError(
                 "Ray is not installed. Please install Ray to use distributed "
                 "serving.")
         # Connect to a ray cluster.
-        ray.init(address=ray_server_address)
+        ray.init(address=ray_address)
 
     if not parallel_config.worker_use_ray:
         # Initialize cluster locally.

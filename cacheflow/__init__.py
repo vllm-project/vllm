@@ -1,9 +1,9 @@
+from cacheflow.engine.arg_utils import EngineArgs
+from cacheflow.engine.llm_engine import LLMEngine
+from cacheflow.engine.ray_utils import initialize_cluster
 from cacheflow.entrypoints.llm import LLM
-from cacheflow.outputs import RequestOutput, CompletionOutput
+from cacheflow.outputs import CompletionOutput, RequestOutput
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import ServerArgs
-from cacheflow.server.llm_server import LLMEngine
-from cacheflow.server.ray_utils import initialize_cluster
 
 __version__ = "0.1.0"
 
@@ -13,6 +13,6 @@ __all__ = [
     "RequestOutput",
     "CompletionOutput",
     "LLMEngine",
-    "ServerArgs",
+    "EngineArgs",
     "initialize_cluster",
 ]

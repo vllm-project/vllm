@@ -216,7 +216,7 @@ class Scheduler:
         if not self.log_stats:
             return scheduler_outputs, prompt_group_ids
 
-        # TODO(woosuk): Move the below code to server.
+        # TODO(woosuk): Move the below code to the engine.
         now = time.time()
         if num_batched_tokens > 0:
             self.num_input_tokens.append((now, num_batched_tokens))
