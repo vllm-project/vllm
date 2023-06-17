@@ -6,9 +6,9 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 import uvicorn
 
-from cacheflow.sampling_params import SamplingParams
 from cacheflow.engine.arg_utils import AsyncEngineArgs
 from cacheflow.engine.async_llm_engine import AsyncLLMEngine
+from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import random_uuid
 
 TIMEOUT_KEEP_ALIVE = 5 # seconds.

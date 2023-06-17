@@ -10,29 +10,20 @@ import fastapi
 from fastapi import BackgroundTasks, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
-from cacheflow.outputs import RequestOutput
 from cacheflow.engine.arg_utils import AsyncEngineArgs
 from cacheflow.engine.async_llm_engine import AsyncLLMEngine
 from cacheflow.engine.tokenizer_utils import get_tokenizer
+from cacheflow.entrypoints.openai.protocol import (
+    CompletionRequest, CompletionResponse, CompletionResponseChoice,
+    CompletionResponseStreamChoice, CompletionStreamResponse, ErrorResponse,
+    LogProbs, ModelCard, ModelList, ModelPermission, UsageInfo)
 from cacheflow.logger import init_logger
+from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import random_uuid
-from cacheflow.entrypoints.openai.protocol import (
-    CompletionRequest,
-    CompletionResponse,
-    CompletionResponseChoice,
-    CompletionResponseStreamChoice,
-    CompletionStreamResponse,
-    ErrorResponse,
-    LogProbs,
-    ModelCard,
-    ModelList,
-    ModelPermission,
-    UsageInfo,
-)
 
 TIMEOUT_KEEP_ALIVE = 5 # seconds
 
