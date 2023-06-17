@@ -97,6 +97,7 @@ def run_cacheflow(
         # FIXME(woosuk): Do not use internal method.
         llm._add_request(
             prompt=prompt,
+            prompt_token_ids=None,
             sampling_params=sampling_params,
         )
 
