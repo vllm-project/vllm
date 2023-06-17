@@ -4,6 +4,18 @@ from vllm.sequence import SequenceGroup, SequenceStatus
 
 
 class CompletionOutput:
+    """The output data of one completion output of a request.
+
+    Args:
+        index: The index of the output in the request.
+        text: The generated output text.
+        token_ids: The token IDs of the generated output text.
+        cumulative_logprob: The cumulative log probability of the generated
+            output text.
+        logprobs: The log probabilities of the top probability words at each
+            position if the logprobs are requested.
+        finish_reason: The reason why the sequence is finished.
+    """
 
     def __init__(
         self,
@@ -11,7 +23,7 @@ class CompletionOutput:
         text: str,
         token_ids: List[int],
         cumulative_logprob: float,
-        logprobs: List[Dict[int, float]],
+        logprobs: Optional[List[Dict[int, float]]],
         finish_reason: Optional[str] = None,
     ) -> None:
         self.index = index
@@ -34,7 +46,14 @@ class CompletionOutput:
 
 
 class RequestOutput:
+    """The output data of a request to the LLM.
 
+    Args:
+        request_id: The unique ID of the request.
+        prompt: The prompt string of the request.
+        prompt_token_ids: The token IDs of the prompt.
+        outputs: The output sequences of the request.
+    """
     def __init__(
         self,
         request_id: str,
