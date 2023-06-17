@@ -1,6 +1,6 @@
 import argparse
 
-from cacheflow import ServerArgs, LLMEngine, SamplingParams
+from vllm import LLMEngine, SamplingParams, ServerArgs
 
 
 def main(args: argparse.Namespace):
