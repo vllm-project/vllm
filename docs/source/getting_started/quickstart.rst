@@ -1,26 +1,28 @@
+.. _quickstart:
+
 Quickstart
 ==========
 
-This guide shows how to use vLLM for:
+This guide shows how to use vLLM to:
 
-* running offline batched inference on a dataset
-* build an API server for a large language model
-* start an OpenAI-compatible API server
+* run offline batched inference on a dataset;
+* build an API server for a large language model;
+* start an OpenAI-compatible API server.
 
-Be sure to complete the `installation instructions <installation.html>`_ before continuing with this guide.
+Be sure to complete the :ref:`installation instructions <installation>` before continuing with this guide.
 
 Offline Batched Inference
 -------------------------
 
 We first show an example of using vLLM for offline batched inference on a dataset. In other words, we use vLLM to generate texts for a list of input prompts.
 
-First, import ``LLM`` and ``SamplingParams`` from vLLM. The ``LLM`` class is the main class for running offline inference with vLLM engine. The ``SamplingParams`` class specifies the parameters for the sampling process.
+Import ``LLM`` and ``SamplingParams`` from vLLM. The ``LLM`` class is the main class for running offline inference with vLLM engine. The ``SamplingParams`` class specifies the parameters for the sampling process.
 
 .. code-block:: python
 
     from vllm import LLM, SamplingParams
 
-We perform inference on the following list of input prompts. We use a ``SamplingParams`` object to specify the sampling parameters for the generation process. In this example, we set the sampling temperature to 0.8 and nucleus sampling probability to 0.95. For more information about the sampling parameters, please refer to the `class definition <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/sampling_params.py>`_.
+Define the list of input prompts and the sampling parameters for generation. The sampling temperature is set to 0.8 and the nucleus sampling probability is set to 0.95. For more information about the sampling parameters, refer to the `class definition <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/sampling_params.py>`_.
 
 .. code-block:: python
 
@@ -32,13 +34,13 @@ We perform inference on the following list of input prompts. We use a ``Sampling
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-Next, we initialize the LLM server for offline inference with the ``LLM`` class. We use the `OPT model <https://arxiv.org/abs/2205.01068>`_ with 125 million parameters as an example. The list of supported models can be found in the `supported models page </models/supported_models.html>`_.
+Initialize vLLM's engine for offline inference with the ``LLM`` class and the `OPT-125M model <https://arxiv.org/abs/2205.01068>`_. The list of supported models can be found at :ref:`supported models <supported_models>`.
 
 .. code-block:: python
 
     llm = LLM(model="facebook/opt-125m")
 
-We call ``llm.generate`` to generate the outputs with the given input prompts and sampling parameters. It adds the input prompts to CacheFlow server's waiting queue. Then, the CacheFlow server generates the outputs for the input prompts and returns the outputs with high throughput. The outputs are returned as a list of ``RequestOutput`` objects, which includes the output tokens and log probabilites of each output.
+Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of ``RequestOutput`` objects with all the output tokens.
 
 .. code-block:: python
 
@@ -51,7 +53,7 @@ We call ``llm.generate`` to generate the outputs with the given input prompts an
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
-The code example can also be found in `examples/offline_inference.py <https://github.com/WoosukKwon/cacheflow/blob/main/examples/offline_inference.py>`_.
+The code example can also be found in `examples/offline_inference.py <https://github.com/WoosukKwon/vllm/blob/main/examples/offline_inference.py>`_.
 
 
 Simple FastAPI Server
@@ -59,9 +61,9 @@ Simple FastAPI Server
 
 CacheFlow can also be deployed as an LLM server. We provide an example server implementation using `FastAPI <https://fastapi.tiangolo.com/>`_ as an frontend at `cacheflow/entrypoints/simple_fastapi_frontend.py <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/entrypoints/simple_fastapi_frontend.py>`_. The server uses ``AsyncLLMServer`` class to support asynchronous processing of incoming requests. To start the server, run the following command:
 
-.. code-block:: bash
+.. code-block:: console
 
-    python -m cacheflow.entrypoints.simple_fastapi_frontend
+    $ python -m cacheflow.entrypoints.simple_fastapi_frontend
 
 By default, this commands start the server at ``http://localhost:8001`` with the OPT-125M model. To query the model, run the following command:
 
