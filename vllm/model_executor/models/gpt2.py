@@ -28,7 +28,7 @@ from transformers import GPT2Config
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import GPTPagedAttention
+from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
@@ -59,7 +59,7 @@ class GPT2Attention(nn.Module):
         self.c_proj = RowParallelLinear(self.hidden_size, self.hidden_size,
                                         bias=True, input_is_parallel=True,
                                         perform_initialization=False)
-        self.attn = GPTPagedAttention(self.num_heads, self.head_dim,
+        self.attn = PagedAttention(self.num_heads, self.head_dim,
                                       scale=self.scale)
 
     def forward(

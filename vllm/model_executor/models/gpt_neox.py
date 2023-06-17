@@ -27,7 +27,7 @@ from transformers import GPTNeoXConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import GPTNeoXPagedAttention
+from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
@@ -63,7 +63,7 @@ class GPTNeoXAttention(nn.Module):
         scaling = self.head_size ** -0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0
-        self.attn = GPTNeoXPagedAttention(self.num_heads, self.head_size,
+        self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_size,
                                           scaling, rotary_dim)
 
     def forward(

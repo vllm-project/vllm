@@ -13,8 +13,8 @@ from vllm.model_executor.input_metadata import InputMetadata
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 128]
 
 
-class GPTPagedAttention(nn.Module):
-    """GPT-style multi-head attention.
+class PagedAttention(nn.Module):
+    """GPT-style multi-head PagedAttention.
 
     This class takes flattened 1D query, key, and value tensors as input. The
     input 1D tensors can be split into three parts: the prompt tokens, the
@@ -164,8 +164,8 @@ class GPTPagedAttention(nn.Module):
         return output.view(-1, self.num_heads * self.head_size)
 
 
-class GPTNeoXPagedAttention(GPTPagedAttention):
-    """Attention with GPT-NeoX style rotary embedding."""
+class PagedAttentionWithRoPE(PagedAttention):
+    """PagedAttention with GPT-NeoX style rotary embedding."""
 
     def __init__(
         self,
