@@ -2,7 +2,7 @@
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
-## Latest News
+## Latest News 🔥
 
 - [2023/06] We officially released vLLM! vLLM has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April. Check out our [blog post]().
 
