@@ -40,7 +40,7 @@ Initialize vLLM's engine for offline inference with the ``LLM`` class and the `O
 
     llm = LLM(model="facebook/opt-125m")
 
-Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of ``RequestOutput`` objects with all the output tokens.
+Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of ``RequestOutput`` objects, which include all the output tokens.
 
 .. code-block:: python
 
@@ -59,13 +59,17 @@ The code example can also be found in `examples/offline_inference.py <https://gi
 API Server
 ----------
 
-vLLM can be deployed as an LLM service. We provide an example `FastAPI <https://fastapi.tiangolo.com/>`_ server. Check `vllm/entrypoints/api_server.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/entrypoints/api_server.py>`_ for the server implementation. The server uses ``AsyncLLMEngine`` class to support asynchronous processing of incoming requests. To start the server, run the following command:
+vLLM can be deployed as an LLM service. We provide an example `FastAPI <https://fastapi.tiangolo.com/>`_ server. Check `vllm/entrypoints/api_server.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/entrypoints/api_server.py>`_ for the server implementation. The server uses ``AsyncLLMEngine`` class to support asynchronous processing of incoming requests.
+
+Start the server:
 
 .. code-block:: console
 
     $ python -m vllm.entrypoints.api_server
 
-By default, this command starts the server at ``http://localhost:8000`` with the OPT-125M model. To query the model, run the following command:
+By default, this command starts the server at ``http://localhost:8000`` with the OPT-125M model.
+
+Query the model in shell:
 
 .. code-block:: console
 
@@ -82,7 +86,9 @@ See `examples/api_client.py <https://github.com/WoosukKwon/vllm/blob/main/exampl
 OpenAI-Compatible Server
 ------------------------
 
-vLLM can be deployed as a server that mimics the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API. To start, run the following command:
+vLLM can be deployed as a server that mimics the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
+
+Start the server:
 
 .. code-block:: console
 
@@ -110,7 +116,7 @@ Query the model with input prompts:
     $         "temperature": 0
     $     }'
 
-This server is compatible with OpenAI API, so you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the ``openai`` python package:
+Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the ``openai`` python package:
 
 .. code-block:: python
 
