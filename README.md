@@ -1,10 +1,10 @@
 # vLLM
 
-CacheFlow is a fast and easy-to-use library for LLM inference and serving.
+vLLM is a fast and easy-to-use library for LLM inference and serving.
 
 ## Latest News
 
-- [2023/06] We officially released CacheFlow! CacheFlow has powered [LMSys Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April. Check out our [blog post]().
+- [2023/06] We officially released vLLM! vLLM has powered [LMSys Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April. Check out our [blog post]().
 
 ## Getting Started
 
@@ -15,7 +15,7 @@ Visit our [documentation](https://llm-serving-cacheflow.readthedocs-hosted.com/_
 
 ## Key Features
 
-CacheFlow comes with many powerful features that include:
+vLLM comes with many powerful features that include:
 
 - Seamless integration with popular HuggingFace models
 - Efficient management for cached attention keys and values
