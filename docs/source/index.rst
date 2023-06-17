@@ -1,7 +1,7 @@
 Welcome to vLLM!
 ================
 
-**vLLM** is a fast and easy-to-use library for LLM inference and serving.
+**vLLM** is a high-throughput and memory-efficient inference and serving engine for large language models (LLM).
 Its core features include:
 
 - Seamless integration with popular HuggingFace models
