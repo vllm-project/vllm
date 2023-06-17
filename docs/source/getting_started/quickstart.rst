@@ -22,7 +22,7 @@ Import ``LLM`` and ``SamplingParams`` from vLLM. The ``LLM`` class is the main c
 
     from vllm import LLM, SamplingParams
 
-Define the list of input prompts and the sampling parameters for generation. The sampling temperature is set to 0.8 and the nucleus sampling probability is set to 0.95. For more information about the sampling parameters, refer to the `class definition <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/sampling_params.py>`_.
+Define the list of input prompts and the sampling parameters for generation. The sampling temperature is set to 0.8 and the nucleus sampling probability is set to 0.95. For more information about the sampling parameters, refer to the `class definition <https://github.com/WoosukKwon/vllm/blob/main/vllm/sampling_params.py>`_.
 
 .. code-block:: python
 
@@ -56,70 +56,70 @@ Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM
 The code example can also be found in `examples/offline_inference.py <https://github.com/WoosukKwon/vllm/blob/main/examples/offline_inference.py>`_.
 
 
-Simple FastAPI Server
----------------------
+API Server
+----------
 
-CacheFlow can also be deployed as an LLM server. We provide an example server implementation using `FastAPI <https://fastapi.tiangolo.com/>`_ as an frontend at `cacheflow/entrypoints/simple_fastapi_frontend.py <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/entrypoints/simple_fastapi_frontend.py>`_. The server uses ``AsyncLLMServer`` class to support asynchronous processing of incoming requests. To start the server, run the following command:
+vLLM can be deployed as an LLM service. We provide an example `FastAPI <https://fastapi.tiangolo.com/>`_ server. Check `vllm/entrypoints/api_server.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/entrypoints/api_server.py>`_ for the server implementation. The server uses ``AsyncLLMEngine`` class to support asynchronous processing of incoming requests. To start the server, run the following command:
 
 .. code-block:: console
 
-    $ python -m cacheflow.entrypoints.simple_fastapi_frontend
+    $ python -m vllm.entrypoints.api_server
 
-By default, this commands start the server at ``http://localhost:8001`` with the OPT-125M model. To query the model, run the following command:
+By default, this command starts the server at ``http://localhost:8000`` with the OPT-125M model. To query the model, run the following command:
 
-.. code-block:: bash
+.. code-block:: console
 
-    curl http://localhost:8001/generate \
-        -d '{
-            "prompt": "San Francisco is a",
-            "use_beam_search": true,
-            "n": 4,
-            "temperature": 0
-        }'
+    $ curl http://localhost:8000/generate \
+    $     -d '{
+    $         "prompt": "San Francisco is a",
+    $         "use_beam_search": true,
+    $         "n": 4,
+    $         "temperature": 0
+    $     }'
 
-For a more detailed client example, please refer to `examples/simple_fastapi_client.py <https://github.com/WoosukKwon/cacheflow/blob/main/examples/simple_fastapi_client.py>`_.
+See `examples/api_client.py <https://github.com/WoosukKwon/vllm/blob/main/examples/api_client.py>`_ for a more detailed client example.
 
 OpenAI-Compatible Server
 ------------------------
 
-CacheFlow can be deployed as a server that mimics the OpenAI API protocol. This allows CacheFlow to be used as a drop-in replacement for applications using OpenAI API. To start an OpenAI-compatible server, run the following command:
+vLLM can be deployed as a server that mimics the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API. To start, run the following command:
 
-.. code-block:: bash
+.. code-block:: console
 
-    python -m cacheflow.entrypoints.openai.openai_frontend \
-        --model facebook/opt-125m
+    $ python -m vllm.entrypoints.openai.api_server \
+    $     --model facebook/opt-125m
 
-By default, this commands start the server at ``http://localhost:8000``. You can specify the host and port with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the above command) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_ and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
+By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the above command) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_ and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
 
-This server can be queried with the same format as OpenAI API. For example, you can list the models with the following command:
+This server can be queried in the same format as OpenAI API. For example, list the models:
 
-.. code-block:: bash
+.. code-block:: console
 
-    curl http://localhost:8000/v1/models
+    $ curl http://localhost:8000/v1/models
 
-and query the model with the following command:
+Query the model with input prompts:
 
-.. code-block:: bash
+.. code-block:: console
 
-    curl http://localhost:8000/v1/completions \
-        -H "Content-Type: application/json" \
-        -d '{
-            "model": "facebook/opt-125m",
-            "prompt": "San Francisco is a",
-            "max_tokens": 7,
-            "temperature": 0
-        }'
+    $ curl http://localhost:8000/v1/completions \
+    $     -H "Content-Type: application/json" \
+    $     -d '{
+    $         "model": "facebook/opt-125m",
+    $         "prompt": "San Francisco is a",
+    $         "max_tokens": 7,
+    $         "temperature": 0
+    $     }'
 
-Since this server is fully compatible with OpenAI API, you can use it as a drop-in replacement for applications using OpenAI API. For example, you can query the server with ``openai`` python package:
+This server is compatible with OpenAI API, so you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the ``openai`` python package:
 
 .. code-block:: python
 
     import openai
-    # Modify OpenAI's API key and API base to use CacheFlow's API server.
+    # Modify OpenAI's API key and API base to use vLLM's API server.
     openai.api_key = "EMPTY"
     openai.api_base = "http://localhost:8000/v1"
     completion = openai.Completion.create(model="facebook/opt-125m",
                                           prompt="San Francisco is a")
     print("Completion result:", completion)
 
-For a more detailed client example, please refer to `examples/openai_client.py <https://github.com/WoosukKwon/cacheflow/blob/main/examples/openai_client.py>`_.
+For a more detailed client example, refer to `examples/openai_client.py <https://github.com/WoosukKwon/vllm/blob/main/examples/openai_client.py>`_.
