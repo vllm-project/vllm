@@ -17,9 +17,9 @@
 
 # -- Project information -----------------------------------------------------
 
-project = 'CacheFlow'
-copyright = '2023, CacheFlow Team'
-author = 'the CacheFlow Team'
+project = 'vLLM'
+copyright = '2023, vLLM Team'
+author = 'the vLLM Team'
 
 
 # -- General configuration ---------------------------------------------------
