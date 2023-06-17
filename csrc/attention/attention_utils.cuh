@@ -22,7 +22,7 @@
 #include <float.h>
 #include <type_traits>
 
-namespace cacheflow {
+namespace vllm {
 
 // Q*K^T operation.
 template<int THREAD_GROUP_SIZE, typename Vec, int N>
@@ -52,4 +52,4 @@ struct Qk_dot {
   }
 };
 
-} // namespace cacheflow
+} // namespace vllm

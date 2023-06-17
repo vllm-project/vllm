@@ -23,7 +23,7 @@
 
 #include <stdint.h>
 
-namespace cacheflow {
+namespace vllm {
 
 // FP16 vector types for Q, K, V.
 template<>
@@ -441,4 +441,4 @@ inline __device__ Float8_ to_float(uint4 u) {
   return tmp;
 }
 
-} // namespace cacheflow
+} // namespace vllm

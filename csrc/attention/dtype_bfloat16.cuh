@@ -25,7 +25,7 @@
 #include <cuda_fp16.h>
 #include <stdint.h>
 
-namespace cacheflow {
+namespace vllm {
 
 // Define custom BF16 vector data types.
 struct bf16_4_t {
@@ -420,4 +420,4 @@ inline __device__ void from_float(bf16_8_t& dst, Float8_ src) {
 #endif
 }
 
-} // namespace cacheflow
+} // namespace vllm

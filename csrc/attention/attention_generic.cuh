@@ -19,7 +19,7 @@
 
 #include <stdint.h>
 
-namespace cacheflow {
+namespace vllm {
 
 // A vector type to store Q, K, V elements.
 template<typename T, int VEC_SIZE>
@@ -61,4 +61,4 @@ inline __device__ void zero(T& dst) {
   dst = tmp.raw;
 }
 
-} // namespace cacheflow
+} // namespace vllm

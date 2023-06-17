@@ -22,7 +22,7 @@
 
 #include <stdint.h>
 
-namespace cacheflow {
+namespace vllm {
 
 // Define custom FP32 vector data types.
 struct Float4_ {
@@ -265,4 +265,4 @@ inline __device__ Float8_ to_float(Float8_ u) {
   return u;
 }
 
-} // namespace cacheflow
+} // namespace vllm

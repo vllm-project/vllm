@@ -17,7 +17,7 @@
  */
 #pragma once
 
-namespace cacheflow {
+namespace vllm {
 
 template<typename T>
 __inline__ __device__ T warpReduceSum(T val) {
@@ -48,4 +48,4 @@ __inline__ __device__ T blockReduceSum(T val) {
   return val;
 }
 
-} // namespace cacheflow
+} // namespace vllm

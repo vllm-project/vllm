@@ -3,7 +3,7 @@
 
 #include "reduction_utils.cuh"
 
-namespace cacheflow {
+namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
 template<typename scalar_t>
@@ -33,7 +33,7 @@ __global__ void rms_norm_kernel(
   }
 }
 
-} // namespace cacheflow
+} // namespace vllm
 
 void rms_norm(
   torch::Tensor& out,      // [num_tokens, hidden_size]
@@ -52,7 +52,7 @@ void rms_norm(
     input.scalar_type(),
     "rms_norm_kernel",
     [&] {
-      cacheflow::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
+      vllm::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
         out.data_ptr<scalar_t>(),
         input.data_ptr<scalar_t>(),
         weight.data_ptr<scalar_t>(),
