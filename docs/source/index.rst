@@ -1,7 +1,7 @@
 Welcome to vLLM!
 ================
 
-**CacheFlow** is a fast and easy-to-use library for LLM inference and serving.
+**vLLM** is a fast and easy-to-use library for LLM inference and serving.
 Its core features include:
 
 - Seamless integration with popular HuggingFace models
