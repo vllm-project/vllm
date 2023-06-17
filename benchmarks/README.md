@@ -1,4 +1,4 @@
-# Benchmarking CacheFlow
+# Benchmarking vLLM
 
 ## Downloading the ShareGPT dataset
 

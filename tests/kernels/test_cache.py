@@ -2,7 +2,7 @@ import random
 
 import torch
 
-from cacheflow import cache_ops
+from vllm import cache_ops
 
 
 @torch.inference_mode()

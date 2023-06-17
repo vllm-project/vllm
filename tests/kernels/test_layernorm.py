@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from cacheflow import layernorm_ops
+from vllm import layernorm_ops
 
 
 class RefRMSNorm(nn.Module):

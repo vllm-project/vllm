@@ -1,6 +1,6 @@
 import openai
 
-# Modify OpenAI's API key and API base to use CacheFlow's API server.
+# Modify OpenAI's API key and API base to use vLLM's API server.
 openai.api_key = "EMPTY"
 openai.api_base = "http://localhost:8000/v1"
 model = "facebook/opt-125m"

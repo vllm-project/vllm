@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from cacheflow import LLM, SamplingParams
+from vllm import LLM, SamplingParams
 
 
 def main(args: argparse.Namespace):

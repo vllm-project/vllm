@@ -17,9 +17,9 @@
 
 # -- Project information -----------------------------------------------------
 
-project = 'CacheFlow'
-copyright = '2023, CacheFlow Team'
-author = 'the CacheFlow Team'
+project = 'vLLM'
+copyright = '2023, vLLM Team'
+author = 'the vLLM Team'
 
 
 # -- General configuration ---------------------------------------------------
@@ -55,7 +55,7 @@ html_title = project
 html_theme = 'sphinx_book_theme'
 html_theme_options = {
     'path_to_docs': 'docs/source',
-    'repository_url': 'https://github.com/WoosukKwon/cacheflow',
+    'repository_url': 'https://github.com/WoosukKwon/vllm',
     'use_repository_button': True,
 }
 

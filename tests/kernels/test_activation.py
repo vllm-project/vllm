@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from cacheflow import activation_ops
+from vllm import activation_ops
 
 
 def ref_silu_and_mul(x: torch.Tensor) -> torch.Tensor:

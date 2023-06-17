@@ -5,7 +5,7 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-from cacheflow import attention_ops
+from vllm import attention_ops
 
 MAX_SEQ_LEN = 4096
 TEST_SEED = 0

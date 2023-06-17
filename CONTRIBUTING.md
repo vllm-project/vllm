@@ -1,6 +1,6 @@
-# Contributing to CacheFlow
+# Contributing to vLLM
 
-Thank you for your interest in contributing to CacheFlow!
+Thank you for your interest in contributing to vLLM!
 Our community is open to everyone and welcomes all kinds of contributions, no matter how small or large.
 There are several ways you can contribute to the project:
 
@@ -11,9 +11,9 @@ There are several ways you can contribute to the project:
 However, remember that contributions aren't just about code.
 We believe in the power of community support; thus, answering queries, assisting others, and enhancing the documentation are highly regarded and beneficial contributions.
 
-Finally, one of the most impactful ways to support us is by raising awareness about CacheFlow.
+Finally, one of the most impactful ways to support us is by raising awareness about vLLM.
 Talk about it in your blog posts, highlighting how it's driving your incredible projects.
-Express your support on Twitter if CacheFlow aids you, or simply offer your appreciation by starring our repository.
+Express your support on Twitter if vLLM aids you, or simply offer your appreciation by starring our repository.
 
 
 ## Setup for development
@@ -70,5 +70,5 @@ If a comment isn't clear or you disagree with a suggestion, feel free to ask for
 
 ### Thank You
 
-Finally, thank you for taking the time to read these guidelines and for your interest in contributing to CacheFlow.
-Your contributions make CacheFlow a great tool for everyone!
+Finally, thank you for taking the time to read these guidelines and for your interest in contributing to vLLM.
+Your contributions make vLLM a great tool for everyone!

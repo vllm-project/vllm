@@ -1,4 +1,4 @@
-from cacheflow import LLM, SamplingParams
+from vllm import LLM, SamplingParams
 
 
 # Sample prompts.

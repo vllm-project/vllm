@@ -75,7 +75,7 @@ ext_modules = []
 
 # Cache operations.
 cache_extension = CUDAExtension(
-    name="cacheflow.cache_ops",
+    name="vllm.cache_ops",
     sources=["csrc/cache.cpp", "csrc/cache_kernels.cu"],
     extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
 )
@@ -83,7 +83,7 @@ ext_modules.append(cache_extension)
 
 # Attention kernels.
 attention_extension = CUDAExtension(
-    name="cacheflow.attention_ops",
+    name="vllm.attention_ops",
     sources=["csrc/attention.cpp", "csrc/attention/attention_kernels.cu"],
     extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
 )
@@ -91,7 +91,7 @@ ext_modules.append(attention_extension)
 
 # Positional encoding kernels.
 positional_encoding_extension = CUDAExtension(
-    name="cacheflow.pos_encoding_ops",
+    name="vllm.pos_encoding_ops",
     sources=["csrc/pos_encoding.cpp", "csrc/pos_encoding_kernels.cu"],
     extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
 )
@@ -99,7 +99,7 @@ ext_modules.append(positional_encoding_extension)
 
 # Layer normalization kernels.
 layernorm_extension = CUDAExtension(
-    name="cacheflow.layernorm_ops",
+    name="vllm.layernorm_ops",
     sources=["csrc/layernorm.cpp", "csrc/layernorm_kernels.cu"],
     extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
 )
@@ -107,7 +107,7 @@ ext_modules.append(layernorm_extension)
 
 # Activation kernels.
 activation_extension = CUDAExtension(
-    name="cacheflow.activation_ops",
+    name="vllm.activation_ops",
     sources=["csrc/activation.cpp", "csrc/activation_kernels.cu"],
     extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
 )
@@ -144,18 +144,18 @@ def get_requirements() -> List[str]:
 
 
 setuptools.setup(
-    name="cacheflow",
-    version=find_version(get_path("cacheflow", "__init__.py")),
-    author="CacheFlow Team",
-    author_email="cacheflow@gmail.com",
+    name="vllm",
+    version=find_version(get_path("vllm", "__init__.py")),
+    author="vLLM Team",
+    author_email="vllm@gmail.com",  # FIXME
     license="Apache 2.0",
-    description="CacheFlow: A high-performance LLM Serving System",
+    description="vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention",  # FIXME
     long_description=read_readme(),
     long_description_content_type="text/markdown",
-    url="https://github.com/WoosukKwon/cacheflow",
+    url="https://github.com/WoosukKwon/vllm",
     project_urls={
-        "Homepage": "https://github.com/WoosukKwon/cacheflow",
-        "Documentation": "https://cacheflow.readthedocs.io/en/latest/",
+        "Homepage": "https://github.com/WoosukKwon/vllm",
+        "Documentation": "https://vllm.readthedocs.io/en/latest/",  # FIXME
     },
     classifiers=[
         "Programming Language :: Python :: 3.8",

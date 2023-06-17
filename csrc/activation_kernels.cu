@@ -1,7 +1,7 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
-namespace cacheflow {
+namespace vllm {
 
 template<typename T>
 __device__ __forceinline__ T silu(const T& x) {
@@ -22,7 +22,7 @@ __global__ void silu_and_mul_kernel(
   }
 }
 
-} // namespace cacheflow
+} // namespace vllm
 
 void silu_and_mul(
   torch::Tensor& out,      // [num_tokens, d]
@@ -40,7 +40,7 @@ void silu_and_mul(
     input.scalar_type(),
     "silu_and_mul_kernel",
     [&] {
-      cacheflow::silu_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
+      vllm::silu_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
         out.data_ptr<scalar_t>(),
         input.data_ptr<scalar_t>(),
         d);

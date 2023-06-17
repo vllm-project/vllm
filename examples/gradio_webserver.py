@@ -6,7 +6,7 @@ import requests
 
 
 def http_bot(prompt):
-    headers = {"User-Agent": "Cacheflow Client"}
+    headers = {"User-Agent": "vLLM Client"}
     pload = {
         "prompt": prompt,
         "stream": True,
@@ -24,7 +24,7 @@ def http_bot(prompt):
 def build_demo():
     with gr.Blocks() as demo:
         gr.Markdown(
-            "# Cacheflow text completion demo\n"
+            "# vLLM text completion demo\n"
         )
         inputbox = gr.Textbox(label="Input", placeholder="Enter text and press ENTER")
         outputbox = gr.Textbox(label="Output", placeholder="Generated result from the model")
