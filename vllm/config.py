@@ -87,7 +87,7 @@ class CacheConfig:
     Args:
         block_size: Size of a cache block in number of tokens.
         gpu_memory_utilization: Fraction of GPU memory to use for the
-            CacheFlow execution.
+            vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
     """
     def __init__(

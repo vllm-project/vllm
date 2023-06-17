@@ -1,7 +1,7 @@
 """Benchmark online serving throughput.
 
 On the server side, run one of the following commands:
-    (CacheFlow backend)
+    (vLLM backend)
     python -m cacheflow.entrypoints.simple_fastapi_frontend \
         --disable-log-requests --model <your_model>
 

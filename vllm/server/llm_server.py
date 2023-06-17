@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 class LLMEngine:
     """An LLM server that receives requests and generates texts.
 
-    This is the main class for the CacheFlow LLM server. It receives requests
+    This is the main class for the vLLM LLM server. It receives requests
     from clients and generates texts from the LLM. It includes a tokenizer, a
     language model (possibly distributed across multiple GPUs), and GPU memory
     space allocated for intermediate states (aka KV cache). This class utilizes

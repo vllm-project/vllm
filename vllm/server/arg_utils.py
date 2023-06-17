@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 
 @dataclass
 class ServerArgs:
-    """Arguments for CacheFlow servers."""
+    """Arguments for vLLM servers."""
     model: str
     download_dir: Optional[str] = None
     use_np_weights: bool = False
@@ -33,7 +33,7 @@ class ServerArgs:
     def add_cli_args(
         parser: argparse.ArgumentParser,
     ) -> argparse.ArgumentParser:
-        """Shared CLI arguments for CacheFlow servers."""
+        """Shared CLI arguments for vLLM servers."""
         # Model arguments
         parser.add_argument('--model', type=str, default='facebook/opt-125m',
                             help='name or path of the huggingface model to use')
@@ -118,7 +118,7 @@ class ServerArgs:
 
 @dataclass
 class AsyncServerArgs(ServerArgs):
-    """Arguments for asynchronous CacheFlow servers."""
+    """Arguments for asynchronous vLLM servers."""
     server_use_ray: bool = False
     disable_log_requests: bool = False
 
