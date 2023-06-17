@@ -1,4 +1,4 @@
-# CacheFlow
+# vLLM
 
 ## Build from source
 
@@ -28,7 +28,7 @@ python examples/simple_server.py --help
 To start the server:
 ```bash
 ray start --head
-python -m cacheflow.entrypoints.fastapi_server # --model <your_model>
+python -m vllm.entrypoints.fastapi_server # --model <your_model>
 ```
 
 To test the server:
@@ -45,9 +45,9 @@ pip install gradio
 
 Start the server:
 ```bash
-python -m cacheflow.http_frontend.fastapi_frontend
+python -m vllm.http_frontend.fastapi_frontend
 # At another terminal
-python -m cacheflow.http_frontend.gradio_webserver
+python -m vllm.http_frontend.gradio_webserver
 ```
 
 ## Load LLaMA weights
@@ -62,5 +62,5 @@ Since LLaMA weight is not fully public, we cannot directly download the LLaMA we
 2. For all the commands above, specify the model with `--model /output/path/llama-7b` to load the model. For example:
     ```bash
     python simple_server.py --model /output/path/llama-7b
-    python -m cacheflow.http_frontend.fastapi_frontend --model /output/path/llama-7b
+    python -m vllm.http_frontend.fastapi_frontend --model /output/path/llama-7b
     ```
