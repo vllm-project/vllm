@@ -5,11 +5,11 @@ import random
 import time
 from typing import List, Tuple
 
-from cacheflow import LLM, SamplingParams
 import torch
 from transformers import (AutoConfig, AutoTokenizer, AutoModelForCausalLM,
                           PreTrainedTokenizerBase)
 from tqdm import tqdm
+from vllm import LLM, SamplingParams
 
 
 def get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
