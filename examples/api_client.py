@@ -1,4 +1,4 @@
-"""Example Python client for cacheflow.entrypoints.api_server"""
+"""Example Python client for vllm.entrypoints.api_server"""
 
 import argparse
 import json

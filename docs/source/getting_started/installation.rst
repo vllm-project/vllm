@@ -1,8 +1,8 @@
 Installation
 ============
 
-CacheFlow is a Python library that includes some C++ and CUDA code.
-CacheFlow can run on systems that meet the following requirements:
+vLLM is a Python library that includes some C++ and CUDA code.
+vLLM can run on systems that meet the following requirements:
 
 * OS: Linux
 * Python: 3.8 or higher
@@ -10,23 +10,23 @@ CacheFlow can run on systems that meet the following requirements:
 * GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, etc.)
 
 .. note::
-    As of now, CacheFlow does not support CUDA 12.
+    As of now, vLLM does not support CUDA 12.
     If you are using Hopper or Lovelace GPUs, please use CUDA 11.8.
 
 .. tip::
-    If you have trouble installing CacheFlow, we recommend using the NVIDIA PyTorch Docker image.
+    If you have trouble installing vLLM, we recommend using the NVIDIA PyTorch Docker image.
 
     .. code-block:: console
 
         $ # Pull the Docker image with CUDA 11.8.
         $ docker run --gpus all -it --rm --shm-size=8g nvcr.io/nvidia/pytorch:22.12-py3
 
-    Inside the Docker container, please execute :code:`pip uninstall torch` before installing CacheFlow.
+    Inside the Docker container, please execute :code:`pip uninstall torch` before installing vLLM.
 
 Install with pip
 ----------------
 
-You can install CacheFlow using pip:
+You can install vLLM using pip:
 
 .. code-block:: console
 
@@ -34,8 +34,8 @@ You can install CacheFlow using pip:
     $ conda create -n myenv python=3.8 -y
     $ conda activate myenv
 
-    $ # Install CacheFlow.
-    $ pip install cacheflow  # This may take 5-10 minutes.
+    $ # Install vLLM.
+    $ pip install vllm  # This may take 5-10 minutes.
 
 
 .. _build_from_source:
@@ -43,10 +43,10 @@ You can install CacheFlow using pip:
 Build from source
 -----------------
 
-You can also build and install CacheFlow from source.
+You can also build and install vLLM from source.
 
 .. code-block:: console
 
-    $ git clone https://github.com/WoosukKwon/cacheflow.git
-    $ cd cacheflow
+    $ git clone https://github.com/WoosukKwon/vllm.git
+    $ cd vllm
     $ pip install -e .  # This may take 5-10 minutes.

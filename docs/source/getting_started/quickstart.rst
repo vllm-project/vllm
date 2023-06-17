@@ -18,7 +18,7 @@ First, import ``LLM`` and ``SamplingParams`` from vLLM. The ``LLM`` class is the
 
 .. code-block:: python
 
-    from cacheflow import LLM, SamplingParams
+    from vllm import LLM, SamplingParams
 
 We perform inference on the following list of input prompts. We use a ``SamplingParams`` object to specify the sampling parameters for the generation process. In this example, we set the sampling temperature to 0.8 and nucleus sampling probability to 0.95. For more information about the sampling parameters, please refer to the `class definition <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/sampling_params.py>`_.
 
