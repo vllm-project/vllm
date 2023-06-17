@@ -34,7 +34,7 @@ from vllm.sequence import SequenceOutputs
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.attention import GPTNeoXCacheFlowAttention
+from vllm.model_executor.layers.attention import GPTNeoXPagedAttention
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
@@ -104,8 +104,8 @@ class LlamaAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.attn = GPTNeoXCacheFlowAttention(self.num_heads, self.head_dim,
-                                              self.scaling, rotary_dim=self.head_dim)
+        self.attn = GPTNeoXPagedAttention(self.num_heads, self.head_dim,
+                                          self.scaling, rotary_dim=self.head_dim)
 
     def forward(
         self,

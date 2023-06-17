@@ -13,7 +13,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 128]
 
 
-class GPTCacheFlowAttention(nn.Module):
+class GPTPagedAttention(nn.Module):
     """GPT-style multi-head attention.
 
     This class takes flattened 1D query, key, and value tensors as input. The
@@ -164,7 +164,7 @@ class GPTCacheFlowAttention(nn.Module):
         return output.view(-1, self.num_heads * self.head_size)
 
 
-class GPTNeoXCacheFlowAttention(GPTCacheFlowAttention):
+class GPTNeoXPagedAttention(GPTPagedAttention):
     """Attention with GPT-NeoX style rotary embedding."""
 
     def __init__(
