@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from cacheflow import pos_encoding_ops
+from vllm import pos_encoding_ops
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
