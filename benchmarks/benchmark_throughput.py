@@ -85,7 +85,7 @@ def run_vllm(
         seed=seed,
     )
 
-    # Add the requests to the server.
+    # Add the requests to the engine.
     for prompt, _, output_len in requests:
         sampling_params = SamplingParams(
             n=n,
@@ -98,12 +98,13 @@ def run_vllm(
         # FIXME(woosuk): Do not use internal method.
         llm._add_request(
             prompt=prompt,
+            prompt_token_ids=None,
             sampling_params=sampling_params,
         )
 
     start = time.time()
     # FIXME(woosuk): Do use internal method.
-    llm._run_server(use_tqdm=True)
+    llm._run_engine(use_tqdm=True)
     end = time.time()
     return end - start
 

@@ -2,7 +2,7 @@
 
 On the server side, run one of the following commands:
     (vLLM backend)
-    python -m vllm.entrypoints.simple_fastapi_frontend \
+    python -m vllm.entrypoints.api_server \
         --disable-log-requests --model <your_model>
 
     (TGI backend)
