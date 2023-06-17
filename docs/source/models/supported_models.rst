@@ -3,7 +3,7 @@
 Supported Models
 ================
 
-vLLM supports a variety of generative Transformer models in `HuggingFace Transformers <https://github.com/huggingface/transformers>`_.
+vLLM supports a variety of generative Transformer models in `HuggingFace Transformers <https://huggingface.co/models>`_.
 The following is the list of model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
 
