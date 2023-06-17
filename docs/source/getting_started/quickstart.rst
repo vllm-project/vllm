@@ -1,14 +1,20 @@
 Quickstart
 ==========
 
-CacheFlow is a high-throughput and memory-efficient inference server for large language models (LLM). This quickstart guide will show you how to use CacheFlow for different LLM application scenarios. To run the examples in this guide, you will need to install CacheFlow following the `installation guide <installation.html>`_.
+This guide shows how to use vLLM for:
+
+* running offline batched inference on a dataset
+* build an API server for a large language model
+* start an OpenAI-compatible API server
+
+Be sure to complete the `installation instructions <installation.html>`_ before continuing with this guide.
 
 Offline Batched Inference
 -------------------------
 
-We first show an example to use CacheFlow for offline batched inference. In this example, we will use CacheFlow to generate texts for a list of input prompts. This can be used to apply LLM on a large dataset.
+We first show an example of using vLLM for offline batched inference on a dataset. In other words, we use vLLM to generate texts for a list of input prompts.
 
-First, we import the ``LLM`` and ``SamplingParams`` classes from CacheFlow. ``LLM`` class is the main class for running offline inference jobs with CacheFlow server. ``SamplingParams`` class is used to specify the parameters for the sampling process.
+First, import ``LLM`` and ``SamplingParams`` from vLLM. The ``LLM`` class is the main class for running offline inference with vLLM engine. The ``SamplingParams`` class specifies the parameters for the sampling process.
 
 .. code-block:: python
 
