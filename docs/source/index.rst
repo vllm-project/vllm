@@ -12,7 +12,7 @@ Its core features include:
 - Tensor parallelism support for multi-GPU inference
 - OpenAI-compatible API
 
-For more information, please refer to our [blog post]().
+For more information, please refer to our `blog post <>`_.
 
 
 Documentation
