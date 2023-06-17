@@ -149,6 +149,7 @@ class GPTNeoXLayer(nn.Module):
 
 
 class GPTNeoXModel(nn.Module):
+
     def __init__(self, config: GPTNeoXConfig):
         super().__init__()
         self.config = config
