@@ -149,7 +149,7 @@ setuptools.setup(
     author="vLLM Team",
     author_email="vllm@gmail.com",  # FIXME
     license="Apache 2.0",
-    description="vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention",
+    description="vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention",  # FIXME
     long_description=read_readme(),
     long_description_content_type="text/markdown",
     url="https://github.com/WoosukKwon/vllm",
