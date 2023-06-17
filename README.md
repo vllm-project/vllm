@@ -17,8 +17,8 @@ Visit our [documentation](https://llm-serving-cacheflow.readthedocs-hosted.com/_
 
 vLLM comes with many powerful features that include:
 
+- **PagedAttention**, efficient management of cached attention keys and values
 - Seamless integration with popular HuggingFace models
-- Efficient management for cached attention keys and values
 - Advanced batching mechanism
 - Optimized CUDA kernels
 - Efficient support for various decoding algorithms such as parallel sampling and beam search
