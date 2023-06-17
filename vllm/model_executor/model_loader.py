@@ -5,10 +5,10 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from cacheflow.config import ModelConfig
-from cacheflow.model_executor.models import (
-    GPT2LMHeadModel, GPTNeoXForCausalLM, LlamaForCausalLM, OPTForCausalLM)
-from cacheflow.model_executor.weight_utils import initialize_dummy_weights
+from vllm.config import ModelConfig
+from vllm.model_executor.models import (GPT2LMHeadModel, GPTNeoXForCausalLM,
+                                        LlamaForCausalLM, OPTForCausalLM)
+from vllm.model_executor.weight_utils import initialize_dummy_weights
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {

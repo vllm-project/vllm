@@ -25,17 +25,17 @@ import torch
 from torch import nn
 from transformers import GPTNeoXConfig
 
-from cacheflow.model_executor.input_metadata import InputMetadata
-from cacheflow.model_executor.layers.activation import get_act_fn
-from cacheflow.model_executor.layers.attention import GPTNeoXCacheFlowAttention
-from cacheflow.model_executor.layers.sampler import Sampler
-from cacheflow.model_executor.weight_utils import (hf_model_weights_iterator,
-                                                   load_tensor_parallel_weights)
-from cacheflow.model_executor.parallel_utils.parallel_state import (
+from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import GPTNeoXCacheFlowAttention
+from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
+                                              load_tensor_parallel_weights)
+from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from cacheflow.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from cacheflow.sequence import SequenceOutputs
+from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 

@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 
-from cacheflow import activation_ops
+from vllm import activation_ops
 
 _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU(),

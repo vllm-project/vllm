@@ -4,7 +4,7 @@
 
 import torch
 
-from cacheflow.model_executor.parallel_utils.parallel_state import (
+from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_group,

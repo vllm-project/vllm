@@ -11,7 +11,7 @@ import torch
 from torch import _C
 from torch.cuda import _lazy_call, device as device_ctx_manager
 
-from cacheflow.model_executor.parallel_utils.parallel_state import (
+from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 

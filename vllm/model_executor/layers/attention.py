@@ -5,10 +5,10 @@ import torch
 import torch.nn as nn
 from xformers import ops as xops
 
-from cacheflow import attention_ops
-from cacheflow import cache_ops
-from cacheflow import pos_encoding_ops
-from cacheflow.model_executor.input_metadata import InputMetadata
+from vllm import attention_ops
+from vllm import cache_ops
+from vllm import pos_encoding_ops
+from vllm.model_executor.input_metadata import InputMetadata
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 128]
 

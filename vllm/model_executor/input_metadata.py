@@ -3,8 +3,8 @@ from typing import Dict, List, Tuple
 import torch
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-from cacheflow.sampling_params import SamplingParams
-from cacheflow.sequence import SequenceData
+from vllm.sampling_params import SamplingParams
+from vllm.sequence import SequenceData
 
 
 class InputMetadata:
