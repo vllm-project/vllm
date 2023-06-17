@@ -2,13 +2,13 @@ import enum
 import time
 from typing import Dict, List, Optional, Tuple
 
-from cacheflow.config import CacheConfig, SchedulerConfig
-from cacheflow.core.block_manager import BlockSpaceManager
-from cacheflow.core.policy import PolicyFactory
-from cacheflow.logger import init_logger
-from cacheflow.sequence import (Sequence, SequenceData, SequenceGroup,
-                                SequenceGroupMetadata, SequenceOutputs,
-                                SequenceStatus)
+from vllm.config import CacheConfig, SchedulerConfig
+from vllm.core.block_manager import BlockSpaceManager
+from vllm.core.policy import PolicyFactory
+from vllm.logger import init_logger
+from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
+                           SequenceGroupMetadata, SequenceOutputs,
+                           SequenceStatus)
 
 logger = init_logger(__name__)
 

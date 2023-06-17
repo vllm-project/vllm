@@ -3,7 +3,7 @@ from typing import List, Tuple, Union
 from transformers import (AutoConfig, AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
-from cacheflow.logger import init_logger
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 

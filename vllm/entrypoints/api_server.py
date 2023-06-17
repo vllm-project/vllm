@@ -6,10 +6,10 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 import uvicorn
 
-from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import AsyncServerArgs
-from cacheflow.server.async_llm_server import AsyncLLMEngine
-from cacheflow.utils import random_uuid
+from vllm.sampling_params import SamplingParams
+from vllm.server.arg_utils import AsyncServerArgs
+from vllm.server.async_llm_server import AsyncLLMEngine
+from vllm.utils import random_uuid
 
 TIMEOUT_KEEP_ALIVE = 5 # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1 # seconds

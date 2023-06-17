@@ -3,16 +3,15 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
-                              SchedulerConfig)
-from cacheflow.model_executor import get_model, InputMetadata, set_random_seed
-from cacheflow.model_executor.parallel_utils.parallel_state import (
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig)
+from vllm.model_executor import get_model, InputMetadata, set_random_seed
+from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel, initialize_all_reduce_launcher)
-from cacheflow.sampling_params import SamplingParams
-from cacheflow.sequence import (SequenceData, SequenceGroupMetadata,
-                                SequenceOutputs)
-from cacheflow.worker.cache_engine import CacheEngine
-from cacheflow.utils import get_gpu_memory
+from vllm.sampling_params import SamplingParams
+from vllm.sequence import SequenceData, SequenceGroupMetadata, SequenceOutputs
+from vllm.worker.cache_engine import CacheEngine
+from vllm.utils import get_gpu_memory
 
 
 class Worker:

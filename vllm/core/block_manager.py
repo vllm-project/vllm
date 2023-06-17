@@ -1,9 +1,9 @@
 """A block manager that manages token blocks."""
 from typing import Dict, List, Optional, Set, Tuple
 
-from cacheflow.block import PhysicalTokenBlock
-from cacheflow.sequence import Sequence, SequenceGroup, SequenceStatus
-from cacheflow.utils import Device
+from vllm.block import PhysicalTokenBlock
+from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.utils import Device
 
 
 class BlockAllocator:

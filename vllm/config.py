@@ -3,8 +3,8 @@ from typing import Optional
 import torch
 from transformers import AutoConfig, PretrainedConfig
 
-from cacheflow.logger import init_logger
-from cacheflow.utils import get_cpu_memory
+from vllm.logger import init_logger
+from vllm.utils import get_cpu_memory
 
 logger = init_logger(__name__)
 

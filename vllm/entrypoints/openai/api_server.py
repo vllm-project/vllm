@@ -13,14 +13,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 
-from cacheflow.outputs import RequestOutput
-from cacheflow.server.arg_utils import AsyncServerArgs
-from cacheflow.server.async_llm_server import AsyncLLMEngine
-from cacheflow.server.tokenizer_utils import get_tokenizer
-from cacheflow.logger import init_logger
-from cacheflow.sampling_params import SamplingParams
-from cacheflow.utils import random_uuid
-from cacheflow.entrypoints.openai.protocol import (
+from vllm.outputs import RequestOutput
+from vllm.server.arg_utils import AsyncServerArgs
+from vllm.server.async_llm_server import AsyncLLMEngine
+from vllm.server.tokenizer_utils import get_tokenizer
+from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
+from vllm.utils import random_uuid
+from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,

@@ -3,8 +3,8 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from cacheflow import cache_ops
-from cacheflow.config import CacheConfig, ModelConfig, ParallelConfig
+from vllm import cache_ops
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 

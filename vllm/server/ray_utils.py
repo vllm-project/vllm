@@ -6,7 +6,7 @@ try:
 except ImportError:
     ray = None
 
-from cacheflow.config import ParallelConfig
+from vllm.config import ParallelConfig
 
 DeviceID = Tuple[int, Optional[str], int]  # rank, node resource (node IP), device id
 

@@ -3,8 +3,8 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
-                              SchedulerConfig)
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig)
 
 
 @dataclass

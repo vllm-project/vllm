@@ -2,8 +2,8 @@ import copy
 import enum
 from typing import Dict, List, Optional, Union
 
-from cacheflow.block import LogicalTokenBlock
-from cacheflow.sampling_params import SamplingParams
+from vllm.block import LogicalTokenBlock
+from vllm.sampling_params import SamplingParams
 
 
 class SequenceStatus(enum.Enum):

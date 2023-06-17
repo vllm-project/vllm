@@ -1,19 +1,18 @@
 import time
 from typing import Any, List, Optional
 
-from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
-                              SchedulerConfig)
-from cacheflow.core.scheduler import Scheduler
-from cacheflow.logger import init_logger
-from cacheflow.outputs import RequestOutput
-from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import ServerArgs
-from cacheflow.server.ray_utils import DeviceID, initialize_cluster, ray
-from cacheflow.server.tokenizer_utils import (get_tokenizer,
-                                              detokenize_incrementally)
-from cacheflow.sequence import Sequence, SequenceGroup, SequenceStatus
-from cacheflow.utils import Counter
-from cacheflow.worker.worker import Worker
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig)
+from vllm.core.scheduler import Scheduler
+from vllm.logger import init_logger
+from vllm.outputs import RequestOutput
+from vllm.sampling_params import SamplingParams
+from vllm.server.arg_utils import ServerArgs
+from vllm.server.ray_utils import DeviceID, initialize_cluster, ray
+from vllm.server.tokenizer_utils import get_tokenizer, detokenize_incrementally
+from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.utils import Counter
+from vllm.worker.worker import Worker
 
 logger = init_logger(__name__)
 

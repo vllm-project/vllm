@@ -4,7 +4,7 @@ from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from cacheflow.utils import random_uuid
+from vllm.utils import random_uuid
 
 
 class ErrorResponse(BaseModel):

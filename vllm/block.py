@@ -1,7 +1,7 @@
 """Token blocks."""
 from typing import List
 
-from cacheflow.utils import Device
+from vllm.utils import Device
 
 _BLANK_TOKEN_ID = -1
 

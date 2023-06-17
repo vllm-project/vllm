@@ -1,6 +1,6 @@
 from typing import List
 
-from cacheflow.sequence import SequenceGroup
+from vllm.sequence import SequenceGroup
 
 
 class Policy:

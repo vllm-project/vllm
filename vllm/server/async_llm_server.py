@@ -2,12 +2,12 @@ import asyncio
 import time
 from typing import Dict, List, Optional
 
-from cacheflow.logger import init_logger
-from cacheflow.outputs import RequestOutput
-from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import AsyncServerArgs
-from cacheflow.server.llm_server import LLMEngine
-from cacheflow.server.ray_utils import ray, initialize_cluster
+from vllm.logger import init_logger
+from vllm.outputs import RequestOutput
+from vllm.sampling_params import SamplingParams
+from vllm.server.arg_utils import AsyncServerArgs
+from vllm.server.llm_server import LLMEngine
+from vllm.server.ray_utils import ray, initialize_cluster
 
 logger = init_logger(__name__)
 
