@@ -2,12 +2,12 @@ import asyncio
 import time
 from typing import Dict, List, Optional
 
+from cacheflow.engine.arg_utils import AsyncEngineArgs
+from cacheflow.engine.llm_engine import LLMEngine
+from cacheflow.engine.ray_utils import initialize_cluster, ray
 from cacheflow.logger import init_logger
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import AsyncServerArgs
-from cacheflow.server.llm_server import LLMEngine
-from cacheflow.server.ray_utils import ray, initialize_cluster
 
 logger = init_logger(__name__)
 
@@ -29,44 +29,44 @@ class AsyncLLMEngine:
         worker_use_ray: Whether to use Ray for model workers. Required for
             distributed execution. Should be the same as
             `parallel_config.worker_use_ray`.
-        server_use_ray: Whether to make LLMEngine a Ray actor. If so, the
+        engine_use_ray: Whether to make LLMEngine a Ray actor. If so, the
             async frontend will be executed in a separate process as the
             model workers.
         log_requests: Whether to log the requests.
         *args, *kwargs: Arguments for LLMEngine.
     """
-    def __init__(self, worker_use_ray: bool, server_use_ray: bool,
+    def __init__(self, worker_use_ray: bool, engine_use_ray: bool,
                  log_requests: bool = True, *args, **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
-        self.server_use_ray = server_use_ray
+        self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
-        if not self.server_use_ray:
-            server_class = LLMEngine
+        if not self.engine_use_ray:
+            engine_class = LLMEngine
         elif self.worker_use_ray:
-            server_class = ray.remote(num_cpus=0)(LLMEngine).remote
+            engine_class = ray.remote(num_cpus=0)(LLMEngine).remote
         else:
-            server_class = ray.remote(num_gpus=1)(LLMEngine).remote
-        self.server = server_class(*args, **kwargs)
+            engine_class = ray.remote(num_gpus=1)(LLMEngine).remote
+        self.engine = engine_class(*args, **kwargs)
         # Request id -> request output.
         self.request_outputs: Dict[str, RequestOutput] = {}
         # Request id -> event to notify that there is new output.
         self.request_events: Dict[str, asyncio.Event] = {}
-        self.is_server_running = False
+        self.is_engine_running = False
         self.kicking_request_id: Optional[str] = None
 
-    async def server_step(self, kicking_request_id: Optional[str] = None):
-        """Kick the server to process the waiting requests."""
-        self.is_server_running = True
+    async def engine_step(self, kicking_request_id: Optional[str] = None):
+        """Kick the engine to process the waiting requests."""
+        self.is_engine_running = True
         self.kicking_request_id = kicking_request_id
-        if self.server_use_ray:
-            request_outputs = await self.server.step.remote()
+        if self.engine_use_ray:
+            request_outputs = await self.engine.step.remote()
         else:
             # Yield to the event loop to allow other coroutines to run
-            # while is_server_running is True. This let the server to add new
+            # while is_engine_running is True. This let the engine to add new
             # requests into the queue.
             await asyncio.sleep(0)
-            request_outputs = self.server.step()
-        self.is_server_running = False
+            request_outputs = self.engine.step()
+        self.is_engine_running = False
         self.kicking_request_id = None
 
         # Notify the waiting coroutines that there are new outputs ready.
@@ -104,7 +104,7 @@ class AsyncLLMEngine:
         arrival_time = time.time()
 
         # Create an event to notify us that there is new output from the
-        # cacheflow server.
+        # cacheflow engine.
         request_event = asyncio.Event()
         self.request_events[request_id] = request_event
 
@@ -114,31 +114,31 @@ class AsyncLLMEngine:
                         f"sampling params: {sampling_params}, "
                         f"prompt token ids: {prompt_token_ids}.")
 
-        # Add the request into the cacheflow server's waiting queue.
-        if self.server_use_ray:
-            await self.server.add_request.remote(
+        # Add the request into the cacheflow engine's waiting queue.
+        if self.engine_use_ray:
+            await self.engine.add_request.remote(
                 request_id, prompt, sampling_params,
                 prompt_token_ids=prompt_token_ids,
                 arrival_time=arrival_time)
         else:
-            self.server.add_request(
+            self.engine.add_request(
                 request_id, prompt, sampling_params,
                 prompt_token_ids=prompt_token_ids,
                 arrival_time=arrival_time)
 
-        # The cacheflow server does not have a background loop that keeps
+        # The cacheflow engine does not have a background loop that keeps
         # processing incoming requests. Therefore, we need to keep kicking
-        # the server to process the requests.
+        # the engine to process the requests.
         while True:
             if request_id not in self.request_events:
                 # The request has been aborted.
                 return
 
-            # Kick the server if the server is not running.
-            if not self.is_server_running:
-                await self.server_step(request_id)
+            # Kick the engine if the engine is not running.
+            if not self.is_engine_running:
+                await self.engine_step(request_id)
 
-            # Wait for new output. The group_event will be set in server_step
+            # Wait for new output. The group_event will be set in engine_step
             # when there is new output available for the sequence group.
             # Added a timeout to prevent deadlock.
             try:
@@ -160,11 +160,11 @@ class AsyncLLMEngine:
 
                 del self.request_outputs[request_id]
                 del self.request_events[request_id]
-                # Kick the server if the server is not running. This is to
-                # prevent that there are still requests in server's waiting
+                # Kick the engine if the engine is not running. This is to
+                # prevent that there are still requests in engine's waiting
                 # queue to be executed.
-                if not self.is_server_running:
-                    await self.server_step()
+                if not self.is_engine_running:
+                    await self.engine_step()
                 break
 
     async def abort(self, request_id: str) -> None:
@@ -183,36 +183,36 @@ class AsyncLLMEngine:
         if self.log_requests:
             logger.info(f"Aborted request {request_id}.")
 
-        if self.server_use_ray:
-            await self.server.abort_request.remote(request_id)
+        if self.engine_use_ray:
+            await self.engine.abort_request.remote(request_id)
         else:
-            self.server.abort_request(request_id)
+            self.engine.abort_request(request_id)
 
         if request_id in self.request_events:
             del self.request_events[request_id]
         if request_id in self.request_outputs:
             del self.request_outputs[request_id]
 
-        # To prevent deadlock when a request is aborted while the server is
+        # To prevent deadlock when a request is aborted while the engine is
         # running.
         if self.kicking_request_id == request_id:
-            self.is_server_running = False
+            self.is_engine_running = False
             self.kicking_request_id = None
 
     @classmethod
-    def from_server_args(cls, server_args: AsyncServerArgs) -> "AsyncLLMEngine":
-        """Creates an async LLM server from the server arguments."""
-        # Create the server configs.
-        server_configs = server_args.create_server_configs()
-        parallel_config = server_configs[2]
+    def from_engine_args(cls, engine_args: AsyncEngineArgs) -> "AsyncLLMEngine":
+        """Creates an async LLM engine from the engine arguments."""
+        # Create the engine configs.
+        engine_configs = engine_args.create_engine_configs()
+        parallel_config = engine_configs[2]
         # Initialize the cluster.
         distributed_init_method, devices = initialize_cluster(
-            parallel_config, server_args.server_use_ray)
-        # Create the LLM server.
-        server = cls(server_args.worker_use_ray,
-                     server_args.server_use_ray,
-                     not server_args.disable_log_requests,
-                     *server_configs,
+            parallel_config, engine_args.engine_use_ray)
+        # Create the async LLM engine.
+        engine = cls(engine_args.worker_use_ray,
+                     engine_args.engine_use_ray,
+                     not engine_args.disable_log_requests,
+                     *engine_configs,
                      distributed_init_method, devices,
-                     log_stats=not server_args.disable_log_stats)
-        return server
+                     log_stats=not engine_args.disable_log_stats)
+        return engine

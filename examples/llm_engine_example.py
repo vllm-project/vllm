@@ -1,12 +1,12 @@
 import argparse
 
-from cacheflow import ServerArgs, LLMEngine, SamplingParams
+from cacheflow import EngineArgs, LLMEngine, SamplingParams
 
 
 def main(args: argparse.Namespace):
-    # Parse the CLI argument and initialize the server.
-    server_args = ServerArgs.from_cli_args(args)
-    server = LLMEngine.from_server_args(server_args)
+    # Parse the CLI argument and initialize the engine.
+    engine_args = EngineArgs.from_cli_args(args)
+    engine = LLMEngine.from_engine_args(engine_args)
 
     # Test the following prompts.
     test_prompts = [
@@ -19,27 +19,27 @@ def main(args: argparse.Namespace):
          SamplingParams(n=3, best_of=3, use_beam_search=True, temperature=0.0)),
     ]
 
-    # Run the server by calling `server.step()` manually.
+    # Run the engine by calling `engine.step()` manually.
     request_id = 0
     while True:
         # To test iteration-level scheduling, we add one request at each step.
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
-            server.add_request(str(request_id), prompt, sampling_params)
+            engine.add_request(str(request_id), prompt, sampling_params)
             request_id += 1
 
-        request_outputs = server.step()
+        request_outputs = engine.step()
         for request_output in request_outputs:
             if request_output.finished():
                 print(request_output)
 
-        if not (server.has_unfinished_requests() or test_prompts):
+        if not (engine.has_unfinished_requests() or test_prompts):
             break
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Demo on using the LLMEngine class synchronously')
-    parser = ServerArgs.add_cli_args(parser)
+        description='Demo on using the LLMEngine class directly')
+    parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     main(args)

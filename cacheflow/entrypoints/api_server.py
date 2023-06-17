@@ -6,9 +6,9 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 import uvicorn
 
+from cacheflow.engine.arg_utils import AsyncEngineArgs
+from cacheflow.engine.async_llm_engine import AsyncLLMEngine
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import AsyncServerArgs
-from cacheflow.server.async_llm_server import AsyncLLMEngine
 from cacheflow.utils import random_uuid
 
 TIMEOUT_KEEP_ALIVE = 5 # seconds.
@@ -30,7 +30,7 @@ async def generate(request: Request) -> Response:
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
-    results_generator = server.generate(prompt, sampling_params, request_id)
+    results_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -44,7 +44,7 @@ async def generate(request: Request) -> Response:
             yield (json.dumps(ret) + "\0").encode("utf-8")
 
     async def abort_request() -> None:
-        await server.abort(request_id)
+        await engine.abort(request_id)
 
     if stream:
         background_tasks = BackgroundTasks()
@@ -57,7 +57,7 @@ async def generate(request: Request) -> Response:
     async for request_output in results_generator:
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
-            await server.abort(request_id)
+            await engine.abort(request_id)
             return Response(status_code=499)
         final_output = request_output
 
@@ -75,11 +75,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser = AsyncServerArgs.add_cli_args(parser)
+    parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
-    server_args = AsyncServerArgs.from_cli_args(args)
-    server = AsyncLLMEngine.from_server_args(server_args)
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="debug",
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE)

@@ -8,8 +8,8 @@ from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
 
 
 @dataclass
-class ServerArgs:
-    """Arguments for CacheFlow servers."""
+class EngineArgs:
+    """Arguments for CacheFlow engine."""
     model: str
     download_dir: Optional[str] = None
     use_np_weights: bool = False
@@ -33,12 +33,12 @@ class ServerArgs:
     def add_cli_args(
         parser: argparse.ArgumentParser,
     ) -> argparse.ArgumentParser:
-        """Shared CLI arguments for CacheFlow servers."""
+        """Shared CLI arguments for CacheFlow engine."""
         # Model arguments
         parser.add_argument('--model', type=str, default='facebook/opt-125m',
                             help='name or path of the huggingface model to use')
         parser.add_argument('--download-dir', type=str,
-                            default=ServerArgs.download_dir,
+                            default=EngineArgs.download_dir,
                             help='directory to download and load the weights, '
                                  'default to the default cache dir of '
                                  'huggingface')
@@ -49,7 +49,7 @@ class ServerArgs:
         parser.add_argument('--use-dummy-weights', action='store_true',
                             help='use dummy values for model weights')
         # TODO(woosuk): Support FP32.
-        parser.add_argument('--dtype', type=str, default=ServerArgs.dtype,
+        parser.add_argument('--dtype', type=str, default=EngineArgs.dtype,
                             choices=['auto', 'half', 'bfloat16', 'float'],
                             help='data type for model weights and activations. '
                                  'The "auto" option will use FP16 precision '
@@ -60,46 +60,46 @@ class ServerArgs:
                             help='use Ray for distributed serving, will be '
                                  'automatically set when using more than 1 GPU')
         parser.add_argument('--pipeline-parallel-size', '-pp', type=int,
-                            default=ServerArgs.pipeline_parallel_size,
+                            default=EngineArgs.pipeline_parallel_size,
                             help='number of pipeline stages')
         parser.add_argument('--tensor-parallel-size', '-tp', type=int,
-                            default=ServerArgs.tensor_parallel_size,
+                            default=EngineArgs.tensor_parallel_size,
                             help='number of tensor parallel replicas')
         # KV cache arguments
         parser.add_argument('--block-size', type=int,
-                            default=ServerArgs.block_size,
+                            default=EngineArgs.block_size,
                             choices=[8, 16, 32],
                             help='token block size')
         # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
-        parser.add_argument('--seed', type=int, default=ServerArgs.seed,
+        parser.add_argument('--seed', type=int, default=EngineArgs.seed,
                             help='random seed')
         parser.add_argument('--swap-space', type=int,
-                            default=ServerArgs.swap_space,
+                            default=EngineArgs.swap_space,
                             help='CPU swap space size (GiB) per GPU')
         parser.add_argument('--gpu-memory-utilization', type=float,
-                            default=ServerArgs.gpu_memory_utilization,
+                            default=EngineArgs.gpu_memory_utilization,
                             help='the percentage of GPU memory to be used for'
                                  'the model executor')
         parser.add_argument('--max-num-batched-tokens', type=int,
-                            default=ServerArgs.max_num_batched_tokens,
+                            default=EngineArgs.max_num_batched_tokens,
                             help='maximum number of batched tokens per '
                                  'iteration')
         parser.add_argument('--max-num-seqs', type=int,
-                            default=ServerArgs.max_num_seqs,
+                            default=EngineArgs.max_num_seqs,
                             help='maximum number of sequences per iteration')
         parser.add_argument('--disable-log-stats', action='store_true',
                             help='disable logging statistics')
         return parser
 
     @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> "ServerArgs":
+    def from_cli_args(cls, args: argparse.Namespace) -> "EngineArgs":
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        server_args = cls(**{attr: getattr(args, attr) for attr in attrs})
-        return server_args
+        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        return engine_args
 
-    def create_server_configs(
+    def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
         # Initialize the configs.
@@ -117,19 +117,19 @@ class ServerArgs:
 
 
 @dataclass
-class AsyncServerArgs(ServerArgs):
-    """Arguments for asynchronous CacheFlow servers."""
-    server_use_ray: bool = False
+class AsyncEngineArgs(EngineArgs):
+    """Arguments for asynchronous CacheFlow engine."""
+    engine_use_ray: bool = False
     disable_log_requests: bool = False
 
     @staticmethod
     def add_cli_args(
         parser: argparse.ArgumentParser,
     ) -> argparse.ArgumentParser:
-        parser = ServerArgs.add_cli_args(parser)
-        parser.add_argument('--server-use-ray', action='store_true',
-                            help='use Ray to start the LLM server in a '
-                                 'separate process as the web server process.')
+        parser = EngineArgs.add_cli_args(parser)
+        parser.add_argument('--engine-use-ray', action='store_true',
+                            help='use Ray to start the LLM engine in a '
+                                 'separate process as the server process.')
         parser.add_argument('--disable-log-requests', action='store_true',
                             help='disable logging requests')
         return parser

@@ -4,13 +4,13 @@ from typing import Any, List, Optional
 from cacheflow.config import (CacheConfig, ModelConfig, ParallelConfig,
                               SchedulerConfig)
 from cacheflow.core.scheduler import Scheduler
+from cacheflow.engine.arg_utils import EngineArgs
+from cacheflow.engine.ray_utils import DeviceID, initialize_cluster, ray
+from cacheflow.engine.tokenizer_utils import (detokenize_incrementally,
+                                              get_tokenizer)
 from cacheflow.logger import init_logger
 from cacheflow.outputs import RequestOutput
 from cacheflow.sampling_params import SamplingParams
-from cacheflow.server.arg_utils import ServerArgs
-from cacheflow.server.ray_utils import DeviceID, initialize_cluster, ray
-from cacheflow.server.tokenizer_utils import (get_tokenizer,
-                                              detokenize_incrementally)
 from cacheflow.sequence import Sequence, SequenceGroup, SequenceStatus
 from cacheflow.utils import Counter
 from cacheflow.worker.worker import Worker
@@ -19,9 +19,9 @@ logger = init_logger(__name__)
 
 
 class LLMEngine:
-    """An LLM server that receives requests and generates texts.
+    """An LLM engine that receives requests and generates texts.
 
-    This is the main class for the CacheFlow LLM server. It receives requests
+    This is the main class for the CacheFlow LLM engine. It receives requests
     from clients and generates texts from the LLM. It includes a tokenizer, a
     language model (possibly distributed across multiple GPUs), and GPU memory
     space allocated for intermediate states (aka KV cache). This class utilizes
@@ -31,8 +31,8 @@ class LLMEngine:
     The `LLM` class wraps this class for offline batched inference and the
     `AsyncLLMEngine` class wraps this class for online serving.
 
-    NOTE: The config arguments are derived from the `ServerArgs` class. For the
-    comprehensive list of arguments, see `ServerArgs`.
+    NOTE: The config arguments are derived from the `EngineArgs` class. For the
+    comprehensive list of arguments, see `EngineArgs`.
 
     Args:
         model_config: The configuration related to the LLM model.
@@ -58,7 +58,7 @@ class LLMEngine:
         log_stats: bool,
     ) -> None:
         logger.info(
-            "Initializing an LLM server with config: "
+            "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
             f"dtype={model_config.dtype}, "
             f"use_dummy_weights={model_config.use_dummy_weights}, "
@@ -135,17 +135,17 @@ class LLMEngine:
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
 
     @classmethod
-    def from_server_args(cls, server_args: ServerArgs) -> "LLMEngine":
-        """Creates an LLM server from the server arguments."""
-        # Create the server configs.
-        server_configs = server_args.create_server_configs()
-        parallel_config = server_configs[2]
+    def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
+        """Creates an LLM engine from the engine arguments."""
+        # Create the engine configs.
+        engine_configs = engine_args.create_engine_configs()
+        parallel_config = engine_configs[2]
         # Initialize the cluster.
         distributed_init_method, devices = initialize_cluster(parallel_config)
-        # Create the LLM server.
-        server = cls(*server_configs, distributed_init_method, devices,
-                     log_stats=not server_args.disable_log_stats)
-        return server
+        # Create the LLM engine.
+        engine = cls(*engine_configs, distributed_init_method, devices,
+                     log_stats=not engine_args.disable_log_stats)
+        return engine
 
     def add_request(
         self,
@@ -155,10 +155,10 @@ class LLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
     ) -> None:
-        """Add a request to the server's request pool.
+        """Add a request to the engine's request pool.
 
         The request is added to the request pool and will be processed by the
-        scheduler as `server.step()` is called. The exact scheduling policy is
+        scheduler as `engine.step()` is called. The exact scheduling policy is
         determined by the scheduler.
 
         Args:
@@ -211,7 +211,7 @@ class LLMEngine:
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
 
-        This function performs one decoding iteration for the server. It first
+        This function performs one decoding iteration of the engine. It first
         schedules the sequences to be executed in the next iteration and the
         token blocks to be swapped in/out/copy. Then, it executes the model
         and updates the scheduler with the model outputs. Finally, it decodes
