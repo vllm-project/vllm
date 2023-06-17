@@ -16,7 +16,7 @@ Requirements
 
 .. note::
     As of now, vLLM does not support CUDA 12.
-    If you are using Hopper or Lovelace GPUs, please use CUDA 11.8.
+    If you are using Hopper or Lovelace GPUs, please use CUDA 11.8 instead of CUDA 12.
 
 .. tip::
     If you have trouble installing vLLM, we recommend using the NVIDIA PyTorch Docker image.
