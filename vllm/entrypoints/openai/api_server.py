@@ -102,11 +102,11 @@ async def create_completion(raw_request: Request):
     for the API specification. This API mimics the OpenAI Completion API.
 
     NOTE: Currently we do not support the following features:
-        - echo (since the cacheflow server does not currently support
+        - echo (since the vLLM server does not currently support
           getting the logprobs of prompt tokens)
         - suffix (the language models we currently support do not support
           suffix)
-        - logit_bias (to be supported in cacheflow server)
+        - logit_bias (to be supported by vLLM server)
     """
     request = CompletionRequest(**await raw_request.json())
     logger.info(f"Received completion request: {request}")
@@ -116,7 +116,7 @@ async def create_completion(raw_request: Request):
         return error_check_ret
 
     if request.echo:
-        # We do not support echo since the cacheflow server does not
+        # We do not support echo since the vLLM server does not
         # currently support getting the logprobs of prompt tokens.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "echo is not currently supported")
@@ -127,7 +127,7 @@ async def create_completion(raw_request: Request):
                                     "suffix is not currently supported")
 
     if request.logit_bias is not None:
-        # TODO: support logit_bias in cacheflow server.
+        # TODO: support logit_bias in vLLM server.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "logit_bias is not currently supported")
 

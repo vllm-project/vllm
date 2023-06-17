@@ -25,7 +25,7 @@ This gives you the ability to modify the codebase and test your model.
 1. Bring your model code
 ------------------------
 
-Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the `cacheflow/model_executor/models <https://github.com/WoosukKwon/vllm/tree/main/vllm/model_executor/models>`_ directory.
+Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the `vllm/model_executor/models <https://github.com/WoosukKwon/vllm/tree/main/vllm/model_executor/models>`_ directory.
 For instance, vLLM's `OPT model <https://github.com/WoosukKwon/vllm/blob/main/vllm/model_executor/models/opt.py>`_ was adpated from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
 
 .. warning::
@@ -91,4 +91,4 @@ While the process is straightforward for most layers, the tensor-parallel layers
 5. Register your model
 ----------------------
 
-Finally, include your :code:`*ForCausalLM` class in `cacheflow/model_executor/models/__init__.py <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/model_executor/models/__init__.py>`_ and register it to the :code:`_MODEL_REGISTRY` in `cacheflow/model_executor/model_loader.py <https://github.com/WoosukKwon/cacheflow/blob/main/cacheflow/model_executor/model_loader.py>`_.
+Finally, include your :code:`*ForCausalLM` class in `vllm/model_executor/models/__init__.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/model_executor/models/__init__.py>`_ and register it to the :code:`_MODEL_REGISTRY` in `vllm/model_executor/model_loader.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/model_executor/model_loader.py>`_.

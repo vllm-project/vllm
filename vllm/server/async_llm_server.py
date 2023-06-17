@@ -104,7 +104,7 @@ class AsyncLLMEngine:
         arrival_time = time.time()
 
         # Create an event to notify us that there is new output from the
-        # cacheflow server.
+        # vLLM server.
         request_event = asyncio.Event()
         self.request_events[request_id] = request_event
 
@@ -114,7 +114,7 @@ class AsyncLLMEngine:
                         f"sampling params: {sampling_params}, "
                         f"prompt token ids: {prompt_token_ids}.")
 
-        # Add the request into the cacheflow server's waiting queue.
+        # Add the request into the vLLM server's waiting queue.
         if self.server_use_ray:
             await self.server.add_request.remote(
                 request_id, prompt, sampling_params,
@@ -126,7 +126,7 @@ class AsyncLLMEngine:
                 prompt_token_ids=prompt_token_ids,
                 arrival_time=arrival_time)
 
-        # The cacheflow server does not have a background loop that keeps
+        # The vLLM server does not have a background loop that keeps
         # processing incoming requests. Therefore, we need to keep kicking
         # the server to process the requests.
         while True:

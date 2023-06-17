@@ -34,7 +34,7 @@ class ModelCard(BaseModel):
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
-    owned_by: str = "cacheflow"
+    owned_by: str = "vllm"
     root: Optional[str] = None
     parent: Optional[str] = None
     permission: List[ModelPermission] = Field(default_factory=list)
@@ -82,7 +82,7 @@ class CompletionRequest(BaseModel):
     best_of: Optional[int] = None
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
-    # Additional parameters supported by cacheflow
+    # Additional parameters supported by vLLM
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False

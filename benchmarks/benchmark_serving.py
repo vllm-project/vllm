@@ -2,7 +2,7 @@
 
 On the server side, run one of the following commands:
     (vLLM backend)
-    python -m cacheflow.entrypoints.simple_fastapi_frontend \
+    python -m vllm.entrypoints.simple_fastapi_frontend \
         --disable-log-requests --model <your_model>
 
     (TGI backend)
@@ -114,7 +114,7 @@ async def send_request(
     request_start_time = time.time()
 
     headers = {"User-Agent": "Benchmark Client"}
-    if backend == "cacheflow":
+    if backend == "vllm":
         pload = {
             "prompt": prompt,
             "n": 1,
@@ -213,8 +213,8 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Benchmark the online serving throughput.")
-    parser.add_argument("--backend", type=str, default="cacheflow",
-                        choices=["cacheflow", "tgi"])
+    parser.add_argument("--backend", type=str, default="vllm",
+                        choices=["vllm", "tgi"])
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--dataset", type=str, required=True,

@@ -70,7 +70,7 @@ def sample_requests(
     return sampled_requests
 
 
-def run_cacheflow(
+def run_vllm(
     requests: List[Tuple[str, int, int]],
     model: str,
     tensor_parallel_size: int,
@@ -171,8 +171,8 @@ def main(args: argparse.Namespace):
     tokenizer = get_tokenizer(args.model)
     requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
 
-    if args.backend == "cacheflow":
-        elapsed_time = run_cacheflow(
+    if args.backend == "vllm":
+        elapsed_time = run_vllm(
             requests, args.model, args.tensor_parallel_size, args.seed, args.n,
             args.use_beam_search)
     elif args.backend == "hf":
@@ -191,8 +191,8 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark the throughput.")
-    parser.add_argument("--backend", type=str, choices=["cacheflow", "hf"],
-                        default="cacheflow")
+    parser.add_argument("--backend", type=str, choices=["vllm", "hf"],
+                        default="vllm")
     parser.add_argument("--dataset", type=str, required=True,
                         help="Path to the dataset.")
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
@@ -206,7 +206,7 @@ if __name__ == "__main__":
     parser.add_argument("--hf-max-batch-size", type=int, default=None,
                         help="Maximum batch size for HF backend.")
     args = parser.parse_args()
-    if args.backend == "cacheflow":
+    if args.backend == "vllm":
         if args.hf_max_batch_size is not None:
             raise ValueError("HF max batch size is only for HF backend.")
     elif args.backend == "hf":

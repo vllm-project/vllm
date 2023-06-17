@@ -8,7 +8,7 @@ Placeholder.
 
 .. code-block:: python
 
-    from cacheflow import LLM, SamplingParams
+    from vllm import LLM, SamplingParams
 
     # Sample prompts.
     prompts = [

@@ -22,7 +22,7 @@ class NewLineFormatter(logging.Formatter):
         return msg
 
 
-_root_logger = logging.getLogger("cacheflow")
+_root_logger = logging.getLogger("vllm")
 _default_handler = None
 
 
