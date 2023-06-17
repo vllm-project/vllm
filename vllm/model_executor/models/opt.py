@@ -76,7 +76,7 @@ class OPTAttention(nn.Module):
                                           input_is_parallel=True,
                                           perform_initialization=False)
         self.attn = PagedAttention(self.num_heads, self.head_dim,
-                                      scale=self.scaling)
+                                   scale=self.scaling)
 
     def forward(
         self,

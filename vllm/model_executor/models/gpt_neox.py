@@ -64,7 +64,7 @@ class GPTNeoXAttention(nn.Module):
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0
         self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_size,
-                                          scaling, rotary_dim)
+                                           scaling, rotary_dim)
 
     def forward(
         self,

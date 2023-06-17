@@ -105,7 +105,7 @@ class LlamaAttention(nn.Module):
             perform_initialization=False,
         )
         self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_dim,
-                                          self.scaling, rotary_dim=self.head_dim)
+                                           self.scaling, rotary_dim=self.head_dim)
 
     def forward(
         self,
