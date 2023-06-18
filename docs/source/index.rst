@@ -7,12 +7,12 @@ Its core features include:
 - State-of-the-art performance in serving throughput
 - Efficient management of cached attention keys and values with **PagedAttention**
 - Seamless integration with popular HuggingFace models
-- Advanced batching mechanism
+- Dynamic batching of incoming requests
 - Optimized CUDA kernels
-- Efficient support for various decoding algorithms such as parallel sampling and beam search
-- Tensor parallelism support for multi-GPU inference
+- High-throughput serving with various decoding algorithms, including *parallel sampling* and *beam search*
+- Tensor parallelism support for distributed inference
 - Streaming outputs
-- OpenAI-compatible API
+- OpenAI-compatible API server
 
 For more information, please refer to our `blog post <>`_.
 
