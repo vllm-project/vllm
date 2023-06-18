@@ -1,6 +1,6 @@
 # vLLM: Easy, Fast, and Cheap LLM Serving for Everyone
 
-| [Documentation](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/) | [Blog]() |
+| [**Documentation**](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/) | [**Blog**]() |
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
