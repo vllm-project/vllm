@@ -34,13 +34,13 @@ vLLM comes with many powerful features that include:
 vLLM outperforms HuggingFace Transformers (HF) by up to 24x and Text Generation Inference (TGI) by up to 3.5x, in terms of throughput.
 For a detailed explanation on this, check out our [blog post]().
 
-Serving throughput when each request asks for 1 output completion:
+- Serving throughput when each request asks for 1 output completion:
 <p align="center">
   <img src="./assets/figures/perf_a10g_n1.png" width="45%">
   <img src="./assets/figures/perf_a100_n1.png" width="45%"> 
 </p>
 
-Serving throughput when each request asks for 3 parallel output completions:
+- Serving throughput when each request asks for 3 parallel output completions:
 <p align="center">
   <img src="./assets/figures/perf_a10g_n3.png" width="45%">
   <img src="./assets/figures/perf_a100_n3.png" width="45%"> 
