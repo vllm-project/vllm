@@ -24,7 +24,7 @@ vLLM comes with many powerful features that include:
 - Seamless integration with popular HuggingFace models
 - Dynamic batching of incoming requests
 - Optimized CUDA kernels
-- Efficient support for various decoding algorithms such as parallel sampling and beam search
+- High-throughput serving with various decoding algorithms, including *parallel sampling* and *beam search*
 - Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
@@ -34,16 +34,16 @@ vLLM comes with many powerful features that include:
 vLLM outperforms HuggingFace Transformers (HF) by up to 24x and Text Generation Inference (TGI) by up to 3.5x, in terms of throughput.
 For details, check out our [blog post]().
 
-- Serving throughput when each request asks for 1 output completion:
 <p align="center">
   <img src="./assets/figures/perf_a10g_n1.png" width="45%">
-  <img src="./assets/figures/perf_a100_n1.png" width="45%"> 
+  <img src="./assets/figures/perf_a100_n1.png" width="45%">
+  <em> Serving throughput when each request asks for 1 output completion. </em>
 </p>
 
-- Serving throughput when each request asks for 3 parallel output completions:
 <p align="center">
   <img src="./assets/figures/perf_a10g_n3.png" width="45%">
-  <img src="./assets/figures/perf_a100_n3.png" width="45%"> 
+  <img src="./assets/figures/perf_a100_n3.png" width="45%">
+  <em> Serving throughput when each request asks for 3 output completions. </em>
 </p>
 
 ## Contributing
