@@ -1,66 +1,54 @@
-# vLLM
+# vLLM: Easy, Fast, and Cheap LLM Serving for Everyone
 
-## Build from source
+| [**Documentation**](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/) | [**Blog**]() |
 
-```bash
-pip install -r requirements.txt
-pip install -e .  # This may take several minutes.
-```
+vLLM is a fast and easy-to-use library for LLM inference and serving.
 
-## Test simple server
+## Latest News 🔥
 
-```bash
-# Single-GPU inference.
-python examples/simple_server.py # --model <your_model>
+- [2023/06] We officially released vLLM! vLLM has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April. Check out our [blog post]().
 
-# Multi-GPU inference (e.g., 2 GPUs).
-ray start --head
-python examples/simple_server.py -tp 2 # --model <your_model>
-```
+## Getting Started
 
-The detailed arguments for `simple_server.py` can be found by:
-```bash
-python examples/simple_server.py --help
-```
+Visit our [documentation](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/) to get started.
+- [Installation](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/getting_started/installation.html): `pip install vllm`
+- [Quickstart](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/getting_started/quickstart.html)
+- [Supported Models](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/models/supported_models.html)
 
-## FastAPI server
+## Key Features
 
-To start the server:
-```bash
-ray start --head
-python -m vllm.entrypoints.fastapi_server # --model <your_model>
-```
+vLLM comes with many powerful features that include:
 
-To test the server:
-```bash
-python test_cli_client.py
-```
+- State-of-the-art performance in serving throughput
+- Efficient management of attention key and value memory with **PagedAttention**
+- Seamless integration with popular HuggingFace models
+- Dynamic batching of incoming requests
+- Optimized CUDA kernels
+- High-throughput serving with various decoding algorithms, including *parallel sampling* and *beam search*
+- Tensor parallelism support for distributed inference
+- Streaming outputs
+- OpenAI-compatible API server
 
-## Gradio web server
+## Performance
 
-Install the following additional dependencies:
-```bash
-pip install gradio
-```
+vLLM outperforms HuggingFace Transformers (HF) by up to 24x and Text Generation Inference (TGI) by up to 3.5x, in terms of throughput.
+For details, check out our [blog post]().
 
-Start the server:
-```bash
-python -m vllm.http_frontend.fastapi_frontend
-# At another terminal
-python -m vllm.http_frontend.gradio_webserver
-```
+<p align="center">
+  <img src="./assets/figures/perf_a10g_n1.png" width="45%">
+  <img src="./assets/figures/perf_a100_n1.png" width="45%">
+  <br>
+  <em> Serving throughput when each request asks for 1 output completion. </em>
+</p>
 
-## Load LLaMA weights
+<p align="center">
+  <img src="./assets/figures/perf_a10g_n3.png" width="45%">
+  <img src="./assets/figures/perf_a100_n3.png" width="45%">
+  <br>
+  <em> Serving throughput when each request asks for 3 output completions. </em>
+</p>
 
-Since LLaMA weight is not fully public, we cannot directly download the LLaMA weights from huggingface. Therefore, you need to follow the following process to load the LLaMA weights.
+## Contributing
 
-1. Converting LLaMA weights to huggingface format with [this script](https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/convert_llama_weights_to_hf.py).
-    ```bash
-    python src/transformers/models/llama/convert_llama_weights_to_hf.py \
-        --input_dir /path/to/downloaded/llama/weights --model_size 7B --output_dir /output/path/llama-7b
-    ```
-2. For all the commands above, specify the model with `--model /output/path/llama-7b` to load the model. For example:
-    ```bash
-    python simple_server.py --model /output/path/llama-7b
-    python -m vllm.http_frontend.fastapi_frontend --model /output/path/llama-7b
-    ```
+We welcome and value any contributions and collaborations.
+Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.

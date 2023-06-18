@@ -165,7 +165,7 @@ setuptools.setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     packages=setuptools.find_packages(
-        exclude=("benchmarks", "csrc", "docs", "examples", "tests")),
+        exclude=("assets", "benchmarks", "csrc", "docs", "examples", "tests")),
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
