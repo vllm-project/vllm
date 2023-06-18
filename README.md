@@ -36,10 +36,12 @@ For a detailed explanation on this, check out our [blog post]().
 
 | ![](./assets/figures/perf_a10g_n1.png) | ![](./assets/figures/perf_a100_n1.png) |
 | :--: | :--: |
+
 Serving throughput when each request asks for one output completion.
 
 | ![](./assets/figures/perf_a10g_n3.png) | ![](./assets/figures/perf_a100_n3.png) |
 | :--: | :--: |
+
 Serving throughput when each request asks for three parallel output completions.
 
 ## Contributing
