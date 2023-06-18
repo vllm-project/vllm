@@ -3,7 +3,8 @@
 On the server side, run one of the following commands:
     (vLLM backend)
     python -m vllm.entrypoints.api_server \
-        --disable-log-requests --model <your_model>
+        --model <your_model> --swap-space 16 \
+        --disable-log-requests
 
     (TGI backend)
     ./launch_hf_server.sh <your_model>
