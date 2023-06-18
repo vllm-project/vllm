@@ -25,7 +25,7 @@ vLLM comes with many powerful features that include:
 - Dynamic batching of incoming requests
 - Optimized CUDA kernels
 - Efficient support for various decoding algorithms such as parallel sampling and beam search
-- Tensor parallelism support for multi-GPU inference
+- Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
 
