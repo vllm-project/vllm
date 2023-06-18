@@ -37,12 +37,16 @@ For details, check out our [blog post]().
 <p align="center">
   <img src="./assets/figures/perf_a10g_n1.png" width="45%">
   <img src="./assets/figures/perf_a100_n1.png" width="45%">
+</p>
+<p align="center">
   <em> Serving throughput when each request asks for 1 output completion. </em>
 </p>
 
 <p align="center">
   <img src="./assets/figures/perf_a10g_n3.png" width="45%">
   <img src="./assets/figures/perf_a100_n3.png" width="45%">
+</p>
+<p align="center">
   <em> Serving throughput when each request asks for 3 output completions. </em>
 </p>
 
