@@ -35,12 +35,16 @@ vLLM outperforms HuggingFace Transformers (HF) by up to 24x and Text Generation 
 For a detailed explanation on this, check out our [blog post]().
 
 Serving throughput when each request asks for one output completion:
-| ![](./assets/figures/perf_a10g_n1.png) | ![](./assets/figures/perf_a100_n1.png) |
-| :--: | :--: |
+<p align="center">
+  <img src="./assets/figures/perf_a10g_n1.png" width="45%">
+  <img src="./assets/figures/perf_a100_n1.png" width="45%"> 
+</p>
 
 Serving throughput when each request asks for three parallel output completions:
-| ![](./assets/figures/perf_a10g_n3.png) | ![](./assets/figures/perf_a100_n3.png) |
-| :--: | :--: |
+<p align="center">
+  <img src="./assets/figures/perf_a10g_n3.png" width="45%">
+  <img src="./assets/figures/perf_a100_n3.png" width="45%"> 
+</p>
 
 ## Contributing
 
