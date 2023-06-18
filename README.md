@@ -1,5 +1,7 @@
 # vLLM: Easy, Fast, and Cheap LLM Serving for Everyone
 
+| [Documentation](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/) | [Blog]() |
+
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
 ## Latest News 🔥
@@ -17,12 +19,14 @@ Visit our [documentation](https://llm-serving-cacheflow.readthedocs-hosted.com/_
 
 vLLM comes with many powerful features that include:
 
-- **PagedAttention**, efficient management of cached attention keys and values
+- State-of-the-art performance in serving throughput
+- Efficient management of cached attention keys and values with **PagedAttention**
 - Seamless integration with popular HuggingFace models
 - Advanced batching mechanism
 - Optimized CUDA kernels
 - Efficient support for various decoding algorithms such as parallel sampling and beam search
 - Tensor parallelism support for multi-GPU inference
+- Support streaming outputs
 - OpenAI-compatible API
 
 ## Performance
