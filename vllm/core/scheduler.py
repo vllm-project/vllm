@@ -409,7 +409,8 @@ class Scheduler:
         seq_group: SequenceGroup,
         blocks_to_swap_out: Dict[int, int],
     ) -> None:
-        assert self.block_manager.can_swap_out(seq_group)
+        assert self.block_manager.can_swap_out(seq_group), (
+            "The CPU KV cache is full. Please increase the swap space.")
         mapping = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
