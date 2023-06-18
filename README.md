@@ -1,4 +1,4 @@
-# vLLM
+# vLLM: Easy, Fast, and Cheap LLM Serving for Everyone
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
@@ -38,5 +38,5 @@ For a detailed explanation on this, check out our [blog post]().
 
 ## Contributing
 
-As an open-source project in a fast-evolving field, we welcome any contributions and collaborations.
+We welcome any contributions and collaborations.
 For guidance on how to contribute, please check out [CONTRIBUTING.md](./CONTRIBUTING.md).
