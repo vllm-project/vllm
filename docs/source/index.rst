@@ -5,7 +5,7 @@ Welcome to vLLM!
 Its core features include:
 
 - State-of-the-art performance in serving throughput
-- Efficient management of cached attention keys and values with **PagedAttention**
+- Efficient management of attention key and value memory with **PagedAttention**
 - Seamless integration with popular HuggingFace models
 - Dynamic batching of incoming requests
 - Optimized CUDA kernels
