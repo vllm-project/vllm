@@ -147,15 +147,14 @@ setuptools.setup(
     name="vllm",
     version=find_version(get_path("vllm", "__init__.py")),
     author="vLLM Team",
-    author_email="vllm@gmail.com",  # FIXME
     license="Apache 2.0",
-    description="vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention",  # FIXME
+    description="A high-throughput and memory-efficient inference and serving engine for LLMs",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
-    url="https://github.com/WoosukKwon/vllm",
+    url="https://github.com/vllm-project/vllm",
     project_urls={
-        "Homepage": "https://github.com/WoosukKwon/vllm",
-        "Documentation": "https://vllm.readthedocs.io/en/latest/",  # FIXME
+        "Homepage": "https://github.com/vllm-project/vllm",
+        "Documentation": "https://vllm.readthedocs.io/en/latest/",
     },
     classifiers=[
         "Programming Language :: Python :: 3.8",
