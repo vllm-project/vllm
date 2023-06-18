@@ -1,15 +1,17 @@
 Welcome to vLLM!
 ================
 
-**vLLM** is a high-throughput and memory-efficient inference and serving engine for large language models (LLM).
+**vLLM** is a fast and easy-to-use library for LLM inference and serving.
 Its core features include:
 
-- **PagedAttention**, efficient management of cached attention keys and values
+- State-of-the-art performance in serving throughput
+- Efficient management of cached attention keys and values with **PagedAttention**
 - Seamless integration with popular HuggingFace models
 - Advanced batching mechanism
 - Optimized CUDA kernels
 - Efficient support for various decoding algorithms such as parallel sampling and beam search
 - Tensor parallelism support for multi-GPU inference
+- Streaming outputs
 - OpenAI-compatible API
 
 For more information, please refer to our `blog post <>`_.
