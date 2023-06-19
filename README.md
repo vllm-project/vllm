@@ -10,17 +10,17 @@ Easy, fast, and cheap LLM serving for everyone
 </h3>
 
 <p align="center">
-| <a href="https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/"><b>Documentation</b></a> | <a href=""><b>Blog</b></a> |
+| <a href="https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/">
+<b>Documentation</b></a> | <a href=""><b>Blog</b></a> |
 
 </p>
 
----
 
-🔥 *News* 🔥
+## Latest News 🔥
 
 - [2023/06] We officially released vLLM! vLLM has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April. Check out our [blog post]().
 
----
+## What is vLLM?
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
@@ -34,12 +34,12 @@ vLLM is fast with:
 vLLM is flexible and easy-to-use with:
 
 - Seamless integration with popular HuggingFace models
-- High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
+- Various decoding algorithms, including *parallel sampling*, *beam search*, and more
 - Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
 
-Install with pip or [from source](https://llm-serving-cacheflow.readthedocs-hosted.com/en/latest/getting_started/installation.html#build-from-source):
+Install vLLM with pip or [from source](https://llm-serving-cacheflow.readthedocs-hosted.com/en/latest/getting_started/installation.html#build-from-source):
 
 ```bash
 pip install vllm
