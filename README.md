@@ -39,6 +39,13 @@ vLLM is flexible and easy to use with:
 - Streaming outputs
 - OpenAI-compatible API server
 
+vLLM can seamlessly support many Huggingface models, including the following architectures:
+
+- GPT-2 (e.g., `gpt2`, `gpt2-xl`, ...)
+- GPTNeoX (e.g., `EleutherAI/gpt-neox-20b`, `databricks/dolly-v2-12b`, `stabilityai/stablelm-tuned-alpha-7b`, ...)
+- LLaMA (e.g., `llama-65b`, `lmsys/vicuna-13b-v1.3`, `young-geng/koala`, ...)
+- OPT (e.g., `facebook/opt-66b`, `facebook/opt-iml-max-30b`, ...)
+
 Install vLLM with pip or [from source](https://llm-serving-cacheflow.readthedocs-hosted.com/en/latest/getting_started/installation.html#build-from-source):
 
 ```bash
