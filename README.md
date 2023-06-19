@@ -14,6 +14,14 @@ Easy, fast, and cheap LLM serving for everyone
 
 </p>
 
+---
+
+*Latest News* 🔥
+
+- [2023/06] We officially released vLLM! vLLM has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April. Check out our [blog post]().
+
+---
+
 vLLM is a fast and easy to use library for LLM inference and serving.
 
 vLLM is fast with:
@@ -36,14 +44,6 @@ Install vLLM with pip or [from source](https://llm-serving-cacheflow.readthedocs
 ```bash
 pip install vllm
 ```
----
-
-*Latest News* 🔥
-
-- [2023/06] We officially released vLLM! vLLM has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April. Check out our [blog post]().
-
----
-
 
 ## Getting Started
 
