@@ -41,7 +41,7 @@ class CompletionOutput:
                 f"text={self.text!r}, "
                 f"token_ids={self.token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
-                f"logprobs={self.logprobs},"
+                f"logprobs={self.logprobs}, "
                 f"finish_reason={self.finish_reason})")
 
 
