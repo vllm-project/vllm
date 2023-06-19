@@ -10,8 +10,7 @@ Easy, fast, and cheap LLM serving for everyone
 </h3>
 
 <p align="center">
-| <a href="https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/">
-<b>Documentation</b></a> | <a href=""><b>Blog</b></a> |
+| <a href="https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/"><b>Documentation</b></a> | <a href=""><b>Blog</b></a> |
 
 </p>
 
