@@ -58,15 +58,19 @@ vLLM outperforms HuggingFace Transformers (HF) by up to 24x and Text Generation 
 For details, check out our [blog post]().
 
 <p align="center">
-  <img src="./docs/source/assets/figures/perf_a10g_n1.png" width="45%">
-  <img src="./docs/source/assets/figures/perf_a100_n1.png" width="45%">
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/logos/perf_a10g_n1_dark.png">
+  <img src="./docs/source/assets/figures/perf_a10g_n1_light.png" width="45%">
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/logos/perf_a100_n1_dark.png">
+  <img src="./docs/source/assets/figures/perf_a100_n1_light.png" width="45%">
   <br>
   <em> Serving throughput when each request asks for 1 output completion. </em>
 </p>
 
 <p align="center">
-  <img src="./docs/source/assets/figures/perf_a10g_n3.png" width="45%">
-  <img src="./docs/source/assets/figures/perf_a100_n3.png" width="45%">
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/logos/perf_a10g_n3_dark.png">
+  <img src="./docs/source/assets/figures/perf_a10g_n3_light.png" width="45%">
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/logos/perf_a100_n3_dark.png">
+  <img src="./docs/source/assets/figures/perf_a100_n3_light.png" width="45%">
   <br>
   <em> Serving throughput when each request asks for 3 output completions. </em>
 </p>
