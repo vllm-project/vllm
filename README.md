@@ -31,7 +31,7 @@ vLLM is fast with:
 - Dynamic batching of incoming requests
 - Optimized CUDA kernels
 
-vLLM is flexible and easy-to-use with:
+vLLM is flexible and easy to use with:
 
 - Seamless integration with popular HuggingFace models
 - Various decoding algorithms, including *parallel sampling*, *beam search*, and more
