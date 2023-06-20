@@ -53,7 +53,9 @@ copybutton_prompt_is_regexp = True
 #
 html_title = project
 html_theme = 'sphinx_book_theme'
+html_logo = 'assets/logos/vllm-logo-text-light.png'
 html_theme_options = {
+    'logo_only': True,
     'path_to_docs': 'docs/source',
     'repository_url': 'https://github.com/WoosukKwon/vllm',
     'use_repository_button': True,
