@@ -40,7 +40,7 @@ vLLM is flexible and easy to use with:
 * Streaming outputs
 * OpenAI-compatible API server
 
-For more information, please refer to our `blog post <>`_.
+For more information, please refer to our `blog post <https://vllm.ai>`_.
 
 
 Documentation
