@@ -17,7 +17,12 @@ def get_tokenizer(
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
     config = AutoConfig.from_pretrained(model_name)
-    if config.model_type == "llama" and getattr(kwargs, "use_fast", True):
+    if "open_llama" in model_name:
+        kwargs["use_fast"] = False
+        logger.info(
+            "OpenLLaMA models do not support the fast tokenizer. "
+            "Using the slow tokenizer instead.")
+    elif config.model_type == "llama" and getattr(kwargs, "use_fast", True):
         # LLaMA fast tokenizer causes protobuf errors in some environments.
         # However, we found that the below LLaMA fast tokenizer works well in
         # most environments.
