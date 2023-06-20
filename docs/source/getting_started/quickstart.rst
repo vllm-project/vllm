@@ -22,7 +22,7 @@ Import ``LLM`` and ``SamplingParams`` from vLLM. The ``LLM`` class is the main c
 
     from vllm import LLM, SamplingParams
 
-Define the list of input prompts and the sampling parameters for generation. The sampling temperature is set to 0.8 and the nucleus sampling probability is set to 0.95. For more information about the sampling parameters, refer to the `class definition <https://github.com/WoosukKwon/vllm/blob/main/vllm/sampling_params.py>`_.
+Define the list of input prompts and the sampling parameters for generation. The sampling temperature is set to 0.8 and the nucleus sampling probability is set to 0.95. For more information about the sampling parameters, refer to the `class definition <https://github.com/vllm-project/vllm/blob/main/vllm/sampling_params.py>`_.
 
 .. code-block:: python
 
@@ -53,13 +53,13 @@ Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
-The code example can also be found in `examples/offline_inference.py <https://github.com/WoosukKwon/vllm/blob/main/examples/offline_inference.py>`_.
+The code example can also be found in `examples/offline_inference.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py>`_.
 
 
 API Server
 ----------
 
-vLLM can be deployed as an LLM service. We provide an example `FastAPI <https://fastapi.tiangolo.com/>`_ server. Check `vllm/entrypoints/api_server.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/entrypoints/api_server.py>`_ for the server implementation. The server uses ``AsyncLLMEngine`` class to support asynchronous processing of incoming requests.
+vLLM can be deployed as an LLM service. We provide an example `FastAPI <https://fastapi.tiangolo.com/>`_ server. Check `vllm/entrypoints/api_server.py <https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/api_server.py>`_ for the server implementation. The server uses ``AsyncLLMEngine`` class to support asynchronous processing of incoming requests.
 
 Start the server:
 
@@ -81,7 +81,7 @@ Query the model in shell:
     $         "temperature": 0
     $     }'
 
-See `examples/api_client.py <https://github.com/WoosukKwon/vllm/blob/main/examples/api_client.py>`_ for a more detailed client example.
+See `examples/api_client.py <https://github.com/vllm-project/vllm/blob/main/examples/api_client.py>`_ for a more detailed client example.
 
 OpenAI-Compatible Server
 ------------------------
@@ -128,4 +128,4 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
                                           prompt="San Francisco is a")
     print("Completion result:", completion)
 
-For a more detailed client example, refer to `examples/openai_client.py <https://github.com/WoosukKwon/vllm/blob/main/examples/openai_client.py>`_.
+For a more detailed client example, refer to `examples/openai_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_client.py>`_.
