@@ -22,7 +22,7 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
-vLLM is a fast and easy to use library for LLM inference and serving.
+vLLM is a fast and easy-to-use library for LLM inference and serving.
 
 vLLM is fast with:
 
