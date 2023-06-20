@@ -10,7 +10,7 @@ Easy, fast, and cheap LLM serving for everyone
 </h3>
 
 <p align="center">
-| <a href="https://vllm.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href=""><b>Blog</b></a> |
+| <a href="https://vllm.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://vllm.ai"><b>Blog</b></a> | <a href="https://github.com/vllm-project/vllm/discussions"><b>Discussions</b></a> |
 
 </p>
 
@@ -18,7 +18,7 @@ Easy, fast, and cheap LLM serving for everyone
 
 *Latest News* 🔥
 
-- [2023/06] We officially released vLLM! vLLM has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April. Check out our [blog post]().
+- [2023/06] We officially released vLLM! vLLM has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid April. Check out our [blog post](https://vllm.ai).
 
 ---
 
@@ -62,7 +62,7 @@ Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to get started
 ## Performance
 
 vLLM outperforms HuggingFace Transformers (HF) by up to 24x and Text Generation Inference (TGI) by up to 3.5x, in terms of throughput.
-For details, check out our [blog post]().
+For details, check out our [blog post](https://vllm.ai).
 
 <p align="center">
   <picture>
@@ -70,7 +70,7 @@ For details, check out our [blog post]().
   <img src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a10g_n1_light.png" width="45%">
   </picture>
   <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/figures/perf_a100_n1_dark.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a100_n1_dark.png">
   <img src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a100_n1_light.png" width="45%">
   </picture>
   <br>
@@ -79,11 +79,11 @@ For details, check out our [blog post]().
 
 <p align="center">
   <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/figures/perf_a10g_n3_dark.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a10g_n3_dark.png">
   <img src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a10g_n3_light.png" width="45%">
   </picture>
   <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/figures/perf_a100_n3_dark.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a100_n3_dark.png">
   <img src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a100_n3_light.png" width="45%">
   </picture>  <br>
   <em> Serving throughput when each request asks for 3 output completions. </em>
