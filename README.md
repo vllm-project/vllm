@@ -10,7 +10,7 @@ Easy, fast, and cheap LLM serving for everyone
 </h3>
 
 <p align="center">
-| <a href="https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/"><b>Documentation</b></a> | <a href=""><b>Blog</b></a> |
+| <a href="https://vllm.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href=""><b>Blog</b></a> |
 
 </p>
 
@@ -39,7 +39,7 @@ vLLM is flexible and easy to use with:
 - Streaming outputs
 - OpenAI-compatible API server
 
-Install vLLM with pip or [from source](https://llm-serving-cacheflow.readthedocs-hosted.com/en/latest/getting_started/installation.html#build-from-source):
+Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):
 
 ```bash
 pip install vllm
@@ -47,10 +47,10 @@ pip install vllm
 
 ## Getting Started
 
-Visit our [documentation](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/) to get started.
-- [Installation](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/getting_started/installation.html)
-- [Quickstart](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/getting_started/quickstart.html)
-- [Supported Models](https://llm-serving-cacheflow.readthedocs-hosted.com/_/sharing/Cyo52MQgyoAWRQ79XA4iA2k8euwzzmjY?next=/en/latest/models/supported_models.html)
+Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to get started.
+- [Installation](https://vllm.readthedocs.io/en/latest/getting_started/installation.html)
+- [Quickstart](https://vllm.readthedocs.io/en/latest/getting_started/quickstart.html)
+- [Supported Models](https://vllm.readthedocs.io/en/latest/models/supported_models.html)
 
 ## Performance
 
