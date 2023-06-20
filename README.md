@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/logos/vllm-logo-text-dark.png">
-    <img alt="vLLM" src="./docs/source/assets/logos/vllm-logo-text-light.png" width=55%>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-dark.png">
+    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-light.png" width=55%>
   </picture>
 </p>
 
@@ -66,12 +66,12 @@ For details, check out our [blog post]().
 
 <p align="center">
   <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/figures/perf_a10g_n1_dark.png">
-  <img src="./docs/source/assets/figures/perf_a10g_n1_light.png" width="45%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a10g_n1_dark.png">
+  <img src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a10g_n1_light.png" width="45%">
   </picture>
   <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/figures/perf_a100_n1_dark.png">
-  <img src="./docs/source/assets/figures/perf_a100_n1_light.png" width="45%">
+  <img src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a100_n1_light.png" width="45%">
   </picture>
   <br>
   <em> Serving throughput when each request asks for 1 output completion. </em>
@@ -80,11 +80,11 @@ For details, check out our [blog post]().
 <p align="center">
   <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/figures/perf_a10g_n3_dark.png">
-  <img src="./docs/source/assets/figures/perf_a10g_n3_light.png" width="45%">
+  <img src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a10g_n3_light.png" width="45%">
   </picture>
   <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./docs/source/assets/figures/perf_a100_n3_dark.png">
-  <img src="./docs/source/assets/figures/perf_a100_n3_light.png" width="45%">
+  <img src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/figures/perf_a100_n3_light.png" width="45%">
   </picture>  <br>
   <em> Serving throughput when each request asks for 3 output completions. </em>
 </p>
