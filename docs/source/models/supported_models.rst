@@ -29,7 +29,7 @@ Alongside each architecture, we include some popular models that use it.
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
-Alternatively, you can raise an issue on our `GitHub <https://github.com/WoosukKwon/vllm/issues>`_ project.
+Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ project.
 
 .. tip::
     The easiest way to check if your model is supported is to run the program below:

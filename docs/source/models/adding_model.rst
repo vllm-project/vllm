@@ -11,22 +11,22 @@ This document provides a high-level guide on integrating a `HuggingFace Transfor
     However, for models that include new operators (e.g., a new attention mechanism), the process can be a bit more complex.
 
 .. tip::
-    If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/WoosukKwon/vllm/issues>`_ repository.
+    If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ repository.
     We will be happy to help you out!
 
 
 0. Fork the vLLM repository
 --------------------------------
 
-Start by forking our `GitHub <https://github.com/WoosukKwon/vllm/issues>`_ repository and then :ref:`build it from source <build_from_source>`.
+Start by forking our `GitHub <https://github.com/vllm-project/vllm/issues>`_ repository and then :ref:`build it from source <build_from_source>`.
 This gives you the ability to modify the codebase and test your model.
 
 
 1. Bring your model code
 ------------------------
 
-Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the `vllm/model_executor/models <https://github.com/WoosukKwon/vllm/tree/main/vllm/model_executor/models>`_ directory.
-For instance, vLLM's `OPT model <https://github.com/WoosukKwon/vllm/blob/main/vllm/model_executor/models/opt.py>`_ was adpated from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
+Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the `vllm/model_executor/models <https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models>`_ directory.
+For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/opt.py>`_ was adpated from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
 
 .. warning::
     When copying the model code, make sure to review and adhere to the code's copyright and licensing terms.
@@ -91,4 +91,4 @@ While the process is straightforward for most layers, the tensor-parallel layers
 5. Register your model
 ----------------------
 
-Finally, include your :code:`*ForCausalLM` class in `vllm/model_executor/models/__init__.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/model_executor/models/__init__.py>`_ and register it to the :code:`_MODEL_REGISTRY` in `vllm/model_executor/model_loader.py <https://github.com/WoosukKwon/vllm/blob/main/vllm/model_executor/model_loader.py>`_.
+Finally, include your :code:`*ForCausalLM` class in `vllm/model_executor/models/__init__.py <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/__init__.py>`_ and register it to the :code:`_MODEL_REGISTRY` in `vllm/model_executor/model_loader.py <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/model_loader.py>`_.

@@ -57,7 +57,7 @@ html_logo = 'assets/logos/vllm-logo-text-light.png'
 html_theme_options = {
     'logo_only': True,
     'path_to_docs': 'docs/source',
-    'repository_url': 'https://github.com/WoosukKwon/vllm',
+    'repository_url': 'https://github.com/vllm-project/vllm',
     'use_repository_button': True,
 }
 
