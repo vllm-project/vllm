@@ -87,7 +87,7 @@ class LLMEngine:
                 worker_cls = ray.remote(
                     num_cpus=0,
                     num_gpus=1,
-                    resources={node_resource: 1e-5},
+                    resources={node_resource: 1e-3},
                 )(worker_cls).remote
 
             worker = worker_cls(
