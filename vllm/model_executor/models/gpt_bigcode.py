@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
+import numpy as np
 from transformers import GPTBigCodeConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -147,8 +148,7 @@ class GPTBigCodeModel(nn.Module):
         super().__init__()
         self.config = config
         assert config.add_cross_attention == False
-        # assert config.scale_attn_by_inverse_layer_idx == False
-        # assert config.reorder_and_upcast_attn == False
+
         self.embed_dim = config.hidden_size
 
         # Optimization: While the vocab size of GPT-2 is 50257, we extend it
@@ -242,9 +242,8 @@ class GPTBigCodeForCausalLM(nn.Module):
                     with n_heads for q, then 1 for k, 1 for 1 v, times head dim
                 return: qkv_array.shape=(3 * n_heads * head_dim, hidden_dim)
                 
-                TODO: no longer needed if vllm supports MQA.
+                TODO: this function is no longer needed once vllm supports MQA.
                 """
-                import numpy as np
                 qkv_array = qkv_array.numpy()
                 
                 dims_q = n_head * head_dim
