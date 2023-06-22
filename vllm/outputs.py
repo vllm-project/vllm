@@ -53,6 +53,7 @@ class RequestOutput:
         prompt: The prompt string of the request.
         prompt_token_ids: The token IDs of the prompt.
         outputs: The output sequences of the request.
+        finished: Whether the whole request is finished.
     """
     def __init__(
         self,
