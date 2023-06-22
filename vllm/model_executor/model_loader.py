@@ -7,7 +7,7 @@ from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import (GPT2LMHeadModel, GPTNeoXForCausalLM,
-                                        LlamaForCausalLM, OPTForCausalLM)
+                                        LlamaForCausalLM, OPTForCausalLM, GPTBigCodeForCausalLM)
 from vllm.model_executor.weight_utils import initialize_dummy_weights
 
 # TODO(woosuk): Lazy-load the model classes.
@@ -16,6 +16,7 @@ _MODEL_REGISTRY = {
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
+    "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
 }
 
 
