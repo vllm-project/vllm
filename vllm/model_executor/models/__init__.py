@@ -11,5 +11,5 @@ __all__ = [
     "GPTBigCodeForCausalLM",
     "GPTNeoXForCausalLM",
     "LlamaForCausalLM",
-    "OPTForCausalLM"
+    "OPTForCausalLM",
 ]
