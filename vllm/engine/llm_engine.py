@@ -130,8 +130,8 @@ class LLMEngine:
 
         if num_gpu_blocks <= 0 or num_cpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks, "
-                             "Try increase `gpu_memory_utilization` when. "
-                             "initialize the engine.")
+                             "Try increase `gpu_memory_utilization` when "
+                             "initializing the engine.")
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
