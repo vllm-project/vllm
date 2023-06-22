@@ -8,6 +8,7 @@ _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU(),
     "gelu_new": nn.GELU(approximate="tanh"),   # NOTE: This may introduce small rounding errors.
     "gelu_fast": nn.GELU(approximate="tanh"),  # NOTE: This may introduce small rounding errors.
+    "gelu_pytorch_tanh": nn.GELU(approximate="tanh"),  # NOTE: This may introduce small rounding errors.
     "relu": nn.ReLU(),
 }
 
