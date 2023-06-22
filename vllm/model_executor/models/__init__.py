@@ -7,8 +7,8 @@ from vllm.model_executor.models.gpt_bigcode import GPTBigCodeForCausalLM
 
 __all__ = [
     "GPT2LMHeadModel",
-    "GPTBigCodeForCausalLM"
+    "GPTBigCodeForCausalLM",
     "GPTNeoXForCausalLM",
     "LlamaForCausalLM",
-    "OPTForCausalLM",
+    "OPTForCausalLM"
 ]
