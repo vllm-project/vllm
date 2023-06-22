@@ -154,7 +154,7 @@ class AsyncLLMEngine:
             yield request_output
 
             # Once finished, release the resources of the sequence group.
-            if request_output.finished():
+            if request_output.finished:
                 if self.log_requests:
                     logger.info(f"Finished request {request_id}.")
 

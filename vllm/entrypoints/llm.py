@@ -133,7 +133,7 @@ class LLM:
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
-                if output.finished():
+                if output.finished:
                     outputs.append(output)
                     if use_tqdm:
                         pbar.update(1)
