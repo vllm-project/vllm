@@ -6,7 +6,7 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "LLM",
