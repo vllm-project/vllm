@@ -6,7 +6,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
-from vllm.model_executor.models import ( GPT2LMHeadModel, GPTBigCodeForCausalLM, GPTNeoXForCausalLM,
+from vllm.model_executor.models import (GPT2LMHeadModel, GPTBigCodeForCausalLM, GPTNeoXForCausalLM,
                                         LlamaForCausalLM, OPTForCausalLM)
 from vllm.model_executor.weight_utils import initialize_dummy_weights
 
