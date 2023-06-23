@@ -27,7 +27,7 @@ from transformers import GPTJConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
@@ -39,21 +39,6 @@ from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
-# class GPTJForCausalLM(nn.Module):
-#     def __init__(self, config: GPTJConfig):
-#         super().__init__()
-#         self.hidden_size = config.hidden_size
-#         self.total_num_heads = config.num_attention_heads
-
-#         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
-#         assert self.total_num_heads % tensor_model_parallel_world_size == 0
-#         self.embed_out = ColumnParallelLinear(config.hidden_size,
-#                                               config.vocab_size,
-#                                               bias=False, gather_output=False,
-#                                               perform_initialization=False)
-#         self.sampler = Sampler(config.vocab_size)
-
-
 class GPTJAttention(nn.Module):
 
     def __init__(self, config: GPTJConfig):
@@ -63,92 +48,110 @@ class GPTJAttention(nn.Module):
         self.head_size = self.hidden_size // self.total_num_heads
 
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
-        assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
+        assert self.head_size * tensor_model_parallel_world_size != self.hidden_size
 
-        self.query_key_value = ColumnParallelLinear(config.hidden_size,
-                                                    3 * config.hidden_size,
-                                                    gather_output=False,
-                                                    perform_initialization=False)
-        self.dense = RowParallelLinear(config.hidden_size, config.hidden_size,
-                                       input_is_parallel=True,
-                                       perform_initialization=False)
-
+        self.q_proj = ColumnParallelLinear(config.hidden_size, 
+                                           config.hidden_size,
+                                           bias=False,
+                                           gather_output=False,
+                                           perform_initialization=False)
+        
+        self.k_proj = ColumnParallelLinear(config.hidden_size, 
+                                           config.hidden_size,
+                                           bias=False,
+                                           gather_output=False,
+                                           perform_initialization=False)
+        
+        self.v_proj = ColumnParallelLinear(config.hidden_size, 
+                                           config.hidden_size,
+                                           bias=False,
+                                           gather_output=False,
+                                           perform_initialization=False)
+    
+        self.out_projection = RowParallelLinear(config.hidden_size, 
+                                           config.hidden_size,
+                                           bias=False,
+                                           input_is_parallel=False,
+                                           perform_initialization=False)
+        
         scaling = self.head_size ** -0.5
-        self.attn = PagedAttention(self.num_heads, self.head_size, scaling)
-
+        rotary_dim = config.rotary_dim 
+        self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_size,
+                                           scaling, rotary_dim)
+        
     def forward(
         self,
+        position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        qkv, _ = self.query_key_value(hidden_states)
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
 
-        q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, cache_event)
-        output, _ = self.dense(attn_output)
-        return output
-
+        attn_output = self.attn(
+            position_ids, q, k, v, k_cache, v_cache, input_metadata, cache_event)
+        attn_output, _ = self.out_projection(attn_output)
+        return attn_output
+    
 
 class GPTJMLP(nn.Module):
 
-    def __init__(self, config: GPTJConfig):
+    def __init__(self, intermediate_size: int, config: GPTJConfig):
         super().__init__()
-        self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
-                                                  config.intermediate_size,
-                                                  gather_output=False,
-                                                  perform_initialization=False)
-        self.dense_4h_to_h = RowParallelLinear(config.intermediate_size, config.hidden_size,
-                                               input_is_parallel=True,
-                                               perform_initialization=False)
-        self.act = get_act_fn(config.hidden_act)
+        hidden_size = config.n_embd
+        self.fc_in = ColumnParallelLinear(hidden_size,
+                                          intermediate_size,
+                                          gather_output=False,
+                                          perform_initialization=False)
+        self.fc_out = RowParallelLinear(intermediate_size, 
+                                        hidden_size,
+                                        input_is_parallel=True,
+                                        perform_initialization=False)
+        
+        self.act = get_act_fn(config.activation_function)
 
-    def forward(self, hidden_states):
-        hidden_states, _ = self.dense_h_to_4h(hidden_states)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states, _ = self.fc_in(hidden_states)
         hidden_states = self.act(hidden_states)
-        hidden_states, _ = self.dense_4h_to_h(hidden_states)
+        hidden_states, _ = self.fc_out(hidden_states)
         return hidden_states
+    
 
-
-class GPTJLayer(nn.Module):
+class GPTJBlock(nn.Module):
 
     def __init__(self, config: GPTJConfig):
         super().__init__()
-        self.use_parallel_residual = config.use_parallel_residual
-        self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.attention = GPTJAttention(config)
-        self.mlp = GPTJMLP(config)
+        inner_dim = config.n_inner if config.n_inner is not None else 4 * config.n_embd
 
+        self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
+        self.attn = GPTJAttention(config)
+        self.mlp = GPTJMLP(inner_dim, config)
+    
     def forward(
         self,
+        position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        attn_input = self.input_layernorm(hidden_states)
-        attn_output = self.attention(
-            hidden_states=attn_input,
+        residual = hidden_states
+        hidden_states = self.ln_1(hidden_states)
+        attn_output = self.attn(
+            position_ids=position_ids,
+            hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
-
-        if self.use_parallel_residual:
-            mlp_input = self.post_attention_layernorm(hidden_states)
-            mlp_output = self.mlp(mlp_input)
-            hidden_states = mlp_output + attn_output + hidden_states
-        else:
-            attn_output = attn_output + hidden_states
-            mlp_input = self.post_attention_layernorm(attn_output)
-            mlp_output = self.mlp(mlp_input)
-            hidden_states = mlp_output + attn_output
+        feed_forward_hidden_states = self.mlp(hidden_states)
+        hidden_states = attn_output + residual + feed_forward_hidden_states
         return hidden_states
-
+    
 
 class GPTJModel(nn.Module):
 
@@ -156,61 +159,74 @@ class GPTJModel(nn.Module):
         super().__init__()
         self.config = config
 
-        self.embed_in = VocabParallelEmbedding(config.vocab_size, config.hidden_size,
-                                               perform_initialization=False)
-        self.layers = nn.ModuleList([GPTJLayer(config) for _ in range(config.num_hidden_layers)])
-        self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.embed_dim = config.n_embd
+
+        vocab_size = ((config.vocab_size + 63) // 64) * 64
+        self.wte = VocabParallelEmbedding(vocab_size, 
+                                          self.embed_dim, 
+                                          perform_initialization=False)
+        self.h = nn.ModuleList(
+            [GPTJBlock(config) for _ in range(config.n_layer)])
+        self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
+        position_ids: torch.Tensor,
         input_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        hidden_states = self.embed_in(input_ids)
-        for i in range(len(self.layers)):
+        inputs_embeds = self.wte(input_ids)
+        hidden_states = inputs_embeds 
+        for i in range(len(self.h)):
             if cache_events is None:
                 cache_event = None
             else:
                 cache_event = cache_events[i]
-            layer = self.layers[i]
+            layer = self.h[i]
             hidden_states = layer(
+                position_ids, 
                 hidden_states,
-                kv_caches[i],
-                input_metadata,
-                cache_event,
+                kv_caches[i], 
+                input_metadata, 
+                cache_event
             )
-        hidden_states = self.final_layer_norm(hidden_states)
+
+        hidden_states = self.ln_f(hidden_states)
         return hidden_states
-
-
+    
 class GPTJForCausalLM(nn.Module):
-
-    def __init__(self, config: GPTJConfig):
+    
+    def __init__(self, config):
         super().__init__()
-        self.gpt_j = GPTJModel(config)
-        self.embed_out = ColumnParallelLinear(config.hidden_size, config.vocab_size,
-                                              bias=False, gather_output=False,
-                                              perform_initialization=False)
+        self.config = config
+        self.transformer = GPTJModel(config)
+        self.lm_head = ColumnParallelLinear(config.n_embd,
+                                            config.vocab_size,
+                                            gather_output=False, 
+                                            perform_initialization=False)
+        
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,
         input_ids: torch.Tensor,
+        token_type_ids: torch.Tensor,
+        positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
-        hidden_states = self.gpt_j(
-            input_ids, kv_caches, input_metadata, cache_events)
+        hidden_states = self.transformer(
+            input_ids, token_type_ids, positions, kv_caches, input_metadata, cache_events)
         next_tokens = self.sampler(
-            self.embed_out.weight, hidden_states, input_metadata)
+            self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
-
-    _column_parallel_weights = ["embed_in.weight", "embed_out.weight", "dense_h_to_4h.weight", "dense_h_to_4h.bias"]
-    _row_parallel_weights = ["dense.weight", "dense_4h_to_h.weight"]
-
+    
+    _column_parallel_weights = ["self.wte.weight", "lm_head.weight", "fc_in.weight", "fc_in.bias"]
+    _row_parallel_weights = ["out_projection.weight", "fc_out.weight"]
+    
     def load_weights(self, model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
@@ -218,10 +234,10 @@ class GPTJForCausalLM(nn.Module):
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
             model_name_or_path, cache_dir, use_np_cache):
-            if ("attention.bias" in name or "attention.masked_bias" in name):
+            if ("attn.bias" in name or "attn.masked_bias" in name):
                 continue
             param = state_dict[name]
-            if "query_key_value" in name:
+            if ("q_proj" in name or "k_proj" in name or "v_proj" in name):
                 shard_size = param.shape[0]
                 loaded_weight = loaded_weight[shard_size * tensor_model_parallel_rank
                                               :shard_size * (tensor_model_parallel_rank + 1)]
@@ -229,11 +245,11 @@ class GPTJForCausalLM(nn.Module):
                 num_heads = self.config.num_attention_heads
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // num_heads
-                if 'query_key_value.weight' in name:
+                if ('q_proj.weight' in name or 'k_proj.weight' in name or 'v_proj.weight' in name):
                     loaded_weight = loaded_weight.view(-1, 3, head_size, hidden_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1, hidden_size)
-                elif 'query_key_value.bias' in name:
+                elif ('q_proj.bias' in name or 'k_proj.bias' in name or 'v_proj.bias' in name):
                     loaded_weight = loaded_weight.view(-1, 3, head_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1)
