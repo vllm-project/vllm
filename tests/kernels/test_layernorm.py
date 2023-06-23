@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import time
 from vllm import layernorm_ops
 
 
@@ -52,3 +52,27 @@ def test_rms_norm() -> None:
                     hidden_size=hidden_size,
                     dtype=dtype,
                 )
+                
+def test_rms_norm_performence() -> None:
+    dtype = torch.half
+    for num_tokens in [2048, 4096, 10192]:
+        for hidden_size in [64, 768, 1024, 5120]:
+            start_time = time.time()
+            x = torch.randn(num_tokens,
+                            hidden_size,
+                            dtype=dtype,
+                            device="cuda")
+            ref = RefRMSNorm(hidden_size).to(dtype).cuda()
+            out = torch.empty_like(x)
+            for i in range(10000):
+                layernorm_ops.rms_norm(
+                    out,
+                    x,
+                    ref.weight.data,
+                    ref.variance_epsilon,
+                )
+            elapsed_time = time.time() - start_time
+            print(
+                f"Testing RMS kernel with dtype={dtype}, num_tokens="
+                f"{num_tokens}, hidden_size={hidden_size} Elapsed time: {elapsed_time} seconds"
+            )
