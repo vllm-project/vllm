@@ -1,3 +1,4 @@
+from vllm.model_executor.models.codegen import CodeGenForCausalLM
 from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
 from vllm.model_executor.models.gpt_bigcode import GPTBigCodeForCausalLM
 from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
@@ -7,6 +8,7 @@ from vllm.model_executor.models.opt import OPTForCausalLM
 
 
 __all__ = [
+    "CodeGenForCausalLM",
     "GPT2LMHeadModel",
     "GPTBigCodeForCausalLM",
     "GPTNeoXForCausalLM",
