@@ -235,7 +235,7 @@ class GPTBigCodeForCausalLM(nn.Module):
                 continue
 
             param = state_dict[name]
-            
+
             def _expand_mqa_mha(qkv_array, n_head, head_dim):
                 """manipulates along axis=0 from MQA to MHA
                 inputs: qkv_array.shape=((n_heads + 2) * head_dim, hidden_dim)
@@ -245,7 +245,7 @@ class GPTBigCodeForCausalLM(nn.Module):
                 TODO: this function is no longer needed once vllm supports MQA.
                 """
                 qkv_array = qkv_array.numpy()
-                
+
                 dims_q = n_head * head_dim
                 q, k, v = np.split(qkv_array, (dims_q, dims_q + head_dim), axis=0)
                 # q is fine, but k & v have not replicated shape along the first axis
