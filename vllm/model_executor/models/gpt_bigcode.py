@@ -241,7 +241,7 @@ class GPTBigCodeForCausalLM(nn.Module):
                 inputs: qkv_array.shape=((n_heads + 2) * head_dim, hidden_dim)
                     with n_heads for q, then 1 for k, 1 for 1 v, times head dim
                 return: qkv_array.shape=(3 * n_heads * head_dim, hidden_dim)
-                
+
                 TODO: this function is no longer needed once vllm supports MQA.
                 """
                 qkv_array = qkv_array.numpy()
