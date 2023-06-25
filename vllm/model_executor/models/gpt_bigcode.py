@@ -23,9 +23,9 @@ InputMetadata to extract the original 2D shape of the input.
 """
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from torch import nn
-import numpy as np
 from transformers import GPTBigCodeConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
