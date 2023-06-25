@@ -1,22 +1,18 @@
-from typing import List, Tuple, Union
+from typing import List, Tuple
 
-from transformers import (AutoConfig, AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_config
 
 logger = init_logger(__name__)
 
 _MODEL_TYPES_WITH_SLOW_TOKENIZER = []
 
 
-def get_tokenizer(
-    model_name: str,
-    *args,
-    **kwargs,
-) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+def get_tokenizer(model_name: str, *args, **kwargs) -> PreTrainedTokenizerBase:
     """Gets a tokenizer for the given model name via Huggingface."""
-    config = AutoConfig.from_pretrained(model_name)
+    config = get_config(model_name)
     if "open_llama" in model_name:
         kwargs["use_fast"] = False
         logger.info(
@@ -44,7 +40,7 @@ def get_tokenizer(
 
 
 def detokenize_incrementally(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: PreTrainedTokenizerBase,
     prev_output_tokens: List[str],
     new_token_id: int,
     skip_special_tokens: bool,
