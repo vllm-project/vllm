@@ -1,8 +1,9 @@
-#include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <torch/extension.h>
 
 #include "reduction_utils.cuh"
 #include <c10/util/Half.h>
+
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
@@ -98,7 +99,7 @@ void rms_norm_kernel(
 
     
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    if  (std::is_same<scalar_t, at::Half>::value) {
+    if  (std::is_same<scalar_t, at::Half>::value && hidden_size % 8 == 0) {
       dim3 block(min(((hidden_size / 8 + 31) / 32) * 32, 1024));
       rms_norm_kernel_impl_half<<<grid, block, 0, stream>>>(
         reinterpret_cast<__half*>(out),
