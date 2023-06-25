@@ -6,9 +6,9 @@ InputMetadata to extract the original 2D shape of the input.
 """
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from torch import nn
-import numpy as np
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
@@ -35,16 +35,27 @@ class Attention(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         assert self.head_dim * self.num_heads == self.hidden_size
 
-        self.query_key_value = nn.Linear(
+        self.query_key_value = ColumnParallelLinear(
             self.hidden_size,
             3 * self.hidden_size,  # FIXME(woosuk)
             bias=config.bias,
+            gather_output=False,
+            perform_initialization=False,
         )
-        self.dense = nn.Linear(self.hidden_size, self.hidden_size, bias=config.bias)
+        self.dense = RowParallelLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=config.bias,
+            input_is_parallel=True,
+            perform_initialization=False,
+        )
 
         assert config.rotary
-        self.inv_norm_factor = self.head_dim ** -0.5
-        self.attn = PagedAttentionWithRoPE()
+        rotary_dim = int(self.head_dim * 0.5)
+        assert rotary_dim % 2 == 0
+        scaling = self.head_dim ** -0.5
+        self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_dim,
+                                           scaling, rotary_dim)
 
     def forward(
         self,
@@ -69,9 +80,15 @@ class MLP(nn.Module):
         super().__init__()
         hidden_size = config.hidden_size
 
-        self.dense_h_to_4h = nn.Linear(hidden_size, 4 * hidden_size, bias=config.bias)
+        self.dense_h_to_4h = ColumnParallelLinear(hidden_size, 4 * hidden_size,
+                                                  bias=config.bias,
+                                                  gather_output=False,
+                                                  perform_initialization=False)
         self.act = get_act_fn("gelu")
-        self.dense_4h_to_h = nn.Linear(4 * hidden_size, hidden_size, bias=config.bias)
+        self.dense_4h_to_h = RowParallelLinear(4 * hidden_size, hidden_size,
+                                               bias=config.bias,
+                                               input_is_parallel=True,
+                                               perform_initialization=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.dense_h_to_4h(x)
@@ -172,7 +189,9 @@ class RWModel(nn.Module):
 class RWForCausalLM(nn.Module):
 
     def __init__(self, config: RWConfig):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
+
         self.transformer = RWModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.sampler = Sampler(config.vocab_size)
@@ -190,6 +209,10 @@ class RWForCausalLM(nn.Module):
         next_tokens = self.sampler(
             self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
+
+    _column_parallel_weights = ["word_embeddings.weight", "lm_head.weight",
+                                "dense_h_to_4h.weight", "dense_h_to_4h.bias"]
+    _row_parallel_weights = ["dense.weight", "dense_4h_to_h.weight"]
 
     def load_weights(self, model_name_or_path: str,
                      cache_dir: Optional[str] = None,
@@ -230,7 +253,7 @@ class RWForCausalLM(nn.Module):
 
             # For the fused QKV linear layer, manually shard the weights.
             if "query_key_value" in name:
-                # GPT-2's fused QKV has the shape of [3 * num_heads * head_size, hidden_size].
+                # The fused QKV weight has the shape of [3 * num_heads * head_size, hidden_size].
                 # When tensor parallelism is used, we shard the weights along the head dimension.
                 total_num_heads = self.config.num_attention_heads
                 hidden_size = self.config.hidden_size
@@ -240,10 +263,14 @@ class RWForCausalLM(nn.Module):
                 head_end = (tensor_model_parallel_rank + 1) * num_heads
 
                 if name.endswith(".weight"):
+                    # FIXME
+                    orig_dtype = loaded_weight.dtype
+                    loaded_weight = loaded_weight.float()
                     loaded_weight = _expand_mqa_mha(loaded_weight, n_head=total_num_heads, head_dim=head_size)
                     loaded_weight = loaded_weight.view(3, total_num_heads, head_size, hidden_size)
                     loaded_weight = loaded_weight[:, head_start:head_end, :, :]
                     loaded_weight = loaded_weight.reshape(-1, hidden_size)
+                    loaded_weight = loaded_weight.to(orig_dtype)
                 elif name.endswith(".bias"):
                     loaded_weight = _expand_mqa_mha(loaded_weight, n_head=total_num_heads, head_dim=head_size)
                     loaded_weight = loaded_weight.view(3, total_num_heads, head_size)

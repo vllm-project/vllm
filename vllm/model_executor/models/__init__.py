@@ -3,7 +3,7 @@ from vllm.model_executor.models.gpt_bigcode import GPTBigCodeForCausalLM
 from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
-
+from vllm.model_executor.models.falcon import RWForCausalLM
 
 
 __all__ = [
@@ -12,4 +12,5 @@ __all__ = [
     "GPTNeoXForCausalLM",
     "LlamaForCausalLM",
     "OPTForCausalLM",
+    "RWForCausalLM",
 ]
