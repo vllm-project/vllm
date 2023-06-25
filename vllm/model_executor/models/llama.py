@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import nn
 from transformers import LlamaConfig
+from safetensors import safe_open
 
 from vllm.sequence import SequenceOutputs
 from vllm.model_executor.input_metadata import InputMetadata
@@ -36,8 +37,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
+from vllm.model_executor.weight_utils import (load_tensor_parallel_weights,
+                                              prepare_hf_model_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
@@ -245,49 +246,55 @@ class LlamaForCausalLM(nn.Module):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
-        for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, use_np_cache):
-            if "rotary_emb.inv_freq" in name:
-                continue
+        _, hf_weights_files = prepare_hf_model_weights(
+            model_name_or_path, cache_dir, allow_patterns="*.safetensors"
+        )
+        for file in hf_weights_files:
+            with safe_open(file, framework="pt") as f:
+                for name in f.keys():
+                    if "rotary_emb.inv_freq" in name:
+                        continue
 
-            is_attention_weight = False
-            for stride_id, att_weight_name in enumerate(["q_proj", "k_proj", "v_proj"]):
-                if att_weight_name not in name:
-                    continue
-                param = state_dict[name.replace(att_weight_name, "qkv_proj")]
-                shard_size = param.shape[0] // 3
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank
-                    :shard_size * (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id
-                                         :shard_size * (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_attention_weight = True
-                break
-            if is_attention_weight:
-                continue
+                    slice_ = f.get_slice(name)
 
-            is_gate_up_weight = False
-            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
-                if weight_name not in name:
-                    continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
-                shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank
-                    :shard_size * (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id
-                                         :shard_size * (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_gate_up_weight = True
-                break
-            if is_gate_up_weight:
-                continue
+                    is_attention_weight = False
+                    for stride_id, att_weight_name in enumerate(["q_proj", "k_proj", "v_proj"]):
+                        if att_weight_name not in name:
+                            continue
+                        param = state_dict[name.replace(att_weight_name, "qkv_proj")]
+                        shard_size = param.shape[0] // 3
+                        loaded_weight = slice_[
+                            shard_size * tensor_model_parallel_rank
+                            :shard_size * (tensor_model_parallel_rank + 1)]
+                        param_slice = param.data[shard_size * stride_id
+                                                 :shard_size * (stride_id + 1)]
+                        assert param_slice.shape == loaded_weight.shape
+                        param_slice.copy_(loaded_weight)
+                        is_attention_weight = True
+                        break
+                    if is_attention_weight:
+                        continue
 
-            param = state_dict[name]
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         self._column_parallel_weights,
-                                         self._row_parallel_weights,
-                                         tensor_model_parallel_rank)
+                    is_gate_up_weight = False
+                    for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+                        if weight_name not in name:
+                            continue
+                        param = state_dict[name.replace(weight_name, "gate_up_proj")]
+                        shard_size = param.shape[0] // 2
+                        loaded_weight = slice_[
+                            shard_size * tensor_model_parallel_rank
+                            :shard_size * (tensor_model_parallel_rank + 1)]
+                        param_slice = param.data[shard_size * stride_id
+                                                 :shard_size * (stride_id + 1)]
+                        assert param_slice.shape == loaded_weight.shape
+                        param_slice.copy_(loaded_weight)
+                        is_gate_up_weight = True
+                        break
+                    if is_gate_up_weight:
+                        continue
+
+                    param = state_dict[name]
+                    load_tensor_parallel_weights(param, slice_, name,
+                                                 self._column_parallel_weights,
+                                                 self._row_parallel_weights,
+                                                 tensor_model_parallel_rank)

@@ -17,29 +17,42 @@ class Disabledtqdm(tqdm):
         super().__init__(*args, **kwargs, disable=True)
 
 
+def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
+    lock_dir = cache_dir if cache_dir is not None else "/tmp"
+    lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
+    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name))
+    return lock
+
+
+def prepare_hf_model_weights(
+    model_name_or_path: str,
+    cache_dir: Optional[str] = None,
+    allow_patterns: str = "*.bin"
+):
+    # Download model weights from huggingface.
+    is_local = os.path.isdir(model_name_or_path)
+    if not is_local:
+        # Use file lock to prevent multiple processes from
+        # downloading the same model weights at the same time.
+        with get_lock(model_name_or_path, cache_dir):
+            hf_folder = snapshot_download(model_name_or_path,
+                                          allow_patterns=allow_patterns,
+                                          cache_dir=cache_dir,
+                                          tqdm_class=Disabledtqdm)
+    else:
+        hf_folder = model_name_or_path
+    hf_weights_files = glob.glob(os.path.join(hf_folder, allow_patterns))
+    return hf_folder, hf_weights_files
+
+
 def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
     use_np_cache: bool = False,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
-    # Prepare file lock directory to prevent multiple processes from
-    # downloading the same model weights at the same time.
-    lock_dir = cache_dir if cache_dir is not None else "/tmp"
-    lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
-    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name))
-
-    # Download model weights from huggingface.
-    is_local = os.path.isdir(model_name_or_path)
-    if not is_local:
-        with lock:
-            hf_folder = snapshot_download(model_name_or_path,
-                                          allow_patterns="*.bin",
-                                          cache_dir=cache_dir,
-                                          tqdm_class=Disabledtqdm)
-    else:
-        hf_folder = model_name_or_path
-
-    hf_bin_files = glob.glob(os.path.join(hf_folder, "*.bin"))
+    hf_folder, hf_bin_files = prepare_hf_model_weights(
+        model_name_or_path, cache_dir=cache_dir, allow_patterns="*.bin"
+    )
 
     if use_np_cache:
         # Convert the model weights from torch tensors to numpy arrays for
@@ -47,7 +60,9 @@ def hf_model_weights_iterator(
         np_folder = os.path.join(hf_folder, 'np')
         os.makedirs(np_folder, exist_ok=True)
         weight_names_file = os.path.join(np_folder, 'weight_names.json')
-        with lock:
+        # Use file lock to prevent multiple processes from
+        # dumping the same model weights to numpy at the same time.
+        with get_lock(model_name_or_path, cache_dir):
             if not os.path.exists(weight_names_file):
                 weight_names = []
                 for bin_file in hf_bin_files:
@@ -77,7 +92,7 @@ def hf_model_weights_iterator(
 
 def load_tensor_parallel_weights(
     param: torch.Tensor,
-    loaded_weight: torch.Tensor,
+    loaded_weight: torch.Tensor or object,
     param_name: str,
     column_parallel_weight_names: List[str],
     row_parallel_weight_names: List[str],
@@ -98,6 +113,10 @@ def load_tensor_parallel_weights(
                 shard_size * tensor_model_parallel_rank
                 :shard_size * (tensor_model_parallel_rank + 1)]
             break
+
+    # convert PySafeSlice object to torch.Tensor
+    if not isinstance(loaded_weight, torch.Tensor):
+        loaded_weight = loaded_weight[:]
     assert param.shape == loaded_weight.shape
     param.data.copy_(loaded_weight)
 
