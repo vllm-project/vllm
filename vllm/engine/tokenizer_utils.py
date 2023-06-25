@@ -22,7 +22,7 @@ def get_tokenizer(
         logger.info(
             "OpenLLaMA models do not support the fast tokenizer. "
             "Using the slow tokenizer instead.")
-    elif config.model_type == "llama" and getattr(kwargs, "use_fast", True):
+    elif config.model_type == "llama" and kwargs.get("use_fast", True):
         # LLaMA fast tokenizer causes protobuf errors in some environments.
         # However, we found that the below LLaMA fast tokenizer works well in
         # most environments.
@@ -31,7 +31,7 @@ def get_tokenizer(
             f"Using the LLaMA fast tokenizer in '{model_name}' to avoid "
             "potential protobuf errors.")
     elif config.model_type in _MODEL_TYPES_WITH_SLOW_TOKENIZER:
-        if getattr(kwargs, "use_fast", False) == True:
+        if kwargs.get("use_fast", False) == True:
             raise ValueError(
                 f"Cannot use the fast tokenizer for {config.model_type} due to "
                 "bugs in the fast tokenizer.")
