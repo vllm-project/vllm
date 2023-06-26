@@ -28,7 +28,7 @@ vLLM is fast with:
 
 - State-of-the-art serving throughput
 - Efficient management of attention key and value memory with **PagedAttention**
-- Dynamic batching of incoming requests
+- Continuous batching of incoming requests
 - Optimized CUDA kernels
 
 vLLM is flexible and easy to use with:
