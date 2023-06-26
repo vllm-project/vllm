@@ -156,7 +156,9 @@ class Scheduler:
             # The total number of sequences in the RUNNING state should not
             # exceed the maximum number of sequences.
             num_new_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
-            num_curr_seqs = len(self.running)
+            num_curr_seqs = sum(
+                seq_group.num_seqs(status=SequenceStatus.RUNNING)
+                for seq_group in self.running)
             if num_curr_seqs + num_new_seqs > self.scheduler_config.max_num_seqs:
                 break
 
@@ -198,7 +200,9 @@ class Scheduler:
                 # The total number of sequences in the RUNNING state should not
                 # exceed the maximum number of sequences.
                 num_new_seqs = seq_group.num_seqs(status=SequenceStatus.WAITING)
-                num_curr_seqs = len(self.running)
+                num_curr_seqs = sum(
+                    seq_group.num_seqs(status=SequenceStatus.RUNNING)
+                    for seq_group in self.running)
                 if num_curr_seqs + num_new_seqs > self.scheduler_config.max_num_seqs:
                     break
 
