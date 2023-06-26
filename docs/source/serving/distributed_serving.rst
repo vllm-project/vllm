@@ -5,17 +5,16 @@ Distributed Inference and Serving
 
 vLLM supports distributed tensor-parallel inference and serving. Currently, we support `Megatron-LM's tensor parallel algorithm <https://arxiv.org/pdf/1909.08053.pdf>`_. We manage the distributed runtime with `Ray <https://github.com/ray-project/ray>`_. To run distributed inference, install Ray with:
 
-.. code-block:: bash
+.. code-block:: console
 
-    pip install ray
+    $ pip install ray
 
 To run multi-GPU inference with the :code:`LLM` class, set the :code:`tensor_parallel_size` argument to the number of GPUs you want to use. For example, to run inference on 4 GPUs:
 
 .. code-block:: python
 
     from vllm import LLM
-    llm = LLM("facebook/opt-13b",
-              tensor_parallel_size=4)
+    llm = LLM("facebook/opt-13b", tensor_parallel_size=4)
     output = llm.generate("San Franciso is a")
 
 To run multi-GPU serving, pass in the :code:`--tensor-parallel-size` argument when starting the server. For example, to run API server on 4 GPUs:

@@ -40,10 +40,10 @@ vLLM is flexible and easy to use with:
 * Streaming outputs
 * OpenAI-compatible API server
 
-For more information:
+For more information, check out the following:
 
-* `vLLM announcing blog post <https://vllm.ai>`_ (PagedAttention introduction)
-* `Continuous batching introduction <https://www.anyscale.com/blog/continuous-batching-llm-inference>`_ by Cade Daniel et al.
+* `vLLM announcing blog post <https://vllm.ai>`_ (intro to PagedAttention)
+* `How continuous batching enables 23x throughput in LLM inference while reducing p50 latency <https://www.anyscale.com/blog/continuous-batching-llm-inference>`_ by Cade Daniel et al.
 
 
 
