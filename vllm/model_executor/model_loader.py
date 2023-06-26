@@ -16,6 +16,7 @@ _MODEL_REGISTRY = {
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
+    "LLaMAForCausalLM": LlamaForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
 }
 
