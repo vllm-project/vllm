@@ -55,6 +55,12 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
+   :caption: Serving
+
+   serving/distributed_serving
+
+.. toctree::
+   :maxdepth: 1
    :caption: Models
 
    models/supported_models
