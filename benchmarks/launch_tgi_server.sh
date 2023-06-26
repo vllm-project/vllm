@@ -1,6 +1,6 @@
 #!/bin/bash
 
-PORT=8001
+PORT=8000
 MODEL=$1
 TOKENS=$2
 
