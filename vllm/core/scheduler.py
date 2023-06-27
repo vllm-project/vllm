@@ -193,6 +193,9 @@ class Scheduler:
 
                 # If the number of batched tokens exceeds the limit, stop.
                 num_prompt_tokens = seq_group.get_seqs()[0].get_len()
+                if num_prompt_tokens > self.scheduler_config.max_num_batched_tokens:
+                    raise ValueError(f"The input promot is too long. The current prompt is of length {num_prompt_tokens}, "
+                                     f"which exceeds the limit of {self.scheduler_config.max_num_batched_tokens}.")
                 if (num_batched_tokens + num_prompt_tokens
                     > self.scheduler_config.max_num_batched_tokens):
                     break
