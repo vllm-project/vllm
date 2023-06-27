@@ -228,11 +228,13 @@ class GPT2LMHeadModel(nn.Module):
                 # GPT-2 ties the weights of the embedding layer and the final
                 # linear layer.
                 continue
-            if ".attn.bias" in name:
+            if ".attn.bias" in name or ".attn.masked_bias" in name:
                 # Skip attention mask.
                 # NOTE: "c_attn.bias" should not be skipped.
                 continue
-            name = "transformer." + name
+
+            if not name.startswith("transformer."):
+                name = "transformer." + name
 
             # The HF's GPT-2 implementation uses Conv1D instead of Linear.
             # Because of this, we need to transpose the weights.
