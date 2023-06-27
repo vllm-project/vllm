@@ -20,10 +20,9 @@ ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
-if not torch.cuda.is_available():
+if CUDA_HOME is None:
     raise RuntimeError(
-        f"Cannot find CUDA at CUDA_HOME: {CUDA_HOME}. "
-        "CUDA must be available in order to build the package.")
+        f"Cannot find CUDA_HOME. CUDA must be available in order to build the package.")
 
 
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
