@@ -15,8 +15,14 @@ def get_tokenizer(
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
     try:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args, **kwargs)
-    except TypeError:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
+                                                  **kwargs)
+    except TypeError as e:
+        # If `use_fast` is explicitly specified, we should not retry with 
+        # `use_fast=False`.
+        if kwargs.get("use_fast", None) is not None:
+            raise e from None
+
         # FIXME(woosuk): This is a temporary workaround to avoid protobuf errors
         # in some environments.
         kwargs["use_fast"] = False
@@ -28,7 +34,8 @@ def get_tokenizer(
             "If you are using a LLaMA-based model, consider using "
             "'hf-internal-testing/llama-tokenizer' instead of the original "
             "tokenizer.")
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
+                                                  **kwargs)
     return tokenizer
 
 
