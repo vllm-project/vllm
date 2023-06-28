@@ -61,6 +61,7 @@ class LLMEngine:
             "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
+            f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"dtype={model_config.dtype}, "
             f"use_dummy_weights={model_config.use_dummy_weights}, "
             f"download_dir={model_config.download_dir!r}, "
@@ -77,7 +78,8 @@ class LLMEngine:
         self.log_stats = log_stats
         self._verify_args()
 
-        self.tokenizer = get_tokenizer(model_config.tokenizer)
+        self.tokenizer = get_tokenizer(model_config.tokenizer,
+                                       model_config.tokenizer_mode)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
