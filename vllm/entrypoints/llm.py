@@ -60,6 +60,12 @@ class LLM:
     ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer
 
+    def set_tokenizer(
+        self,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    ) -> None:
+        self.llm_engine.tokenizer = tokenizer
+
     def generate(
         self,
         prompts: Optional[Union[str, List[str]]] = None,
