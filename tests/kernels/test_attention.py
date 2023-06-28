@@ -267,6 +267,54 @@ def run_multi_query_kv_attention(
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
+@torch.inference_mode()
+def run_multi_query_mqa_kv_attention(
+    num_seqs: int,
+    num_heads: int,
+    head_size: int,
+    dtype: torch.dtype,
+) -> None:
+    seq_lens = random.sample(range(1, MAX_SEQ_LEN), num_seqs)
+    num_tokens = sum(seq_lens)
+
+    scale = float(1.0 / (head_size ** 0.5))
+    query = torch.empty(
+        num_tokens, num_heads, head_size, dtype=dtype, device='cuda')
+    key = torch.empty(
+        num_tokens, 1, head_size, dtype=dtype, device='cuda')
+    value = torch.empty(
+        num_tokens, 1, head_size, dtype=dtype, device='cuda')
+
+    query.uniform_(-1e-3, 1e-3)
+    key.uniform_(-1e-3, 1e-3)
+    value.uniform_(-1e-3, 1e-3)
+
+    attn_op = xops.fmha.cutlass.FwOp()
+    attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
+    output = xops.memory_efficient_attention_forward(
+        query.unsqueeze(0),
+        key.unsqueeze(0).expand(-1, -1, num_heads, -1),
+        value.unsqueeze(0).expand(-1, -1, num_heads, -1),
+        attn_bias=attn_bias,
+        p=0.0,
+        scale=scale,
+        op=attn_op,
+    )
+    output = output.squeeze(0)
+
+    cu_seq_lens = [0]
+    for seq_len in seq_lens:
+        cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
+    ref_output = ref_multi_query_kv_attention(
+        cu_seq_lens,
+        query,
+        key.repeat(1, num_heads, 1),
+        value.repeat(1, num_heads, 1),
+        dtype,
+    )
+    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+
+
 def test_single_query_cached_kv_attention() -> None:
     torch.random.manual_seed(TEST_SEED)
     torch.cuda.manual_seed(TEST_SEED)
@@ -294,6 +342,19 @@ def test_multi_query_kv_attention() -> None:
             print(f'Testing multi_query_kv_attention with dtype={dtype}, '
                   f'head_size={head_size}')
             run_multi_query_kv_attention(
+                num_seqs=5,
+                num_heads=3, head_size=head_size, dtype=dtype,
+            )
+
+
+def test_multi_query_mqa_kv_attention() -> None:
+    torch.random.manual_seed(TEST_SEED)
+    torch.cuda.manual_seed(TEST_SEED)
+    for dtype in [torch.half, torch.bfloat16, torch.float]:
+        for head_size in [64, 80, 96, 128]:
+            print(f'Testing multi_query_kv_attention with dtype={dtype}, '
+                  f'head_size={head_size}')
+            run_multi_query_mqa_kv_attention(
                 num_seqs=5,
                 num_heads=3,
                 head_size=head_size,
