@@ -71,7 +71,7 @@ class SamplingParams:
         self._verify_args()
         if self.use_beam_search:
             self._verity_beam_search()
-        elif self.temperature == 0.0:
+        elif self.temperature < 1e-4:
             # Zero temperature means greedy sampling.
             self._verify_greedy_sampling()
 

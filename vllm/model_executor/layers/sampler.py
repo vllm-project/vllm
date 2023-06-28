@@ -152,7 +152,7 @@ def _apply_penalties(
             continue
         p = presence_penalties[i]
         f = frequency_penalties[i]
-        if p == 0.0 and f == 0.0:
+        if p < 1e-4 and f < 1e-4:
             continue
         indices.append(i)
 
@@ -190,7 +190,7 @@ def _get_temperatures(
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
         temperature = sampling_params.temperature
-        if temperature == 0.0:
+        if temperature < 1e-4:
             # NOTE: Zero temperature means deterministic sampling
             # (i.e., greedy sampling or beam search).
             # Set the temperature to 1 to avoid division by zero.
@@ -286,7 +286,7 @@ def _sample_from_prompt(
         beam_width = sampling_params.best_of
         _, next_token_ids = torch.topk(prob, beam_width)
         next_token_ids = next_token_ids.tolist()
-    elif sampling_params.temperature == 0.0:
+    elif sampling_params.temperature < 1e-4:
         # Greedy sampling.
         assert sampling_params.best_of == 1
         next_token_id = torch.argmax(prob)
@@ -343,7 +343,7 @@ def _sample_from_generation_tokens(
 
         parent_seq_ids = [beam_outputs[seq_id][0] for seq_id in seq_ids]
         next_token_ids = [beam_outputs[seq_id][1] for seq_id in seq_ids]
-    elif sampling_params.temperature == 0.0:
+    elif sampling_params.temperature < 1e-4:
         # Greedy sampling.
         assert len(seq_ids) == 1
         next_token_id = torch.argmax(probs, dim=-1)
