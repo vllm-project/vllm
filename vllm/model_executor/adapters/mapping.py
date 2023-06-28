@@ -1,0 +1,3 @@
+ADAPTER_MAPPING = {
+    "LORA": "",
+}
