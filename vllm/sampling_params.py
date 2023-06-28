@@ -109,7 +109,7 @@ class SamplingParams:
                              f"search. Got {self.best_of}.")
         if self.temperature > _SAMPLING_EPS:
             raise ValueError("temperature must be 0 when using beam search.")
-        if self.top_p < 1.0:
+        if self.top_p < 1.0 - _SAMPLING_EPS:
             raise ValueError("top_p must be 1 when using beam search.")
         if self.top_k != -1:
             raise ValueError("top_k must be -1 when using beam search.")
@@ -118,7 +118,7 @@ class SamplingParams:
         if self.best_of > 1:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
-        if self.top_p < 1.0:
+        if self.top_p < 1.0 - _SAMPLING_EPS:
             raise ValueError("top_p must be 1 when using greedy sampling.")
         if self.top_k != -1:
             raise ValueError("top_k must be -1 when using greedy sampling.")
