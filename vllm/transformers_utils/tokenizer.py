@@ -13,10 +13,17 @@ _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
 
 def get_tokenizer(
     tokenizer_name: str,
+    tokenizer_mode: str = "auto",
     *args,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
+    if tokenizer_mode == "slow":
+        if kwargs.get("use_fast", False):
+            raise ValueError(
+                "Cannot use the fast tokenizer in slow tokenizer mode.")
+        kwargs["use_fast"] = False
+
     if "llama" in tokenizer_name.lower() and kwargs.get("use_fast", True):
         logger.info(
             "For some LLaMA-based models, initializing the fast tokenizer may "
