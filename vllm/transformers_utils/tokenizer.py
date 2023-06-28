@@ -27,7 +27,7 @@ def get_tokenizer(
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
                                                   **kwargs)
     except TypeError as e:
-        # A workaround to avoid protobuf errors in some environments.
+        # The LLaMA tokenizer causes a protobuf error in some environments.
         err_msg = (
             "Failed to load the tokenizer. If you are using a LLaMA-based "
             f"model, use '{_FAST_LLAMA_TOKENIZER}' instead of the original "
