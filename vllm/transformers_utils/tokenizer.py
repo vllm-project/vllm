@@ -20,7 +20,7 @@ def get_tokenizer(
         # FIXME(woosuk): This is a temporary workaround to avoid protobuf errors
         # in some environments.
         kwargs["use_fast"] = False
-        logger.info(
+        logger.warn(
             "Using the slow tokenizer for the given model due to an error in "
             "loading the fast tokenizer. This may cause a significant "
             "performance degradation.")
