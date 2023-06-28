@@ -20,7 +20,7 @@ def get_tokenizer(
     except TypeError as e:
         # If `use_fast` is explicitly specified, we should not retry with 
         # `use_fast=False`.
-        if kwargs.get("use_fast", None) is not None:
+        if "use_fast" in kwargs:
             raise e from None
 
         # FIXME(woosuk): This is a temporary workaround to avoid protobuf errors
