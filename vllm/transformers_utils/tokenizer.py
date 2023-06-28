@@ -32,7 +32,7 @@ def get_tokenizer(
             "Failed to load the tokenizer. If you are using a LLaMA-based "
             f"model, use '{_FAST_LLAMA_TOKENIZER}' instead of the original "
             "tokenizer.")
-        raise ValueError(err_msg) from e
+        raise RuntimeError(err_msg) from e
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.warning(
