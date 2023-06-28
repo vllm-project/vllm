@@ -17,6 +17,8 @@ class ModelConfig:
     Args:
         model: Name or path of the huggingface model to use.
         tokenizer: Name or path of the huggingface tokenizer to use.
+        tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
+            available, and "slow" will always use the slow tokenizer.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
         use_np_weights: Save a numpy copy of model weights for faster loading.
@@ -31,7 +33,8 @@ class ModelConfig:
     def __init__(
         self,
         model: str,
-        tokenizer: Optional[str],
+        tokenizer: str,
+        tokenizer_mode: str,
         download_dir: Optional[str],
         use_np_weights: bool,
         use_dummy_weights: bool,
@@ -40,6 +43,7 @@ class ModelConfig:
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
+        self.tokenizer_mode = tokenizer_mode
         self.download_dir = download_dir
         self.use_np_weights = use_np_weights
         self.use_dummy_weights = use_dummy_weights
@@ -47,6 +51,15 @@ class ModelConfig:
 
         self.hf_config: PretrainedConfig = AutoConfig.from_pretrained(model)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
+        self._verify_tokenizer_mode()
+
+    def _verify_tokenizer_mode(self) -> None:
+        tokenizer_mode = self.tokenizer_mode.lower()
+        if tokenizer_mode not in ["auto", "slow"]:
+            raise ValueError(
+                f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
+                "either 'auto' or 'slow'.")
+        self.tokenizer_mode = tokenizer_mode
 
     def verify_with_parallel_config(
         self,

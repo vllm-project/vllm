@@ -12,6 +12,7 @@ class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
     tokenizer: Optional[str] = None
+    tokenizer_mode: str = "auto"
     download_dir: Optional[str] = None
     use_np_weights: bool = False
     use_dummy_weights: bool = False
@@ -42,6 +43,12 @@ class EngineArgs:
                             help='name or path of the huggingface model to use')
         parser.add_argument('--tokenizer', type=str, default=EngineArgs.tokenizer,
                             help='name or path of the huggingface tokenizer to use')
+        parser.add_argument('--tokenizer-mode', type=str,
+                            default=EngineArgs.tokenizer_mode,
+                            choices=['auto', 'slow'],
+                            help='tokenizer mode. "auto" will use the fast '
+                                 'tokenizer if available, and "slow" will '
+                                 'always use the slow tokenizer.')
         parser.add_argument('--download-dir', type=str,
                             default=EngineArgs.download_dir,
                             help='directory to download and load the weights, '
@@ -109,8 +116,8 @@ class EngineArgs:
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
         # Initialize the configs.
         model_config = ModelConfig(
-            self.model, self.tokenizer, self.download_dir, self.use_np_weights,
-            self.use_dummy_weights, self.dtype, self.seed)
+            self.model, self.tokenizer, self.tokenizer_mode, self.download_dir,
+            self.use_np_weights, self.use_dummy_weights, self.dtype, self.seed)
         cache_config = CacheConfig(self.block_size, self.gpu_memory_utilization,
                                    self.swap_space)
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
