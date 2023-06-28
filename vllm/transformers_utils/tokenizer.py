@@ -7,6 +7,9 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
+_FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
+
 
 def get_tokenizer(
     tokenizer_name: str,
@@ -14,28 +17,27 @@ def get_tokenizer(
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
+    if "llama" in tokenizer_name.lower() and kwargs.get("use_fast", True):
+        logger.info(
+            "For some LLaMA-based models, initializing the fast tokenizer may "
+            "take a long time. To eliminate the initialization time, consider "
+            f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
+            "tokenizer.")
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
                                                   **kwargs)
     except TypeError as e:
-        # If `use_fast` is explicitly specified, we should not retry with 
-        # `use_fast=False`.
-        if "use_fast" in kwargs:
-            raise e from None
-
-        # FIXME(woosuk): This is a temporary workaround to avoid protobuf errors
-        # in some environments.
-        kwargs["use_fast"] = False
-        logger.warn(
-            "Using the slow tokenizer for the given model due to an error in "
-            "loading the fast tokenizer. This may cause a significant "
-            "performance degradation.")
-        logger.info(
-            "If you are using a LLaMA-based model, consider using "
-            "'hf-internal-testing/llama-tokenizer' instead of the original "
+        # A workaround to avoid protobuf errors in some environments.
+        err_msg = (
+            "Failed to load the tokenizer. If you are using a LLaMA-based "
+            f"model, use '{_FAST_LLAMA_TOKENIZER}' instead of the original "
             "tokenizer.")
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
-                                                  **kwargs)
+        raise ValueError(err_msg) from e
+
+    if not isinstance(tokenizer, PreTrainedTokenizerFast):
+        logger.warning(
+            "Using a slow tokenizer. This might cause a significant "
+            "slowdown. Consider using a fast tokenizer instead.")
     return tokenizer
 
 
