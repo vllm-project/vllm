@@ -6,23 +6,11 @@ import time
 from typing import List, Tuple
 
 import torch
-from transformers import (AutoConfig, AutoTokenizer, AutoModelForCausalLM,
-                          PreTrainedTokenizerBase)
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
-
-
-def get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
-    config = AutoConfig.from_pretrained(model_name)
-    if config.model_type == "llama":
-        # A workaround for potential protobuf errors.
-        model_name = "hf-internal-testing/llama-tokenizer"
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # To enable padding in the HF backend.
-        tokenizer.pad_token = tokenizer.eos_token
-        return tokenizer
-    return AutoTokenizer.from_pretrained(model_name)
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
 def sample_requests(
@@ -74,6 +62,7 @@ def sample_requests(
 def run_vllm(
     requests: List[Tuple[str, int, int]],
     model: str,
+    tokenizer: str,
     tensor_parallel_size: int,
     seed: int,
     n: int,
@@ -81,6 +70,7 @@ def run_vllm(
 ) -> float:
     llm = LLM(
         model=model,
+        tokenizer=tokenizer,
         tensor_parallel_size=tensor_parallel_size,
         seed=seed,
     )
@@ -118,9 +108,10 @@ def run_hf(
     max_batch_size: int,
 ) -> float:
     assert not use_beam_search
-    tokenizer = get_tokenizer(model)
-    llm = AutoModelForCausalLM.from_pretrained(
-        model, torch_dtype=torch.float16)
+    llm = AutoModelForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
+    if llm.config.model_type == "llama":
+        # To enable padding in the HF backend.
+        tokenizer.pad_token = tokenizer.eos_token
     llm = llm.cuda()
 
     pbar = tqdm(total=len(requests))
@@ -170,13 +161,13 @@ def main(args: argparse.Namespace):
     random.seed(args.seed)
 
     # Sample the requests.
-    tokenizer = get_tokenizer(args.model)
+    tokenizer = get_tokenizer(args.tokenizer)
     requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
 
     if args.backend == "vllm":
         elapsed_time = run_vllm(
-            requests, args.model, args.tensor_parallel_size, args.seed, args.n,
-            args.use_beam_search)
+            requests, args.model, args.tokenizer, args.tensor_parallel_size,
+            args.seed, args.n, args.use_beam_search)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -198,6 +189,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, required=True,
                         help="Path to the dataset.")
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
+    parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n", type=int, default=1,
                         help="Number of generated sequences per prompt.")
@@ -208,11 +200,14 @@ if __name__ == "__main__":
     parser.add_argument("--hf-max-batch-size", type=int, default=None,
                         help="Maximum batch size for HF backend.")
     args = parser.parse_args()
+
     if args.backend == "vllm":
         if args.hf_max_batch_size is not None:
             raise ValueError("HF max batch size is only for HF backend.")
     elif args.backend == "hf":
         if args.hf_max_batch_size is None:
             raise ValueError("HF max batch size is required for HF backend.")
+    if args.tokenizer is None:
+        args.tokenizer = args.model
 
     main(args)

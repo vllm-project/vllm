@@ -16,6 +16,7 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
+        tokenizer: Name or path of the huggingface tokenizer to use.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
         use_np_weights: Save a numpy copy of model weights for faster loading.
@@ -30,6 +31,7 @@ class ModelConfig:
     def __init__(
         self,
         model: str,
+        tokenizer: Optional[str],
         download_dir: Optional[str],
         use_np_weights: bool,
         use_dummy_weights: bool,
@@ -37,6 +39,7 @@ class ModelConfig:
         seed: int,
     ) -> None:
         self.model = model
+        self.tokenizer = tokenizer
         self.download_dir = download_dir
         self.use_np_weights = use_np_weights
         self.use_dummy_weights = use_dummy_weights
