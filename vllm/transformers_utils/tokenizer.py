@@ -1,46 +1,44 @@
 from typing import List, Tuple, Union
 
-from transformers import (AutoConfig, AutoTokenizer, PreTrainedTokenizer,
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_MODEL_TYPES_WITH_SLOW_TOKENIZER = []
+# A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
+_FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
 
 
 def get_tokenizer(
-    model_name: str,
+    tokenizer_name: str,
     *args,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
-    config = AutoConfig.from_pretrained(model_name)
-    if "open_llama" in model_name:
-        kwargs["use_fast"] = False
+    if "llama" in tokenizer_name.lower() and kwargs.get("use_fast", True):
         logger.info(
-            "OpenLLaMA models do not support the fast tokenizer. "
-            "Using the slow tokenizer instead.")
-    elif config.model_type == "llama" and kwargs.get("use_fast", True):
-        # LLaMA fast tokenizer causes protobuf errors in some environments.
-        # However, we found that the below LLaMA fast tokenizer works well in
-        # most environments.
-        model_name = "hf-internal-testing/llama-tokenizer"
-        logger.info(
-            f"Using the LLaMA fast tokenizer in '{model_name}' to avoid "
-            "potential protobuf errors.")
-    elif config.model_type in _MODEL_TYPES_WITH_SLOW_TOKENIZER:
-        if kwargs.get("use_fast", False) == True:
-            raise ValueError(
-                f"Cannot use the fast tokenizer for {config.model_type} due to "
-                "bugs in the fast tokenizer.")
-        logger.info(
-            f"Using the slow tokenizer for {config.model_type} due to bugs in "
-            "the fast tokenizer. This could potentially lead to performance "
-            "degradation.")
-        kwargs["use_fast"] = False
-    return AutoTokenizer.from_pretrained(model_name, *args, **kwargs)
+            "For some LLaMA-based models, initializing the fast tokenizer may "
+            "take a long time. To eliminate the initialization time, consider "
+            f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
+            "tokenizer.")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
+                                                  **kwargs)
+    except TypeError as e:
+        # The LLaMA tokenizer causes a protobuf error in some environments.
+        err_msg = (
+            "Failed to load the tokenizer. If you are using a LLaMA-based "
+            f"model, use '{_FAST_LLAMA_TOKENIZER}' instead of the original "
+            "tokenizer.")
+        raise RuntimeError(err_msg) from e
+
+    if not isinstance(tokenizer, PreTrainedTokenizerFast):
+        logger.warning(
+            "Using a slow tokenizer. This might cause a significant "
+            "slowdown. Consider using a fast tokenizer instead.")
+    return tokenizer
 
 
 def detokenize_incrementally(

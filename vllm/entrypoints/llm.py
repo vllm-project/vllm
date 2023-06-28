@@ -25,6 +25,7 @@ class LLM:
 
     Args:
         model: The name or path of a HuggingFace Transformers model.
+        tokenizer: The name or path of a HuggingFace Transformers tokenizer.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -38,6 +39,7 @@ class LLM:
     def __init__(
         self,
         model: str,
+        tokenizer: Optional[str] = None,
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         seed: int = 0,
@@ -47,6 +49,7 @@ class LLM:
             kwargs["disable_log_stats"] = True
         engine_args = EngineArgs(
             model=model,
+            tokenizer=tokenizer,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             seed=seed,

@@ -6,11 +6,12 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.core.scheduler import Scheduler
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import DeviceID, initialize_cluster, ray
-from vllm.engine.tokenizer_utils import detokenize_incrementally, get_tokenizer
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
+                                               get_tokenizer)
 from vllm.utils import Counter
 from vllm.worker.worker import Worker
 
@@ -59,6 +60,7 @@ class LLMEngine:
         logger.info(
             "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
+            f"tokenizer={model_config.tokenizer!r}, "
             f"dtype={model_config.dtype}, "
             f"use_dummy_weights={model_config.use_dummy_weights}, "
             f"download_dir={model_config.download_dir!r}, "
@@ -75,7 +77,7 @@ class LLMEngine:
         self.log_stats = log_stats
         self._verify_args()
 
-        self.tokenizer = get_tokenizer(model_config.model)
+        self.tokenizer = get_tokenizer(model_config.tokenizer)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
