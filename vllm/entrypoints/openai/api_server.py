@@ -313,7 +313,7 @@ if __name__ == "__main__":
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     # A separate tokenizer to map token IDs to strings.
-    tokenizer = get_tokenizer(args.model)
+    tokenizer = get_tokenizer(engine_args.tokenizer, engine_args.tokenizer_mode)
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info",
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
