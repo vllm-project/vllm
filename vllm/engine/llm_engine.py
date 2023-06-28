@@ -182,6 +182,15 @@ class LLMEngine:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
+        # check if input prompt is too long
+        if hasattr(self.model_config.hf_config, "max_position_embeddings"):
+            limit = min(self.scheduler_config.max_num_batched_tokens, self.model_config.hf_config.max_position_embeddings)
+        else:
+            limit = self.scheduler_config.max_num_batched_tokens
+        if len(prompt_token_ids) > limit:
+            logger.warn(f"[Warning] input prompt has {len(prompt_token_ids)} tokens, exceeding the limit of {limit}, ignored.")
+            return
+
         # Create the sequences.
         block_size = self.cache_config.block_size
         seqs: List[Sequence] = []
