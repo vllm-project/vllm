@@ -80,6 +80,7 @@ __global__ void single_query_cached_kv_attention_kernel(
   const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
   const int* __restrict__ context_lens,   // [num_seqs]
   const int max_num_blocks_per_seq,
+  bool is_mqa,
   const int q_stride) {
   constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   constexpr int NUM_TOKENS_PER_THREAD_GROUP = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
@@ -91,6 +92,10 @@ __global__ void single_query_cached_kv_attention_kernel(
   const int head_idx = blockIdx.x;
   const int num_heads = gridDim.x;
   const int seq_idx = blockIdx.y;
+  
+  // for MultiQueryAttention, the k_cache and v_cache will only have one head.
+  const int kv_head_idx = is_mqa? 0 : head_idx;
+  const int kv_num_heads = is_mqa? 1 : num_heads;
 
   // A vector type to store a part of a key or a query.
   // The vector size is configured in such a way that the threads in a thread group
@@ -156,8 +161,8 @@ __global__ void single_query_cached_kv_attention_kernel(
 
 #pragma unroll
       for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
-        const scalar_t* k_ptr = k_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
-                                        + head_idx * HEAD_SIZE * BLOCK_SIZE
+        const scalar_t* k_ptr = k_cache + physical_block_number * kv_num_heads * HEAD_SIZE * BLOCK_SIZE
+                                        + kv_head_idx * HEAD_SIZE * BLOCK_SIZE
                                         + physical_block_offset * x;
         const int vec_idx = thread_group_offset + j * THREAD_GROUP_SIZE;
         const int offset1 = (vec_idx * VEC_SIZE) / x;
@@ -242,8 +247,8 @@ __global__ void single_query_cached_kv_attention_kernel(
     L_vec logits_vec;
     from_float(logits_vec, *reinterpret_cast<Float_L_vec*>(logits + token_idx));
 
-    const scalar_t* v_ptr = v_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
-                                    + head_idx * HEAD_SIZE * BLOCK_SIZE;
+    const scalar_t* v_ptr = v_cache + physical_block_number * kv_num_heads * HEAD_SIZE * BLOCK_SIZE
+                                    + kv_head_idx * HEAD_SIZE * BLOCK_SIZE;
 #pragma unroll
     for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
@@ -328,6 +333,7 @@ __global__ void single_query_cached_kv_attention_kernel(
     block_tables_ptr,                                                                         \
     context_lens_ptr,                                                                         \
     max_num_blocks_per_seq,                                                                   \
+    is_mqa,                                                                                   \
     query_stride);
 
 // TODO(woosuk): Tune NUM_THREADS.
@@ -348,6 +354,7 @@ void single_query_cached_kv_attention_launcher(
   int num_heads = query.size(1);
   int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);
+  bool is_mqa = key_cache.size(1) == 1;
   int query_stride = query.stride(0);
 
   int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);

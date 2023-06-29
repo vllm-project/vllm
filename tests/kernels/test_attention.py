@@ -34,8 +34,9 @@ def ref_single_query_cached_kv_attention(
     value_cache: torch.Tensor,
     block_tables: torch.Tensor,
     context_lens: torch.Tensor,
+    is_mqa: bool = False,
 ) -> None:
-    num_heads = value_cache.shape[1]
+    num_heads = query.shape[1]
     head_size = value_cache.shape[2]
     block_size = value_cache.shape[3]
 
@@ -47,18 +48,23 @@ def ref_single_query_cached_kv_attention(
 
         keys = []
         values = []
+        kv_num_heads = 1 if is_mqa else num_heads
         for j in range(context_len):
             block_number = int(block_table[j // block_size])
             block_offset = j % block_size
 
             k = key_cache[block_number, :, :, block_offset, :]
-            k = k.reshape(num_heads, head_size)
+            k = k.reshape(kv_num_heads, head_size)
             keys.append(k)
 
             v = value_cache[block_number, :, :, block_offset]
             values.append(v)
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
+
+        if is_mqa:
+            keys = keys.repeat(1, num_heads, 1)
+            values = values.repeat(1, num_heads, 1)
 
         scale = 1.0 / (head_size ** 0.5)
         out = ref_masked_attention(q, keys, values, scale)
@@ -164,18 +170,20 @@ def run_single_query_cached_kv_attention(
     block_size: int,
     num_blocks: int,
     dtype: torch.dtype,
+    is_mqa: bool = False,
 ) -> None:
     qkv = torch.empty(
         num_tokens, 3, num_heads, head_size, dtype=dtype, device='cuda')
     qkv.uniform_(-1e-3, 1e-3)
     query, _, _ = qkv.unbind(dim=1)
 
+    kv_num_heads = 1 if is_mqa else num_heads
     x = 16 // torch.tensor([], dtype=dtype).element_size()
-    key_block_shape = (num_heads, head_size // x, block_size, x)
+    key_block_shape = (kv_num_heads, head_size // x, block_size, x)
     key_cache = torch.empty(
         size=(num_blocks, *key_block_shape), dtype=dtype, device='cuda')
     key_cache.uniform_(-1e-3, 1e-3)
-    value_block_shape = (num_heads, head_size, block_size)
+    value_block_shape = (kv_num_heads, head_size, block_size)
     value_cache = torch.empty(
         size=(num_blocks, *value_block_shape), dtype=dtype, device='cuda')
     value_cache.uniform_(-1e-3, 1e-3)
@@ -217,6 +225,7 @@ def run_single_query_cached_kv_attention(
         value_cache,
         block_tables,
         context_lens,
+        is_mqa,
     )
     # NOTE(woosuk): Due to the difference in the data types the two
     # implementations use for attention softmax logits and accumulation,
@@ -360,3 +369,23 @@ def test_multi_query_mqa_kv_attention() -> None:
                 head_size=head_size,
                 dtype=dtype,
             )
+
+
+def test_single_query_cached_mqa_kv_attention() -> None:
+    torch.random.manual_seed(TEST_SEED)
+    torch.cuda.manual_seed(TEST_SEED)
+    for dtype in [torch.half, torch.bfloat16, torch.float]:
+        for block_size in [8, 16, 32]:
+            for head_size in [64, 80, 96, 128]:
+                print(f'Testing single_query_cached_kv_attention with '
+                      f'dtype={dtype}, block_size={block_size}, '
+                      f'head_size={head_size}')
+                run_single_query_cached_kv_attention(
+                    num_tokens=37,
+                    num_heads=3,
+                    head_size=head_size,
+                    block_size=block_size,
+                    num_blocks=1024,
+                    dtype=dtype,
+                    is_mqa=True,
+                )
