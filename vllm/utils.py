@@ -39,4 +39,5 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 def in_wsl() -> bool:
+    # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
