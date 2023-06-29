@@ -173,3 +173,6 @@ cython_debug/
 
 # Sphinx documentation
 _build/
+
+# Data
+data/
