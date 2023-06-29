@@ -4,14 +4,14 @@
 
 ```bash
 # Install dependencies.
-pip -r requirements-docs.txt
+pip install -r requirements-docs.txt
 
 # Build the docs.
 make clean
 make html
 ```
 
-## Open the docs with your brower
+## Open the docs with your browser
 
 ```bash
 python -m http.server -d build/html/
