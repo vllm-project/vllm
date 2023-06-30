@@ -40,6 +40,7 @@ class RWConfig(PretrainedConfig):
         hidden_dropout=0.0,
         attention_dropout=0.0,
         multi_query=True,
+        n_head_kv=None,
         alibi=False,
         bias=False,
         parallel_attn=False,
@@ -61,6 +62,7 @@ class RWConfig(PretrainedConfig):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.multi_query = multi_query
+        self.n_head_kv = 1 if n_head_kv is None else n_head_kv
         self.alibi = alibi
         self.bias = bias
         self.parallel_attn = parallel_attn
