@@ -1,9 +1,15 @@
 from transformers import AutoConfig, PretrainedConfig
+
 from vllm.transformers_utils.configs import *
+
+_CONFIG_REGISTRY = {
+    "RefinedWeb": RWConfig,
+}
 
 
 def get_config(model: str) -> PretrainedConfig:
     config = AutoConfig.from_pretrained(model, trust_remote_code=True)
-    if config.model_type == "RefinedWeb":
-        config = RWConfig.from_pretrained(model)
+    if config.model_type in _CONFIG_REGISTRY:
+        config_class = _CONFIG_REGISTRY[config.model_type]
+        config = config_class.from_pretrained(model)
     return config
