@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional,Callable,Awaitable
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
@@ -80,7 +80,8 @@ class AsyncLLMEngine:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         request_id: str,
-        prompt_token_ids: Optional[List[int]] = None
+        prompt_token_ids: Optional[List[int]] = None,
+        custom_async_func : Callable[[], Awaitable[None]] = None,
     ) -> RequestOutput:
         """Generate outputs for a request.
 
@@ -137,6 +138,9 @@ class AsyncLLMEngine:
             # Kick the engine if the engine is not running.
             if not self.is_engine_running:
                 await self.engine_step(request_id)
+
+            if custom_async_func is not None:
+                await custom_async_func()
 
             # Wait for new output. The group_event will be set in engine_step
             # when there is new output available for the sequence group.

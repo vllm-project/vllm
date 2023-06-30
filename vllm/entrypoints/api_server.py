@@ -30,7 +30,12 @@ async def generate(request: Request) -> Response:
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
-    results_generator = engine.generate(prompt, sampling_params, request_id)
+
+    async def detect_request_disconnected():
+        if await request_dict.is_disconnected():
+            # Abort the request if the client disconnects.
+            raise ValueError("Client disconnected.")
+    results_generator = engine.generate(prompt, sampling_params, request_id,custom_async_func=detect_request_disconnected)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -54,12 +59,17 @@ async def generate(request: Request) -> Response:
 
     # Non-streaming case
     final_output = None
-    async for request_output in results_generator:
-        if await request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await engine.abort(request_id)
-            return Response(status_code=499)
-        final_output = request_output
+    try:
+        async for request_output in results_generator:
+            if await request.is_disconnected():
+                # Abort the request if the client disconnects.
+                await engine.abort(request_id)
+                return Response(status_code=499)
+            final_output = request_output
+    except ValueError:
+        await engine.abort(request_id)
+        return Response(status_code=499)
+
 
     assert final_output is not None
     prompt = final_output.prompt

@@ -144,8 +144,15 @@ async def create_completion(raw_request: Request):
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
-    result_generator = engine.generate(prompt, sampling_params,
-                                       request_id)
+
+
+    async def detect_request_disconnected():
+        if await raw_request.is_disconnected():
+            # Abort the request if the client disconnects.
+            raise ValueError("Client disconnected.")
+
+    result_generator = engine.generate(prompt, sampling_params, 
+                                        request_id, custom_async_func = detect_request_disconnected)
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.
@@ -221,13 +228,19 @@ async def create_completion(raw_request: Request):
 
     # Non-streaming response
     final_res: RequestOutput = None
-    async for res in result_generator:
-        if await raw_request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await abort_request()
-            return create_error_response(HTTPStatus.BAD_REQUEST,
-                                         "Client disconnected")
-        final_res = res
+    try:
+        async for res in result_generator:
+            if await raw_request.is_disconnected():
+                # Abort the request if the client disconnects.
+                await abort_request()
+                return create_error_response(HTTPStatus.BAD_REQUEST,
+                                            "Client disconnected")
+            final_res = res
+
+    except ValueError as e:
+        await abort_request()
+        return create_error_response(HTTPStatus.BAD_REQUEST,"Client disconnected")
+
     assert final_res is not None
     choices = []
     for output in final_res.outputs:
