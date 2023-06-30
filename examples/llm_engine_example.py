@@ -30,7 +30,7 @@ def main(args: argparse.Namespace):
 
         request_outputs = engine.step()
         for request_output in request_outputs:
-            if request_output.finished():
+            if request_output.finished:
                 print(request_output)
 
         if not (engine.has_unfinished_requests() or test_prompts):

@@ -5,6 +5,10 @@ import torch
 
 from vllm import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
+from vllm.logger import init_logger
+from vllm.utils import in_wsl
+
+logger = init_logger(__name__)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -85,16 +89,22 @@ class CacheEngine:
         cpu_cache: List[KVCache] = []
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
+        pin_memory = not in_wsl()
+        if not pin_memory:
+            # Pinning memory in WSL is not supported.
+            # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+            logger.warn("Using 'pin_memory=False' as WSL is detected. "
+                        "This may slow down the performance.")
         for _ in range(self.num_layers):
             key_blocks = torch.empty(
                 size=(self.num_cpu_blocks, *key_block_shape),
                 dtype=self.dtype,
-                pin_memory=True,
+                pin_memory=pin_memory,
             )
             value_blocks = torch.empty(
                 size=(self.num_cpu_blocks, *value_block_shape),
                 dtype=self.dtype,
-                pin_memory=True,
+                pin_memory=pin_memory,
             )
             cpu_cache.append((key_blocks, value_blocks))
         return cpu_cache

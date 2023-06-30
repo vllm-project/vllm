@@ -1,6 +1,7 @@
 # coding=utf-8
 # Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
 # Copyright 2023 The vLLM team.
+# Copyright 2023 CTranslate2, and Michael Feil
 # Copyright 2018 The OpenAI Team Authors and HuggingFace Inc. team.
 # Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
 #
@@ -15,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GPT-2 model compatible with HuggingFace weights.
+"""Inference-only GPTBigCode model compatible with HuggingFace weights.
 
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
@@ -24,7 +25,8 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import GPT2Config
+import numpy as np
+from transformers import GPTBigCodeConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
@@ -41,9 +43,9 @@ from vllm.sequence import SequenceOutputs
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class GPT2Attention(nn.Module):
+class GPTBigCodeAttention(nn.Module):
 
-    def __init__(self, config: GPT2Config):
+    def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
         total_num_heads = config.num_attention_heads
@@ -78,12 +80,12 @@ class GPT2Attention(nn.Module):
         return attn_output
 
 
-class GPT2MLP(nn.Module):
+class GPTBigMLP(nn.Module):
 
     def __init__(
         self,
         intermediate_size: int,
-        config: GPT2Config,
+        config: GPTBigCodeConfig,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -102,17 +104,17 @@ class GPT2MLP(nn.Module):
         return hidden_states
 
 
-class GPT2Block(nn.Module):
+class GPTBigCodeBlock(nn.Module):
 
-    def __init__(self, config: GPT2Config):
+    def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         hidden_size = config.hidden_size
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = GPT2Attention(config)
+        self.attn = GPTBigCodeAttention(config)
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = GPT2MLP(inner_dim, config)
+        self.mlp = GPTBigMLP(inner_dim, config)
 
     def forward(
         self,
@@ -140,14 +142,13 @@ class GPT2Block(nn.Module):
         return hidden_states
 
 
-class GPT2Model(nn.Module):
+class GPTBigCodeModel(nn.Module):
 
-    def __init__(self, config: GPT2Config):
+    def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         self.config = config
         assert config.add_cross_attention == False
-        assert config.scale_attn_by_inverse_layer_idx == False
-        assert config.reorder_and_upcast_attn == False
+
         self.embed_dim = config.hidden_size
 
         # Optimization: While the vocab size of GPT-2 is 50257, we extend it
@@ -159,7 +160,7 @@ class GPT2Model(nn.Module):
         self.wte = VocabParallelEmbedding(vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList(
-            [GPT2Block(config) for _ in range(config.num_hidden_layers)])
+            [GPTBigCodeBlock(config) for _ in range(config.num_hidden_layers)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -187,12 +188,12 @@ class GPT2Model(nn.Module):
         return hidden_states
 
 
-class GPT2LMHeadModel(nn.Module):
+class GPTBigCodeForCausalLM(nn.Module):
 
-    def __init__(self, config: GPT2Config):
+    def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         self.config = config
-        self.transformer = GPT2Model(config)
+        self.transformer = GPTBigCodeModel(config)
         # TODO(zhuohan): create a new weight after implementing pipeline
         #                parallelism
         self.lm_head_weight = self.transformer.wte.weight
@@ -228,31 +229,38 @@ class GPT2LMHeadModel(nn.Module):
                 # GPT-2 ties the weights of the embedding layer and the final
                 # linear layer.
                 continue
-            if ".attn.bias" in name or ".attn.masked_bias" in name:
+            if ".attn.bias" in name:
                 # Skip attention mask.
                 # NOTE: "c_attn.bias" should not be skipped.
                 continue
 
-            if not name.startswith("transformer."):
-                name = "transformer." + name
-
-            # The HF's GPT-2 implementation uses Conv1D instead of Linear.
-            # Because of this, we need to transpose the weights.
-            for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
-                if conv1d_weight_name not in name:
-                    continue
-                if not name.endswith(".weight"):
-                    continue
-                loaded_weight = loaded_weight.t()
             param = state_dict[name]
-
-            if name == "transformer.wte.weight":
-                # Consider padding in the vocab size.
-                padded_vocab_size = param.shape[0] * tensor_model_parallel_world_size
-                num_extra_rows = padded_vocab_size - self.config.vocab_size
-                extra_rows = torch.empty(num_extra_rows, loaded_weight.shape[1])
-                extra_rows = extra_rows.to(loaded_weight)
-                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
+            
+            def _expand_mqa_mha(qkv_array, n_head, head_dim):
+                """manipulates along axis=0 from MQA to MHA
+                inputs: qkv_array.shape=((n_heads + 2) * head_dim, hidden_dim)
+                    with n_heads for q, then 1 for k, 1 for 1 v, times head dim
+                return: qkv_array.shape=(3 * n_heads * head_dim, hidden_dim)
+                
+                TODO: this function is no longer needed once vllm supports MQA.
+                """
+                qkv_array = qkv_array.numpy()
+                
+                dims_q = n_head * head_dim
+                q, k, v = np.split(qkv_array, (dims_q, dims_q + head_dim), axis=0)
+                # q is fine, but k & v have not replicated shape along the first axis
+                # as long as MQA is not nativly supported, increase memory and replicated
+                # (head_dim, hidden_dim) to (n_heads * head_dim, hidden_dim)
+                if k.ndim == 2 and v.ndim == 2:
+                    replication = (n_head, 1)  # weights
+                else:
+                    replication = n_head  # biases
+                # replicate n_head times for q, v
+                k, v = np.tile(k, replication), np.tile(v, replication)
+                # concat q, k, v along the first axis (n_heads * head_dim, hidden_dim)
+                # to (3 * n_heads * head_dim, hidden_dim)
+                qkv_array = np.concatenate((q, k, v), axis=0)
+                return torch.from_numpy(qkv_array)
 
             # For the fused QKV linear layer, manually shard the weights.
             if "c_attn" in name:
@@ -266,10 +274,12 @@ class GPT2LMHeadModel(nn.Module):
                 head_end = (tensor_model_parallel_rank + 1) * num_heads
 
                 if name.endswith(".weight"):
+                    loaded_weight = _expand_mqa_mha(loaded_weight, n_head=total_num_heads, head_dim=head_size)
                     loaded_weight = loaded_weight.view(3, total_num_heads, head_size, hidden_size)
                     loaded_weight = loaded_weight[:, head_start:head_end, :, :]
                     loaded_weight = loaded_weight.reshape(-1, hidden_size)
                 elif name.endswith(".bias"):
+                    loaded_weight = _expand_mqa_mha(loaded_weight, n_head=total_num_heads, head_dim=head_size)
                     loaded_weight = loaded_weight.view(3, total_num_heads, head_size)
                     loaded_weight = loaded_weight[:, head_start:head_end, :]
                     loaded_weight = loaded_weight.reshape(-1)

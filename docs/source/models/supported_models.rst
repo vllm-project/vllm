@@ -17,6 +17,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
+  * - :code:`GPTBigCodeForCausalLM`
+    - StarCoder, SantaCoder, WizardCoder
+    - :code:`bigcode/starcoder`, :code:`bigcode/gpt_bigcode-santacoder`, :code:`WizardLM/WizardCoder-15B-V1.0`, etc.
   * - :code:`GPTNeoXForCausalLM`
     - GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM
     - :code:`EleutherAI/gpt-neox-20b`, :code:`EleutherAI/pythia-12b`, :code:`OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, :code:`databricks/dolly-v2-12b`, :code:`stabilityai/stablelm-tuned-alpha-7b`, etc.

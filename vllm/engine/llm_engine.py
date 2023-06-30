@@ -6,11 +6,12 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.core.scheduler import Scheduler
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import DeviceID, initialize_cluster, ray
-from vllm.engine.tokenizer_utils import detokenize_incrementally, get_tokenizer
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
+                                               get_tokenizer)
 from vllm.utils import Counter
 from vllm.worker.worker import Worker
 
@@ -59,6 +60,8 @@ class LLMEngine:
         logger.info(
             "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
+            f"tokenizer={model_config.tokenizer!r}, "
+            f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"dtype={model_config.dtype}, "
             f"use_dummy_weights={model_config.use_dummy_weights}, "
             f"download_dir={model_config.download_dir!r}, "
@@ -75,7 +78,8 @@ class LLMEngine:
         self.log_stats = log_stats
         self._verify_args()
 
-        self.tokenizer = get_tokenizer(model_config.model)
+        self.tokenizer = get_tokenizer(model_config.tokenizer,
+                                       model_config.tokenizer_mode)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -87,7 +91,7 @@ class LLMEngine:
                 worker_cls = ray.remote(
                     num_cpus=0,
                     num_gpus=1,
-                    resources={node_resource: 1e-5},
+                    resources={node_resource: 1e-3},
                 )(worker_cls).remote
 
             worker = worker_cls(
@@ -127,6 +131,12 @@ class LLMEngine:
         # FIXME(woosuk): Change to debug log.
         logger.info(f'# GPU blocks: {num_gpu_blocks}, '
                     f'# CPU blocks: {num_cpu_blocks}')
+
+        if num_gpu_blocks <= 0:
+            raise ValueError("No available memory for the cache blocks. "
+                             "Try increasing `gpu_memory_utilization` when "
+                             "initializing the engine.")
+
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
