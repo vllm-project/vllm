@@ -182,14 +182,6 @@ class LLMEngine:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
-        # check if input prompt is too long
-        if hasattr(self.model_config.hf_config, "max_position_embeddings"):
-            limit = min(self.scheduler_config.max_num_batched_tokens, self.model_config.hf_config.max_position_embeddings)
-        else:
-            limit = self.scheduler_config.max_num_batched_tokens
-        if len(prompt_token_ids) > limit:
-            logger.warn(f"[Warning] input prompt has {len(prompt_token_ids)} tokens, exceeding the limit of {limit}, ignored.")
-            return
 
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -231,11 +223,22 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        seq_group_metadata_list, scheduler_outputs, ignored_seq_groups = self.scheduler.schedule()
+
+        # Create the outputs.
+        request_outputs: List[RequestOutput] = []
+
+        # Handle ignored sequences, just create corresponding request output
+        # we do not need to stop or free anything, because we already set the
+        # sequence status to ignored and the seq group is not in any queue
+        for seq_group in ignored_seq_groups:
+            logger.info("Add seq group to ignore")
+            request_output = RequestOutput.from_ignored_seq_group(seq_group)
+            request_outputs.append(request_output)
+
         if (not seq_group_metadata_list) and scheduler_outputs.is_empty():
             # Nothing to do.
-            return []
-
+            return request_outputs
         # Execute the model.
         output = self._run_workers(
             "execute_model",
@@ -254,8 +257,6 @@ class LLMEngine:
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
-        # Create the outputs.
-        request_outputs: List[RequestOutput] = []
         for seq_group in seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)

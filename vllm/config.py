@@ -170,14 +170,17 @@ class SchedulerConfig:
             a single iteration.
         max_num_seqs: Maximum number of sequences to be processed in a single
             iteration.
+        max_prompt_len: Maximum length of input prompt.
     """
     def __init__(
         self,
         max_num_batched_tokens: int,
         max_num_seqs: int,
+        max_prompt_len: int
     ) -> None:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_seqs = max_num_seqs
+        self.max_prompt_len = max_prompt_len
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
