@@ -20,13 +20,14 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.sequence import SequenceOutputs
+from vllm.transformers_utils.configs import RWConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class Attention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: RWConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
         assert config.multi_query
@@ -104,7 +105,7 @@ class Attention(nn.Module):
 
 class MLP(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: RWConfig):
         super().__init__()
         hidden_size = config.hidden_size
 
@@ -127,7 +128,7 @@ class MLP(nn.Module):
 
 class DecoderLayer(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: RWConfig):
         super().__init__()
         self.config = config
         hidden_size = config.hidden_size
@@ -176,7 +177,7 @@ class DecoderLayer(nn.Module):
 
 class RWModel(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: RWConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
         assert not config.alibi
@@ -220,7 +221,7 @@ class RWModel(nn.Module):
 
 class RWForCausalLM(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: RWConfig):
         super().__init__()
         self.config = config
 
