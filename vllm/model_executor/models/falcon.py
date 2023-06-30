@@ -40,7 +40,7 @@ class Attention(nn.Module):
         self.num_query_heads = (self.total_num_query_heads //
                                 tensor_model_parallel_world_size)
 
-        self.total_num_kv_heads = getattr(config, "n_head_kv", 1)
+        self.total_num_kv_heads = config.n_head_kv
         assert self.total_num_kv_heads % tensor_model_parallel_world_size == 0
         self.num_kv_heads = (self.total_num_kv_heads //
                              tensor_model_parallel_world_size)
@@ -236,7 +236,9 @@ class RWForCausalLM(nn.Module):
         self.config = config
 
         self.transformer = RWModel(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = ColumnParallelLinear(config.hidden_size, config.vocab_size,
+                                            bias=False, gather_output=False,
+                                            perform_initialization=False)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -279,22 +281,21 @@ class RWForCausalLM(nn.Module):
                 total_num_query_heads = self.config.num_attention_heads
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // total_num_query_heads
+                loaded_weight = loaded_weight.view(-1, head_size, hidden_size)
 
                 num_query_heads = (total_num_query_heads //
                                    tensor_model_parallel_world_size)
                 query_head_start = tensor_model_parallel_rank * num_query_heads
                 query_head_end = (tensor_model_parallel_rank + 1) * num_query_heads
 
-                total_num_kv_heads = getattr(self.config, "n_head_kv", 1)
+                total_num_kv_heads = self.config.n_head_kv
                 num_kv_heads = (total_num_kv_heads //
                                 tensor_model_parallel_world_size)
                 kv_head_start = tensor_model_parallel_rank * num_kv_heads
                 kv_head_end = (tensor_model_parallel_rank + 1) * num_kv_heads
-                loaded_weight = loaded_weight.view(
-                    num_query_heads + 2 * num_kv_heads, head_size, hidden_size)
 
                 # Load query weights.
-                query_weight = loaded_weight[:num_query_heads, :, :]
+                query_weight = loaded_weight[:total_num_query_heads, :, :]
                 query_weight = loaded_weight[query_head_start:query_head_end, :, :]
                 query_weight = query_weight.reshape(-1, hidden_size)
                 param = state_dict[name.replace("query_key_value", "query")]
@@ -302,9 +303,9 @@ class RWForCausalLM(nn.Module):
                 param.data.copy_(query_weight)
 
                 # Load key and value weights.
-                key_value_weight = loaded_weight[num_query_heads:, :, :]
+                key_value_weight = loaded_weight[total_num_query_heads:, :, :]
                 key_value_weight = key_value_weight.reshape(
-                    2, num_kv_heads, head_size, hidden_size)
+                    2, total_num_kv_heads, head_size, hidden_size)
                 key_value_weight = key_value_weight[:, kv_head_start:kv_head_end, :, :]
                 key_value_weight = key_value_weight.reshape(-1, hidden_size)
                 param = state_dict[name.replace("query_key_value", "key_value")]
