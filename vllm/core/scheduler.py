@@ -193,6 +193,8 @@ class Scheduler:
                 if num_prompt_tokens > self.scheduler_config.max_prompt_len:
                     logger.warn(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long, exceeding limit of {self.scheduler_config.max_prompt_len}")
+                    for seq in seq_group.get_seqs():
+                        seq.status = SequenceStatus.IGNORED
                     ignored_seq_groups.append(seq_group)
                     self.waiting.pop(0)
                     break

@@ -182,7 +182,6 @@ class LLMEngine:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
-
         # Create the sequences.
         block_size = self.cache_config.block_size
         seqs: List[Sequence] = []
@@ -228,17 +227,10 @@ class LLMEngine:
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
 
-        # Handle ignored sequences, just create corresponding request output
-        # we do not need to stop or free anything, because we already set the
-        # sequence status to ignored and the seq group is not in any queue
-        for seq_group in ignored_seq_groups:
-            logger.info("Add seq group to ignore")
-            request_output = RequestOutput.from_ignored_seq_group(seq_group)
-            request_outputs.append(request_output)
-
-        if (not seq_group_metadata_list) and scheduler_outputs.is_empty():
+        if (not seq_group_metadata_list) and scheduler_outputs.is_empty() and (not ignored_seq_groups):
             # Nothing to do.
             return request_outputs
+
         # Execute the model.
         output = self._run_workers(
             "execute_model",
@@ -257,7 +249,7 @@ class LLMEngine:
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
-        for seq_group in seq_groups:
+        for seq_group in seq_groups + ignored_seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
         return request_outputs

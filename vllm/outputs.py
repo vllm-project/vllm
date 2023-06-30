@@ -102,16 +102,6 @@ class RequestOutput:
         return cls(seq_group.request_id, prompt, prompt_token_ids, outputs,
                    finished)
 
-    @classmethod
-    def from_ignored_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
-        output = CompletionOutput(
-            0, "", [], -1, None, SequenceStatus.get_finished_reason(SequenceStatus.IGNORED))
-        seq = seq_group.get_seqs()[0]
-        prompt = seq.prompt
-        prompt_token_ids = seq.data.prompt_token_ids
-        finished = True
-        return cls(seq_group.request_id, prompt, prompt_token_ids, [output], finished)
-
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
