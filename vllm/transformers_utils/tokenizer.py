@@ -1,10 +1,9 @@
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_config
 
 logger = init_logger(__name__)
 
@@ -50,7 +49,7 @@ def get_tokenizer(
 
 
 def detokenize_incrementally(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     prev_output_tokens: List[str],
     new_token_id: int,
     skip_special_tokens: bool,
