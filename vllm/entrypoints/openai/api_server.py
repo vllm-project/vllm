@@ -124,7 +124,7 @@ async def create_completion(raw_request: Request):
 
     model_name = request.model
     request_id = f"cmpl-{random_uuid()}"
-    prompt = request.prompt
+    prompt = request.prompt if type(request.prompt) != list else ' '.join(request.prompt)
     created_time = int(time.time())
     try:
         sampling_params = SamplingParams(
