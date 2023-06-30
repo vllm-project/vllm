@@ -223,13 +223,9 @@ class LLMEngine:
         the sequences and returns the newly generated results.
         """
         seq_group_metadata_list, scheduler_outputs, ignored_seq_groups = self.scheduler.schedule()
-
-        # Create the outputs.
-        request_outputs: List[RequestOutput] = []
-
         if (not seq_group_metadata_list) and scheduler_outputs.is_empty() and (not ignored_seq_groups):
             # Nothing to do.
-            return request_outputs
+            return []
 
         # Execute the model.
         output = self._run_workers(
@@ -249,6 +245,8 @@ class LLMEngine:
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
+        # Create the outputs.
+        request_outputs: List[RequestOutput] = []
         for seq_group in seq_groups + ignored_seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
