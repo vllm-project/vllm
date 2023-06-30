@@ -98,7 +98,9 @@ def load_tensor_parallel_weights(
                 shard_size * tensor_model_parallel_rank
                 :shard_size * (tensor_model_parallel_rank + 1)]
             break
-    assert param.shape == loaded_weight.shape
+    assert param.shape == loaded_weight.shape, (
+        f"{param_name} shape mismatch between model and checkpoint: "
+        f"{param.shape} != {loaded_weight.shape}")
     param.data.copy_(loaded_weight)
 
 
