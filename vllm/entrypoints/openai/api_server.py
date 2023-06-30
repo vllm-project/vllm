@@ -19,7 +19,6 @@ from vllm.entrypoints.openai.protocol import (
     CompletionRequest, CompletionResponse, CompletionResponseChoice,
     CompletionResponseStreamChoice, CompletionStreamResponse, ErrorResponse,
     LogProbs, ModelCard, ModelList, ModelPermission, UsageInfo)
-from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
