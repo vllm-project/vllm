@@ -1,4 +1,4 @@
-
+# Adapted from https://huggingface.co/tiiuae/falcon-40b/blob/main/modelling_RW.py
 """Inference-only Falcon model compatible with HuggingFace weights.
 
 The input of the model is flattened to a 1D tensor of tokens. The model uses
