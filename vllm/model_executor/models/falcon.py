@@ -1,4 +1,4 @@
-# Adapted from https://huggingface.co/tiiuae/falcon-40b/blob/main/modelling_RW.py
+# Adapted from https://huggingface.co/tiiuae/falcon-7b/blob/main/modelling_RW.py
 """Inference-only Falcon model compatible with HuggingFace weights.
 
 The input of the model is flattened to a 1D tensor of tokens. The model uses
@@ -134,13 +134,23 @@ class DecoderLayer(nn.Module):
         hidden_size = config.hidden_size
         self.num_heads = config.n_head
 
-        self.input_layernorm = nn.LayerNorm(hidden_size,
-                                            eps=config.layer_norm_epsilon)
+        # NOTE(woosuk): Falcon-7B uses the same layernorm for attention and
+        # MLP. However, Falcon-40B uses separate layernorms for them.
+        # FIXME(woosuk): This is a hacky way to distinguish the two models.
+        if hidden_size == 4544:
+            # Falcon-7B
+            self.input_layernorm = nn.LayerNorm(hidden_size,
+                                                eps=config.layer_norm_epsilon)
+        elif hidden_size == 8192:
+            # Falcon-40B
+            self.ln_attn = nn.LayerNorm(hidden_size,
+                                        eps=config.layer_norm_epsilon)
+            self.ln_mlp = nn.LayerNorm(hidden_size,
+                                       eps=config.layer_norm_epsilon)
+        else:
+            raise ValueError(f"Only Falcon-7B and Falcon-40B are supported.")
+        assert config.parallel_attn
         self.self_attention = Attention(config)
-        if not config.parallel_attn:
-            # unused if parallel attn
-            self.post_attention_layernorm = nn.LayerNorm(
-                hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = MLP(config)
 
     def forward(
@@ -151,9 +161,8 @@ class DecoderLayer(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        layernorm_output = self.input_layernorm(hidden_states)
         residual = hidden_states
-
+        layernorm_output = self.input_layernorm(hidden_states)
         # Self attention.
         attention_output = self.self_attention(
             position_ids=position_ids,
@@ -162,16 +171,9 @@ class DecoderLayer(nn.Module):
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
-        if not self.config.parallel_attn:
-            residual = attention_output + residual
-            layernorm_output = self.post_attention_layernorm(residual)
-
         # MLP.
         mlp_output = self.mlp(layernorm_output)
-        if self.config.parallel_attn:
-            mlp_output += attention_output
-
-        output = mlp_output + residual
+        output = attention_output + mlp_output + residual
         return output
 
 
