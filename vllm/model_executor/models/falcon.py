@@ -162,17 +162,25 @@ class DecoderLayer(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         residual = hidden_states
-        layernorm_output = self.input_layernorm(hidden_states)
+        if hasattr(self, "input_layernorm"):
+            # Falcon-7B
+            ln_attn = self.input_layernorm(hidden_states)
+            ln_mlp = ln_attn
+        else:
+            # Falcon-40B
+            ln_attn = self.ln_attn(hidden_states)
+            ln_mlp = self.ln_mlp(hidden_states)
+
         # Self attention.
         attention_output = self.self_attention(
             position_ids=position_ids,
-            hidden_states=layernorm_output,
+            hidden_states=ln_attn,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
         # MLP.
-        mlp_output = self.mlp(layernorm_output)
+        mlp_output = self.mlp(ln_mlp)
         output = attention_output + mlp_output + residual
         return output
 
