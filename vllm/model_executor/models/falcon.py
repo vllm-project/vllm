@@ -256,7 +256,7 @@ class RWForCausalLM(nn.Module):
         return next_tokens
 
     _column_parallel_weights = ["word_embeddings.weight", "lm_head.weight",
-                                "dense_h_to_4h.weight", "dense_h_to_4h.bias"]
+                                "dense_h_to_4h.weight"]
     _row_parallel_weights = ["dense.weight", "dense_4h_to_h.weight"]
 
     def load_weights(self, model_name_or_path: str,
@@ -283,19 +283,12 @@ class RWForCausalLM(nn.Module):
                 head_size = hidden_size // total_num_query_heads
                 loaded_weight = loaded_weight.view(-1, head_size, hidden_size)
 
+                # Load query weights.
                 num_query_heads = (total_num_query_heads //
                                    tensor_model_parallel_world_size)
                 query_head_start = tensor_model_parallel_rank * num_query_heads
                 query_head_end = (tensor_model_parallel_rank + 1) * num_query_heads
 
-                total_num_kv_heads = self.config.n_head_kv
-                num_kv_heads = (total_num_kv_heads //
-                                tensor_model_parallel_world_size)
-                kv_head_start = tensor_model_parallel_rank * num_kv_heads
-                kv_head_end = (tensor_model_parallel_rank + 1) * num_kv_heads
-
-                # Load query weights.
-                query_weight = loaded_weight[:total_num_query_heads, :, :]
                 query_weight = loaded_weight[query_head_start:query_head_end, :, :]
                 query_weight = query_weight.reshape(-1, hidden_size)
                 param = state_dict[name.replace("query_key_value", "query")]
@@ -303,6 +296,12 @@ class RWForCausalLM(nn.Module):
                 param.data.copy_(query_weight)
 
                 # Load key and value weights.
+                total_num_kv_heads = self.config.n_head_kv
+                num_kv_heads = (total_num_kv_heads //
+                                tensor_model_parallel_world_size)
+                kv_head_start = tensor_model_parallel_rank * num_kv_heads
+                kv_head_end = (tensor_model_parallel_rank + 1) * num_kv_heads
+
                 key_value_weight = loaded_weight[total_num_query_heads:, :, :]
                 key_value_weight = key_value_weight.reshape(
                     2, total_num_kv_heads, head_size, hidden_size)
