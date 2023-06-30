@@ -268,51 +268,51 @@ class RWForCausalLM(nn.Module):
 
         for name, loaded_weight in hf_model_weights_iterator(
             model_name_or_path, cache_dir, use_np_cache):
-
-            # For the fused QKV linear layer, we split the weight into query and key_value
-            # and shard them along the head dimension.
-            if "query_key_value" in name:
-                if not name.endswith(".weight"):
-                    # Falcon does not use bias for linear layers.
-                    raise ValueError(f"Unexpected parameter name {name}")
-
-                # The fused QKV weight has the shape of
-                # [(num_q_heads + 2 * num_kv_heads) * head_size, hidden_size].
-                total_num_query_heads = self.config.num_attention_heads
-                hidden_size = self.config.hidden_size
-                head_size = hidden_size // total_num_query_heads
-                loaded_weight = loaded_weight.view(-1, head_size, hidden_size)
-
-                # Load query weights.
-                num_query_heads = (total_num_query_heads //
-                                   tensor_model_parallel_world_size)
-                query_head_start = tensor_model_parallel_rank * num_query_heads
-                query_head_end = (tensor_model_parallel_rank + 1) * num_query_heads
-
-                query_weight = loaded_weight[query_head_start:query_head_end, :, :]
-                query_weight = query_weight.reshape(-1, hidden_size)
-                param = state_dict[name.replace("query_key_value", "query")]
-                assert param.shape == query_weight.shape
-                param.data.copy_(query_weight)
-
-                # Load key and value weights.
-                total_num_kv_heads = self.config.n_head_kv
-                num_kv_heads = (total_num_kv_heads //
-                                tensor_model_parallel_world_size)
-                kv_head_start = tensor_model_parallel_rank * num_kv_heads
-                kv_head_end = (tensor_model_parallel_rank + 1) * num_kv_heads
-
-                key_value_weight = loaded_weight[total_num_query_heads:, :, :]
-                key_value_weight = key_value_weight.reshape(
-                    2, total_num_kv_heads, head_size, hidden_size)
-                key_value_weight = key_value_weight[:, kv_head_start:kv_head_end, :, :]
-                key_value_weight = key_value_weight.reshape(-1, hidden_size)
-                param = state_dict[name.replace("query_key_value", "key_value")]
-                assert param.shape == key_value_weight.shape
-                param.data.copy_(key_value_weight)
-            else:
+            if not "query_key_value" in name:
                 param = state_dict[name]
                 load_tensor_parallel_weights(param, loaded_weight, name,
                                              self._column_parallel_weights,
                                              self._row_parallel_weights,
                                              tensor_model_parallel_rank)
+                continue
+
+            # For the fused QKV linear layer, we split the weight into
+            # query and key_value and shard them along the head dimension.
+            if not name.endswith(".weight"):
+                # Falcon does not use bias for linear layers.
+                raise ValueError(f"Unexpected parameter name {name}")
+
+            # The fused QKV weight has the shape of
+            # [(num_q_heads + 2 * num_kv_heads) * head_size, hidden_size].
+            total_num_query_heads = self.config.num_attention_heads
+            hidden_size = self.config.hidden_size
+            head_size = hidden_size // total_num_query_heads
+            loaded_weight = loaded_weight.view(-1, head_size, hidden_size)
+
+            # Load query weights.
+            num_query_heads = (total_num_query_heads //
+                               tensor_model_parallel_world_size)
+            query_head_start = tensor_model_parallel_rank * num_query_heads
+            query_head_end = (tensor_model_parallel_rank + 1) * num_query_heads
+
+            query_weight = loaded_weight[query_head_start:query_head_end, :, :]
+            query_weight = query_weight.reshape(-1, hidden_size)
+            param = state_dict[name.replace("query_key_value", "query")]
+            assert param.shape == query_weight.shape
+            param.data.copy_(query_weight)
+
+            # Load key and value weights.
+            total_num_kv_heads = self.config.n_head_kv
+            num_kv_heads = (total_num_kv_heads //
+                            tensor_model_parallel_world_size)
+            kv_head_start = tensor_model_parallel_rank * num_kv_heads
+            kv_head_end = (tensor_model_parallel_rank + 1) * num_kv_heads
+
+            key_value_weight = loaded_weight[total_num_query_heads:, :, :]
+            key_value_weight = key_value_weight.reshape(
+                2, total_num_kv_heads, head_size, hidden_size)
+            key_value_weight = key_value_weight[:, kv_head_start:kv_head_end, :, :]
+            key_value_weight = key_value_weight.reshape(-1, hidden_size)
+            param = state_dict[name.replace("query_key_value", "key_value")]
+            assert param.shape == key_value_weight.shape
+            param.data.copy_(key_value_weight)
