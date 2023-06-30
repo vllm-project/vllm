@@ -4,6 +4,7 @@ from vllm.transformers_utils.configs import *
 
 _CONFIG_REGISTRY = {
     "RefinedWeb": RWConfig,
+    "RefinedWebModel": RWConfig,
 }
 
 
