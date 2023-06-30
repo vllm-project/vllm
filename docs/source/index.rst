@@ -29,7 +29,7 @@ vLLM is fast with:
 
 * State-of-the-art serving throughput
 * Efficient management of attention key and value memory with **PagedAttention**
-* Dynamic batching of incoming requests
+* Continuous batching of incoming requests
 * Optimized CUDA kernels
 
 vLLM is flexible and easy to use with:
@@ -40,7 +40,11 @@ vLLM is flexible and easy to use with:
 * Streaming outputs
 * OpenAI-compatible API server
 
-For more information, please refer to our `blog post <https://vllm.ai>`_.
+For more information, check out the following:
+
+* `vLLM announcing blog post <https://vllm.ai>`_ (intro to PagedAttention)
+* `How continuous batching enables 23x throughput in LLM inference while reducing p50 latency <https://www.anyscale.com/blog/continuous-batching-llm-inference>`_ by Cade Daniel et al.
+
 
 
 Documentation
@@ -52,6 +56,12 @@ Documentation
 
    getting_started/installation
    getting_started/quickstart
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Serving
+
+   serving/distributed_serving
 
 .. toctree::
    :maxdepth: 1
