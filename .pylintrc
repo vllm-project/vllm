@@ -85,6 +85,8 @@ disable=abstract-method,
         intern-builtin,
         invalid-str-codec,
         locally-disabled,
+        logging-fstring-interpolation,  # added by vLLM
+        logging-not-lazy,  # added by vLLM
         long-builtin,
         long-suffix,
         map-builtin-not-iterating,
