@@ -284,9 +284,9 @@ class LLMEngine:
                 if stopped:
                     continue
 
-                # Check if the sequence has reached max_sequence_len.
-                if seq.get_len() == \
-                    self.scheduler.scheduler_config.max_sequence_len:
+                # Check if the sequence has reached max_seq_len.
+                if (seq.get_len() >=
+                    self.scheduler.scheduler_config.max_seq_len):
                     self.scheduler.free_seq(
                         seq, SequenceStatus.FINISHED_LENGTH_CAPPED)
                     continue
