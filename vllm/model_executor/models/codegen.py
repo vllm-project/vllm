@@ -1,7 +1,6 @@
 # coding=utf-8
 # Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py
-# Copyright 2023 The vLLM team.
-# Copyright 2023 The vLLM team.
+# Copyright 2023 The vLLM team, Michael Feil
 # Copyright 2022 EleutherAI The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -123,7 +122,7 @@ class CodeGenMLP(nn.Module):
         return hidden_states
 
 
-class GPTJBlock(nn.Module):
+class CodeGenBlock(nn.Module):
 
     def __init__(self, config: CodeGenConfig):
         super().__init__()
@@ -210,7 +209,7 @@ class CodeGenForCausalLM(nn.Module):
                                             perform_initialization=False)
 
         self.sampler = Sampler(config.vocab_size)
-        
+
         
 
     def forward(
@@ -271,6 +270,8 @@ class CodeGenForCausalLM(nn.Module):
                 # continue GPT-J-style
                 
                 for name_p, weight in [("q_proj",qw),("k_proj",kw),("v_proj",vw)]:
+                    # TODO: check if this works.
+                    new_name = name.replace('qkv_proj', name_p)
                     if 'qkv_proj.weight' in name:
                         weight = weight.view(-1, 3, head_size, hidden_size)
                         weight = weight.transpose(0, 1)
@@ -281,17 +282,19 @@ class CodeGenForCausalLM(nn.Module):
                         weight = weight.reshape(-1)
                     else:
                         raise ValueError(f"Unexpected weight name: {name}")
-                    self._replace(state_dict, weight, name.replace('qkv_proj', name_p))
+                    self._replace(state_dict, weight, new_name)
+                    param = state_dict[name]
                     load_tensor_parallel_weights(param, weight, name.replace('qkv_proj', name_p),
                                             self._column_parallel_weights,
                                             self._row_parallel_weights,
                                             tensor_model_parallel_rank)
-                state_dict.pop(name)                
+                state_dict.pop(name)
             else:
                 load_tensor_parallel_weights(param, loaded_weight, name,
                                             self._column_parallel_weights,
                                             self._row_parallel_weights,
                                             tensor_model_parallel_rank)
+    @staticmethod
     def _replace(state_dict, weights, model_name):
         state_dict[model_name].copy_(weights.detach())
     
