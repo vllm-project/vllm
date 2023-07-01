@@ -113,7 +113,6 @@ class MLP(nn.Module):
     def __init__(self, config: RWConfig):
         super().__init__()
         hidden_size = config.hidden_size
-
         self.dense_h_to_4h = ColumnParallelLinear(hidden_size, 4 * hidden_size,
                                                   bias=config.bias,
                                                   gather_output=False,
