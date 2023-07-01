@@ -43,8 +43,7 @@ class SchedulerOutputs:
         assert not (blocks_to_swap_in and blocks_to_swap_out)
 
     def is_empty(self) -> bool:
-        return (not self.blocks_to_swap_in
-                and not self.blocks_to_swap_out
+        return (not self.blocks_to_swap_in and not self.blocks_to_swap_out
                 and not self.blocks_to_copy)
 
 
@@ -169,8 +168,7 @@ class Scheduler:
 
         num_batched_tokens = sum(
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
-            for seq_group in self.running
-        )
+            for seq_group in self.running)
 
         # Join waiting sequences if possible.
         prompt_group_ids: List[str] = []
@@ -193,13 +191,14 @@ class Scheduler:
 
                 # If the number of batched tokens exceeds the limit, stop.
                 num_prompt_tokens = seq_group.get_seqs()[0].get_len()
-                if (num_batched_tokens + num_prompt_tokens
-                    > self.scheduler_config.max_num_batched_tokens):
+                if (num_batched_tokens + num_prompt_tokens >
+                        self.scheduler_config.max_num_batched_tokens):
                     break
 
                 # The total number of sequences in the RUNNING state should not
                 # exceed the maximum number of sequences.
-                num_new_seqs = seq_group.num_seqs(status=SequenceStatus.WAITING)
+                num_new_seqs = seq_group.num_seqs(
+                    status=SequenceStatus.WAITING)
                 num_curr_seqs = sum(
                     seq_group.num_seqs(status=SequenceStatus.RUNNING)
                     for seq_group in self.running)
@@ -227,12 +226,11 @@ class Scheduler:
         elapsed_time = now - self.last_logging_time
         if elapsed_time > _LOGGING_INTERVAL_SEC:
             self.last_logging_time = now
-            self.num_input_tokens = [
-                (t, n) for t, n in self.num_input_tokens
-                if now - t < _LOGGING_INTERVAL_SEC
-            ]
+            self.num_input_tokens = [(t, n) for t, n in self.num_input_tokens
+                                     if now - t < _LOGGING_INTERVAL_SEC]
             if len(self.num_input_tokens) > 1:
-                total_num_tokens = sum(n for _, n in self.num_input_tokens[:-1])
+                total_num_tokens = sum(n
+                                       for _, n in self.num_input_tokens[:-1])
                 window = now - self.num_input_tokens[0][0]
                 avg_throughput = total_num_tokens / window
             else:
@@ -245,19 +243,19 @@ class Scheduler:
 
             total_num_cpu_blocks = self.cache_config.num_cpu_blocks
             if total_num_cpu_blocks > 0:
-                num_free_cpu_blocks = self.block_manager.get_num_free_cpu_blocks()
+                num_free_cpu_blocks = self.block_manager.get_num_free_cpu_blocks(
+                )
                 num_used_cpu_blocks = total_num_cpu_blocks - num_free_cpu_blocks
                 cpu_cache_usage = num_used_cpu_blocks / total_num_cpu_blocks
             else:
                 cpu_cache_usage = 0.0
 
-            logger.info(
-                f"Throughput: {avg_throughput:.1f} tokens/s, "
-                f"Running: {len(self.running)} reqs, "
-                f"Swapped: {len(self.swapped)} reqs, "
-                f"Pending: {len(self.waiting)} reqs, "
-                f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
-                f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
+            logger.info(f"Throughput: {avg_throughput:.1f} tokens/s, "
+                        f"Running: {len(self.running)} reqs, "
+                        f"Swapped: {len(self.swapped)} reqs, "
+                        f"Pending: {len(self.waiting)} reqs, "
+                        f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
+                        f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         return scheduler_outputs, prompt_group_ids
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:

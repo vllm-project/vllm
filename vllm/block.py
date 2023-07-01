@@ -35,7 +35,8 @@ class LogicalTokenBlock:
 
     def append_tokens(self, token_ids: List[int]) -> None:
         assert len(token_ids) <= self.get_num_empty_slots()
-        self.token_ids[self.num_tokens:self.num_tokens + len(token_ids)] = token_ids
+        self.token_ids[self.num_tokens:self.num_tokens +
+                       len(token_ids)] = token_ids
         self.num_tokens += len(token_ids)
 
     def get_token_ids(self) -> List[int]:

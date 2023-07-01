@@ -3,6 +3,7 @@ from typing import List, Optional, Union
 
 _SAMPLING_EPS = 1e-5
 
+
 class SamplingParams:
     """Sampling parameters for text generation.
 

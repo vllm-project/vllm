@@ -54,10 +54,10 @@ class PagedAttention(nn.Module):
 
     def multi_query_kv_attention(
         self,
-        output: torch.Tensor,                   # [num_prompt_tokens, num_heads, head_size]
-        query: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
-        key: torch.Tensor,                      # [num_prompt_tokens, num_heads, head_size]
-        value: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
+        output: torch.Tensor,  # [num_prompt_tokens, num_heads, head_size]
+        query: torch.Tensor,  # [num_prompt_tokens, num_heads, head_size]
+        key: torch.Tensor,  # [num_prompt_tokens, num_heads, head_size]
+        value: torch.Tensor,  # [num_prompt_tokens, num_heads, head_size]
         attn_bias: xops.AttentionBias,
     ) -> torch.Tensor:
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
@@ -76,10 +76,12 @@ class PagedAttention(nn.Module):
 
     def single_query_cached_kv_attention(
         self,
-        output: torch.Tensor,           # [num_generation_tokens, num_heads, head_size]
-        query: torch.Tensor,            # [num_generation_tokens, num_heads, head_size]
-        key_cache: torch.Tensor,        # [num_blocks, num_heads, head_size/x, block_size, x]
-        value_cache: torch.Tensor,      # [num_blocks, num_heads, head_size, block_size]
+        output: torch.Tensor,  # [num_generation_tokens, num_heads, head_size]
+        query: torch.Tensor,  # [num_generation_tokens, num_heads, head_size]
+        key_cache: torch.
+        Tensor,  # [num_blocks, num_heads, head_size/x, block_size, x]
+        value_cache: torch.
+        Tensor,  # [num_blocks, num_heads, head_size, block_size]
         input_metadata: InputMetadata,
     ) -> None:
         block_size = value_cache.shape[3]
@@ -97,14 +99,17 @@ class PagedAttention(nn.Module):
 
     def forward(
         self,
-        query: torch.Tensor,                    # [num_tokens, num_heads * head_size]
-        key: torch.Tensor,                      # [num_tokens, num_heads * head_size]
-        value: torch.Tensor,                    # [num_tokens, num_heads * head_size]
-        key_cache: Optional[torch.Tensor],      # [num_blocks, num_heads, head_size/x, block_size, x]
-        value_cache: Optional[torch.Tensor],    # [num_blocks, num_heads, head_size, block_size]
+        query: torch.Tensor,  # [num_tokens, num_heads * head_size]
+        key: torch.Tensor,  # [num_tokens, num_heads * head_size]
+        value: torch.Tensor,  # [num_tokens, num_heads * head_size]
+        key_cache: Optional[
+            torch.
+            Tensor],  # [num_blocks, num_heads, head_size/x, block_size, x]
+        value_cache: Optional[
+            torch.Tensor],  # [num_blocks, num_heads, head_size, block_size]
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
-    ) -> torch.Tensor:                          # [num_tokens, num_heads * head_size]
+    ) -> torch.Tensor:  # [num_tokens, num_heads * head_size]
         # NOTE: The query, key, and value tensors must be sliced from a qkv
         # tensor of shape [num_tokens, 3 * num_heads * head_size].
 
@@ -136,7 +141,7 @@ class PagedAttention(nn.Module):
         # and value vectors will not be cached.
         num_valid_tokens = input_metadata.num_valid_tokens
         if (num_valid_tokens > 0 and key_cache is not None
-            and value_cache is not None):
+                and value_cache is not None):
             # The stride is 3 because the key and value are sliced from qkv.
             cache_ops.reshape_and_cache(
                 key[:num_valid_tokens],
@@ -149,15 +154,12 @@ class PagedAttention(nn.Module):
         if input_metadata.num_generation_tokens > 0:
             assert key_cache is not None and value_cache is not None, (
                 "key_cache and value_cache must be provided when "
-                "generating tokens."
-            )
+                "generating tokens.")
             # Compute the attention op for generation tokens.
             self.single_query_cached_kv_attention(
                 output[num_prompt_tokens:num_valid_tokens],
-                query[num_prompt_tokens:num_valid_tokens],
-                key_cache,
-                value_cache,
-                input_metadata)
+                query[num_prompt_tokens:num_valid_tokens], key_cache,
+                value_cache, input_metadata)
 
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.
@@ -179,7 +181,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         super().__init__(num_heads, head_size, scale)
 
         # Create the cos and sin cache.
-        inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2) / rotary_dim))
+        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
         t = torch.arange(max_position).float()
         freqs = torch.einsum('i,j -> ij', t, inv_freq.float())
         cos = freqs.cos()
@@ -195,15 +197,17 @@ class PagedAttentionWithRoPE(PagedAttention):
 
     def forward(
         self,
-        positions: torch.Tensor,                # [num_tokens]
-        query: torch.Tensor,                    # [num_tokens, num_heads * head_size]
-        key: torch.Tensor,                      # [num_tokens, num_heads * head_size]
-        value: torch.Tensor,                    # [num_tokens, num_heads * head_size]
-        key_cache: torch.Tensor,                # [num_blocks, num_heads, head_size/x, block_size, x]
-        value_cache: torch.Tensor,              # [num_blocks, num_heads, head_size, block_size]
+        positions: torch.Tensor,  # [num_tokens]
+        query: torch.Tensor,  # [num_tokens, num_heads * head_size]
+        key: torch.Tensor,  # [num_tokens, num_heads * head_size]
+        value: torch.Tensor,  # [num_tokens, num_heads * head_size]
+        key_cache: torch.
+        Tensor,  # [num_blocks, num_heads, head_size/x, block_size, x]
+        value_cache: torch.
+        Tensor,  # [num_blocks, num_heads, head_size, block_size]
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
-    ) -> torch.Tensor:                          # [num_tokens, num_heads * head_size]
+    ) -> torch.Tensor:  # [num_tokens, num_heads * head_size]
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
         pos_encoding_ops.rotary_embedding_neox(

@@ -8,7 +8,8 @@ except ImportError:
 
 from vllm.config import ParallelConfig
 
-DeviceID = Tuple[int, Optional[str], int]  # rank, node resource (node IP), device id
+DeviceID = Tuple[int, Optional[str],
+                 int]  # rank, node resource (node IP), device id
 
 
 def initialize_cluster(

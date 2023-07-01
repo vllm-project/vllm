@@ -27,8 +27,9 @@ class BlockAllocator:
         # Initialize the free blocks.
         self.free_blocks: List[PhysicalTokenBlock] = []
         for i in range(num_blocks):
-            block = PhysicalTokenBlock(
-                device=device, block_number=i, block_size=block_size)
+            block = PhysicalTokenBlock(device=device,
+                                       block_number=i,
+                                       block_size=block_size)
             self.free_blocks.append(block)
 
     def allocate(self) -> PhysicalTokenBlock:
@@ -143,7 +144,8 @@ class BlockSpaceManager:
         for block in src_block_table:
             block.ref_count += 1
 
-    def _get_physical_blocks(self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
+    def _get_physical_blocks(
+            self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
         # NOTE: Here, we assume that the physical blocks are only shared by
         # the sequences in the same group.
         blocks: Set[PhysicalTokenBlock] = set()

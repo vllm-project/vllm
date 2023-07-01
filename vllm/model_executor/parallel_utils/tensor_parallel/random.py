@@ -12,8 +12,7 @@ from torch import _C
 from torch.cuda import _lazy_call, device as device_ctx_manager
 
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-)
+    get_tensor_model_parallel_rank, )
 
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
@@ -50,7 +49,6 @@ def _set_cuda_rng_state(new_state, device=-1):
             default_generator.set_state(new_state)
 
     _lazy_call(cb)
-
 
 
 class CudaRNGStatesTracker:

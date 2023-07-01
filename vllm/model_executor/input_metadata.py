@@ -11,8 +11,9 @@ class InputMetadata:
 
     def __init__(
         self,
-        seq_groups: List[Tuple[List[int], SamplingParams]],     # List of (seq_ids, sampling_params).
-        seq_data: Dict[int, SequenceData],                      # Seq_id -> SequenceData.
+        seq_groups: List[Tuple[
+            List[int], SamplingParams]],  # List of (seq_ids, sampling_params).
+        seq_data: Dict[int, SequenceData],  # Seq_id -> SequenceData.
         prompt_lens: List[int],
         slot_mapping: torch.Tensor,
         context_lens: torch.Tensor,

@@ -67,8 +67,7 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"use_np_weights={model_config.use_np_weights}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
-            f"seed={model_config.seed})"
-        )
+            f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
@@ -152,7 +151,9 @@ class LLMEngine:
         # Initialize the cluster.
         distributed_init_method, devices = initialize_cluster(parallel_config)
         # Create the LLM engine.
-        engine = cls(*engine_configs, distributed_init_method, devices,
+        engine = cls(*engine_configs,
+                     distributed_init_method,
+                     devices,
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
@@ -281,8 +282,8 @@ class LLMEngine:
                         # Truncate the output text so that the stop string is
                         # not included in the output.
                         seq.output_text = seq.output_text[:-len(stop_str)]
-                        self.scheduler.free_seq(seq,
-                                                SequenceStatus.FINISHED_STOPPED)
+                        self.scheduler.free_seq(
+                            seq, SequenceStatus.FINISHED_STOPPED)
                         stopped = True
                         break
                 if stopped:
@@ -296,8 +297,8 @@ class LLMEngine:
                 # Check if the sequence has generated the EOS token.
                 if not sampling_params.ignore_eos:
                     if seq.get_last_token_id() == self.tokenizer.eos_token_id:
-                        self.scheduler.free_seq(seq,
-                                                SequenceStatus.FINISHED_STOPPED)
+                        self.scheduler.free_seq(
+                            seq, SequenceStatus.FINISHED_STOPPED)
                         continue
 
     def _run_workers(

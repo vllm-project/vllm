@@ -120,11 +120,10 @@ class CacheEngine:
                 src_key_cache, src_value_cache = src[i]
                 dst_key_cache, dst_value_cache = dst[i]
                 # Copy the key blocks.
-                cache_ops.swap_blocks(
-                    src_key_cache, dst_key_cache, src_to_dst)
+                cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
                 # Copy the value blocks.
-                cache_ops.swap_blocks(
-                    src_value_cache, dst_value_cache, src_to_dst)
+                cache_ops.swap_blocks(src_value_cache, dst_value_cache,
+                                      src_to_dst)
                 event = self.events[i]
                 event.record(stream=self.cache_stream)
 

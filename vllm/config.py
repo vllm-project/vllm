@@ -106,6 +106,7 @@ class CacheConfig:
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
     """
+
     def __init__(
         self,
         block_size: int,
@@ -137,10 +138,9 @@ class CacheConfig:
         num_gpus_per_node = parallel_config.tensor_parallel_size
         cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
 
-        msg = (
-            f"{cpu_memory_usage / _GiB:.2f} GiB out of "
-            f"the {total_cpu_memory / _GiB:.2f} GiB total CPU memory is "
-            "allocated for the swap space.")
+        msg = (f"{cpu_memory_usage / _GiB:.2f} GiB out of "
+               f"the {total_cpu_memory / _GiB:.2f} GiB total CPU memory is "
+               "allocated for the swap space.")
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
@@ -157,6 +157,7 @@ class ParallelConfig:
             True if either pipeline_parallel_size or tensor_parallel_size is
             greater than 1.
     """
+
     def __init__(
         self,
         pipeline_parallel_size: int,
@@ -187,6 +188,7 @@ class SchedulerConfig:
         max_num_seqs: Maximum number of sequences to be processed in a single
             iteration.
     """
+
     def __init__(
         self,
         max_num_batched_tokens: int,

@@ -146,7 +146,8 @@ class Sequence:
         return SequenceStatus.is_finished(self.status)
 
     def fork(self, child_seq: 'Sequence') -> None:
-        child_seq.logical_token_blocks = copy.deepcopy(self.logical_token_blocks)
+        child_seq.logical_token_blocks = copy.deepcopy(
+            self.logical_token_blocks)
         child_seq.output_logprobs = copy.deepcopy(self.output_logprobs)
         child_seq.data = copy.deepcopy(self.data)
         return None
@@ -201,12 +202,13 @@ class SequenceGroup:
 class SequenceGroupMetadata:
 
     def __init__(
-        self,
-        request_id: str,
-        is_prompt: bool,
-        seq_data: Dict[int, SequenceData],      # Seq id -> sequence data.
-        sampling_params: SamplingParams,
-        block_tables: Dict[int, List[int]],     # Seq id -> list of physical block numbers.
+            self,
+            request_id: str,
+            is_prompt: bool,
+            seq_data: Dict[int, SequenceData],  # Seq id -> sequence data.
+            sampling_params: SamplingParams,
+            block_tables: Dict[
+                int, List[int]],  # Seq id -> list of physical block numbers.
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -218,11 +220,12 @@ class SequenceGroupMetadata:
 class SequenceOutputs:
 
     def __init__(
-        self,
-        seq_id: int,
-        parent_seq_id: int,
-        output_token: int,
-        logprobs: Dict[int, float],         # Token id -> logP(x_i+1 | x_0, ..., x_i).
+            self,
+            seq_id: int,
+            parent_seq_id: int,
+            output_token: int,
+            logprobs: Dict[int,
+                           float],  # Token id -> logP(x_i+1 | x_0, ..., x_i).
     ) -> None:
         self.seq_id = seq_id
         self.parent_seq_id = parent_seq_id
@@ -238,7 +241,7 @@ class SequenceOutputs:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
             return NotImplemented
-        return (self.seq_id == other.seq_id and
-                self.parent_seq_id == other.parent_seq_id and
-                self.output_token == other.output_token and
-                self.logprobs == other.logprobs)
+        return (self.seq_id == other.seq_id
+                and self.parent_seq_id == other.parent_seq_id
+                and self.output_token == other.output_token
+                and self.logprobs == other.logprobs)

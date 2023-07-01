@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# YAPF formatter, adapted from ray.
+# YAPF formatter, adapted from ray and skypilot.
 #
 # Usage:
 #    # Do work and commit your work.
@@ -23,9 +23,7 @@ builtin cd "$ROOT" || exit 1
 
 YAPF_VERSION=$(yapf --version | awk '{print $2}')
 PYLINT_VERSION=$(pylint --version | head -n 1 | awk '{print $2}')
-PYLINT_QUOTES_VERSION=$(pip list | grep pylint-quotes | awk '{print $2}')
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
-BLACK_VERSION=$(black --version | head -n 1 | awk '{print $2}')
 
 # # params: tool name, tool version, required version
 tool_version_check() {
@@ -73,7 +71,7 @@ format_changed() {
 
 # Format all files
 format_all() {
-    yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" sky tests examples
+    yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" vllm
 }
 
 ## This flag formats individual files. --files *must* be the first command line
@@ -89,17 +87,14 @@ else
    format_changed
 fi
 echo 'vLLM yapf: Done'
-echo 'vLLM Black:'
-black "${BLACK_INCLUDES[@]}"
 
 # Run mypy
-# TODO(zhwu): When more of the codebase is typed properly, the mypy flags
-# should be set to do a more stringent check.
-echo 'vLLM mypy:'
-mypy
+# TODO(zhuohan): Enable mypy
+# echo 'vLLM mypy:'
+# mypy
 
 # Run Pylint
-echo 'Sky Pylint:'
+echo 'vLLM Pylint:'
 pylint vllm
 
 if ! git diff --quiet &>/dev/null; then
