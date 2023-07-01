@@ -13,6 +13,7 @@ class SequenceStatus(enum.Enum):
     FINISHED_STOPPED = enum.auto()
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
+    FINISHED_IGNORED = enum.auto()
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
@@ -20,6 +21,7 @@ class SequenceStatus(enum.Enum):
             SequenceStatus.FINISHED_STOPPED,
             SequenceStatus.FINISHED_LENGTH_CAPPED,
             SequenceStatus.FINISHED_ABORTED,
+            SequenceStatus.FINISHED_IGNORED
         ]
 
     @staticmethod
@@ -30,6 +32,8 @@ class SequenceStatus(enum.Enum):
             finish_reason = "length"
         elif status == SequenceStatus.FINISHED_ABORTED:
             finish_reason = "abort"
+        elif status == SequenceStatus.FINISHED_IGNORED:
+            finish_reason = "length"
         else:
             finish_reason = None
         return finish_reason

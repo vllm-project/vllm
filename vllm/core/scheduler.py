@@ -102,11 +102,12 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
-    def _schedule(self) -> Tuple[SchedulerOutputs, List[str]]:
+    def _schedule(self) -> Tuple[SchedulerOutputs, List[str], List[SequenceGroup]]:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
+        ignored_seq_groups: List[SequenceGroup] = []
 
         # Fix the current time.
         now = time.time()
@@ -187,12 +188,24 @@ class Scheduler:
                 # If the sequence group has been preempted in this step, stop.
                 if seq_group in preempted:
                     break
+
+                num_prompt_tokens = seq_group.get_seqs()[0].get_len()
+                if num_prompt_tokens >= self.scheduler_config.max_seq_len:
+                    logger.warn(
+                        f"Input prompt ({num_prompt_tokens} tokens) is too long"
+                        " and exceeds limit of "
+                        f"{self.scheduler_config.max_seq_len}")
+                    for seq in seq_group.get_seqs():
+                        seq.status = SequenceStatus.FINISHED_IGNORED
+                    ignored_seq_groups.append(seq_group)
+                    self.waiting.pop(0)
+                    break
+
                 # If the sequence group cannot be allocated, stop.
                 if not self.block_manager.can_allocate(seq_group):
                     break
 
                 # If the number of batched tokens exceeds the limit, stop.
-                num_prompt_tokens = seq_group.get_seqs()[0].get_len()
                 if (num_batched_tokens + num_prompt_tokens
                     > self.scheduler_config.max_num_batched_tokens):
                     break
@@ -218,7 +231,7 @@ class Scheduler:
             blocks_to_copy=blocks_to_copy,
         )
         if not self.log_stats:
-            return scheduler_outputs, prompt_group_ids
+            return scheduler_outputs, prompt_group_ids, ignored_seq_groups
 
         # TODO(woosuk): Move the below code to the engine.
         now = time.time()
@@ -258,13 +271,13 @@ class Scheduler:
                 f"Pending: {len(self.waiting)} reqs, "
                 f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
                 f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
-        return scheduler_outputs, prompt_group_ids
+        return scheduler_outputs, prompt_group_ids, ignored_seq_groups
 
-    def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
+    def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, List[SequenceGroup]]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
-        scheduler_outputs, prompt_group_ids = self._schedule()
+        scheduler_outputs, prompt_group_ids, ignored_seq_groups = self._schedule()
 
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
@@ -286,7 +299,7 @@ class Scheduler:
                 block_tables=block_tables,
             )
             seq_group_metadata_list.append(seq_group_metadata)
-        return seq_group_metadata_list, scheduler_outputs
+        return seq_group_metadata_list, scheduler_outputs, ignored_seq_groups
 
     def update(
         self,
