@@ -85,10 +85,12 @@ class BlockSpaceManager:
         num_required_blocks = len(seq.logical_token_blocks)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         # Use watermark to avoid frequent cache eviction.
-        return num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks
+        return (num_free_gpu_blocks - num_required_blocks >=
+                self.watermark_blocks)
 
     def allocate(self, seq_group: SequenceGroup) -> None:
-        # NOTE: Here we assume that all sequences in the group have the same prompt.
+        # NOTE: Here we assume that all sequences in the group have the same
+        # prompt.
         seq = seq_group.get_seqs()[0]
 
         # Allocate new physical token blocks that will store the prompt tokens.

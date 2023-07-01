@@ -30,9 +30,6 @@ class SiluAndMul(nn.Module):
     The function computes x -> silu(x[:d]) * x[d:] where d = x.shape[1] // 2.
     """
 
-    def __init__(self):
-        super().__init__()
-
     def forward(
             self,
             x: torch.Tensor,  # (num_tokens, 2 * d)

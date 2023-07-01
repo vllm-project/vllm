@@ -1,5 +1,5 @@
 """Sampling parameters for text generation."""
-from typing import List, Optional, Union
+from typing import Optional, Sequence, Union
 
 _SAMPLING_EPS = 1e-5
 
@@ -52,7 +52,7 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         use_beam_search: bool = False,
-        stop: Union[str, List[str]] = [],
+        stop: Union[str, Sequence[str]] = (),
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,

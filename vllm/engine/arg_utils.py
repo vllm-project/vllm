@@ -12,11 +12,11 @@ class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
     tokenizer: Optional[str] = None
-    tokenizer_mode: str = "auto"
+    tokenizer_mode: str = 'auto'
     download_dir: Optional[str] = None
     use_np_weights: bool = False
     use_dummy_weights: bool = False
-    dtype: str = "auto"
+    dtype: str = 'auto'
     seed: int = 0
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
@@ -129,7 +129,7 @@ class EngineArgs:
         return parser
 
     @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> "EngineArgs":
+    def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.

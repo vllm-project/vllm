@@ -44,9 +44,9 @@ def hf_model_weights_iterator(
     if use_np_cache:
         # Convert the model weights from torch tensors to numpy arrays for
         # faster loading.
-        np_folder = os.path.join(hf_folder, 'np')
+        np_folder = os.path.join(hf_folder, "np")
         os.makedirs(np_folder, exist_ok=True)
-        weight_names_file = os.path.join(np_folder, 'weight_names.json')
+        weight_names_file = os.path.join(np_folder, "weight_names.json")
         with lock:
             if not os.path.exists(weight_names_file):
                 weight_names = []
@@ -57,10 +57,10 @@ def hf_model_weights_iterator(
                         with open(param_path, "wb") as f:
                             np.save(f, param.cpu().detach().numpy())
                         weight_names.append(name)
-                with open(weight_names_file, 'w') as f:
+                with open(weight_names_file, "w") as f:
                     json.dump(weight_names, f)
 
-        with open(weight_names_file, 'r') as f:
+        with open(weight_names_file, "r") as f:
             weight_names = json.load(f)
 
         for name in weight_names:

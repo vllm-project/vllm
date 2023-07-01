@@ -60,7 +60,7 @@ class Scheduler:
         self.log_stats = log_stats
 
         # Instantiate the scheduling policy.
-        self.policy = PolicyFactory.get_policy(policy_name='fcfs')
+        self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Create the block space manager.
         self.block_manager = BlockSpaceManager(
             block_size=self.cache_config.block_size,
@@ -158,7 +158,8 @@ class Scheduler:
             num_curr_seqs = sum(
                 seq_group.num_seqs(status=SequenceStatus.RUNNING)
                 for seq_group in self.running)
-            if num_curr_seqs + num_new_seqs > self.scheduler_config.max_num_seqs:
+            if (num_curr_seqs + num_new_seqs >
+                    self.scheduler_config.max_num_seqs):
                 break
 
             seq_group = self.swapped.pop(0)
@@ -202,7 +203,8 @@ class Scheduler:
                 num_curr_seqs = sum(
                     seq_group.num_seqs(status=SequenceStatus.RUNNING)
                     for seq_group in self.running)
-                if num_curr_seqs + num_new_seqs > self.scheduler_config.max_num_seqs:
+                if (num_curr_seqs + num_new_seqs >
+                        self.scheduler_config.max_num_seqs):
                     break
 
                 seq_group = self.waiting.pop(0)
@@ -243,8 +245,8 @@ class Scheduler:
 
             total_num_cpu_blocks = self.cache_config.num_cpu_blocks
             if total_num_cpu_blocks > 0:
-                num_free_cpu_blocks = self.block_manager.get_num_free_cpu_blocks(
-                )
+                num_free_cpu_blocks = (
+                    self.block_manager.get_num_free_cpu_blocks())
                 num_used_cpu_blocks = total_num_cpu_blocks - num_free_cpu_blocks
                 cpu_cache_usage = num_used_cpu_blocks / total_num_cpu_blocks
             else:
@@ -296,8 +298,8 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 output = seq_outputs[seq.seq_id]
                 if seq.seq_id != output.parent_seq_id:
-                    # The sequence is a fork of the parent sequence (beam search).
-                    # Free the current sequence.
+                    # The sequence is a fork of the parent sequence (beam
+                    # search). Free the current sequence.
                     self.block_manager.free(seq)
                     # Fork the parent sequence.
                     parent_seq = seq_group.find(output.parent_seq_id)
@@ -370,7 +372,7 @@ class Scheduler:
         elif preemption_mode == PreemptionMode.SWAP:
             self._preempt_by_swap(seq_group, blocks_to_swap_out)
         else:
-            assert False, 'Invalid preemption mode.'
+            assert False, "Invalid preemption mode."
 
     def _preempt_by_recompute(
         self,

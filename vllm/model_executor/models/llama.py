@@ -1,9 +1,10 @@
 # coding=utf-8
-# Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
+# Adapted from
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
+# This code is based on EleutherAI"s GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its
 # original forms to accommodate minor architectural differences compared
 # to GPT-NeoX and OPT used by the Meta AI team that trained the model.
@@ -30,7 +31,6 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.sequence import SequenceOutputs
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -66,9 +66,9 @@ class LlamaMLP(nn.Module):
                                            bias=False,
                                            input_is_parallel=True,
                                            perform_initialization=False)
-        if hidden_act != 'silu':
-            raise ValueError(f'Unsupported activation: {hidden_act}. '
-                             'Only silu is supported for now.')
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -91,7 +91,8 @@ class LlamaAttention(nn.Module):
         )
         self.total_num_heads = num_heads
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
+        self.num_heads = (self.total_num_heads //
+                          tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
         self.scaling = self.head_dim**-0.5
 

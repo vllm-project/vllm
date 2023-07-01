@@ -22,7 +22,8 @@ from .random import (
 )
 
 from .utils import (
-    split_tensor_along_last_dim, )
+    split_tensor_along_last_dim,
+)
 
 __all__ = [
     #layers.py
@@ -37,7 +38,7 @@ __all__ = [
     "copy_to_tensor_model_parallel_region",
     "gather_from_tensor_model_parallel_region",
     "gather_from_sequence_parallel_region",
-    #    "reduce_from_tensor_model_parallel_region",
+#    "reduce_from_tensor_model_parallel_region",
     "scatter_to_tensor_model_parallel_region",
     "scatter_to_sequence_parallel_region",
     # random.py

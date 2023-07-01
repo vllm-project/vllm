@@ -1,5 +1,6 @@
 # coding=utf-8
-# Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py
+# Adapted from
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI The HuggingFace Inc. team. All rights reserved.
 #
@@ -51,7 +52,8 @@ class GPTNeoXAttention(nn.Module):
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
         )
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
+        self.num_heads = (self.total_num_heads //
+                          tensor_model_parallel_world_size)
 
         self.query_key_value = ColumnParallelLinear(
             config.hidden_size,
@@ -252,12 +254,12 @@ class GPTNeoXForCausalLM(nn.Module):
                 num_heads = self.config.num_attention_heads
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // num_heads
-                if 'query_key_value.weight' in name:
+                if "query_key_value.weight" in name:
                     loaded_weight = loaded_weight.view(-1, 3, head_size,
                                                        hidden_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1, hidden_size)
-                elif 'query_key_value.bias' in name:
+                elif "query_key_value.bias" in name:
                     loaded_weight = loaded_weight.view(-1, 3, head_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1)

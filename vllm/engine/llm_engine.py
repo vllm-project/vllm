@@ -77,8 +77,8 @@ class LLMEngine:
         self.log_stats = log_stats
         self._verify_args()
 
-        self.tokenizer = get_tokenizer(model_config.tokenizer,
-                                       model_config.tokenizer_mode)
+        self.tokenizer = get_tokenizer(
+            model_config.tokenizer, tokenizer_mode=model_config.tokenizer_mode)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -128,8 +128,8 @@ class LLMEngine:
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
         # FIXME(woosuk): Change to debug log.
-        logger.info(f'# GPU blocks: {num_gpu_blocks}, '
-                    f'# CPU blocks: {num_cpu_blocks}')
+        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
+                    f"# CPU blocks: {num_cpu_blocks}")
 
         if num_gpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
@@ -304,8 +304,8 @@ class LLMEngine:
     def _run_workers(
         self,
         method: str,
-        get_all_outputs: bool = False,
         *args,
+        get_all_outputs: bool = False,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""

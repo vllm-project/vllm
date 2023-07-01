@@ -145,17 +145,16 @@ class Sequence:
     def is_finished(self) -> bool:
         return SequenceStatus.is_finished(self.status)
 
-    def fork(self, child_seq: 'Sequence') -> None:
+    def fork(self, child_seq: "Sequence") -> None:
         child_seq.logical_token_blocks = copy.deepcopy(
             self.logical_token_blocks)
         child_seq.output_logprobs = copy.deepcopy(self.output_logprobs)
         child_seq.data = copy.deepcopy(self.data)
-        return None
 
     def __repr__(self) -> str:
-        return (f'Sequence(seq_id={self.seq_id}, '
-                f'status={self.status.name}, '
-                f'num_blocks={len(self.logical_token_blocks)})')
+        return (f"Sequence(seq_id={self.seq_id}, "
+                f"status={self.status.name}, "
+                f"num_blocks={len(self.logical_token_blocks)})")
 
 
 class SequenceGroup:
@@ -188,7 +187,7 @@ class SequenceGroup:
         for seq in self.seqs:
             if seq.seq_id == seq_id:
                 return seq
-        raise ValueError(f'Sequence {seq_id} not found.')
+        raise ValueError(f"Sequence {seq_id} not found.")
 
     def is_finished(self) -> bool:
         return all(seq.is_finished() for seq in self.seqs)
@@ -233,10 +232,10 @@ class SequenceOutputs:
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
-        return (f'SequenceOutputs(seq_id={self.seq_id}, '
-                f'parent_seq_id={self.parent_seq_id}, '
-                f'output_token={self.output_token}), '
-                f'logprobs={self.logprobs}')
+        return (f"SequenceOutputs(seq_id={self.seq_id}, "
+                f"parent_seq_id={self.parent_seq_id}, "
+                f"output_token={self.output_token}), "
+                f"logprobs={self.logprobs}")
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):

@@ -1,5 +1,6 @@
 # coding=utf-8
-# Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
+# Adapted from
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 CTranslate2, and Michael Feil
 # Copyright 2018 The OpenAI Team Authors and HuggingFace Inc. team.
@@ -119,7 +120,8 @@ class GPTBigCodeBlock(nn.Module):
     def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         hidden_size = config.hidden_size
-        inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
+        inner_dim = (config.n_inner if config.n_inner is not None else 4 *
+                     hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = GPTBigCodeAttention(config)
@@ -157,7 +159,7 @@ class GPTBigCodeModel(nn.Module):
     def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         self.config = config
-        assert config.add_cross_attention == False
+        assert not config.add_cross_attention
 
         self.embed_dim = config.hidden_size
 
@@ -272,26 +274,31 @@ class GPTBigCodeForCausalLM(nn.Module):
                 qkv_array = qkv_array.numpy()
 
                 dims_q = n_head * head_dim
+                # pylint: disable=unbalanced-tuple-unpacking
                 q, k, v = np.split(qkv_array, (dims_q, dims_q + head_dim),
                                    axis=0)
-                # q is fine, but k & v have not replicated shape along the first axis
-                # as long as MQA is not nativly supported, increase memory and replicated
-                # (head_dim, hidden_dim) to (n_heads * head_dim, hidden_dim)
+                # q is fine, but k & v have not replicated shape along the first
+                # axis as long as MQA is not nativly supported, increase memory
+                # and replicated (head_dim, hidden_dim) to
+                # (n_heads * head_dim, hidden_dim)
                 if k.ndim == 2 and v.ndim == 2:
                     replication = (n_head, 1)  # weights
                 else:
                     replication = n_head  # biases
                 # replicate n_head times for q, v
                 k, v = np.tile(k, replication), np.tile(v, replication)
-                # concat q, k, v along the first axis (n_heads * head_dim, hidden_dim)
+                # concat q, k, v along the first axis
+                # (n_heads * head_dim, hidden_dim)
                 # to (3 * n_heads * head_dim, hidden_dim)
                 qkv_array = np.concatenate((q, k, v), axis=0)
                 return torch.from_numpy(qkv_array)
 
             # For the fused QKV linear layer, manually shard the weights.
             if "c_attn" in name:
-                # GPT-2's fused QKV has the shape of [3 * num_heads * head_size, hidden_size].
-                # When tensor parallelism is used, we shard the weights along the head dimension.
+                # GPT-2's fused QKV has the shape of
+                # [3 * num_heads * head_size, hidden_size].
+                # When tensor parallelism is used, we shard the weights along
+                # the head dimension.
                 total_num_heads = self.config.num_attention_heads
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // total_num_heads

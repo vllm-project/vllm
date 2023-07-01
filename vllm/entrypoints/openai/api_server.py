@@ -1,4 +1,5 @@
-# Adapted from https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/serve/openai_api_server.py
+# Adapted from
+# https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/serve/openai_api_server.py
 
 import argparse
 from http import HTTPStatus
@@ -40,7 +41,7 @@ def create_error_response(status_code: HTTPStatus,
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request, exc):
+async def validation_exception_handler(request, exc):  # pylint: disable=unused-argument
     return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
 
@@ -329,7 +330,7 @@ if __name__ == "__main__":
 
     # A separate tokenizer to map token IDs to strings.
     tokenizer = get_tokenizer(engine_args.tokenizer,
-                              engine_args.tokenizer_mode)
+                              tokenizer_mode=engine_args.tokenizer_mode)
 
     uvicorn.run(app,
                 host=args.host,

@@ -1,5 +1,6 @@
-# Adapted from https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
-
+# Adapted from
+# https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
+"""Logging configuration for vLLM."""
 import logging
 import sys
 

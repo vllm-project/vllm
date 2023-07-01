@@ -39,8 +39,8 @@ class AsyncLLMEngine:
     def __init__(self,
                  worker_use_ray: bool,
                  engine_use_ray: bool,
-                 log_requests: bool = True,
                  *args,
+                 log_requests: bool = True,
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
@@ -219,9 +219,9 @@ class AsyncLLMEngine:
         # Create the async LLM engine.
         engine = cls(engine_args.worker_use_ray,
                      engine_args.engine_use_ray,
-                     not engine_args.disable_log_requests,
                      *engine_configs,
                      distributed_init_method,
                      devices,
+                     log_requests=not engine_args.disable_log_requests,
                      log_stats=not engine_args.disable_log_stats)
         return engine

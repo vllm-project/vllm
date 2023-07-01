@@ -13,8 +13,8 @@ _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
 
 def get_tokenizer(
     tokenizer_name: str,
-    tokenizer_mode: str = "auto",
     *args,
+    tokenizer_mode: str = "auto",
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
@@ -42,7 +42,7 @@ def get_tokenizer(
         raise RuntimeError(err_msg) from e
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
-        logger.warning(
+        logger.warninging(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
     return tokenizer
@@ -73,7 +73,8 @@ def detokenize_incrementally(
         output_text = tokenizer.convert_tokens_to_string(output_tokens)
         return new_token, output_text
 
-    # Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
+    # Adapted from
+    # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
     # NOTE(woosuk): The following code is slow because it runs a for loop over
     # the output_tokens. In Python, running a for loop over a list can be slow
     # even when the loop body is very simple.

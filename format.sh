@@ -44,6 +44,7 @@ YAPF_FLAGS=(
 
 YAPF_EXCLUDES=(
     '--exclude' 'build/**'
+    '--exclude' 'vllm/model_executor/parallel_utils/**'
 )
 
 # Format specified files

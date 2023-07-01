@@ -1,7 +1,9 @@
 # coding=utf-8
-# Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/opt/modeling_opt.py
+# Adapted from
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/opt/modeling_opt.py
 # Copyright 2023 The vLLM team.
-# Copyright 2022 The Fairseq Authors and The HuggingFace Inc. team. All rights reserved.
+# Copyright 2022 The Fairseq Authors and The HuggingFace Inc. team. All rights
+# reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,8 +45,9 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 class OPTLearnedPositionalEmbedding(nn.Embedding):
 
     def __init__(self, num_embeddings: int, embedding_dim: int):
-        # OPT is set up so that if padding_idx is specified then offset the embedding ids by 2
-        # and adjust num_embeddings appropriately. Other models don't have this hack
+        # OPT is set up so that if padding_idx is specified then offset the
+        # embedding ids by 2 and adjust num_embeddings appropriately. Other
+        # models don't have this hack
         self.offset = 2
         super().__init__(num_embeddings + self.offset, embedding_dim)
 
@@ -199,8 +202,9 @@ class OPTDecoder(nn.Module):
         else:
             self.project_in = None
 
-        # Note that the only purpose of `config._remove_final_layer_norm` is to keep backward compatibility
-        # with checkpoints that have been fine-tuned before transformers v4.20.1
+        # Note that the only purpose of `config._remove_final_layer_norm` is to
+        # keep backward compatibility with checkpoints that have been fine-tuned
+        # before transformers v4.20.1
         # see https://github.com/facebookresearch/metaseq/pull/164
         if config.do_layer_norm_before and not config._remove_final_layer_norm:
             self.final_layer_norm = nn.LayerNorm(

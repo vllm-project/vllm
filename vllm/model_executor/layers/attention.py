@@ -14,6 +14,7 @@ _SUPPORTED_HEAD_SIZES = [64, 80, 96, 128]
 
 
 class PagedAttention(nn.Module):
+    # pylint: disable=line-too-long
     """GPT-style multi-head PagedAttention.
 
     This class takes flattened 1D query, key, and value tensors as input. The
@@ -183,7 +184,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
         t = torch.arange(max_position).float()
-        freqs = torch.einsum('i,j -> ij', t, inv_freq.float())
+        freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
         cos = freqs.cos()
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)

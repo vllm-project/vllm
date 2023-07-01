@@ -1,5 +1,6 @@
 # coding=utf-8
-# Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
+# Adapted from
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
 # Copyright 2023 The vLLM team.
 # Copyright 2018 The OpenAI Team Authors and HuggingFace Inc. team.
 # Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
@@ -117,7 +118,8 @@ class GPT2Block(nn.Module):
     def __init__(self, config: GPT2Config):
         super().__init__()
         hidden_size = config.hidden_size
-        inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
+        inner_dim = (config.n_inner if config.n_inner is not None else 4 *
+                     hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = GPT2Attention(config)
@@ -155,9 +157,9 @@ class GPT2Model(nn.Module):
     def __init__(self, config: GPT2Config):
         super().__init__()
         self.config = config
-        assert config.add_cross_attention == False
-        assert config.scale_attn_by_inverse_layer_idx == False
-        assert config.reorder_and_upcast_attn == False
+        assert not config.add_cross_attention
+        assert not config.scale_attn_by_inverse_layer_idx
+        assert not config.reorder_and_upcast_attn
         self.embed_dim = config.hidden_size
 
         # Optimization: While the vocab size of GPT-2 is 50257, we extend it
@@ -270,8 +272,10 @@ class GPT2LMHeadModel(nn.Module):
 
             # For the fused QKV linear layer, manually shard the weights.
             if "c_attn" in name:
-                # GPT-2's fused QKV has the shape of [3 * num_heads * head_size, hidden_size].
-                # When tensor parallelism is used, we shard the weights along the head dimension.
+                # GPT-2's fused QKV has the shape of
+                # [3 * num_heads * head_size, hidden_size].
+                # When tensor parallelism is used, we shard the weights along
+                # the head dimension.
                 total_num_heads = self.config.num_attention_heads
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // total_num_heads

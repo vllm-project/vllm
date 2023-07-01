@@ -411,16 +411,16 @@ def _sample(
 
             # Get top-k log probabilities for the next tokens.
             next_logprobs: Dict[int, Dict[int, float]] = {}
-            for i, seq_id in enumerate(seq_ids):
+            for j, seq_id in enumerate(seq_ids):
                 next_logprobs[seq_id] = _get_topk_logprobs(
-                    logprob[i], sampling_params.logprobs)
+                    logprob[j], sampling_params.logprobs)
 
             # Build the output.
             for seq_id, parent_seq_id, next_token_id in zip(
                     seq_ids, parent_seq_ids, next_token_ids):
-                i = seq_ids.index(parent_seq_id)
+                j = seq_ids.index(parent_seq_id)
                 output_logprobs = next_logprobs[parent_seq_id].copy()
-                output_logprobs[next_token_id] = logprob[i,
+                output_logprobs[next_token_id] = logprob[j,
                                                          next_token_id].item()
                 seq_outputs[seq_id] = SequenceOutputs(
                     seq_id,
