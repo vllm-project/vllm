@@ -4,7 +4,7 @@
 # Usage:
 #    # Do work and commit your work.
 
-#    # Format files that differ from origin/master.
+#    # Format files that differ from origin/main.
 #    bash format.sh
 
 #    # Commit changed files with message 'Run yapf and pylint'
@@ -61,7 +61,7 @@ format_changed() {
     #
     # `diff-filter=ACM` and $MERGEBASE is to ensure we only format files that
     # exist on both branches.
-    MERGEBASE="$(git merge-base origin/master HEAD)"
+    MERGEBASE="$(git merge-base origin/main HEAD)"
 
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs -P 5 \
