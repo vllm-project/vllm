@@ -117,7 +117,7 @@ async def create_completion(raw_request: Request):
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                     "suffix is not currently supported")
 
-    if request.logit_bias is not None:
+    if request.logit_bias is not None and len(request.logit_bias) > 0:
         # TODO: support logit_bias in vLLM engine.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "logit_bias is not currently supported")
