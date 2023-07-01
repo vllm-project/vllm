@@ -111,10 +111,12 @@ class EngineArgs:
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray)
-        max_prompt_len = min(self.max_num_batched_tokens, model_config.hf_config.max_position_embeddings) if hasattr(
-            model_config.hf_config, "max_position_embeddings") else self.max_num_batched_tokens
+        max_sequence_len = min(
+            self.max_num_batched_tokens, 
+            getattr(model_config.hf_config, "max_position_embeddings", 
+                    float("inf")))
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs, max_prompt_len)
+                                           self.max_num_seqs, max_sequence_len)
         return model_config, cache_config, parallel_config, scheduler_config
 
 
