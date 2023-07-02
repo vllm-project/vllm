@@ -91,7 +91,9 @@ disable=abstract-method,
         long-suffix,
         map-builtin-not-iterating,
         misplaced-comparison-constant,
+        missing-class-docstring,  # TODO (vLLM): enable
         missing-function-docstring,
+        missing-module-docstring,  # TODO (vLLM): enable
         metaclass-assignment,
         next-method-called,
         next-method-defined,

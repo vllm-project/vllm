@@ -1,3 +1,4 @@
+"""Sequence and related classes functions."""
 import copy
 import enum
 from typing import Dict, List, Optional, Union
@@ -7,6 +8,7 @@ from vllm.sampling_params import SamplingParams
 
 
 class SequenceStatus(enum.Enum):
+    """Status of a sequence."""
     WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()
@@ -36,6 +38,16 @@ class SequenceStatus(enum.Enum):
 
 
 class SequenceData:
+    """The data of a sequence required for an NN model.
+
+    Args:
+        prompt_token_ids: The token IDs of the prompt.
+
+    Attributes:
+        prompt_token_ids: The token IDs of the prompt.
+        output_token_ids: The token IDs of the output.
+        cumulative_logprob: The cumulative log probability of the output.
+    """
 
     def __init__(
         self,
@@ -71,6 +83,15 @@ class SequenceData:
 
 
 class Sequence:
+    """Store the data, status, and block information of a sequence.
+
+    Args:
+        seq_id: The ID of the sequence.
+        prompt: The prompt of the sequence.
+        prompt_token_ids: The token IDs of the prompt.
+        block_size: The block size of the sequence. Should be the same as the
+            block size of the model.
+    """
 
     def __init__(
         self,
@@ -158,6 +179,14 @@ class Sequence:
 
 
 class SequenceGroup:
+    """A group of sequences that are generated from the same prompt.
+
+    Args:
+        request_id: The ID of the request.
+        seqs: The list of sequences.
+        sampling_params: The sampling parameters used to generate the outputs.
+        arrival_time: The arrival time of the request.
+    """
 
     def __init__(
         self,
@@ -199,15 +228,24 @@ class SequenceGroup:
 
 
 class SequenceGroupMetadata:
+    """Metadata for a sequence group. Used for NN execution.
+
+    Args:
+        request_id: The ID of the request.
+        is_prompt: Whether the request is at prompt stage.
+        seq_data: The sequence data. (Seq id -> sequence data)
+        sampling_params: The sampling parameters used to generate the outputs.
+        block_tables: The block tables. (Seq id -> list of physical block
+            numbers)
+    """
 
     def __init__(
-            self,
-            request_id: str,
-            is_prompt: bool,
-            seq_data: Dict[int, SequenceData],  # Seq id -> sequence data.
-            sampling_params: SamplingParams,
-            block_tables: Dict[
-                int, List[int]],  # Seq id -> list of physical block numbers.
+        self,
+        request_id: str,
+        is_prompt: bool,
+        seq_data: Dict[int, SequenceData],
+        sampling_params: SamplingParams,
+        block_tables: Dict[int, List[int]],
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -217,14 +255,23 @@ class SequenceGroupMetadata:
 
 
 class SequenceOutputs:
+    """The outputs of the NN for a sequence.
+
+    Args:
+        seq_id: The ID of the sequence.
+        parent_seq_id: The ID of the parent sequence (for forking in beam
+            search).
+        output_token: The output token.
+        logprobs: The logprobs of the output token.
+            (Token id -> logP(x_i+1 | x_0, ..., x_i))
+    """
 
     def __init__(
-            self,
-            seq_id: int,
-            parent_seq_id: int,
-            output_token: int,
-            logprobs: Dict[int,
-                           float],  # Token id -> logP(x_i+1 | x_0, ..., x_i).
+        self,
+        seq_id: int,
+        parent_seq_id: int,
+        output_token: int,
+        logprobs: Dict[int, float],
     ) -> None:
         self.seq_id = seq_id
         self.parent_seq_id = parent_seq_id
