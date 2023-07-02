@@ -282,7 +282,9 @@ class PagedAttentionWithALiBi(PagedAttention):
         value: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
+        # FIXME(woosuk): Because xformers does not support dynamic sequence
+        # lengths with custom attention bias, we need to process each prompt
+        # one by one.
         start = 0    
         for i, prompt_len in enumerate(input_metadata.prompt_lens):
             end = start + prompt_len
