@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse,
     ChatMessage, DeltaMessage, ErrorResponse, LogProbs,
     ModelCard, ModelList, ModelPermission, UsageInfo)
-from vllm.entrypoints.openai.conversation import Conversation, SeparatorStyle, get_conv_template
+from fastchat.conversation import Conversation, SeparatorStyle, get_conv_template
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
