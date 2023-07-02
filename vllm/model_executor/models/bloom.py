@@ -19,6 +19,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
+import math
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -27,7 +28,7 @@ from transformers import BloomConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import PagedAttentionWithALiBi
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
@@ -40,6 +41,28 @@ from vllm.sequence import SequenceOutputs
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
+def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
+    closest_power_of_2 = 2 ** math.floor(math.log2(total_num_heads))
+    base = torch.tensor(
+        2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3))),
+        dtype=torch.float32,
+    )
+    powers = torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32)
+    slopes = torch.pow(base, powers)
+
+    if closest_power_of_2 != total_num_heads:
+        extra_base = torch.tensor(
+            2 ** (-(2 ** -(math.log2(2 * closest_power_of_2) - 3))),
+            dtype=torch.float32,
+        )
+        num_remaining_heads = min(
+            closest_power_of_2, total_num_heads - closest_power_of_2)
+        extra_powers = torch.arange(
+            1, 1 + 2 * num_remaining_heads, 2, dtype=torch.int32)
+        slopes = torch.cat([slopes, torch.pow(extra_base, extra_powers)], dim=0)
+    return slopes
+
+
 class BloomAttention(nn.Module):
 
     def __init__(self, config: BloomConfig):
@@ -49,9 +72,9 @@ class BloomAttention(nn.Module):
         self.head_dim = self.hidden_size // self.total_num_heads
         assert self.head_dim * self.total_num_heads == self.hidden_size
 
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
-        assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
+        tp_world_size = get_tensor_model_parallel_world_size()
+        assert self.total_num_heads % tp_world_size == 0
+        self.num_heads = self.total_num_heads // tp_world_size
 
         self.query_key_value = ColumnParallelLinear(
             self.hidden_size,
@@ -67,8 +90,17 @@ class BloomAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
+
+        # Create the alibi slopes and slice them.
+        tp_rank = get_tensor_model_parallel_rank()
+        head_start = tp_rank * self.num_heads
+        head_end = (tp_rank + 1) * self.num_heads
+        alibi_slopes = _get_alibi_slopes(self.total_num_heads)
+        alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+
         scaling = self.head_dim ** -0.5
-        self.attn = PagedAttention(self.num_heads, self.head_dim, scaling)
+        self.attn = PagedAttentionWithALiBi(self.num_heads, self.head_dim,
+                                            scaling, alibi_slopes)
 
     def forward(
         self,
@@ -78,6 +110,7 @@ class BloomAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
+        del position_ids  # Unused.
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
