@@ -164,7 +164,7 @@ class PagedAttention(nn.Module):
         return output.view(-1, self.num_heads * self.head_size)
 
 
-class PagedAttentionWithRoPE(PagedAttention):
+class PagedAttentionWithRoPE(nn.Module):
     """PagedAttention with GPT-NeoX style rotary embedding."""
 
     def __init__(
@@ -176,7 +176,9 @@ class PagedAttentionWithRoPE(PagedAttention):
         max_position: int = 8192,
         base: int = 10000,
     ) -> None:
-        super().__init__(num_heads, head_size, scale)
+        super().__init__()
+        self.head_size = head_size
+        self.paged_attn = PagedAttention(num_heads, head_size, scale)
 
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2) / rotary_dim))
@@ -187,7 +189,8 @@ class PagedAttentionWithRoPE(PagedAttention):
         cache = torch.cat((cos, sin), dim=-1)
 
         # FIXME(woosuk): This assumes that we configure the default dtype when
-        # initializing the model. Make it more robust.
+        # initializing the model.
+        # TODO(woosuk): Make it more robust.
         torch_dtype = torch.get_default_dtype()
         cache = cache.to(torch_dtype)
         # Embedding size: [max_position, rotary_dim]
@@ -213,7 +216,7 @@ class PagedAttentionWithRoPE(PagedAttention):
             self.head_size,
             self.cos_sin_cache,
         )
-        return super().forward(
+        return self.paged_attn(
             query,
             key,
             value,
