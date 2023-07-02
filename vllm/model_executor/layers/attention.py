@@ -56,6 +56,7 @@ class PagedAttention(nn.Module):
 
     def set_attn_bias(self, input_metadata: InputMetadata) -> None:
         if input_metadata.attn_bias:
+            # Already set by a previous layer.
             return
         prompt_lens = input_metadata.prompt_lens
         attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
@@ -254,6 +255,7 @@ class PagedAttentionWithALiBi(PagedAttention):
 
     def set_attn_bias(self, input_metadata: InputMetadata) -> None:
         if input_metadata.attn_bias:
+            # Already set by a previous layer.
             return
         # Generates ALiBi mask for each prompt.
         for prompt_len in input_metadata.prompt_lens:
@@ -283,9 +285,9 @@ class PagedAttentionWithALiBi(PagedAttention):
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         # FIXME(woosuk): Because xformers does not support dynamic sequence
-        # lengths with custom attention bias, we need to process each prompt
-        # one by one.
-        start = 0    
+        # lengths with custom attention bias, we process each prompt one by
+        # one. This is inefficient, especially when we have many short prompts.
+        start = 0
         for i, prompt_len in enumerate(input_metadata.prompt_lens):
             end = start + prompt_len
             out = xops.memory_efficient_attention_forward(
