@@ -1,9 +1,11 @@
 """Multi-head attention."""
-from typing import Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
 from xformers import ops as xops
+from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
+                                         LowerTriangularMaskWithTensorBias)
 
 from vllm import attention_ops
 from vllm import cache_ops
@@ -52,20 +54,27 @@ class PagedAttention(nn.Module):
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
 
+    def set_attn_bias(self, input_metadata: InputMetadata) -> None:
+        if input_metadata.attn_bias:
+            return
+        prompt_lens = input_metadata.prompt_lens
+        attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
+        input_metadata.attn_bias.append(attn_bias)
+
     def multi_query_kv_attention(
         self,
         output: torch.Tensor,                   # [num_prompt_tokens, num_heads, head_size]
         query: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
         key: torch.Tensor,                      # [num_prompt_tokens, num_heads, head_size]
         value: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
-        attn_bias: xops.AttentionBias,
+        input_metadata: InputMetadata,
     ) -> torch.Tensor:
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(
             query.unsqueeze(0),
             key.unsqueeze(0),
             value.unsqueeze(0),
-            attn_bias=attn_bias,
+            attn_bias=input_metadata.attn_bias[0],
             p=0.0,
             scale=self.scale,
             op=self.attn_op,
@@ -93,6 +102,7 @@ class PagedAttention(nn.Module):
             input_metadata.context_lens,
             block_size,
             input_metadata.max_context_len,
+            None,  # alibi_slopes
         )
 
     def forward(
@@ -119,12 +129,13 @@ class PagedAttention(nn.Module):
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
+            self.set_attn_bias(input_metadata)
             self.multi_query_kv_attention(
                 output[:num_prompt_tokens],
                 query[:num_prompt_tokens],
                 key[:num_prompt_tokens],
                 value[:num_prompt_tokens],
-                input_metadata.attn_bias,
+                input_metadata,
             )
 
         # Wait until the cache op is done.
@@ -164,7 +175,7 @@ class PagedAttention(nn.Module):
         return output.view(-1, self.num_heads * self.head_size)
 
 
-class PagedAttentionWithRoPE(nn.Module):
+class PagedAttentionWithRoPE(PagedAttention):
     """PagedAttention with GPT-NeoX style rotary embedding."""
 
     def __init__(
@@ -176,9 +187,7 @@ class PagedAttentionWithRoPE(nn.Module):
         max_position: int = 8192,
         base: int = 10000,
     ) -> None:
-        super().__init__()
-        self.head_size = head_size
-        self.paged_attn = PagedAttention(num_heads, head_size, scale)
+        super().__init__(num_heads, head_size, scale)
 
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2) / rotary_dim))
@@ -216,7 +225,7 @@ class PagedAttentionWithRoPE(nn.Module):
             self.head_size,
             self.cos_sin_cache,
         )
-        return self.paged_attn(
+        return super().forward(
             query,
             key,
             value,
@@ -224,4 +233,91 @@ class PagedAttentionWithRoPE(nn.Module):
             value_cache,
             input_metadata,
             cache_event,
+        )
+
+
+class PagedAttentionWithALiBi(PagedAttention):
+    """PagedAttention with ALiBi attention bias."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        slopes: List[float],
+    ) -> None:
+        super().__init__(num_heads, head_size, scale)
+        assert len(slopes) == num_heads
+
+        slopes = torch.tensor(slopes, dtype=torch.float32)
+        self.register_buffer("alibi_slopes", slopes, persistent=False)
+
+    def set_attn_bias(self, input_metadata: InputMetadata) -> None:
+        if input_metadata.attn_bias:
+            return
+        # Generates ALiBi mask for each prompt.
+        for prompt_len in input_metadata.prompt_lens:
+            bias = torch.arange(prompt_len)
+            bias = bias[None, :] - bias[:, None]
+            bias = bias.to(self.alibi_slopes.device)
+
+            # When using custom attention bias, xformers requires the bias to
+            # be sliced from a tensor whose length is a multiple of 8.
+            padded_len = (prompt_len + 7) // 8 * 8
+            bias = torch.empty(
+                self.num_heads,
+                padded_len,
+                padded_len,
+                device=self.alibi_slopes.device,
+            )[:, :prompt_len, :prompt_len].copy_(bias)
+            bias.mul_(self.alibi_slopes[:, None, None])
+            attn_bias = LowerTriangularMaskWithTensorBias(bias)
+            input_metadata.attn_bias.append(attn_bias)
+
+    def multi_query_kv_attention(
+        self,
+        output: torch.Tensor,                   # [num_prompt_tokens, num_heads, head_size]
+        query: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
+        key: torch.Tensor,                      # [num_prompt_tokens, num_heads, head_size]
+        value: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
+        input_metadata: InputMetadata,
+    ) -> torch.Tensor:
+        # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
+        start = 0    
+        for i, prompt_len in enumerate(input_metadata.prompt_lens):
+            end = start + prompt_len
+            out = xops.memory_efficient_attention_forward(
+                query[None, start:end],
+                key[None, start:end],
+                value[None, start:end],
+                attn_bias=input_metadata.attn_bias[i],
+                p=0.0,
+                scale=self.scale,
+                op=self.attn_op,
+            )
+            # TODO(woosuk): Unnecessary copy. Optimize.
+            output[start:end].copy_(out.squeeze(0))
+            start += prompt_len
+        return output
+
+    def single_query_cached_kv_attention(
+        self,
+        output: torch.Tensor,           # [num_generation_tokens, num_heads, head_size]
+        query: torch.Tensor,            # [num_generation_tokens, num_heads, head_size]
+        key_cache: torch.Tensor,        # [num_blocks, num_heads, head_size/x, block_size, x]
+        value_cache: torch.Tensor,      # [num_blocks, num_heads, head_size, block_size]
+        input_metadata: InputMetadata,
+    ) -> None:
+        block_size = value_cache.shape[3]
+        attention_ops.single_query_cached_kv_attention(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            self.scale,
+            input_metadata.block_tables,
+            input_metadata.context_lens,
+            block_size,
+            input_metadata.max_context_len,
+            self.alibi_slopes,
         )
