@@ -22,8 +22,7 @@ class SequenceStatus(enum.Enum):
         return status in [
             SequenceStatus.FINISHED_STOPPED,
             SequenceStatus.FINISHED_LENGTH_CAPPED,
-            SequenceStatus.FINISHED_ABORTED,
-            SequenceStatus.FINISHED_IGNORED
+            SequenceStatus.FINISHED_ABORTED, SequenceStatus.FINISHED_IGNORED
         ]
 
     @staticmethod

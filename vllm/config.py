@@ -191,12 +191,8 @@ class SchedulerConfig:
             and generated text).
     """
 
-    def __init__(
-        self,
-        max_num_batched_tokens: int,
-        max_num_seqs: int,
-        max_seq_len: int
-    ) -> None:
+    def __init__(self, max_num_batched_tokens: int, max_num_seqs: int,
+                 max_seq_len: int) -> None:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_seqs = max_num_seqs
         self.max_seq_len = max_seq_len

@@ -227,8 +227,10 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs, ignored_seq_groups = self.scheduler.schedule()
-        if (not seq_group_metadata_list) and scheduler_outputs.is_empty() and (not ignored_seq_groups):
+        (seq_group_metadata_list, scheduler_outputs,
+         ignored_seq_groups) = self.scheduler.schedule()
+        if (not seq_group_metadata_list) and scheduler_outputs.is_empty() and (
+                not ignored_seq_groups):
             # Nothing to do.
             return []
 
@@ -291,7 +293,7 @@ class LLMEngine:
 
                 # Check if the sequence has reached max_seq_len.
                 if (seq.get_len() >=
-                    self.scheduler.scheduler_config.max_seq_len):
+                        self.scheduler.scheduler_config.max_seq_len):
                     self.scheduler.free_seq(
                         seq, SequenceStatus.FINISHED_LENGTH_CAPPED)
                     continue
