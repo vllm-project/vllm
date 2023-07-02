@@ -292,11 +292,11 @@ class BloomForCausalLM(nn.Module):
                 num_heads = self.config.num_attention_heads
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // num_heads
-                if 'query_key_value.weight' in name:
+                if "query_key_value.weight" in name:
                     loaded_weight = loaded_weight.view(-1, 3, head_size, hidden_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1, hidden_size)
-                elif 'query_key_value.bias' in name:
+                elif "query_key_value.bias" in name:
                     loaded_weight = loaded_weight.view(-1, 3, head_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1)
