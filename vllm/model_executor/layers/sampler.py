@@ -13,6 +13,7 @@ from vllm.sequence import SequenceOutputs
 
 _SAMPLING_EPS = 1e-5
 
+
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
 
@@ -50,19 +51,20 @@ class Sampler(nn.Module):
         # Apply presence and frequency penalties.
         output_tokens = _get_output_tokens(input_metadata)
         assert len(output_tokens) == logits.shape[0]
-        presence_penalties, frequency_penalties = _get_penalties(input_metadata)
+        presence_penalties, frequency_penalties = _get_penalties(
+            input_metadata)
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
-        logits = _apply_penalties(
-            logits, output_tokens, presence_penalties, frequency_penalties,
-            self.vocab_size)
+        logits = _apply_penalties(logits, output_tokens, presence_penalties,
+                                  frequency_penalties, self.vocab_size)
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(input_metadata)
         assert len(temperatures) == logits.shape[0]
         if any(t != 1.0 for t in temperatures):
-            t = torch.tensor(
-                temperatures, dtype=logits.dtype, device=logits.device)
+            t = torch.tensor(temperatures,
+                             dtype=logits.dtype,
+                             device=logits.device)
             # Use in-place division to avoid creating a new tensor.
             logits.div_(t.unsqueeze(dim=1))
 
@@ -75,7 +77,9 @@ class Sampler(nn.Module):
         # Apply top-p and top-k truncation.
         top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
         assert len(top_ps) == len(top_ks) == probs.shape[0]
-        if any(p < 1.0 - _SAMPLING_EPS for p in top_ps) or any(k != self.vocab_size for k in top_ks):
+        do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
+        do_top_k = any(k != self.vocab_size for k in top_ks)
+        if do_top_p or do_top_k:
             probs = _apply_top_p_top_k(probs, top_ps, top_ks)
 
         # Sample the next tokens.
@@ -97,8 +101,7 @@ def _prune_hidden_states(
 
 
 def _get_penalties(
-    input_metadata: InputMetadata,
-) -> Tuple[List[float], List[float]]:
+        input_metadata: InputMetadata) -> Tuple[List[float], List[float]]:
     # Collect the presence and frequency penalties.
     presence_penalties: List[float] = []
     frequency_penalties: List[float] = []
@@ -117,9 +120,7 @@ def _get_penalties(
     return presence_penalties, frequency_penalties
 
 
-def _get_output_tokens(
-    input_metadata: InputMetadata,
-) -> List[List[int]]:
+def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
     output_tokens: List[List[int]] = []
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, _ = seq_group
@@ -169,11 +170,13 @@ def _apply_penalties(
                                                  device=logits.device)
 
     frequency_penalties = [frequency_penalties[i] for i in indices]
-    frequency_penalties = torch.tensor(
-        frequency_penalties, dtype=logits.dtype, device=logits.device)
+    frequency_penalties = torch.tensor(frequency_penalties,
+                                       dtype=logits.dtype,
+                                       device=logits.device)
     presence_penalties = [presence_penalties[i] for i in indices]
-    presence_penalties = torch.tensor(
-        presence_penalties, dtype=logits.dtype, device=logits.device)
+    presence_penalties = torch.tensor(presence_penalties,
+                                      dtype=logits.dtype,
+                                      device=logits.device)
 
     # We follow the definition in OpenAI API.
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
@@ -183,9 +186,7 @@ def _apply_penalties(
     return logits
 
 
-def _get_temperatures(
-    input_metadata: InputMetadata,
-) -> List[float]:
+def _get_temperatures(input_metadata: InputMetadata) -> List[float]:
     # Collect the temperatures for the logits.
     temperatures: List[float] = []
     for i, seq_group in enumerate(input_metadata.seq_groups):
@@ -252,8 +253,9 @@ def _apply_top_p_top_k(
     probs_sort[top_k_mask] = 0.0
 
     # Re-sort the probabilities.
-    probs = torch.gather(
-        probs_sort, dim=-1, index=torch.argsort(probs_idx, dim=-1))
+    probs = torch.gather(probs_sort,
+                         dim=-1,
+                         index=torch.argsort(probs_idx, dim=-1))
     return probs
 
 
@@ -296,8 +298,9 @@ def _sample_from_prompt(
         # Random sampling.
         # Sample `best_of` tokens for the prompt.
         num_seqs = sampling_params.best_of
-        next_token_ids = torch.multinomial(
-            prob, num_samples=num_seqs, replacement=True)
+        next_token_ids = torch.multinomial(prob,
+                                           num_samples=num_seqs,
+                                           replacement=True)
         next_token_ids = next_token_ids.tolist()
     return next_token_ids
 
@@ -315,8 +318,9 @@ def _sample_from_generation_tokens(
     if sampling_params.use_beam_search:
         # Beam search.
         # Add cumulative logprobs for the sequences in the group.
-        seq_logprobs = torch.tensor(
-            seq_logprobs, dtype=torch.float, device=logprobs.device)
+        seq_logprobs = torch.tensor(seq_logprobs,
+                                    dtype=torch.float,
+                                    device=logprobs.device)
         logprobs = logprobs + seq_logprobs.unsqueeze(dim=1)
 
         vocab_size = logprobs.size(-1)
@@ -353,8 +357,9 @@ def _sample_from_generation_tokens(
     else:
         # Random sampling.
         # Sample 1 token for each sequence in the group.
-        next_token_ids = torch.multinomial(
-            probs, num_samples=1, replacement=True)
+        next_token_ids = torch.multinomial(probs,
+                                           num_samples=1,
+                                           replacement=True)
         next_token_ids = next_token_ids.squeeze(dim=-1).tolist()
         parent_seq_ids = seq_ids
     return parent_seq_ids, next_token_ids
@@ -381,15 +386,16 @@ def _sample(
             # Sample the next tokens.
             next_token_ids = _sample_from_prompt(prob, sampling_params)
             # Get top-k log probabilities for the next tokens.
-            next_logprobs = _get_topk_logprobs(
-                logprob, sampling_params.logprobs)
+            next_logprobs = _get_topk_logprobs(logprob,
+                                               sampling_params.logprobs)
 
             # Build the output.
             for seq_id, next_token_id in zip(seq_ids, next_token_ids):
                 output_logprobs = next_logprobs.copy()
                 output_logprobs[next_token_id] = logprob[next_token_id].item()
-                seq_outputs[seq_id] = SequenceOutputs(
-                    seq_id, seq_id, next_token_id, output_logprobs)
+                seq_outputs[seq_id] = SequenceOutputs(seq_id, seq_id,
+                                                      next_token_id,
+                                                      output_logprobs)
         else:
             # Generate the next tokens for generation tokens.
             prob = probs[idx:idx + len(seq_ids)]
@@ -399,22 +405,24 @@ def _sample(
             # Sample the next tokens.
             seq_logprobs = [
                 input_metadata.seq_data[seq_id].cumulative_logprob
-                for seq_id in seq_ids]
+                for seq_id in seq_ids
+            ]
             parent_seq_ids, next_token_ids = _sample_from_generation_tokens(
                 seq_ids, prob, logprob, seq_logprobs, sampling_params)
 
             # Get top-k log probabilities for the next tokens.
             next_logprobs: Dict[int, Dict[int, float]] = {}
-            for i, seq_id in enumerate(seq_ids):
+            for j, seq_id in enumerate(seq_ids):
                 next_logprobs[seq_id] = _get_topk_logprobs(
-                    logprob[i], sampling_params.logprobs)
+                    logprob[j], sampling_params.logprobs)
 
             # Build the output.
             for seq_id, parent_seq_id, next_token_id in zip(
-                seq_ids, parent_seq_ids, next_token_ids):
-                i = seq_ids.index(parent_seq_id)
+                    seq_ids, parent_seq_ids, next_token_ids):
+                j = seq_ids.index(parent_seq_id)
                 output_logprobs = next_logprobs[parent_seq_id].copy()
-                output_logprobs[next_token_id] = logprob[i, next_token_id].item()
+                output_logprobs[next_token_id] = logprob[j,
+                                                         next_token_id].item()
                 seq_outputs[seq_id] = SequenceOutputs(
                     seq_id,
                     parent_seq_id,
