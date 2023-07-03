@@ -395,6 +395,9 @@ void single_query_cached_kv_attention_launcher(
     case 96:
       LAUNCH_ATTENTION_KERNEL(T, 96, BLOCK_SIZE, NUM_THREADS);
       break;
+    case 112:
+      LAUNCH_ATTENTION_KERNEL(T, 112, BLOCK_SIZE, NUM_THREADS);
+      break;
     case 128:
       LAUNCH_ATTENTION_KERNEL(T, 128, BLOCK_SIZE, NUM_THREADS);
       break;

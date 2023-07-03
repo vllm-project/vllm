@@ -1,9 +1,10 @@
 from typing import Optional
 
 import torch
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_config
 from vllm.utils import get_cpu_memory
 
 logger = init_logger(__name__)
@@ -49,7 +50,7 @@ class ModelConfig:
         self.use_dummy_weights = use_dummy_weights
         self.seed = seed
 
-        self.hf_config: PretrainedConfig = AutoConfig.from_pretrained(model)
+        self.hf_config = get_config(model)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self._verify_tokenizer_mode()
 
