@@ -37,7 +37,7 @@ class MPTConfig(PretrainedConfig):
         resid_pdrop: float = 0.0,
         emb_pdrop: float = 0.0,
         learned_pos_emb: bool = True,
-        attn_config: Dict[str, Any] = _ATTN_CONFIG_DEFAULTS,
+        attn_config: Optional[Dict[str, Any]] = None,
         init_device: str = "cpu",
         logit_scale: Optional[Union[float, str]] = None,
         no_bias: bool = False,
@@ -56,7 +56,10 @@ class MPTConfig(PretrainedConfig):
         self.resid_pdrop = resid_pdrop
         self.emb_pdrop = emb_pdrop
         self.learned_pos_emb = learned_pos_emb
-        self.attn_config = attn_config
+        if attn_config is None:
+            self.attn_config = _ATTN_CONFIG_DEFAULTS
+        else:
+            self.attn_config = attn_config
         self.init_device = init_device
         self.logit_scale = logit_scale
         self.no_bias = no_bias
