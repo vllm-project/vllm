@@ -6,16 +6,15 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
-from vllm.model_executor.models import (GPT2LMHeadModel, GPTBigCodeForCausalLM, GPTNeoXForCausalLM, 
-                                        GPTJForCausalLM, LlamaForCausalLM, OPTForCausalLM)
+from vllm.model_executor.models import *
 from vllm.model_executor.weight_utils import initialize_dummy_weights
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
     "GPT2LMHeadModel": GPT2LMHeadModel,
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
-    "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "GPTJForCausalLM": GPTJForCausalLM,
+    "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
     "LLaMAForCausalLM": LlamaForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
