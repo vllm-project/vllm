@@ -42,9 +42,9 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
-    closest_power_of_2 = 2 ** math.floor(math.log2(total_num_heads))
+    closest_power_of_2 = 2**math.floor(math.log2(total_num_heads))
     base = torch.tensor(
-        2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3))),
+        2**(-(2**-(math.log2(closest_power_of_2) - 3))),
         dtype=torch.float32,
     )
     powers = torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32)
@@ -52,14 +52,17 @@ def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
 
     if closest_power_of_2 != total_num_heads:
         extra_base = torch.tensor(
-            2 ** (-(2 ** -(math.log2(2 * closest_power_of_2) - 3))),
+            2**(-(2**-(math.log2(2 * closest_power_of_2) - 3))),
             dtype=torch.float32,
         )
-        num_remaining_heads = min(
-            closest_power_of_2, total_num_heads - closest_power_of_2)
-        extra_powers = torch.arange(
-            1, 1 + 2 * num_remaining_heads, 2, dtype=torch.int32)
-        slopes = torch.cat([slopes, torch.pow(extra_base, extra_powers)], dim=0)
+        num_remaining_heads = min(closest_power_of_2,
+                                  total_num_heads - closest_power_of_2)
+        extra_powers = torch.arange(start=1,
+                                    end=1 + 2 * num_remaining_heads,
+                                    step=2,
+                                    dtype=torch.int32)
+        slopes = torch.cat(
+            [slopes, torch.pow(extra_base, extra_powers)], dim=0)
     return slopes
 
 
@@ -98,7 +101,7 @@ class BloomAttention(nn.Module):
         alibi_slopes = _get_alibi_slopes(self.total_num_heads)
         alibi_slopes = alibi_slopes[head_start:head_end].tolist()
 
-        scaling = self.head_dim ** -0.5
+        scaling = self.head_dim**-0.5
         self.attn = PagedAttentionWithALiBi(self.num_heads, self.head_dim,
                                             scaling, alibi_slopes)
 
@@ -114,8 +117,8 @@ class BloomAttention(nn.Module):
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(
-            q, k, v, k_cache, v_cache, input_metadata, cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         output, _ = self.dense(attn_output)
         return output
 
@@ -125,11 +128,13 @@ class BloomMLP(nn.Module):
     def __init__(self, config: BloomConfig):
         super().__init__()
         hidden_size = config.hidden_size
-        self.dense_h_to_4h = ColumnParallelLinear(hidden_size, 4 * hidden_size,
+        self.dense_h_to_4h = ColumnParallelLinear(hidden_size,
+                                                  4 * hidden_size,
                                                   gather_output=False,
                                                   perform_initialization=False)
         self.act = get_act_fn("gelu")
-        self.dense_4h_to_h = RowParallelLinear(4 * hidden_size, hidden_size,
+        self.dense_4h_to_h = RowParallelLinear(4 * hidden_size,
+                                               hidden_size,
                                                input_is_parallel=True,
                                                perform_initialization=False)
 
@@ -259,23 +264,25 @@ class BloomForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
-        hidden_states = self.transformer(
-            input_ids, positions, kv_caches, input_metadata, cache_events)
-        next_tokens = self.sampler(
-            self.lm_head_weight, hidden_states, input_metadata)
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         input_metadata, cache_events)
+        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
+                                   input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["word_embeddings.weight",
-                                "dense_h_to_4h.weight", "dense_h_to_4h.bias"]
+    _column_parallel_weights = [
+        "word_embeddings.weight", "dense_h_to_4h.weight", "dense_h_to_4h.bias"
+    ]
     _row_parallel_weights = ["dense.weight", "dense_4h_to_h.weight"]
 
-    def load_weights(self, model_name_or_path: str,
+    def load_weights(self,
+                     model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+        tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, use_np_cache):
+                model_name_or_path, cache_dir, use_np_cache):
             if not name.startswith("transformer."):
                 name = "transformer." + name
 
@@ -286,14 +293,16 @@ class BloomForCausalLM(nn.Module):
                 # required shape is [3 * num_heads * head_size, hidden_size].
                 # Thus, we need weight conversion.
                 shard_size = param.shape[0]
-                loaded_weight = loaded_weight[shard_size * tensor_model_parallel_rank
-                                              :shard_size * (tensor_model_parallel_rank + 1)]
+                start = shard_size * tp_rank
+                end = shard_size * (tp_rank + 1)
+                loaded_weight = loaded_weight[start:end]
 
                 num_heads = self.config.num_attention_heads
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // num_heads
                 if "query_key_value.weight" in name:
-                    loaded_weight = loaded_weight.view(-1, 3, head_size, hidden_size)
+                    loaded_weight = loaded_weight.view(-1, 3, head_size,
+                                                       hidden_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1, hidden_size)
                 elif "query_key_value.bias" in name:
@@ -304,5 +313,4 @@ class BloomForCausalLM(nn.Module):
                     raise ValueError(f"Unexpected weight name: {name}")
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
-                                         self._row_parallel_weights,
-                                         tensor_model_parallel_rank)
+                                         self._row_parallel_weights, tp_rank)
