@@ -184,7 +184,7 @@ async def create_chat_completion(raw_request: Request):
                                      "logit_bias is not currently supported")
 
     prompt = await get_gen_prompt(request)
-    error_check_ret = await check_length(request, prompt, model_config)
+    error_check_ret = await check_length(request, prompt, engine_model_config)
     if error_check_ret is not None:
         return error_check_ret
 
@@ -577,7 +577,7 @@ if __name__ == "__main__":
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
-    model_config = asyncio.run(engine.get_model_config())
+    engine_model_config = asyncio.run(engine.get_model_config())
 
     # A separate tokenizer to map token IDs to strings.
     tokenizer = get_tokenizer(engine_args.tokenizer,
