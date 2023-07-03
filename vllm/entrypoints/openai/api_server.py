@@ -2,6 +2,7 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/serve/openai_api_server.py
 
 import argparse
+import asyncio
 from http import HTTPStatus
 import json
 import time
@@ -102,7 +103,7 @@ async def check_length(request, prompt, model_config):
     elif hasattr(model_config.hf_config, "seq_length"):
         context_len = model_config.hf_config.seq_length
     elif hasattr(model_config.hf_config, "max_position_embeddings"):
-        context_len = (model_config.hf_config.max_position_embeddings)
+        context_len = model_config.hf_config.max_position_embeddings
     elif hasattr(model_config.hf_config, "seq_length"):
         context_len = model_config.hf_config.seq_length
     else:
@@ -183,7 +184,6 @@ async def create_chat_completion(raw_request: Request):
                                      "logit_bias is not currently supported")
 
     prompt = await get_gen_prompt(request)
-    model_config = await engine.get_model_config()
     error_check_ret = await check_length(request, prompt, model_config)
     if error_check_ret is not None:
         return error_check_ret
@@ -577,6 +577,7 @@ if __name__ == "__main__":
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
+    model_config = asyncio.run(engine.get_model_config())
 
     # A separate tokenizer to map token IDs to strings.
     tokenizer = get_tokenizer(engine_args.tokenizer,
