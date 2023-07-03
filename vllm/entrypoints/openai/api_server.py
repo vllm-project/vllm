@@ -358,7 +358,13 @@ async def create_completion(raw_request: Request):
     model_name = request.model
     request_id = f"cmpl-{random_uuid()}"
     if isinstance(request.prompt, list):
-        assert len(request.prompt) == 1
+        if len(request.prompt) == 0:
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         "please provide at least one prompt")
+        if len(request.prompt) > 1:
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         "multiple prompts in a batch is not "
+                                         "currently supported")
         prompt = request.prompt[0]
     else:
         prompt = request.prompt
