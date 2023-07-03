@@ -8,7 +8,8 @@ except ImportError:
 
 from vllm.config import ParallelConfig
 
-DeviceID = Tuple[int, Optional[str], int]  # rank, node resource (node IP), device id
+# rank, node resource (node IP), device id
+DeviceID = Tuple[int, Optional[str], int]
 
 
 def initialize_cluster(
@@ -53,15 +54,15 @@ def initialize_cluster(
     valid_node_resources = []
     num_devices_per_node = None
     for node in ray.nodes():
-        if (not node['Alive']) or node['Resources']['GPU'] <= 0:
+        if (not node["Alive"]) or node["Resources"]["GPU"] <= 0:
             continue
         if num_devices_per_node is None:
-            num_devices_per_node = node['Resources']['GPU']
+            num_devices_per_node = node["Resources"]["GPU"]
         else:
-            assert num_devices_per_node == node['Resources']['GPU'], (
+            assert num_devices_per_node == node["Resources"]["GPU"], (
                 "The number of GPUs per node is not uniform.")
-        for key in node['Resources']:
-            if key.startswith('node:'):
+        for key in node["Resources"]:
+            if key.startswith("node:"):
                 valid_node_resources.append(key)
 
     # Verify the parallel config.

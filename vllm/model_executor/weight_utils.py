@@ -44,9 +44,9 @@ def hf_model_weights_iterator(
     if use_np_cache:
         # Convert the model weights from torch tensors to numpy arrays for
         # faster loading.
-        np_folder = os.path.join(hf_folder, 'np')
+        np_folder = os.path.join(hf_folder, "np")
         os.makedirs(np_folder, exist_ok=True)
-        weight_names_file = os.path.join(np_folder, 'weight_names.json')
+        weight_names_file = os.path.join(np_folder, "weight_names.json")
         with lock:
             if not os.path.exists(weight_names_file):
                 weight_names = []
@@ -57,10 +57,10 @@ def hf_model_weights_iterator(
                         with open(param_path, "wb") as f:
                             np.save(f, param.cpu().detach().numpy())
                         weight_names.append(name)
-                with open(weight_names_file, 'w') as f:
+                with open(weight_names_file, "w") as f:
                     json.dump(weight_names, f)
 
-        with open(weight_names_file, 'r') as f:
+        with open(weight_names_file, "r") as f:
             weight_names = json.load(f)
 
         for name in weight_names:
@@ -86,17 +86,16 @@ def load_tensor_parallel_weights(
     for p in column_parallel_weight_names:
         if p in param_name:
             shard_size = param.shape[0]
-            loaded_weight = loaded_weight[
-                shard_size * tensor_model_parallel_rank
-                :shard_size * (tensor_model_parallel_rank + 1)]
+            start_idx = tensor_model_parallel_rank * shard_size
+            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            loaded_weight = loaded_weight[start_idx:end_idx]
             break
     for p in row_parallel_weight_names:
         if p in param_name:
             shard_size = param.shape[1]
-            loaded_weight = loaded_weight[
-                :,
-                shard_size * tensor_model_parallel_rank
-                :shard_size * (tensor_model_parallel_rank + 1)]
+            start_idx = tensor_model_parallel_rank * shard_size
+            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            loaded_weight = loaded_weight[:, start_idx:end_idx]
             break
     assert param.shape == loaded_weight.shape, (
         f"{param_name} shape mismatch between model and checkpoint: "

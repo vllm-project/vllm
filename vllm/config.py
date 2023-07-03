@@ -8,7 +8,7 @@ from vllm.utils import get_cpu_memory
 
 logger = init_logger(__name__)
 
-_GiB = 1 << 30
+_GB = 1 << 30
 
 
 class ModelConfig:
@@ -106,6 +106,7 @@ class CacheConfig:
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
     """
+
     def __init__(
         self,
         block_size: int,
@@ -114,7 +115,7 @@ class CacheConfig:
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
-        self.swap_space_bytes = swap_space * _GiB
+        self.swap_space_bytes = swap_space * _GB
         self._verify_args()
 
         # Will be set after profiling.
@@ -137,14 +138,13 @@ class CacheConfig:
         num_gpus_per_node = parallel_config.tensor_parallel_size
         cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
 
-        msg = (
-            f"{cpu_memory_usage / _GiB:.2f} GiB out of "
-            f"the {total_cpu_memory / _GiB:.2f} GiB total CPU memory is "
-            "allocated for the swap space.")
+        msg = (f"{cpu_memory_usage / _GB:.2f} GiB out of "
+               f"the {total_cpu_memory / _GB:.2f} GiB total CPU memory is "
+               "allocated for the swap space.")
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
-            logger.warn("Possibly too large swap space. " + msg)
+            logger.warning("Possibly too large swap space. " + msg)
 
 
 class ParallelConfig:
@@ -157,6 +157,7 @@ class ParallelConfig:
             True if either pipeline_parallel_size or tensor_parallel_size is
             greater than 1.
     """
+
     def __init__(
         self,
         pipeline_parallel_size: int,
@@ -189,12 +190,9 @@ class SchedulerConfig:
         max_seq_len: Maximum length of a sequence (including prompt
             and generated text).
     """
-    def __init__(
-        self,
-        max_num_batched_tokens: int,
-        max_num_seqs: int,
-        max_seq_len: int
-    ) -> None:
+
+    def __init__(self, max_num_batched_tokens: int, max_num_seqs: int,
+                 max_seq_len: int) -> None:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_seqs = max_num_seqs
         self.max_seq_len = max_seq_len
@@ -241,7 +239,7 @@ def _get_and_verify_dtype(
             pass
         else:
             # Casting between float16 and bfloat16 is allowed with a warning.
-            logger.warn(f"Casting {config_dtype} to {torch_dtype}.")
+            logger.warning(f"Casting {config_dtype} to {torch_dtype}.")
 
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:

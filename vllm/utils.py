@@ -17,9 +17,9 @@ class Counter:
         self.counter = start
 
     def __next__(self) -> int:
-        id = self.counter
+        i = self.counter
         self.counter += 1
-        return id
+        return i
 
     def reset(self) -> None:
         self.counter = 0
@@ -37,6 +37,7 @@ def get_cpu_memory() -> int:
 
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
+
 
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071

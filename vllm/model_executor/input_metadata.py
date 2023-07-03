@@ -8,11 +8,22 @@ from vllm.sequence import SequenceData
 
 
 class InputMetadata:
+    """Metadata for input sequences. Used for PagedAttention.
+
+    Args:
+        seq_groups: List of (seq_ids, sampling_params).
+        seq_data: Seq_id -> SequenceData.
+        prompt_lens: Lengths of prompts.
+        slot_mapping: The address to write the new KV to of each token.
+        context_lens: the length of attention context for each generation token.
+        max_context_len: The maximum context length.
+        block_tables: The block tables. (Seq id -> list of physical block)
+    """
 
     def __init__(
         self,
-        seq_groups: List[Tuple[List[int], SamplingParams]],     # List of (seq_ids, sampling_params).
-        seq_data: Dict[int, SequenceData],                      # Seq_id -> SequenceData.
+        seq_groups: List[Tuple[List[int], SamplingParams]],
+        seq_data: Dict[int, SequenceData],
         prompt_lens: List[int],
         slot_mapping: torch.Tensor,
         context_lens: torch.Tensor,

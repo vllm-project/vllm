@@ -93,8 +93,8 @@ class CacheEngine:
         if not pin_memory:
             # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-            logger.warn("Using 'pin_memory=False' as WSL is detected. "
-                        "This may slow down the performance.")
+            logger.warning("Using 'pin_memory=False' as WSL is detected. "
+                           "This may slow down the performance.")
         for _ in range(self.num_layers):
             key_blocks = torch.empty(
                 size=(self.num_cpu_blocks, *key_block_shape),
@@ -120,11 +120,10 @@ class CacheEngine:
                 src_key_cache, src_value_cache = src[i]
                 dst_key_cache, dst_value_cache = dst[i]
                 # Copy the key blocks.
-                cache_ops.swap_blocks(
-                    src_key_cache, dst_key_cache, src_to_dst)
+                cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
                 # Copy the value blocks.
-                cache_ops.swap_blocks(
-                    src_value_cache, dst_value_cache, src_to_dst)
+                cache_ops.swap_blocks(src_value_cache, dst_value_cache,
+                                      src_to_dst)
                 event = self.events[i]
                 event.record(stream=self.cache_stream)
 

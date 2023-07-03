@@ -63,8 +63,7 @@ class LLM:
         self.request_counter = Counter()
 
     def get_tokenizer(
-        self,
-    ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+            self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer
 
     def set_tokenizer(

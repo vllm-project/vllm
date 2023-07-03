@@ -49,12 +49,15 @@ If not, please file a new issue, providing as much relevant information as possi
 
 In general, we adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
 
+We include a formatting script [`format.sh`](./format.sh) to format the code.
+
 ### Pull Requests
 
 When submitting a pull request:
 
 1. Make sure your code has been rebased on top of the latest commit on the main branch.
-2. Include a detailed description of the changes in the pull request.
+2. Ensure code is properly formatted by running [`format.sh`](./format.sh).
+3. Include a detailed description of the changes in the pull request.
 Explain why you made the changes you did.
 If your pull request fixes an open issue, please include a reference to it in the description.
 

@@ -1,2 +1,12 @@
-mypy
+# formatting
+yapf==0.32.0
+pylint==2.8.2
+
+# type checking
+mypy==0.991
+types-PyYAML
+types-requests
+types-setuptools
+
+# testing
 pytest

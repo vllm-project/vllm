@@ -3,6 +3,7 @@ from typing import List, Optional, Union
 
 _SAMPLING_EPS = 1e-5
 
+
 class SamplingParams:
     """Sampling parameters for text generation.
 
@@ -51,7 +52,7 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         use_beam_search: bool = False,
-        stop: Union[str, List[str]] = [],
+        stop: Union[None, str, List[str]] = None,
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
@@ -64,7 +65,12 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.use_beam_search = use_beam_search
-        self.stop = [stop] if isinstance(stop, str) else list(stop)
+        if stop is None:
+            self.stop = []
+        elif isinstance(stop, str):
+            self.stop = [stop]
+        else:
+            self.stop = list(stop)
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs

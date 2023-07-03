@@ -55,6 +55,7 @@ class RequestOutput:
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
     """
+
     def __init__(
         self,
         request_id: str,
@@ -75,8 +76,9 @@ class RequestOutput:
         n = seq_group.sampling_params.n
         seqs = seq_group.get_seqs()
         assert n <= len(seqs)
-        sorted_seqs = sorted(
-            seqs, key=lambda seq: seq.get_cumulative_logprob(), reverse=True)
+        sorted_seqs = sorted(seqs,
+                             key=lambda seq: seq.get_cumulative_logprob(),
+                             reverse=True)
         top_n_seqs = sorted_seqs[:n]
 
         # Create the outputs.

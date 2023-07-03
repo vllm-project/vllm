@@ -27,8 +27,9 @@ class BlockAllocator:
         # Initialize the free blocks.
         self.free_blocks: List[PhysicalTokenBlock] = []
         for i in range(num_blocks):
-            block = PhysicalTokenBlock(
-                device=device, block_number=i, block_size=block_size)
+            block = PhysicalTokenBlock(device=device,
+                                       block_number=i,
+                                       block_size=block_size)
             self.free_blocks.append(block)
 
     def allocate(self) -> PhysicalTokenBlock:
@@ -84,10 +85,12 @@ class BlockSpaceManager:
         num_required_blocks = len(seq.logical_token_blocks)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         # Use watermark to avoid frequent cache eviction.
-        return num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks
+        return (num_free_gpu_blocks - num_required_blocks >=
+                self.watermark_blocks)
 
     def allocate(self, seq_group: SequenceGroup) -> None:
-        # NOTE: Here we assume that all sequences in the group have the same prompt.
+        # NOTE: Here we assume that all sequences in the group have the same
+        # prompt.
         seq = seq_group.get_seqs()[0]
 
         # Allocate new physical token blocks that will store the prompt tokens.
@@ -143,7 +146,8 @@ class BlockSpaceManager:
         for block in src_block_table:
             block.ref_count += 1
 
-    def _get_physical_blocks(self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
+    def _get_physical_blocks(
+            self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
         # NOTE: Here, we assume that the physical blocks are only shared by
         # the sequences in the same group.
         blocks: Set[PhysicalTokenBlock] = set()
