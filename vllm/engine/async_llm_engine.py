@@ -2,6 +2,7 @@ import asyncio
 import time
 from typing import Dict, List, Optional
 
+from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_cluster, ray
@@ -143,7 +144,11 @@ class AsyncLLMEngine:
 
             # Kick the engine if the engine is not running.
             if not self.is_engine_running:
-                await self.engine_step(request_id)
+                try:
+                    await self.engine_step(request_id)
+                except RuntimeError as e:
+                    await self.abort(request_id)
+                    raise e
 
             # Wait for new output. The group_event will be set in engine_step
             # when there is new output available for the sequence group.
@@ -205,6 +210,13 @@ class AsyncLLMEngine:
         if self.kicking_request_id == request_id:
             self.is_engine_running = False
             self.kicking_request_id = None
+
+    async def get_model_config(self) -> ModelConfig:
+        """Get the model configuration of the vLLM engine."""
+        if self.engine_use_ray:
+            return await self.engine.get_model_config.remote()
+        else:
+            return self.engine.get_model_config()
 
     @classmethod
     def from_engine_args(cls,
