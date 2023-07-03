@@ -73,8 +73,8 @@ class Worker:
         # number of tokens equal to max_num_batched_tokens.
 
         # Enable top-k sampling to reflect the accurate memory usage.
-        sampling_params = SamplingParams(top_p=0.99,
-                                         top_k=self.model.config.vocab_size - 1)
+        vocab_size = self.model.config.vocab_size
+        sampling_params = SamplingParams(top_p=0.99, top_k=vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
         seqs = []
@@ -91,7 +91,8 @@ class Worker:
             )
             seqs.append(seq)
 
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(seqs)
+        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+            seqs)
 
         # Execute the model.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
@@ -110,8 +111,9 @@ class Worker:
         total_gpu_memory = get_gpu_memory()
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, self.model_config, self.parallel_config)
-        num_gpu_blocks = int((total_gpu_memory * gpu_memory_utilization
-                              - peak_memory) // cache_block_size)
+        num_gpu_blocks = int(
+            (total_gpu_memory * gpu_memory_utilization - peak_memory) //
+            cache_block_size)
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
@@ -125,8 +127,8 @@ class Worker:
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
         self.block_size = cache_config.block_size
-        self.cache_engine = CacheEngine(
-            self.cache_config, self.model_config, self.parallel_config)
+        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
+                                        self.parallel_config)
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
 
@@ -202,8 +204,8 @@ class Worker:
                 generation_block_tables.append(block_table)
 
                 max_context_len = max(max_context_len, context_len)
-                max_num_blocks_per_seq = max(
-                    max_num_blocks_per_seq, len(block_table))
+                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
+                                             len(block_table))
                 context_lens.append(context_len)
 
                 block_number = block_table[position // self.block_size]
@@ -223,7 +225,8 @@ class Worker:
         context_lens_tensor = torch.cuda.IntTensor(context_lens)
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq)
-            for block_table in generation_block_tables]
+            for block_table in generation_block_tables
+        ]
         block_tables_tensor = torch.cuda.IntTensor(padded_block_tables)
 
         seq_data: Dict[int, SequenceData] = {}
