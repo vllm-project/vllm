@@ -15,16 +15,6 @@ attn_config_defaults: Dict = {
     'alibi': False,
     'alibi_bias_max': 8,
 }
-init_config_defaults: Dict = {
-    'name': 'kaiming_normal_',
-    'fan_mode': 'fan_in',
-    'init_nonlinearity': 'relu',
-    'init_div_is_residual': True,
-    'emb_init_std': None,
-    'emb_init_uniform_lim': None,
-    'init_std': None,
-    'init_gain': 0.0,
-}
 
 
 class MPTConfig(PretrainedConfig):
@@ -54,7 +44,6 @@ class MPTConfig(PretrainedConfig):
         embedding_fraction: float = 1.0,
         norm_type: str = "low_precision_layernorm",
         use_cache: bool = False,
-        init_config: Dict = init_config_defaults,
         **kwargs,
     ) -> None:
         self.d_model = d_model
@@ -74,7 +63,6 @@ class MPTConfig(PretrainedConfig):
         self.embedding_fraction = embedding_fraction
         self.norm_type = norm_type
         self.use_cache = use_cache
-        self.init_config = init_config
         if 'name' in kwargs:
             del kwargs['name']
         if 'loss_fn' in kwargs:
