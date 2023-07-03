@@ -17,6 +17,7 @@ _MODEL_REGISTRY = {
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "GPTJForCausalLM": GPTJForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
+    "LLaMAForCausalLM": LlamaForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
 }
 

@@ -15,7 +15,6 @@ import uvicorn
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.tokenizer_utils import get_tokenizer
 from vllm.entrypoints.openai.protocol import (
     CompletionRequest, CompletionResponse, CompletionResponseChoice,
     CompletionResponseStreamChoice, CompletionStreamResponse, ErrorResponse,
@@ -23,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import random_uuid
 
 TIMEOUT_KEEP_ALIVE = 5 # seconds
@@ -313,7 +313,7 @@ if __name__ == "__main__":
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     # A separate tokenizer to map token IDs to strings.
-    tokenizer = get_tokenizer(args.model)
+    tokenizer = get_tokenizer(engine_args.tokenizer, engine_args.tokenizer_mode)
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info",
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE)

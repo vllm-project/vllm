@@ -6,11 +6,12 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.core.scheduler import Scheduler
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import DeviceID, initialize_cluster, ray
-from vllm.engine.tokenizer_utils import detokenize_incrementally, get_tokenizer
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
+                                               get_tokenizer)
 from vllm.utils import Counter
 from vllm.worker.worker import Worker
 
@@ -59,6 +60,8 @@ class LLMEngine:
         logger.info(
             "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
+            f"tokenizer={model_config.tokenizer!r}, "
+            f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"dtype={model_config.dtype}, "
             f"use_dummy_weights={model_config.use_dummy_weights}, "
             f"download_dir={model_config.download_dir!r}, "
@@ -75,7 +78,8 @@ class LLMEngine:
         self.log_stats = log_stats
         self._verify_args()
 
-        self.tokenizer = get_tokenizer(model_config.model)
+        self.tokenizer = get_tokenizer(model_config.tokenizer,
+                                       model_config.tokenizer_mode)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -128,7 +132,7 @@ class LLMEngine:
         logger.info(f'# GPU blocks: {num_gpu_blocks}, '
                     f'# CPU blocks: {num_cpu_blocks}')
 
-        if num_gpu_blocks <= 0 or num_cpu_blocks <= 0:
+        if num_gpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
                              "Try increasing `gpu_memory_utilization` when "
                              "initializing the engine.")
@@ -222,8 +226,8 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
-        if (not seq_group_metadata_list) and scheduler_outputs.is_empty():
+        seq_group_metadata_list, scheduler_outputs, ignored_seq_groups = self.scheduler.schedule()
+        if (not seq_group_metadata_list) and scheduler_outputs.is_empty() and (not ignored_seq_groups):
             # Nothing to do.
             return []
 
@@ -247,7 +251,7 @@ class LLMEngine:
 
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
-        for seq_group in seq_groups:
+        for seq_group in seq_groups + ignored_seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
         return request_outputs
@@ -284,6 +288,12 @@ class LLMEngine:
                 if stopped:
                     continue
 
+                # Check if the sequence has reached max_seq_len.
+                if (seq.get_len() >=
+                    self.scheduler.scheduler_config.max_seq_len):
+                    self.scheduler.free_seq(
+                        seq, SequenceStatus.FINISHED_LENGTH_CAPPED)
+                    continue
                 # Check if the sequence has reached max_tokens.
                 if seq.get_output_len() == sampling_params.max_tokens:
                     self.scheduler.free_seq(

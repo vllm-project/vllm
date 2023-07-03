@@ -25,6 +25,9 @@ class LLM:
 
     Args:
         model: The name or path of a HuggingFace Transformers model.
+        tokenizer: The name or path of a HuggingFace Transformers tokenizer.
+        tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
+            if available, and "slow" will always use the slow tokenizer.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -38,6 +41,8 @@ class LLM:
     def __init__(
         self,
         model: str,
+        tokenizer: Optional[str] = None,
+        tokenizer_mode: str = "auto",
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         seed: int = 0,
@@ -47,6 +52,8 @@ class LLM:
             kwargs["disable_log_stats"] = True
         engine_args = EngineArgs(
             model=model,
+            tokenizer=tokenizer,
+            tokenizer_mode=tokenizer_mode,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             seed=seed,
@@ -59,6 +66,12 @@ class LLM:
         self,
     ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer
+
+    def set_tokenizer(
+        self,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    ) -> None:
+        self.llm_engine.tokenizer = tokenizer
 
     def generate(
         self,
