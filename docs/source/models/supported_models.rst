@@ -29,7 +29,7 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`LlamaForCausalLM`
     - LLaMA, Vicuna, Alpaca, Koala, Guanaco
     - :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, :code:`JosephusCheung/Guanaco`, etc.
-  * - :code: `MPTForCausalLM`
+  * - :code:`MPTForCausalLM`
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
   * - :code:`OPTForCausalLM`
