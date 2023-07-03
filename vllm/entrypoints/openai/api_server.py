@@ -213,10 +213,11 @@ async def create_chat_completion(raw_request: Request):
     async def abort_request() -> None:
         await engine.abort(request_id)
 
-    def create_stream_response_json(index: int,
-                                    text: str,
-                                    finish_reason: Optional[str] = None
-                                    ) -> str:
+    def create_stream_response_json(
+        index: int,
+        text: str,
+        finish_reason: Optional[str] = None,
+    ) -> str:
         choice_data = ChatCompletionResponseStreamChoice(
             index=index,
             delta=DeltaMessage(content=text),
