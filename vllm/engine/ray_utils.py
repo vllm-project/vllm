@@ -1,10 +1,14 @@
 import random
+from collections import OrderedDict
 from typing import List, Optional, Tuple
 
 try:
     import ray
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy, NodeAffinitySchedulingStrategy
 except ImportError:
     ray = None
+    PlacementGroupSchedulingStrategy = None
+    NodeAffinitySchedulingStrategy = None
 
 from vllm.config import ParallelConfig
 
@@ -49,38 +53,31 @@ def initialize_cluster(
         all_stage_devices = [[(0, None, 0)]]
         return distributed_init_method, all_stage_devices
 
-    # Assume we have a uniform cluster that each node has the same number of
-    # GPUs for now.
-    valid_node_resources = []
-    num_devices_per_node = None
-    for node in ray.nodes():
-        if (not node["Alive"]) or node["Resources"]["GPU"] <= 0:
-            continue
-        if num_devices_per_node is None:
-            num_devices_per_node = node["Resources"]["GPU"]
-        else:
-            assert num_devices_per_node == node["Resources"]["GPU"], (
-                "The number of GPUs per node is not uniform.")
-        for key in node["Resources"]:
-            if key.startswith("node:"):
-                valid_node_resources.append(key)
-
-    # Verify the parallel config.
-    num_nodes = len(valid_node_resources)
-    if parallel_config.world_size > num_nodes * num_devices_per_node:
-        raise ValueError(
-            "The number of required GPUs exceeds the total number of "
-            "available GPUs.")
-    if parallel_config.tensor_parallel_size >= num_devices_per_node:
-        if parallel_config.tensor_parallel_size % num_devices_per_node != 0:
+    current_placement_group = ray.util.get_current_placement_group()
+    if current_placement_group:
+        # We are in a placement group
+        bundles = current_placement_group.bundle_specs
+        # Verify that we can use the placement group.
+        gpu_bundles = 0
+        for bundle in bundles:
+            assert bundle.get("GPU", 0) > 1, "Placement group bundles cannot have more than 1 GPU assigned"
+            if bundle.get("GPU", 0):
+                gpu_bundles += 1
+        if parallel_config.world_size > gpu_bundles:
             raise ValueError(
-                "The number of tensor parallelism is not divisible by the "
-                "number of GPUs per node.")
+                "The number of required GPUs exceeds the total number of "
+                "available GPUs in the placement group.")
     else:
-        if num_devices_per_node % parallel_config.tensor_parallel_size != 0:
-            raise ValueError(
-                "The number of GPUs per node is not divisible by the number "
-                "of tensor parallelism.")
+        # Create a new placement group
+        current_placement_group = ray.util.placement_group(
+            [{"GPU": 1}] * parallel_config.world_size
+        )
+        # Wait until PG is ready - this will block until all
+        # requested resources are available, and will timeout
+        # if they cannot be provisioned.
+        ray.get(current_placement_group.ready(), timeout=1800)
+
+    
 
     # Assign GPUs to pipeline stages.
     rank = 0
@@ -92,8 +89,8 @@ def initialize_cluster(
     for _ in range(parallel_config.pipeline_parallel_size):
         stage_devices = []
         for _ in range(parallel_config.tensor_parallel_size):
-            node_resource = valid_node_resources[current_node_id]
-            stage_devices.append((rank, node_resource, current_device_id))
+            node = valid_nodes.popitem(last=False)
+            stage_devices.append((rank, NodeAffinitySchedulingStrategy(), current_device_id))
             if distributed_init_method is None:
                 ip = node_resource.split("node:")[-1]
                 port = random.randint(10000, 20000)
