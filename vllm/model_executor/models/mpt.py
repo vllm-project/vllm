@@ -22,7 +22,7 @@ from vllm.transformers_utils.configs.mpt import MPTConfig
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-def _gen_alibi_slopes(n_heads: int, alibi_bias_max: int) -> torch.Tensor:
+def _get_alibi_slopes(n_heads: int, alibi_bias_max: int) -> torch.Tensor:
     _n_heads = 2**math.ceil(math.log2(n_heads))
     m = torch.arange(1, _n_heads + 1, dtype=torch.float32)
     m = m.mul(alibi_bias_max / _n_heads)
@@ -70,7 +70,7 @@ class MPTAttention(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         head_start = tp_rank * self.num_heads
         head_end = (tp_rank + 1) * self.num_heads
-        alibi_slopes = _gen_alibi_slopes(self.total_num_heads,
+        alibi_slopes = _get_alibi_slopes(self.total_num_heads,
                                          self.alibi_bias_max)
         alibi_slopes = alibi_slopes[head_start:head_end].tolist()
 
