@@ -1,9 +1,9 @@
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 from transformers import PretrainedConfig
 
-attn_config_defaults: Dict = {
+attn_config_defaults = {
     "attn_type": "multihead_attention",
     "attn_pdrop": 0.0,
     "attn_impl": "triton",
@@ -36,7 +36,7 @@ class MPTConfig(PretrainedConfig):
         resid_pdrop: float = 0.0,
         emb_pdrop: float = 0.0,
         learned_pos_emb: bool = True,
-        attn_config: Dict = attn_config_defaults,
+        attn_config: Dict[str, Any] = attn_config_defaults,
         init_device: str = "cpu",
         logit_scale: Optional[Union[float, str]] = None,
         no_bias: bool = False,
