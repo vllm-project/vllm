@@ -1,7 +1,7 @@
 from typing import Dict, List, Tuple
 
 import torch
-from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
+from xformers.ops import AttentionBias
 
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData
@@ -38,7 +38,6 @@ class InputMetadata:
         self.max_context_len = max_context_len
         self.block_tables = block_tables
 
-        self.attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
         self.num_prompts = len(prompt_lens)
         self.num_prompt_tokens = sum(prompt_lens)
         self.num_generation_tokens = context_lens.shape[0]
@@ -49,6 +48,9 @@ class InputMetadata:
             self.max_num_blocks_per_seq = 0
         assert block_tables.shape[0] == self.num_generation_tokens
         assert context_lens.shape[0] == self.num_generation_tokens
+
+        # Set during the execution of the first attention op.
+        self.attn_bias: List[AttentionBias] = []
 
     def __repr__(self) -> str:
         # Print only useful metadata.
