@@ -193,6 +193,10 @@ async def create_chat_completion(raw_request: Request):
             top_p=request.top_p,
             stop=request.stop,
             max_tokens=request.max_tokens,
+            best_of=request.best_of,
+            top_k=request.top_k,
+            ignore_eos=request.ignore_eos,
+            use_beam_search=request.use_beam_search,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
