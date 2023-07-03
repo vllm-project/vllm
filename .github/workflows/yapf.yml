@@ -10,7 +10,7 @@ on:
     branches:
       - main
 jobs:
-  format:
+  yapf:
     runs-on: ubuntu-latest
     strategy:
       matrix:
