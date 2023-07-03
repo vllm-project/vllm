@@ -77,8 +77,9 @@ class Sampler(nn.Module):
         # Apply top-p and top-k truncation.
         top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
         assert len(top_ps) == len(top_ks) == probs.shape[0]
-        if any(p < 1.0 - _SAMPLING_EPS
-               for p in top_ps) or any(k != self.vocab_size for k in top_ks):
+        do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
+        do_top_k = any(k != self.vocab_size for k in top_ks)
+        if do_top_p or do_top_k:
             probs = _apply_top_p_top_k(probs, top_ps, top_ks)
 
         # Sample the next tokens.
@@ -100,7 +101,7 @@ def _prune_hidden_states(
 
 
 def _get_penalties(
-    input_metadata: InputMetadata, ) -> Tuple[List[float], List[float]]:
+        input_metadata: InputMetadata) -> Tuple[List[float], List[float]]:
     # Collect the presence and frequency penalties.
     presence_penalties: List[float] = []
     frequency_penalties: List[float] = []
@@ -119,7 +120,7 @@ def _get_penalties(
     return presence_penalties, frequency_penalties
 
 
-def _get_output_tokens(input_metadata: InputMetadata, ) -> List[List[int]]:
+def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
     output_tokens: List[List[int]] = []
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, _ = seq_group
@@ -185,7 +186,7 @@ def _apply_penalties(
     return logits
 
 
-def _get_temperatures(input_metadata: InputMetadata, ) -> List[float]:
+def _get_temperatures(input_metadata: InputMetadata) -> List[float]:
     # Collect the temperatures for the logits.
     temperatures: List[float] = []
     for i, seq_group in enumerate(input_metadata.seq_groups):

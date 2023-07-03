@@ -35,7 +35,7 @@ class EngineArgs:
 
     @staticmethod
     def add_cli_args(
-        parser: argparse.ArgumentParser, ) -> argparse.ArgumentParser:
+            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Shared CLI arguments for vLLM engine."""
         # Model arguments
         parser.add_argument(
@@ -150,10 +150,9 @@ class EngineArgs:
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray)
-        max_seq_len = min(
-            self.max_num_batched_tokens,
-            getattr(model_config.hf_config, 'max_position_embeddings',
-                    float('inf')))
+        model_max_len = getattr(model_config.hf_config,
+                                'max_position_embeddings', float('inf'))
+        max_seq_len = min(self.max_num_batched_tokens, model_max_len)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs, max_seq_len)
         return model_config, cache_config, parallel_config, scheduler_config

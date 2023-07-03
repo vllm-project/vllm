@@ -86,17 +86,16 @@ def load_tensor_parallel_weights(
     for p in column_parallel_weight_names:
         if p in param_name:
             shard_size = param.shape[0]
-            loaded_weight = loaded_weight[
-                shard_size * tensor_model_parallel_rank:shard_size *
-                (tensor_model_parallel_rank + 1)]
+            start_idx = tensor_model_parallel_rank * shard_size
+            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            loaded_weight = loaded_weight[start_idx:end_idx]
             break
     for p in row_parallel_weight_names:
         if p in param_name:
             shard_size = param.shape[1]
-            loaded_weight = loaded_weight[:, shard_size *
-                                          tensor_model_parallel_rank:
-                                          shard_size *
-                                          (tensor_model_parallel_rank + 1)]
+            start_idx = tensor_model_parallel_rank * shard_size
+            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            loaded_weight = loaded_weight[:, start_idx:end_idx]
             break
     assert param.shape == loaded_weight.shape, (
         f"{param_name} shape mismatch between model and checkpoint: "

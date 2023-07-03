@@ -1,5 +1,4 @@
-"""vLLM is a high-throughput and memory-efficient inference and serving engine
- for LLMs"""
+"""vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine

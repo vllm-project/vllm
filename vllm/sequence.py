@@ -1,4 +1,4 @@
-"""Sequence and related classes functions."""
+"""Sequence and its related classes."""
 import copy
 import enum
 from typing import Dict, List, Optional, Union
@@ -22,7 +22,8 @@ class SequenceStatus(enum.Enum):
         return status in [
             SequenceStatus.FINISHED_STOPPED,
             SequenceStatus.FINISHED_LENGTH_CAPPED,
-            SequenceStatus.FINISHED_ABORTED, SequenceStatus.FINISHED_IGNORED
+            SequenceStatus.FINISHED_ABORTED,
+            SequenceStatus.FINISHED_IGNORED,
         ]
 
     @staticmethod
@@ -41,7 +42,8 @@ class SequenceStatus(enum.Enum):
 
 
 class SequenceData:
-    """The data of a sequence required for an NN model.
+    """Data associated with a sequence.
+
 
     Args:
         prompt_token_ids: The token IDs of the prompt.
@@ -86,14 +88,14 @@ class SequenceData:
 
 
 class Sequence:
-    """Store the data, status, and block information of a sequence.
+    """Stores the data, status, and block information of a sequence.
 
     Args:
         seq_id: The ID of the sequence.
         prompt: The prompt of the sequence.
         prompt_token_ids: The token IDs of the prompt.
         block_size: The block size of the sequence. Should be the same as the
-            block size of the model.
+            block size used by the block manager and cache engine.
     """
 
     def __init__(
@@ -231,7 +233,8 @@ class SequenceGroup:
 
 
 class SequenceGroupMetadata:
-    """Metadata for a sequence group. Used for NN execution.
+    """Metadata for a sequence group. Used to create `InputMetadata`.
+
 
     Args:
         request_id: The ID of the request.
@@ -258,13 +261,13 @@ class SequenceGroupMetadata:
 
 
 class SequenceOutputs:
-    """The outputs of the NN for a sequence.
+    """The model output associated with a sequence.
 
     Args:
         seq_id: The ID of the sequence.
         parent_seq_id: The ID of the parent sequence (for forking in beam
             search).
-        output_token: The output token.
+        output_token: The output token ID.
         logprobs: The logprobs of the output token.
             (Token id -> logP(x_i+1 | x_0, ..., x_i))
     """

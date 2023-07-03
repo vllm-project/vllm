@@ -42,7 +42,7 @@ def get_tokenizer(
         raise RuntimeError(err_msg) from e
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
-        logger.warninging(
+        logger.warning(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
     return tokenizer

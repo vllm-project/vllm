@@ -55,12 +55,20 @@ class PagedAttention(nn.Module):
 
     def multi_query_kv_attention(
         self,
-        output: torch.Tensor,  # [num_prompt_tokens, num_heads, head_size]
-        query: torch.Tensor,  # [num_prompt_tokens, num_heads, head_size]
-        key: torch.Tensor,  # [num_prompt_tokens, num_heads, head_size]
-        value: torch.Tensor,  # [num_prompt_tokens, num_heads, head_size]
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
         attn_bias: xops.AttentionBias,
     ) -> torch.Tensor:
+        """Normal attention for the prompt tokens.
+
+        Args:
+            output: shape = [num_prompt_tokens, num_heads, head_size]
+            query: shape = [num_prompt_tokens, num_heads, head_size]
+            key: shape = [num_prompt_tokens, num_heads, head_size]
+            value: shape = [num_prompt_tokens, num_heads, head_size]
+        """
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(
             query.unsqueeze(0),
@@ -77,14 +85,22 @@ class PagedAttention(nn.Module):
 
     def single_query_cached_kv_attention(
         self,
-        output: torch.Tensor,  # [num_generation_tokens, num_heads, head_size]
-        query: torch.Tensor,  # [num_generation_tokens, num_heads, head_size]
-        key_cache: torch.
-        Tensor,  # [num_blocks, num_heads, head_size/x, block_size, x]
-        value_cache: torch.
-        Tensor,  # [num_blocks, num_heads, head_size, block_size]
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> None:
+        """PagedAttention for the generation tokens.
+
+        Args:
+            output: shape = [num_generation_tokens, num_heads, head_size]
+            query: shape = [num_generation_tokens, num_heads, head_size]
+            key_cache: shape = [num_blocks, num_heads, head_size/x,
+                block_size, x]
+            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            input_metadata: metadata for paged attention.
+        """
         block_size = value_cache.shape[3]
         attention_ops.single_query_cached_kv_attention(
             output,
@@ -100,19 +116,32 @@ class PagedAttention(nn.Module):
 
     def forward(
         self,
-        query: torch.Tensor,  # [num_tokens, num_heads * head_size]
-        key: torch.Tensor,  # [num_tokens, num_heads * head_size]
-        value: torch.Tensor,  # [num_tokens, num_heads * head_size]
-        key_cache: Optional[
-            torch.
-            Tensor],  # [num_blocks, num_heads, head_size/x, block_size, x]
-        value_cache: Optional[
-            torch.Tensor],  # [num_blocks, num_heads, head_size, block_size]
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: Optional[torch.Tensor],
+        value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
-    ) -> torch.Tensor:  # [num_tokens, num_heads * head_size]
-        # NOTE: The query, key, and value tensors must be sliced from a qkv
-        # tensor of shape [num_tokens, 3 * num_heads * head_size].
+    ) -> torch.Tensor:
+        """PagedAttention forward pass.
+
+        NOTE: The query, key, and value tensors must be sliced from a qkv
+        tensor of shape [num_tokens, 3 * num_heads * head_size].
+
+        Args:
+            query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_heads * head_size]
+            value: shape = [num_tokens, num_heads * head_size]
+            key_cache: shape = [num_blocks, num_heads, head_size/x,
+                block_size, x]
+            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            input_metadata: metadata for paged attention.
+            cache_event: event to wait for the cache operations to finish.
+
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
 
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -198,17 +227,32 @@ class PagedAttentionWithRoPE(PagedAttention):
 
     def forward(
         self,
-        positions: torch.Tensor,  # [num_tokens]
-        query: torch.Tensor,  # [num_tokens, num_heads * head_size]
-        key: torch.Tensor,  # [num_tokens, num_heads * head_size]
-        value: torch.Tensor,  # [num_tokens, num_heads * head_size]
-        key_cache: torch.
-        Tensor,  # [num_blocks, num_heads, head_size/x, block_size, x]
-        value_cache: torch.
-        Tensor,  # [num_blocks, num_heads, head_size, block_size]
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
-    ) -> torch.Tensor:  # [num_tokens, num_heads * head_size]
+    ) -> torch.Tensor:
+        """ PagedAttention forward pass with rotary embedding.
+
+        Args:
+            positions: shape = [num_tokens]
+                        query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_heads * head_size]
+            value: shape = [num_tokens, num_heads * head_size]
+            key_cache: shape = [num_blocks, num_heads, head_size/x,
+                block_size, x]
+            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            input_metadata: metadata for paged attention.
+            cache_event: event to wait for the cache operations to finish.
+
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
         pos_encoding_ops.rotary_embedding_neox(

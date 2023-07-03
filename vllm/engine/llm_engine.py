@@ -229,8 +229,8 @@ class LLMEngine:
         """
         (seq_group_metadata_list, scheduler_outputs,
          ignored_seq_groups) = self.scheduler.schedule()
-        if (not seq_group_metadata_list) and scheduler_outputs.is_empty() and (
-                not ignored_seq_groups):
+        if ((not seq_group_metadata_list) and scheduler_outputs.is_empty()
+                and (not ignored_seq_groups)):
             # Nothing to do.
             return []
 

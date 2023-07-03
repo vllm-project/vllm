@@ -161,10 +161,11 @@ async def create_completion(raw_request: Request):
         await engine.abort(request_id)
 
     def create_stream_response_json(
-            index: int,
-            text: str,
-            logprobs: Optional[LogProbs] = None,
-            finish_reason: Optional[str] = None) -> str:
+        index: int,
+        text: str,
+        logprobs: Optional[LogProbs] = None,
+        finish_reason: Optional[str] = None,
+    ) -> str:
         choice_data = CompletionResponseStreamChoice(
             index=index,
             text=text,
