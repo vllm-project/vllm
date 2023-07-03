@@ -166,7 +166,7 @@ class AsyncEngineArgs(EngineArgs):
 
     @staticmethod
     def add_cli_args(
-        parser: argparse.ArgumentParser, ) -> argparse.ArgumentParser:
+            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--engine-use-ray',
                             action='store_true',
