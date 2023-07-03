@@ -49,8 +49,8 @@ class GPTNeoXAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.total_num_heads
 
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
-        )
+        tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = (self.total_num_heads //
                           tensor_model_parallel_world_size)

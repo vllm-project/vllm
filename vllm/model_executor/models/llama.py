@@ -87,8 +87,8 @@ class LlamaAttention(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
-        )
+        tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
         self.total_num_heads = num_heads
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = (self.total_num_heads //

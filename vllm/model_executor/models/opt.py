@@ -65,8 +65,8 @@ class OPTAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
-        )
+        tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
         total_num_heads = num_heads
         assert num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
