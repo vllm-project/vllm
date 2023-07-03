@@ -144,7 +144,11 @@ class AsyncLLMEngine:
 
             # Kick the engine if the engine is not running.
             if not self.is_engine_running:
-                await self.engine_step(request_id)
+                try:
+                    await self.engine_step(request_id)
+                except RuntimeError as e:
+                    await self.abort(request_id)
+                    raise e
 
             # Wait for new output. The group_event will be set in engine_step
             # when there is new output available for the sequence group.
