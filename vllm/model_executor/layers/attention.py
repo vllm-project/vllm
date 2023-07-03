@@ -10,7 +10,7 @@ from vllm import cache_ops
 from vllm import pos_encoding_ops
 from vllm.model_executor.input_metadata import InputMetadata
 
-_SUPPORTED_HEAD_SIZES = [64, 80, 96, 128]
+_SUPPORTED_HEAD_SIZES = [64, 80, 96, 128, 256]
 
 
 class PagedAttention(nn.Module):
