@@ -1,4 +1,5 @@
-# Adapted from https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py
+# Adapted from
+# https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py
 from typing import Any, Dict, Optional, Union
 
 from transformers import PretrainedConfig
