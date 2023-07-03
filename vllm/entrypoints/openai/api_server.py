@@ -206,8 +206,8 @@ async def create_completion(raw_request: Request):
                 )
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
-                    logprobs = LogProbs(
-                    ) if request.logprobs is not None else None
+                    logprobs = (LogProbs()
+                                if request.logprobs is not None else None)
                     response_json = create_stream_response_json(
                         index=i,
                         text="",
