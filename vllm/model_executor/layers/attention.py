@@ -328,12 +328,21 @@ class PagedAttentionWithALiBi(PagedAttention):
 
     def multi_query_kv_attention(
         self,
-        output: torch.Tensor,                   # [num_prompt_tokens, num_heads, head_size]
-        query: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
-        key: torch.Tensor,                      # [num_prompt_tokens, num_heads, head_size]
-        value: torch.Tensor,                    # [num_prompt_tokens, num_heads, head_size]
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
+        """Attention with ALiBi bias for the prompt tokens.
+
+        Args:
+            output: shape = [num_prompt_tokens, num_heads, head_size]
+            query: shape = [num_prompt_tokens, num_heads, head_size]
+            key: shape = [num_prompt_tokens, num_heads, head_size]
+            value: shape = [num_prompt_tokens, num_heads, head_size]
+            input_metadata: metadata for paged attention.
+        """
         # FIXME(woosuk): Because xformers does not support dynamic sequence
         # lengths with custom attention bias, we process each prompt one by
         # one. This is inefficient, especially when we have many short prompts.
@@ -356,12 +365,22 @@ class PagedAttentionWithALiBi(PagedAttention):
 
     def single_query_cached_kv_attention(
         self,
-        output: torch.Tensor,           # [num_generation_tokens, num_heads, head_size]
-        query: torch.Tensor,            # [num_generation_tokens, num_heads, head_size]
-        key_cache: torch.Tensor,        # [num_blocks, num_heads, head_size/x, block_size, x]
-        value_cache: torch.Tensor,      # [num_blocks, num_heads, head_size, block_size]
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> None:
+        """PagedAttention with ALiBi bias for the generation tokens.
+
+        Args:
+            output: shape = [num_generation_tokens, num_heads, head_size]
+            query: shape = [num_generation_tokens, num_heads, head_size]
+            key_cache: shape = [num_blocks, num_heads, head_size/x,
+                block_size, x]
+            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            input_metadata: metadata for paged attention.
+        """
         block_size = value_cache.shape[3]
         attention_ops.single_query_cached_kv_attention(
             output,
