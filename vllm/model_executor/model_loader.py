@@ -16,7 +16,8 @@ _MODEL_REGISTRY = {
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
-    "LLaMAForCausalLM": LlamaForCausalLM,
+    "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
 }
 
