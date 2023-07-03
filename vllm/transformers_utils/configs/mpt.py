@@ -4,16 +4,16 @@ from typing import Dict, Optional, Union
 from transformers import PretrainedConfig
 
 attn_config_defaults: Dict = {
-    'attn_type': 'multihead_attention',
-    'attn_pdrop': 0.0,
-    'attn_impl': 'triton',
-    'qk_ln': False,
-    'clip_qkv': None,
-    'softmax_scale': None,
-    'prefix_lm': False,
-    'attn_uses_sequence_id': False,
-    'alibi': False,
-    'alibi_bias_max': 8,
+    "attn_type": "multihead_attention",
+    "attn_pdrop": 0.0,
+    "attn_impl": "triton",
+    "qk_ln": False,
+    "clip_qkv": None,
+    "softmax_scale": None,
+    "prefix_lm": False,
+    "attn_uses_sequence_id": False,
+    "alibi": False,
+    "alibi_bias_max": 8,
 }
 
 
@@ -63,8 +63,8 @@ class MPTConfig(PretrainedConfig):
         self.embedding_fraction = embedding_fraction
         self.norm_type = norm_type
         self.use_cache = use_cache
-        if 'name' in kwargs:
-            del kwargs['name']
-        if 'loss_fn' in kwargs:
-            del kwargs['loss_fn']
+        if "name" in kwargs:
+            del kwargs["name"]
+        if "loss_fn" in kwargs:
+            del kwargs["loss_fn"]
         super().__init__(**kwargs)
