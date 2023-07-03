@@ -216,6 +216,7 @@ def run_single_query_cached_kv_attention(
         context_lens,
         block_size,
         max_context_len,
+        None,  # ALiBi slopes.
     )
 
     ref_output = torch.empty_like(query)
