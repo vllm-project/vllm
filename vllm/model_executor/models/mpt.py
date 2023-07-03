@@ -21,13 +21,16 @@ from vllm.transformers_utils.configs.mpt import MPTConfig
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-def _get_alibi_slopes(n_heads: int, alibi_bias_max: int) -> torch.Tensor:
-    _n_heads = 2**math.ceil(math.log2(n_heads))
-    m = torch.arange(1, _n_heads + 1, dtype=torch.float32)
-    m = m.mul(alibi_bias_max / _n_heads)
+def _get_alibi_slopes(
+    total_num_heads: int,
+    alibi_bias_max: int,
+) -> torch.Tensor:
+    next_power_of_2 = 2**math.ceil(math.log2(total_num_heads))
+    m = torch.arange(1, next_power_of_2 + 1, dtype=torch.float32)
+    m = m.mul(alibi_bias_max / next_power_of_2)
     slopes = 1.0 / torch.pow(2, m)
-    if _n_heads != n_heads:
-        slopes = torch.concat([slopes[1::2], slopes[::2]])[:n_heads]
+    if next_power_of_2 != total_num_heads:
+        slopes = torch.concat([slopes[1::2], slopes[::2]])[:total_num_heads]
     return slopes
 
 
@@ -39,11 +42,11 @@ class MPTAttention(nn.Module):
         self.total_num_heads = config.n_heads
         self.clip_qkv = config.attn_config["clip_qkv"]
         self.qk_ln = config.attn_config["qk_ln"]
-        self.alibi_bias_max = config.attn_config['alibi_bias_max']
+        self.alibi_bias_max = config.attn_config["alibi_bias_max"]
         assert not config.attn_config["prefix_lm"]
         assert config.attn_config["alibi"]
 
-        self.Wqkv = ColumnParallelLinear(
+        self.qkv_proj = ColumnParallelLinear(
             self.d_model,
             3 * self.d_model,
             bias=not config.no_bias,
@@ -87,7 +90,7 @@ class MPTAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         del position_ids  # unused.
-        qkv, _ = self.Wqkv(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
@@ -270,6 +273,7 @@ class MPTForCausalLM(nn.Module):
                     loaded_weight = loaded_weight.reshape(-1)
                 else:
                     raise ValueError(f"Unexpected parameter name {name}")
+                name = name.replace("Wqkv", "qkv_proj")
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights, tp_rank)
