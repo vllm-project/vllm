@@ -248,7 +248,6 @@ class MPTForCausalLM(nn.Module):
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
-            param = state_dict[name]
             if "Wqkv" in name:
                 # NOTE(woosuk): MPT's fused QKV has the shape of
                 # [3 * num_heads * head_size, hidden_size].
@@ -274,6 +273,7 @@ class MPTForCausalLM(nn.Module):
                 else:
                     raise ValueError(f"Unexpected parameter name {name}")
                 name = name.replace("Wqkv", "qkv_proj")
+            param = state_dict[name]
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights, tp_rank)
