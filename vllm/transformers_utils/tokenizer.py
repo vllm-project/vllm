@@ -15,7 +15,6 @@ def get_tokenizer(
     tokenizer_name: str,
     *args,
     tokenizer_mode: str = "auto",
-    trust_remote_code: bool = False,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
@@ -32,8 +31,8 @@ def get_tokenizer(
             f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
             "tokenizer.")
     try:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code,
-                                                  *args, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
+                                                  **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments.
         err_msg = (
@@ -41,16 +40,6 @@ def get_tokenizer(
             f"model, use '{_FAST_LLAMA_TOKENIZER}' instead of the original "
             "tokenizer.")
         raise RuntimeError(err_msg) from e
-    except ValueError as e:
-        # If the error pertains to the tokenizer class not existing or not currently being imported, suggest using the --trust-remote-code flag.
-        if e is not None and "does not exist or is not currently imported." in str(e):
-            err_msg = (
-                "Failed to load the tokenizer. If the tokenizer is a custom "
-                "tokenizer, not yet available in the HuggingFace transformers "
-                "library, consider using the --trust-remote-code flag.")
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.warning(
