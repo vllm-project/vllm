@@ -13,6 +13,7 @@ class EngineArgs:
     model: str
     tokenizer: Optional[str] = None
     tokenizer_mode: str = 'auto'
+    trust_remote_code: bool = False
     download_dir: Optional[str] = None
     use_np_weights: bool = False
     use_dummy_weights: bool = False
@@ -55,6 +56,9 @@ class EngineArgs:
                             help='tokenizer mode. "auto" will use the fast '
                             'tokenizer if available, and "slow" will '
                             'always use the slow tokenizer.')
+        parser.add_argument('--trust-remote-code',
+                            action='store_true',
+                            help='trust remote code from huggingface')
         parser.add_argument('--download-dir',
                             type=str,
                             default=EngineArgs.download_dir,
@@ -140,8 +144,8 @@ class EngineArgs:
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
         # Initialize the configs.
-        model_config = ModelConfig(self.model, self.tokenizer,
-                                   self.tokenizer_mode, self.download_dir,
+        model_config = ModelConfig(self.model, self.tokenizer, self.tokenizer_mode,
+                                   self.trust_remote_code, self.download_dir,
                                    self.use_np_weights, self.use_dummy_weights,
                                    self.dtype, self.seed)
         cache_config = CacheConfig(self.block_size,
