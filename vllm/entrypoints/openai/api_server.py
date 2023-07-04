@@ -581,8 +581,15 @@ if __name__ == "__main__":
 
     logger.info(f"args: {args}")
 
-    served_model = args.served_model_name or args.model
-    chat_template = args.chat_template or served_model
+    if args.served_model_name is not None:
+        served_model = args.served_model_name
+    else:
+        served_model = args.model
+
+    if args.chat_template is not None:
+        chat_template = args.chat_template
+    else:
+        chat_template = served_model
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
