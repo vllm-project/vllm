@@ -28,7 +28,6 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import BaiChuanConfig # TODO: Implement in the vllm transformers_utils
 
 from vllm.sequence import SequenceOutputs
 from vllm.model_executor.input_metadata import InputMetadata
@@ -43,6 +42,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.sequence import SequenceOutputs
+from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
