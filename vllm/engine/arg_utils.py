@@ -144,10 +144,11 @@ class EngineArgs:
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
         # Initialize the configs.
-        model_config = ModelConfig(self.model, self.tokenizer, self.tokenizer_mode,
-                                   self.trust_remote_code, self.download_dir,
-                                   self.use_np_weights, self.use_dummy_weights,
-                                   self.dtype, self.seed)
+        model_config = ModelConfig(self.model, self.tokenizer,
+                                   self.tokenizer_mode, self.trust_remote_code,
+                                   self.download_dir, self.use_np_weights,
+                                   self.use_dummy_weights, self.dtype,
+                                   self.seed)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)
