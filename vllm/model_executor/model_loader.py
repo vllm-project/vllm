@@ -6,17 +6,18 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
-from vllm.model_executor.models import (GPT2LMHeadModel, GPTBigCodeForCausalLM, GPTNeoXForCausalLM,
-                                        LlamaForCausalLM, OPTForCausalLM)
+from vllm.model_executor.models import *  # pylint: disable=wildcard-import
 from vllm.model_executor.weight_utils import initialize_dummy_weights
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
+    "BloomForCausalLM": BloomForCausalLM,
     "GPT2LMHeadModel": GPT2LMHeadModel,
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
-    "LLaMAForCausalLM": LlamaForCausalLM,
+    "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
 }
 
@@ -28,8 +29,7 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
             return _MODEL_REGISTRY[arch]
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {list(_MODEL_REGISTRY.keys())}"
-    )
+        f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
 def get_model(model_config: ModelConfig) -> nn.Module:
@@ -46,8 +46,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         initialize_dummy_weights(model)
     else:
         # Load the weights from the cached or downloaded files.
-        model.load_weights(
-            model_config.model, model_config.download_dir,
-            model_config.use_np_weights)
+        model.load_weights(model_config.model, model_config.download_dir,
+                           model_config.use_np_weights)
         model = model.cuda()
     return model.eval()

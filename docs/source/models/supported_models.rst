@@ -14,6 +14,9 @@ Alongside each architecture, we include some popular models that use it.
   * - Architecture
     - Models
     - Example HuggingFace Models
+  * - :code:`BloomForCausalLM`
+    - BLOOM, BLOOMZ, BLOOMChat
+    - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
@@ -26,6 +29,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`LlamaForCausalLM`
     - LLaMA, Vicuna, Alpaca, Koala, Guanaco
     - :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, :code:`JosephusCheung/Guanaco`, etc.
+  * - :code:`MPTForCausalLM`
+    - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
+    - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.
