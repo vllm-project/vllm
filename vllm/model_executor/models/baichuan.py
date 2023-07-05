@@ -250,7 +250,7 @@ class BaiChuanForCausalLM(nn.Module):
         return next_tokens
 
     _column_parallel_weights = [
-        "embed_tokens.weight", "lm_head.weight", "qkv_proj.weight",
+        "embed_tokens.weight", "lm_head.weight", "W_pack.weight",
         "gate_proj.weight", "up_proj.weight"
     ]
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
@@ -265,25 +265,6 @@ class BaiChuanForCausalLM(nn.Module):
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
             if "rotary_emb.inv_freq" in name:
-                continue
-
-            is_attention_weight = False
-            for stride_id, att_weight_name in enumerate(
-                ["q_proj", "k_proj", "v_proj"]):
-                if att_weight_name not in name:
-                    continue
-                param = state_dict[name.replace(att_weight_name, "qkv_proj")]
-                shard_size = param.shape[0] // 3
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_attention_weight = True
-                break
-            if is_attention_weight:
                 continue
 
             is_gate_up_weight = False
