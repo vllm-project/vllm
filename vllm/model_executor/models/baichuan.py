@@ -37,14 +37,15 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 
-from vllm.sequence import SequenceOutputs
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
     VocabParallelEmbedding,
 )
+from vllm.sequence import SequenceOutputs
 
 from .configuration_baichuan import BaiChuanConfig
 
@@ -227,102 +228,32 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(
             self.num_heads * self.head_dim, self.hidden_size, bias=False
         )
-        self.rotary_emb = RotaryEmbedding(
-            self.head_dim, max_position_embeddings=self.max_position_embeddings
-        )
+        # self.rotary_emb = RotaryEmbedding(
+        # self.head_dim, max_position_embeddings=self.max_position_embeddings
+        # )
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return (
-            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
-            .transpose(1, 2)
-            .contiguous()
+        scaling = self.head_size**-0.5
+        rotary_dim = self.head_dim
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads, self.head_size, scaling, rotary_dim
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
-
+        position_ids: torch.LongTensor,
+        kv_cache: KVCache,
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
+    ) -> torch.Tensor:
         proj = self.W_pack(hidden_states)
-        proj = (
-            proj.unflatten(-1, (3, self.hidden_size))
-            .unsqueeze(0)
-            .transpose(0, -2)
-            .squeeze(-2)
+        q, k, v = proj.chunk(chunks=3, dim=-1)
+        k_cache, v_cache = kv_cache
+        attn_output = self.attn(
+            position_ids, q, k, v, k_cache, v_cache, input_metadata, cache_event
         )
-        query_states = (
-            proj[0].view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        )  # batch_size x source_len x hidden_size
-        key_states = (
-            proj[1].view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        )  # batch_size x target_len x head_size
-        value_states = (
-            proj[2].view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        )  # batch_size x source_len x hidden_size
-
-        kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[-2]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin, position_ids
-        )
-        # [bsz, nh, t, hd]
-
-        if past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-        past_key_value = (key_states, value_states) if use_cache else None
-
-        attn_weights = torch.matmul(
-            query_states, key_states.transpose(2, 3)
-        ) / math.sqrt(self.head_dim)
-
-        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-                f" {attn_weights.size()}"
-            )
-
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = attn_weights + attention_mask
-            attn_weights = torch.max(
-                attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min)
-            )
-
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32
-        ).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = attn_output.transpose(1, 2)
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
-        attn_output = self.o_proj(attn_output)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class DecoderLayer(nn.Module):
