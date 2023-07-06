@@ -17,7 +17,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .configuration_baichuan import BaiChuanConfig
+import math
+from typing import List, Optional, Tuple, Union
+
+import torch
+import torch.utils.checkpoint
+from torch import nn
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers import PreTrainedModel, add_start_docstrings
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -26,18 +32,20 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
 )
 from transformers.utils import (
-    logging,
     add_start_docstrings_to_model_forward,
+    logging,
     replace_return_docstrings,
 )
 
-import math
-from typing import List, Optional, Tuple, Union
+from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.parallel_utils.tensor_parallel import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+    VocabParallelEmbedding,
+)
 
-import torch
-import torch.utils.checkpoint
-from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from .configuration_baichuan import BaiChuanConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -625,32 +633,41 @@ class Model(PreTrainedModel):
 
 
 class BaiChuanForCausalLM(PreTrainedModel):
-    def __init__(self, config):
+    def __init__(self, config: BaiChuanConfig):
         super().__init__(config)
+        self.config = config
         self.model = Model(config)
 
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        # self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
-        self.post_init()
+        # self.post_init()
+        self.embed_out = ColumnParallelLinear(
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
+            gather_output=False,
+            perform_initialization=False,
+        )
+        self.sampler = Sampler(config.vocab_size)
 
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
+    # def get_input_embeddings(self):
+    #     return self.model.embed_tokens
 
-    def set_input_embeddings(self, value):
-        self.model.embed_tokens = value
+    # def set_input_embeddings(self, value):
+    #     self.model.embed_tokens = value
 
-    def get_output_embeddings(self):
-        return self.lm_head
+    # def get_output_embeddings(self):
+    #     return self.lm_head
 
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
+    # def set_output_embeddings(self, new_embeddings):
+    #     self.lm_head = new_embeddings
 
-    def set_decoder(self, decoder):
-        self.model = decoder
+    # def set_decoder(self, decoder):
+    #     self.model = decoder
 
-    def get_decoder(self):
-        return self.model
+    # def get_decoder(self):
+    #     return self.model
 
     def forward(
         self,
@@ -749,48 +766,48 @@ class BaiChuanForCausalLM(PreTrainedModel):
             attentions=outputs.attentions,
         )
 
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        past_key_values=None,
-        attention_mask=None,
-        inputs_embeds=None,
-        **kwargs,
-    ):
-        if past_key_values:
-            input_ids = input_ids[:, -1:]
+    # def prepare_inputs_for_generation(
+    #     self,
+    #     input_ids,
+    #     past_key_values=None,
+    #     attention_mask=None,
+    #     inputs_embeds=None,
+    #     **kwargs,
+    # ):
+    #     if past_key_values:
+    #         input_ids = input_ids[:, -1:]
 
-        position_ids = kwargs.get("position_ids", None)
-        if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            if past_key_values:
-                position_ids = position_ids[:, -1].unsqueeze(-1)
+    #     position_ids = kwargs.get("position_ids", None)
+    #     if attention_mask is not None and position_ids is None:
+    #         # create position_ids on the fly for batch generation
+    #         position_ids = attention_mask.long().cumsum(-1) - 1
+    #         position_ids.masked_fill_(attention_mask == 0, 1)
+    #         if past_key_values:
+    #             position_ids = position_ids[:, -1].unsqueeze(-1)
 
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
+    #     # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+    #     if inputs_embeds is not None and past_key_values is None:
+    #         model_inputs = {"inputs_embeds": inputs_embeds}
+    #     else:
+    #         model_inputs = {"input_ids": input_ids}
 
-        model_inputs.update(
-            {
-                "position_ids": position_ids,
-                "past_key_values": past_key_values,
-                "use_cache": kwargs.get("use_cache"),
-                "attention_mask": attention_mask,
-            }
-        )
-        return model_inputs
+    #     model_inputs.update(
+    #         {
+    #             "position_ids": position_ids,
+    #             "past_key_values": past_key_values,
+    #             "use_cache": kwargs.get("use_cache"),
+    #             "attention_mask": attention_mask,
+    #         }
+    #     )
+    #     return model_inputs
 
-    @staticmethod
-    def _reorder_cache(past_key_values, beam_idx):
-        reordered_past = ()
-        for layer_past in past_key_values:
-            reordered_past += (
-                tuple(
-                    past_state.index_select(0, beam_idx) for past_state in layer_past
-                ),
-            )
-        return reordered_past
+    # @staticmethod
+    # def _reorder_cache(past_key_values, beam_idx):
+    #     reordered_past = ()
+    #     for layer_past in past_key_values:
+    #         reordered_past += (
+    #             tuple(
+    #                 past_state.index_select(0, beam_idx) for past_state in layer_past
+    #             ),
+    #         )
+    #     return reordered_past
