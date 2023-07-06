@@ -225,7 +225,7 @@ __global__ void single_query_cached_kv_attention_kernel(
   using Float_L_vec = typename FloatVec<L_vec>::Type;
 
   constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;
-  constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
+  constexpr int NUM_ROWS_PER_ITER = MAX(WARP_SIZE / NUM_V_VECS_PER_ROW, 1);
   constexpr int NUM_ROWS_PER_THREAD = (HEAD_SIZE + NUM_ROWS_PER_ITER - 1) / NUM_ROWS_PER_ITER;
 
   // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
