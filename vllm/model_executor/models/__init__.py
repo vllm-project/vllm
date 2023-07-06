@@ -1,3 +1,4 @@
+from vllm.model_executor.models.baichuan import BaiChuanForCausalLM
 from vllm.model_executor.models.bloom import BloomForCausalLM
 from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
 from vllm.model_executor.models.gpt_bigcode import GPTBigCodeForCausalLM
@@ -14,4 +15,5 @@ __all__ = [
     "LlamaForCausalLM",
     "MPTForCausalLM",
     "OPTForCausalLM",
+    "BaiChuanForCausalLM",
 ]

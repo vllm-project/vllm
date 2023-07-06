@@ -20,9 +20,16 @@
 from .configuration_baichuan import BaiChuanConfig
 from transformers import PreTrainedModel, add_start_docstrings
 from transformers.activations import ACT2FN
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, \
-    SequenceClassifierOutputWithPast
-from transformers.utils import logging, add_start_docstrings_to_model_forward, replace_return_docstrings
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+    SequenceClassifierOutputWithPast,
+)
+from transformers.utils import (
+    logging,
+    add_start_docstrings_to_model_forward,
+    replace_return_docstrings,
+)
 
 import math
 from typing import List, Optional, Tuple, Union
@@ -32,25 +39,45 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
+KVCache = Tuple[torch.Tensor, torch.Tensor]
+
 
 logger = logging.get_logger(__name__)
 
+
 # Copied from transformers.models.bart.modeling_bart._make_causal_mask
 def _make_causal_mask(
-        input_ids_shape: torch.Size, dtype: torch.dtype, device: torch.device, past_key_values_length: int = 0
+    input_ids_shape: torch.Size,
+    dtype: torch.dtype,
+    device: torch.device,
+    past_key_values_length: int = 0,
 ):
     """
     Make causal mask used for bi-directional self-attention.
     """
     bsz, tgt_len = input_ids_shape
-    mask = torch.full((tgt_len, tgt_len), torch.tensor(torch.finfo(dtype).min, device=device), device=device)
+    mask = torch.full(
+        (tgt_len, tgt_len),
+        torch.tensor(torch.finfo(dtype).min, device=device),
+        device=device,
+    )
     mask_cond = torch.arange(mask.size(-1), device=device)
     mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
     mask = mask.to(dtype)
 
     if past_key_values_length > 0:
-        mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
-    return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
+        mask = torch.cat(
+            [
+                torch.zeros(
+                    tgt_len, past_key_values_length, dtype=dtype, device=device
+                ),
+                mask,
+            ],
+            dim=-1,
+        )
+    return mask[None, None, :, :].expand(
+        bsz, 1, tgt_len, tgt_len + past_key_values_length
+    )
 
 
 # Copied from transformers.models.bart.modeling_bart._expand_mask
@@ -65,7 +92,9 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
 
     inverted_mask = 1.0 - expanded_mask
 
-    return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
+    return inverted_mask.masked_fill(
+        inverted_mask.to(torch.bool), torch.finfo(dtype).min
+    )
 
 
 class RMSNorm(nn.Module):
@@ -96,24 +125,38 @@ class RotaryEmbedding(torch.nn.Module):
 
         # Build here to make `torch.jit.trace` work.
         self.max_seq_len_cached = max_position_embeddings
-        t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        t = torch.arange(
+            self.max_seq_len_cached,
+            device=self.inv_freq.device,
+            dtype=self.inv_freq.dtype,
+        )
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos()[None, None, :, :], persistent=False)
-        self.register_buffer("sin_cached", emb.sin()[None, None, :, :], persistent=False)
+        self.register_buffer(
+            "cos_cached", emb.cos()[None, None, :, :], persistent=False
+        )
+        self.register_buffer(
+            "sin_cached", emb.sin()[None, None, :, :], persistent=False
+        )
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
         # This `if` block is unlikely to be run after we build sin/cos in `__init__`. Keep the logic here just in case.
         if seq_len > self.max_seq_len_cached:
             self.max_seq_len_cached = seq_len
-            t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
+            t = torch.arange(
+                self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype
+            )
             freqs = torch.einsum("i,j->ij", t, self.inv_freq)
             # Different from paper, but it uses a different permutation in order to obtain the same calculation
             emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            self.register_buffer("cos_cached", emb.cos()[None, None, :, :], persistent=False)
-            self.register_buffer("sin_cached", emb.sin()[None, None, :, :], persistent=False)
+            self.register_buffer(
+                "cos_cached", emb.cos()[None, None, :, :], persistent=False
+            )
+            self.register_buffer(
+                "sin_cached", emb.sin()[None, None, :, :], persistent=False
+            )
         return (
             self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
             self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
@@ -123,7 +166,7 @@ class RotaryEmbedding(torch.nn.Module):
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -140,10 +183,10 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
 
 class MLP(nn.Module):
     def __init__(
-            self,
-            hidden_size: int,
-            intermediate_size: int,
-            hidden_act: str,
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
     ):
         super().__init__()
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
@@ -172,37 +215,55 @@ class Attention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
         self.W_pack = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=False)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        self.rotary_emb = RotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
+        self.o_proj = nn.Linear(
+            self.num_heads * self.head_dim, self.hidden_size, bias=False
+        )
+        self.rotary_emb = RotaryEmbedding(
+            self.head_dim, max_position_embeddings=self.max_position_embeddings
+        )
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Tuple[torch.Tensor]] = None,
-            output_attentions: bool = False,
-            use_cache: bool = False,
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
         proj = self.W_pack(hidden_states)
-        proj = proj.unflatten(-1, (3, self.hidden_size)).unsqueeze(0).transpose(0, -2).squeeze(-2)
-        query_states = proj[0].view(bsz, q_len, self.num_heads, self.head_dim).transpose(1,
-                                                                                         2)  # batch_size x source_len x hidden_size
-        key_states = proj[1].view(bsz, q_len, self.num_heads, self.head_dim).transpose(1,
-                                                                                       2)  # batch_size x target_len x head_size
-        value_states = proj[2].view(bsz, q_len, self.num_heads, self.head_dim).transpose(1,
-                                                                                         2)  # batch_size x source_len x hidden_size
+        proj = (
+            proj.unflatten(-1, (3, self.hidden_size))
+            .unsqueeze(0)
+            .transpose(0, -2)
+            .squeeze(-2)
+        )
+        query_states = (
+            proj[0].view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        )  # batch_size x source_len x hidden_size
+        key_states = (
+            proj[1].view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        )  # batch_size x target_len x head_size
+        value_states = (
+            proj[2].view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        )  # batch_size x source_len x hidden_size
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
         # [bsz, nh, t, hd]
 
         if past_key_value is not None:
@@ -212,7 +273,9 @@ class Attention(nn.Module):
 
         past_key_value = (key_states, value_states) if use_cache else None
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(
+            query_states, key_states.transpose(2, 3)
+        ) / math.sqrt(self.head_dim)
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
@@ -226,10 +289,14 @@ class Attention(nn.Module):
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
             attn_weights = attn_weights + attention_mask
-            attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
+            attn_weights = torch.max(
+                attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min)
+            )
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.softmax(
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(query_states.dtype)
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -260,17 +327,21 @@ class DecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Tuple[torch.Tensor]] = None,
-            output_attentions: Optional[bool] = False,
-            use_cache: Optional[bool] = False,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+    ) -> Tuple[
+        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
+    ]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -353,8 +424,12 @@ class Model(PreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
+        self.layers = nn.ModuleList(
+            [DecoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.gradient_checkpointing = False
@@ -368,7 +443,9 @@ class Model(PreTrainedModel):
         self.embed_tokens = value
 
     # Copied from transformers.models.bart.modeling_bart.BartDecoder._prepare_decoder_attention_mask
-    def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
+    def _prepare_decoder_attention_mask(
+        self, attention_mask, input_shape, inputs_embeds, past_key_values_length
+    ):
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
@@ -382,44 +459,58 @@ class Model(PreTrainedModel):
 
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
-                inputs_embeds.device
-            )
+            expanded_attn_mask = _expand_mask(
+                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
+            ).to(inputs_embeds.device)
             combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
+                expanded_attn_mask
+                if combined_attention_mask is None
+                else expanded_attn_mask + combined_attention_mask
             )
 
         return combined_attention_mask
 
     def forward(
-            self,
-            input_ids: torch.LongTensor = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
-            inputs_embeds: Optional[torch.FloatTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
+            raise ValueError(
+                "You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time"
+            )
         elif input_ids is not None:
             batch_size, seq_length = input_ids.shape
         elif inputs_embeds is not None:
             batch_size, seq_length, _ = inputs_embeds.shape
         else:
-            raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
+            raise ValueError(
+                "You have to specify either decoder_input_ids or decoder_inputs_embeds"
+            )
 
         seq_length_with_past = seq_length
         past_key_values_length = 0
@@ -431,7 +522,10 @@ class Model(PreTrainedModel):
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
             position_ids = torch.arange(
-                past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
+                past_key_values_length,
+                seq_length + past_key_values_length,
+                dtype=torch.long,
+                device=device,
             )
             position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
         else:
@@ -442,10 +536,15 @@ class Model(PreTrainedModel):
         # embed positions
         if attention_mask is None:
             attention_mask = torch.ones(
-                (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
+                (batch_size, seq_length_with_past),
+                dtype=torch.bool,
+                device=inputs_embeds.device,
             )
         attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+            attention_mask,
+            (batch_size, seq_length),
+            inputs_embeds,
+            past_key_values_length,
         )
 
         hidden_states = inputs_embeds
@@ -466,7 +565,9 @@ class Model(PreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
+            past_key_value = (
+                past_key_values[idx] if past_key_values is not None else None
+            )
 
             if self.gradient_checkpointing and self.training:
 
@@ -510,7 +611,11 @@ class Model(PreTrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(
+                v
+                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+                if v is not None
+            )
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
@@ -548,17 +653,20 @@ class BaiChuanForCausalLM(PreTrainedModel):
         return self.model
 
     def forward(
-            self,
-            input_ids: torch.LongTensor = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
-            inputs_embeds: Optional[torch.FloatTensor] = None,
-            labels: Optional[torch.LongTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
+        self,
+        input_ids: torch.LongTensor,
+        # attention_mask: Optional[torch.Tensor] = None,
+        position_ids: torch.LongTensor,
+        # past_key_values: Optional[List[torch.FloatTensor]] = None,
+        # inputs_embeds: Optional[torch.FloatTensor] = None,
+        # labels: Optional[torch.LongTensor] = None,
+        # use_cache: Optional[bool] = None,
+        # output_attentions: Optional[bool] = None,
+        # output_hidden_states: Optional[bool] = None,
+        # return_dict: Optional[bool] = None,
+        kv_cache: KVCache,
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -586,11 +694,19 @@ class BaiChuanForCausalLM(PreTrainedModel):
         "Hey, are you consciours? Can you talk to me?\nI'm not consciours, but I can talk to you."
         ```"""
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
@@ -634,7 +750,12 @@ class BaiChuanForCausalLM(PreTrainedModel):
         )
 
     def prepare_inputs_for_generation(
-            self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        **kwargs,
     ):
         if past_key_values:
             input_ids = input_ids[:, -1:]
@@ -667,5 +788,9 @@ class BaiChuanForCausalLM(PreTrainedModel):
     def _reorder_cache(past_key_values, beam_idx):
         reordered_past = ()
         for layer_past in past_key_values:
-            reordered_past += (tuple(past_state.index_select(0, beam_idx) for past_state in layer_past),)
+            reordered_past += (
+                tuple(
+                    past_state.index_select(0, beam_idx) for past_state in layer_past
+                ),
+            )
         return reordered_past
