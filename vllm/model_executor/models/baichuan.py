@@ -1,4 +1,7 @@
 # coding=utf-8
+# Adapted from
+# https://huggingface.co/baichuan-inc/baichuan-7B/blob/main/modeling_baichuan.py
+# Copyright 2023 gameofdimension.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
