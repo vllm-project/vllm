@@ -32,6 +32,7 @@ def get_tokenizer(
             "tokenizer.")
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
+                                                  trust_remote_code=True,
                                                   **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments.
