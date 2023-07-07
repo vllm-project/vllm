@@ -50,7 +50,7 @@ def get_tokenizer(
                 e):
             err_msg = (
                 "Failed to load the tokenizer. If the tokenizer is a custom "
-                "tokenizer, not yet available in the HuggingFace transformers "
+                "tokenizer not yet available in the HuggingFace transformers "
                 "library, consider using the --trust-remote-code flag.")
             raise RuntimeError(err_msg) from e
         else:
