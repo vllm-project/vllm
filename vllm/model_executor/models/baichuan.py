@@ -47,7 +47,7 @@ from vllm.model_executor.weight_utils import (
 )
 from vllm.sequence import SequenceOutputs
 
-from .configuration_baichuan import BaiChuanConfig
+# from .configuration_baichuan import BaiChuanConfig
 
 # (
 # add_start_docstrings_to_model_forward,
@@ -109,7 +109,7 @@ class MLP(nn.Module):
 class Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: BaiChuanConfig):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -157,7 +157,7 @@ class Attention(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config: BaiChuanConfig):
+    def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Attention(config=config)
@@ -210,7 +210,7 @@ class Model(nn.Module):
         config: BaiChuanConfig
     """
 
-    def __init__(self, config: BaiChuanConfig):
+    def __init__(self, config):
         super().__init__()
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -254,7 +254,7 @@ class Model(nn.Module):
 
 
 class BaiChuanForCausalLM(nn.Module):
-    def __init__(self, config: BaiChuanConfig):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         self.model = Model(config)
