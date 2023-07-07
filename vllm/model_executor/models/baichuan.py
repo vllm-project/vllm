@@ -271,13 +271,13 @@ class BaiChuanForCausalLM(nn.Module):
     def forward(
         self,
         input_ids: torch.LongTensor,
-        position_ids: torch.LongTensor,
+        positions: torch.LongTensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
         hidden_states = self.model(
-            input_ids, position_ids, kv_caches, input_metadata, cache_events
+            input_ids, positions, kv_caches, input_metadata, cache_events
         )
         next_tokens = self.sampler(self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
