@@ -210,7 +210,7 @@ class Model(nn.Module):
     """
 
     def __init__(self, config: BaiChuanConfig):
-        super().__init__(config)
+        super().__init__()
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -288,21 +288,22 @@ class BaiChuanForCausalLM(nn.Module):
         cache_dir: Optional[str] = None,
         use_np_cache: bool = False,
     ):
+        pass
         # tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        state_dict = self.state_dict()
-        for name in state_dict:
-            print(name, state_dict[name])
-        print("-" * 100)
-        for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, use_np_cache
-        ):
-            print(name, type(loaded_weight))
+        # state_dict = self.state_dict()
+        # for name in state_dict:
+        #     print(name, state_dict[name])
+        # print("-" * 100)
+        # for name, loaded_weight in hf_model_weights_iterator(
+        #     model_name_or_path, cache_dir, use_np_cache
+        # ):
+        #     print(name, type(loaded_weight))
 
 
-if "__main__" == __name__:
-    import sys
+# if "__main__" == __name__:
+#     import sys
 
-    config = BaiChuanConfig()
-    model = BaiChuanForCausalLM(config)
+#     config = BaiChuanConfig()
+#     model = BaiChuanForCausalLM(config)
 
-    model.load_weights(sys.argv[1])
+#     model.load_weights(sys.argv[1])
