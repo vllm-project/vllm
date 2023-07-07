@@ -1,15 +1,19 @@
 import random
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Optional, Tuple, TYPE_CHECKING
+
+from vllm.config import ParallelConfig
 
 try:
     import ray
-    from ray.util.placement_group import PlacementGroup
     from ray.air.util.torch_dist import TorchDistributedWorker
 
     class RayWorker(TorchDistributedWorker):
+        """Ray wrapper for vllm.worker.Worker, allowing Worker to be
+        lazliy initialized after Ray sets CUDA_VISIBLE_DEVICES."""
+
         def __init__(self) -> None:
             self.worker = None
-        
+
         def init_worker(self, worker_init_fn):
             self.worker = worker_init_fn()
 
@@ -18,7 +22,7 @@ try:
 
         def profile_num_available_blocks(self, *args, **kwargs):
             return self.worker.profile_num_available_blocks(*args, **kwargs)
-        
+
         def init_cache_engine(self, *args, **kwargs):
             self.worker.init_cache_engine(*args, **kwargs)
 
@@ -28,16 +32,6 @@ try:
 except ImportError:
     ray = None
     TorchDistributedWorker = None
-
-    class FakePlacementGroup:
-        def __init__(self, bundles: List[Dict[str, float]]):
-            self.bundles = bundles
-
-        @property
-        def bundle_specs(self) -> List[Dict[str, float]]:
-            return self.bundles
-
-from vllm.config import ParallelConfig
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -86,7 +80,9 @@ def initialize_cluster(
         # Verify that we can use the placement group.
         gpu_bundles = 0
         for bundle in bundles:
-            assert bundle.get("GPU", 0) > 1, "Placement group bundles cannot have more than 1 GPU assigned"
+            assert bundle.get(
+                "GPU",
+                0) > 1, "Placement group bundles cannot have more than 1 GPU"
             if bundle.get("GPU", 0):
                 gpu_bundles += 1
         if parallel_config.world_size > gpu_bundles:
@@ -95,9 +91,9 @@ def initialize_cluster(
                 "available GPUs in the placement group.")
     else:
         # Create a new placement group
-        current_placement_group = ray.util.placement_group(
-            [{"GPU": 1}] * parallel_config.world_size
-        )
+        current_placement_group = ray.util.placement_group([{
+            "GPU": 1
+        }] * parallel_config.world_size)
         # Wait until PG is ready - this will block until all
         # requested resources are available, and will timeout
         # if they cannot be provisioned.

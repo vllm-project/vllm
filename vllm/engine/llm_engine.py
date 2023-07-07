@@ -14,6 +14,10 @@ from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
 
+if ray:
+    from ray.air.util.torch_dist import init_torch_dist_process_group
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
@@ -96,7 +100,9 @@ class LLMEngine:
         self.scheduler = Scheduler(scheduler_config, cache_config, log_stats)
 
     def _init_workers(self, distributed_init_method: str):
-        from vllm.worker.worker import Worker
+        # Lazy import the Worker to avoid importing torch.cuda/xformers
+        # before CUDA_VISIBLE_DEVICES is set in the Worker
+        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
         self.workers: List[Worker] = []
         worker = Worker(
@@ -113,38 +119,34 @@ class LLMEngine:
         )
 
     def _init_workers_ray(self, placement_group: "PlacementGroup"):
-        from vllm.worker.worker import Worker
+        # Lazy import the Worker to avoid importing torch.cuda/xformers
+        # before CUDA_VISIBLE_DEVICES is set in the Worker
+        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
         self.workers: List[Worker] = []
         for bundle in placement_group.bundle_specs:
             if not bundle.get("GPU", 0):
                 continue
-            from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
             worker = ray.remote(
                 num_cpus=0,
                 num_gpus=1,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=placement_group, placement_group_capture_child_tasks=True
-                ),
+                    placement_group=placement_group,
+                    placement_group_capture_child_tasks=True),
             )(RayWorker).remote()
             self.workers.append(worker)
 
-        from ray.air.util.torch_dist import (
-            init_torch_dist_process_group,
-        )
         # Initialize torch distributed process group for the workers.
         init_torch_dist_process_group(self.workers, backend="nccl")
-        self._run_workers(
-            "init_worker",
-            get_all_outputs=True,
-            worker_init_fn=lambda: Worker(
-                self.model_config,
-                self.parallel_config,
-                self.scheduler_config,
-                None,
-                None,
-            )
-        )
+        self._run_workers("init_worker",
+                          get_all_outputs=True,
+                          worker_init_fn=lambda: Worker(
+                              self.model_config,
+                              self.parallel_config,
+                              self.scheduler_config,
+                              None,
+                              None,
+                          ))
         self._run_workers(
             "init_model",
             get_all_outputs=True,
@@ -192,7 +194,8 @@ class LLMEngine:
         engine_configs = engine_args.create_engine_configs()
         parallel_config = engine_configs[2]
         # Initialize the cluster.
-        distributed_init_method, placement_group = initialize_cluster(parallel_config)
+        distributed_init_method, placement_group = initialize_cluster(
+            parallel_config)
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      distributed_init_method,

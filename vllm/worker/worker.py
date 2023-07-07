@@ -29,8 +29,8 @@ class Worker:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        rank: Optional[int]=None,
-        distributed_init_method: Optional[str]=None,
+        rank: Optional[int] = None,
+        distributed_init_method: Optional[str] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -50,7 +50,8 @@ class Worker:
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
         # Env vars will be set by Ray.
-        self.rank = self.rank if self.rank is not None else int(os.getenv("RANK", "-1"))
+        self.rank = self.rank if self.rank is not None else int(
+            os.getenv("RANK", "-1"))
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         self.device = torch.device(f"cuda:{local_rank}")
         if self.rank < 0:
@@ -307,14 +308,14 @@ class Worker:
 def _init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
-    distributed_init_method: Optional[str]=None,
+    distributed_init_method: Optional[str] = None,
 ) -> None:
     """Initialize the distributed environment."""
     if not torch.distributed.is_initialized():
         if not distributed_init_method:
             raise ValueError(
-                f"distributed_init_method must be set if torch.distributed is not already initialized"
-            )
+                "distributed_init_method must be set if torch.distributed "
+                "is not already initialized")
         torch.distributed.init_process_group(
             backend="nccl",
             world_size=parallel_config.world_size,
