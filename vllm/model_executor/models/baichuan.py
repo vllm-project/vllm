@@ -301,6 +301,9 @@ class BaiChuanForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
+            if name not in state_dict:
+                continue
+
             param = state_dict[name]
             load_tensor_parallel_weights(
                 param,
