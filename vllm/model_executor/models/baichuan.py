@@ -39,7 +39,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.sequence import SequenceOutputs
 from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -64,9 +63,9 @@ class BaiChuanMLP(nn.Module):
                                            bias=False,
                                            input_is_parallel=True,
                                            perform_initialization=False)
-        if hidden_act != 'silu':
-            raise ValueError(f'Unsupported activation: {hidden_act}. '
-                             'Only silu is supported for now.')
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -90,7 +89,8 @@ class BaiChuanAttention(nn.Module):
         )
         self.total_num_heads = num_heads
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
+        self.num_heads = (self.total_num_heads //
+                          tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
         self.scaling = self.head_dim**-0.5
 
