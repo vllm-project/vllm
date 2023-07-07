@@ -26,85 +26,46 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers import PreTrainedModel, add_start_docstrings
 from transformers.activations import ACT2FN
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-    SequenceClassifierOutputWithPast,
-)
-from transformers.utils import (
-    add_start_docstrings_to_model_forward,
-    logging,
-    replace_return_docstrings,
-)
+
+# from transformers.modeling_outputs import (
+# BaseModelOutputWithPast,
+# CausalLMOutputWithPast,
+# SequenceClassifierOutputWithPast,
+# )
+from transformers.utils import logging
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-    VocabParallelEmbedding,
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_world_size,
+)
+from vllm.model_executor.weight_utils import (
+    hf_model_weights_iterator,
+    load_tensor_parallel_weights,
 )
 from vllm.sequence import SequenceOutputs
 
 from .configuration_baichuan import BaiChuanConfig
 
+# (
+# add_start_docstrings_to_model_forward,
+# logging,
+# replace_return_docstrings,
+# )
+
+
+# from vllm.model_executor.parallel_utils.tensor_parallel import (
+# ColumnParallelLinear,
+# RowParallelLinear,
+# VocabParallelEmbedding,
+# )
+
+
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 logger = logging.get_logger(__name__)
-
-
-# Copied from transformers.models.bart.modeling_bart._make_causal_mask
-def _make_causal_mask(
-    input_ids_shape: torch.Size,
-    dtype: torch.dtype,
-    device: torch.device,
-    past_key_values_length: int = 0,
-):
-    """
-    Make causal mask used for bi-directional self-attention.
-    """
-    bsz, tgt_len = input_ids_shape
-    mask = torch.full(
-        (tgt_len, tgt_len),
-        torch.tensor(torch.finfo(dtype).min, device=device),
-        device=device,
-    )
-    mask_cond = torch.arange(mask.size(-1), device=device)
-    mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-    mask = mask.to(dtype)
-
-    if past_key_values_length > 0:
-        mask = torch.cat(
-            [
-                torch.zeros(
-                    tgt_len, past_key_values_length, dtype=dtype, device=device
-                ),
-                mask,
-            ],
-            dim=-1,
-        )
-    return mask[None, None, :, :].expand(
-        bsz, 1, tgt_len, tgt_len + past_key_values_length
-    )
-
-
-# Copied from transformers.models.bart.modeling_bart._expand_mask
-def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
-    """
-    Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
-    """
-    bsz, src_len = mask.size()
-    tgt_len = tgt_len if tgt_len is not None else src_len
-
-    expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
-
-    inverted_mask = 1.0 - expanded_mask
-
-    return inverted_mask.masked_fill(
-        inverted_mask.to(torch.bool), torch.finfo(dtype).min
-    )
 
 
 class RMSNorm(nn.Module):
@@ -125,70 +86,6 @@ class RMSNorm(nn.Module):
             hidden_states = hidden_states.to(self.weight.dtype)
 
         return self.weight * hidden_states
-
-
-class RotaryEmbedding(torch.nn.Module):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
-        super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
-        self.register_buffer("inv_freq", inv_freq)
-
-        # Build here to make `torch.jit.trace` work.
-        self.max_seq_len_cached = max_position_embeddings
-        t = torch.arange(
-            self.max_seq_len_cached,
-            device=self.inv_freq.device,
-            dtype=self.inv_freq.dtype,
-        )
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer(
-            "cos_cached", emb.cos()[None, None, :, :], persistent=False
-        )
-        self.register_buffer(
-            "sin_cached", emb.sin()[None, None, :, :], persistent=False
-        )
-
-    def forward(self, x, seq_len=None):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        # This `if` block is unlikely to be run after we build sin/cos in `__init__`. Keep the logic here just in case.
-        if seq_len > self.max_seq_len_cached:
-            self.max_seq_len_cached = seq_len
-            t = torch.arange(
-                self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype
-            )
-            freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-            # Different from paper, but it uses a different permutation in order to obtain the same calculation
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            self.register_buffer(
-                "cos_cached", emb.cos()[None, None, :, :], persistent=False
-            )
-            self.register_buffer(
-                "sin_cached", emb.sin()[None, None, :, :], persistent=False
-            )
-        return (
-            self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
-            self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
-        )
-
-
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
-    # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
-    cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
-    sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
-    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
 
 
 class MLP(nn.Module):
@@ -217,7 +114,11 @@ class Attention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
-        self.max_position_embeddings = config.max_position_embeddings
+        # self.max_position_embeddings = config.max_position_embeddings
+
+        tensor_model_parallel_world_size = 1  # get_tensor_model_parallel_world_size()
+        assert self.num_heads % tensor_model_parallel_world_size == 0
+        parallel_num_heads = self.num_heads // tensor_model_parallel_world_size
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -225,17 +126,15 @@ class Attention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
         self.W_pack = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=False)
-        self.o_proj = nn.Linear(
-            self.num_heads * self.head_dim, self.hidden_size, bias=False
-        )
+        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         # self.rotary_emb = RotaryEmbedding(
         # self.head_dim, max_position_embeddings=self.max_position_embeddings
         # )
 
-        scaling = self.head_size**-0.5
+        scaling = self.head_dim**-0.5
         rotary_dim = self.head_dim
         self.attn = PagedAttentionWithRoPE(
-            self.num_heads, self.head_size, scaling, rotary_dim
+            parallel_num_heads, self.head_dim, scaling, rotary_dim
         )
 
     def forward(
@@ -302,30 +201,7 @@ class DecoderLayer(nn.Module):
         return hidden_states
 
 
-class PreTrainedModel(PreTrainedModel):
-    config_class = BaiChuanConfig
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["DecoderLayer"]
-    _keys_to_ignore_on_load_unexpected = [r"decoder\.version"]
-
-    def _init_weights(self, module):
-        std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-
-    def _set_gradient_checkpointing(self, module, value=False):
-        if isinstance(module, Model):
-            module.gradient_checkpointing = value
-
-
-class Model(PreTrainedModel):
+class Model(nn.Module):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DecoderLayer`]
 
@@ -335,11 +211,15 @@ class Model(PreTrainedModel):
 
     def __init__(self, config: BaiChuanConfig):
         super().__init__(config)
+        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size, perform_initialization=False
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
         )
+        # self.embed_tokens = VocabParallelEmbedding(
+        # config.vocab_size, config.hidden_size, perform_initialization=False
+        # )
         self.layers = nn.ModuleList(
             [DecoderLayer(config) for _ in range(config.num_hidden_layers)]
         )
@@ -372,19 +252,20 @@ class Model(PreTrainedModel):
         return hidden_states
 
 
-class BaiChuanForCausalLM(PreTrainedModel):
+class BaiChuanForCausalLM(nn.Module):
     def __init__(self, config: BaiChuanConfig):
         super().__init__(config)
         self.config = config
         self.model = Model(config)
 
-        self.embed_out = ColumnParallelLinear(
-            config.hidden_size,
-            config.vocab_size,
-            bias=False,
-            gather_output=False,
-            perform_initialization=False,
-        )
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        # self.embed_out = ColumnParallelLinear(
+        #     config.hidden_size,
+        #     config.vocab_size,
+        #     bias=False,
+        #     gather_output=False,
+        #     perform_initialization=False,
+        # )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -398,5 +279,21 @@ class BaiChuanForCausalLM(PreTrainedModel):
         hidden_states = self.model(
             input_ids, position_ids, kv_caches, input_metadata, cache_events
         )
-        next_tokens = self.sampler(self.embed_out.weight, hidden_states, input_metadata)
+        next_tokens = self.sampler(self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
+
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        use_np_cache: bool = False,
+    ):
+        # tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+        state_dict = self.state_dict()
+        for name in state_dict:
+            print(name, state_dict[name])
+        print("-" * 100)
+        for name, loaded_weight in hf_model_weights_iterator(
+            model_name_or_path, cache_dir, use_np_cache
+        ):
+            print(name, type(loaded_weight))
