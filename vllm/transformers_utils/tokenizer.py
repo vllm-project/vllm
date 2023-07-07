@@ -31,7 +31,8 @@ def get_tokenizer(
             f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
             "tokenizer.")
     try:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name,
+                                                  *args,
                                                   trust_remote_code=True,
                                                   **kwargs)
     except TypeError as e:
