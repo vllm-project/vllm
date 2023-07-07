@@ -108,7 +108,8 @@ def run_hf(
     max_batch_size: int,
 ) -> float:
     assert not use_beam_search
-    llm = AutoModelForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
+    llm = AutoModelForCausalLM.from_pretrained(model, trust_remote_code=True,
+                                               torch_dtype=torch.float16)
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
