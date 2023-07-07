@@ -269,7 +269,7 @@ async def create_chat_completion(raw_request: Request):
                         finish_reason=output.finish_reason,
                     )
                     yield f"data: {response_json}\n\n"
-            yield "data: [DONE]\n\n"
+        yield "data: [DONE]\n\n"
 
     # Streaming response
     if request.stream:
@@ -465,7 +465,7 @@ async def create_completion(raw_request: Request):
                         finish_reason=output.finish_reason,
                     )
                     yield f"data: {response_json}\n\n"
-            yield "data: [DONE]\n\n"
+        yield "data: [DONE]\n\n"
 
     # Streaming response
     if stream:
