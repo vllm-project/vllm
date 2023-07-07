@@ -20,6 +20,8 @@ class ModelConfig:
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
+        trust_remote_code: Trust remote code (e.g., from HuggingFace) when
+            downloading the model and tokenizer.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
         use_np_weights: Save a numpy copy of model weights for faster loading.
@@ -36,6 +38,7 @@ class ModelConfig:
         model: str,
         tokenizer: str,
         tokenizer_mode: str,
+        trust_remote_code: bool,
         download_dir: Optional[str],
         use_np_weights: bool,
         use_dummy_weights: bool,
@@ -45,6 +48,7 @@ class ModelConfig:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
+        self.trust_remote_code = trust_remote_code
         self.download_dir = download_dir
         self.use_np_weights = use_np_weights
         self.use_dummy_weights = use_dummy_weights
