@@ -110,7 +110,7 @@ def run_hf(
     assert not use_beam_search
     llm = AutoModelForCausalLM.from_pretrained(model, trust_remote_code=True,
                                                torch_dtype=torch.float16)
-    if llm.config.model_type == "llama":
+    if llm.config.model_type in ["baichuan", "llama"]:
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
     llm = llm.cuda()
