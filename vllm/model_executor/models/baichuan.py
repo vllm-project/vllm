@@ -39,6 +39,7 @@ from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size,
+    get_tensor_model_parallel_rank,
 )
 from vllm.model_executor.weight_utils import (
     hf_model_weights_iterator,
@@ -140,7 +141,7 @@ class Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_ids: torch.LongTensor,
+        positions: torch.LongTensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
@@ -149,7 +150,7 @@ class Attention(nn.Module):
         q, k, v = proj.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(
-            position_ids, q, k, v, k_cache, v_cache, input_metadata, cache_event
+            positions, q, k, v, k_cache, v_cache, input_metadata, cache_event
         )
         output, _ = self.o_proj(attn_output)
         return output
@@ -173,7 +174,7 @@ class DecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_ids: torch.LongTensor,
+        positions: torch.LongTensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
@@ -185,7 +186,7 @@ class DecoderLayer(nn.Module):
         # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
-            position_ids=position_ids,
+            positions=positions,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             cache_event=cache_event,
@@ -228,7 +229,7 @@ class Model(nn.Module):
     def forward(
         self,
         input_ids: torch.LongTensor,
-        position_ids: torch.LongTensor,
+        positions: torch.LongTensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
@@ -242,7 +243,7 @@ class Model(nn.Module):
             layer = self.layers[i]
             hidden_states = layer(
                 hidden_states,
-                position_ids,
+                positions,
                 kv_caches[i],
                 input_metadata,
                 cache_event,
@@ -282,28 +283,30 @@ class BaiChuanForCausalLM(nn.Module):
         next_tokens = self.sampler(self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
 
+    _column_parallel_weights = []
+    _row_parallel_weights = []
+
     def load_weights(
         self,
         model_name_or_path: str,
         cache_dir: Optional[str] = None,
         use_np_cache: bool = False,
     ):
-        pass
-        # tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        # state_dict = self.state_dict()
-        # for name in state_dict:
-        #     print(name, state_dict[name])
-        # print("-" * 100)
-        # for name, loaded_weight in hf_model_weights_iterator(
-        #     model_name_or_path, cache_dir, use_np_cache
-        # ):
-        #     print(name, type(loaded_weight))
+        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+        state_dict = self.state_dict()
 
-
-# if "__main__" == __name__:
-#     import sys
-
-#     config = BaiChuanConfig()
-#     model = BaiChuanForCausalLM(config)
-
-#     model.load_weights(sys.argv[1])
+        for name, loaded_weight in hf_model_weights_iterator(
+            model_name_or_path, cache_dir, use_np_cache
+        ):
+            if "rotary_emb.inv_freq" in name:
+                continue
+            
+            param = state_dict[name]
+            load_tensor_parallel_weights(
+                param,
+                loaded_weight,
+                name,
+                self._column_parallel_weights,
+                self._row_parallel_weights,
+                tensor_model_parallel_rank,
+            )
