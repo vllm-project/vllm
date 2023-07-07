@@ -17,21 +17,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import math
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.utils.checkpoint
 from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-from transformers import PreTrainedModel, add_start_docstrings
 from transformers.activations import ACT2FN
 
-# from transformers.modeling_outputs import (
-# BaseModelOutputWithPast,
-# CausalLMOutputWithPast,
-# SequenceClassifierOutputWithPast,
-# )
 from transformers.utils import logging
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -46,22 +38,6 @@ from vllm.model_executor.weight_utils import (
     load_tensor_parallel_weights,
 )
 from vllm.sequence import SequenceOutputs
-
-# from .configuration_baichuan import BaiChuanConfig
-
-# (
-# add_start_docstrings_to_model_forward,
-# logging,
-# replace_return_docstrings,
-# )
-
-
-# from vllm.model_executor.parallel_utils.tensor_parallel import (
-# ColumnParallelLinear,
-# RowParallelLinear,
-# VocabParallelEmbedding,
-# )
-
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -128,9 +104,6 @@ class Attention(nn.Module):
             )
         self.W_pack = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=False)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        # self.rotary_emb = RotaryEmbedding(
-        # self.head_dim, max_position_embeddings=self.max_position_embeddings
-        # )
 
         scaling = self.head_dim**-0.5
         rotary_dim = self.head_dim
@@ -218,9 +191,6 @@ class Model(nn.Module):
         self.embed_tokens = nn.Embedding(
             config.vocab_size, config.hidden_size, self.padding_idx
         )
-        # self.embed_tokens = VocabParallelEmbedding(
-        # config.vocab_size, config.hidden_size, perform_initialization=False
-        # )
         self.layers = nn.ModuleList(
             [DecoderLayer(config) for _ in range(config.num_hidden_layers)]
         )
@@ -260,13 +230,6 @@ class BaiChuanForCausalLM(nn.Module):
         self.model = Model(config)
 
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        # self.embed_out = ColumnParallelLinear(
-        #     config.hidden_size,
-        #     config.vocab_size,
-        #     bias=False,
-        #     gather_output=False,
-        #     perform_initialization=False,
-        # )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
