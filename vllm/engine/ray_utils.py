@@ -1,26 +1,53 @@
 import random
-from collections import OrderedDict
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 try:
     import ray
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy, NodeAffinitySchedulingStrategy
+    from ray.util.placement_group import PlacementGroup
+    from ray.air.util.torch_dist import TorchDistributedWorker
+
+    class RayWorker(TorchDistributedWorker):
+        def __init__(self) -> None:
+            self.worker = None
+        
+        def init_worker(self, worker_init_fn):
+            self.worker = worker_init_fn()
+
+        def init_model(self, *args, **kwargs):
+            self.worker.init_model(*args, **kwargs)
+
+        def profile_num_available_blocks(self, *args, **kwargs):
+            return self.worker.profile_num_available_blocks(*args, **kwargs)
+        
+        def init_cache_engine(self, *args, **kwargs):
+            self.worker.init_cache_engine(*args, **kwargs)
+
+        def execute_model(self, *args, **kwargs):
+            return self.worker.execute_model(*args, **kwargs)
+
 except ImportError:
     ray = None
-    PlacementGroupSchedulingStrategy = None
-    NodeAffinitySchedulingStrategy = None
+    TorchDistributedWorker = None
+
+    class FakePlacementGroup:
+        def __init__(self, bundles: List[Dict[str, float]]):
+            self.bundles = bundles
+
+        @property
+        def bundle_specs(self) -> List[Dict[str, float]]:
+            return self.bundles
 
 from vllm.config import ParallelConfig
 
-# rank, node resource (node IP), device id
-DeviceID = Tuple[int, Optional[str], int]
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 
 def initialize_cluster(
     parallel_config: ParallelConfig,
     engine_use_ray: bool = False,
     ray_address: Optional[str] = None,
-) -> Tuple[str, List[List[DeviceID]]]:
+) -> Tuple[str, Optional["PlacementGroup"]]:
     """Initialize the distributed cluster probably with Ray.
 
     Args:
@@ -42,7 +69,7 @@ def initialize_cluster(
                 "Ray is not installed. Please install Ray to use distributed "
                 "serving.")
         # Connect to a ray cluster.
-        ray.init(address=ray_address)
+        ray.init(address=ray_address, ignore_reinit_error=True)
 
     if not parallel_config.worker_use_ray:
         # Initialize cluster locally.
@@ -50,8 +77,7 @@ def initialize_cluster(
         # We need to setup the distributed init method to make sure
         # the distributed megatron code (e.g., get world size) works correctly.
         distributed_init_method = f"tcp://localhost:{port}"
-        all_stage_devices = [[(0, None, 0)]]
-        return distributed_init_method, all_stage_devices
+        return distributed_init_method, None
 
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
@@ -77,29 +103,4 @@ def initialize_cluster(
         # if they cannot be provisioned.
         ray.get(current_placement_group.ready(), timeout=1800)
 
-    
-
-    # Assign GPUs to pipeline stages.
-    rank = 0
-    current_node_id = 0
-    current_device_id = 0
-    distributed_init_method = None
-    all_stage_devices = []
-
-    for _ in range(parallel_config.pipeline_parallel_size):
-        stage_devices = []
-        for _ in range(parallel_config.tensor_parallel_size):
-            node = valid_nodes.popitem(last=False)
-            stage_devices.append((rank, NodeAffinitySchedulingStrategy(), current_device_id))
-            if distributed_init_method is None:
-                ip = node_resource.split("node:")[-1]
-                port = random.randint(10000, 20000)
-                distributed_init_method = f"tcp://{ip}:{port}"
-            rank += 1
-            current_device_id += 1
-            if current_device_id >= num_devices_per_node:
-                current_node_id += 1
-                current_device_id = 0
-        all_stage_devices.append(stage_devices)
-
-    return distributed_init_method, all_stage_devices
+    return None, current_placement_group

@@ -58,7 +58,7 @@ Next, you need to rewrite the :code:`forward` methods of your model by following
     +    positions: torch.Tensor,
     +    kv_caches: List[KVCache],
     +    input_metadata: InputMetadata,
-    +    cache_events: Optional[List[torch.cuda.Event]],
+    +    cache_events: Optional[List["torch.cuda.Event"]],
     +) -> Dict[int, SequenceOutputs]:
 
 3. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
