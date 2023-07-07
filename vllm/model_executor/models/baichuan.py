@@ -292,24 +292,25 @@ class BaiChuanForCausalLM(nn.Module):
         cache_dir: Optional[str] = None,
         use_np_cache: bool = False,
     ):
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        state_dict = self.state_dict()
+        pass
+        # tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+        # state_dict = self.state_dict()
 
-        for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, use_np_cache
-        ):
-            if "rotary_emb.inv_freq" in name:
-                continue
+        # for name, loaded_weight in hf_model_weights_iterator(
+        #     model_name_or_path, cache_dir, use_np_cache
+        # ):
+        #     if "rotary_emb.inv_freq" in name:
+        #         continue
 
-            if name not in state_dict:
-                continue
+        #     if name not in state_dict:
+        #         continue
 
-            param = state_dict[name]
-            load_tensor_parallel_weights(
-                param,
-                loaded_weight,
-                name,
-                self._column_parallel_weights,
-                self._row_parallel_weights,
-                tensor_model_parallel_rank,
-            )
+        #     param = state_dict[name]
+        #     load_tensor_parallel_weights(
+        #         param,
+        #         loaded_weight,
+        #         name,
+        #         self._column_parallel_weights,
+        #         self._row_parallel_weights,
+        #         tensor_model_parallel_rank,
+        #     )
