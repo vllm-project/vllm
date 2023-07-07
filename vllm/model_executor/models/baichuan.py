@@ -297,3 +297,12 @@ class BaiChuanForCausalLM(nn.Module):
             model_name_or_path, cache_dir, use_np_cache
         ):
             print(name, type(loaded_weight))
+
+
+if "__main__" == __name__:
+    import sys
+
+    config = BaiChuanConfig()
+    model = BaiChuanForCausalLM(config)
+
+    model.load_weights(sys.argv[1])
