@@ -146,7 +146,7 @@ class Attention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        proj = self.W_pack(hidden_states)
+        proj, _ = self.W_pack(hidden_states)
         q, k, v = proj.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(
@@ -300,7 +300,7 @@ class BaiChuanForCausalLM(nn.Module):
         ):
             if "rotary_emb.inv_freq" in name:
                 continue
-            
+
             param = state_dict[name]
             load_tensor_parallel_weights(
                 param,
