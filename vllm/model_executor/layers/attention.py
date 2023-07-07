@@ -134,7 +134,7 @@ class PagedAttention(nn.Module):
         key_cache: Optional[torch.Tensor],
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
-        cache_event: Optional["torch.cuda.Event"],
+        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         """PagedAttention forward pass.
 
@@ -248,7 +248,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         input_metadata: InputMetadata,
-        cache_event: Optional["torch.cuda.Event"],
+        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         """ PagedAttention forward pass with rotary embedding.
 
