@@ -3,7 +3,7 @@ import json
 from typing import AsyncGenerator
 
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import Response, StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 import uvicorn
 
 from vllm.engine.arg_utils import AsyncEngineArgs
