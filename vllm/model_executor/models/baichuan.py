@@ -254,7 +254,7 @@ class Model(nn.Module):
 
 class BaiChuanForCausalLM(nn.Module):
     def __init__(self, config: BaiChuanConfig):
-        super().__init__(config)
+        super().__init__()
         self.config = config
         self.model = Model(config)
 
