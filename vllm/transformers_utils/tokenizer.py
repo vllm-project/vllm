@@ -48,7 +48,8 @@ def get_tokenizer(
         # If the error pertains to the tokenizer class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
         if e is not None and \
-            "does not exist or is not currently imported." in str(e):
+            ("does not exist or is not currently imported." in str(e) or \
+             "requires you to execute the tokenizer file" in str(e)):
             err_msg = (
                 "Failed to load the tokenizer. If the tokenizer is a custom "
                 "tokenizer not yet available in the HuggingFace transformers "
