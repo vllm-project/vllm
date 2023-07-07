@@ -1,6 +1,7 @@
 from typing import List, Tuple, Union
 
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
 
 from vllm.logger import init_logger
 
@@ -20,7 +21,8 @@ def get_tokenizer(
     """Gets a tokenizer for the given model name via Huggingface."""
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
-            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
+            raise ValueError(
+                "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
     if "llama" in tokenizer_name.lower() and kwargs.get("use_fast", True):
@@ -28,8 +30,7 @@ def get_tokenizer(
             "For some LLaMA-based models, initializing the fast tokenizer may "
             "take a long time. To eliminate the initialization time, consider "
             f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
-            "tokenizer."
-        )
+            "tokenizer.")
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name,
@@ -41,8 +42,7 @@ def get_tokenizer(
         err_msg = (
             "Failed to load the tokenizer. If you are using a LLaMA-based "
             f"model, use '{_FAST_LLAMA_TOKENIZER}' instead of the original "
-            "tokenizer."
-        )
+            "tokenizer.")
         raise RuntimeError(err_msg) from e
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
@@ -61,8 +61,7 @@ def get_tokenizer(
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
-            "slowdown. Consider using a fast tokenizer instead."
-        )
+            "slowdown. Consider using a fast tokenizer instead.")
     return tokenizer
 
 
@@ -81,8 +80,7 @@ def detokenize_incrementally(
         output_text: The new output text as a string.
     """
     new_token = tokenizer.convert_ids_to_tokens(
-        new_token_id, skip_special_tokens=skip_special_tokens
-    )
+        new_token_id, skip_special_tokens=skip_special_tokens)
     output_tokens = prev_output_tokens + [new_token]
 
     # Convert the tokens to a string.
