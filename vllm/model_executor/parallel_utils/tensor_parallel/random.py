@@ -9,7 +9,6 @@ import contextlib
 
 import torch
 from torch import _C
-from torch.cuda import _lazy_call, device as device_ctx_manager
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -28,6 +27,8 @@ def _set_cuda_rng_state(new_state, device=-1):
     with a single change: the input state is not cloned. Cloning caused
     major performance issues for +4 GPU cases.
     """
+    from torch.cuda import _lazy_call, device as device_ctx_manager
+
     if hasattr(_C, '_cuda_setRNGState') and callable(_C._cuda_setRNGState):
         # older PyTorch
         def cb():
@@ -125,11 +126,14 @@ class CudaRNGStatesTracker:
 
 
 # RNG tracker object.
-_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
+_CUDA_RNG_STATE_TRACKER = None
 
 
 def get_cuda_rng_tracker():
     """Get cuda rng tracker."""
+    global _CUDA_RNG_STATE_TRACKER
+    if not _CUDA_RNG_STATE_TRACKER:
+        _CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
     return _CUDA_RNG_STATE_TRACKER
 
 
@@ -156,9 +160,9 @@ def model_parallel_cuda_manual_seed(seed):
     # Data parallel gets the original seed.
     data_parallel_seed = seed
 
-    _CUDA_RNG_STATE_TRACKER.reset()
+    get_cuda_rng_tracker().reset()
     # Set the default state.
     torch.cuda.manual_seed(data_parallel_seed)
     # and model parallel state.
-    _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME,
+    get_cuda_rng_tracker().add(_MODEL_PARALLEL_RNG_TRACKER_NAME,
                                 tensor_model_parallel_seed)

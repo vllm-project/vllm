@@ -92,7 +92,7 @@ class OPTAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
+        cache_event: Optional["torch.cuda.Event"],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
@@ -139,7 +139,7 @@ class OPTDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
+        cache_event: Optional["torch.cuda.Event"],
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
@@ -222,7 +222,7 @@ class OPTDecoder(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
+        cache_events: Optional[List["torch.cuda.Event"]],
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
         pos_embeds = self.embed_positions(positions)
@@ -258,7 +258,7 @@ class OPTModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
+        cache_events: Optional[List["torch.cuda.Event"]],
     ) -> torch.Tensor:
         return self.decoder(input_ids, positions, kv_caches, input_metadata,
                             cache_events)
@@ -281,7 +281,7 @@ class OPTForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
+        cache_events: Optional[List["torch.cuda.Event"]],
     ) -> Dict[int, SequenceOutputs]:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
