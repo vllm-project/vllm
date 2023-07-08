@@ -74,7 +74,7 @@ class GPTJAttention(nn.Module):
         self.num_heads = self.total_num_heads // tp_world_size
 
         # FIXME(woosuk): GPT-J's RoPE is different from GPT-NeoX's RoPE.
-        scaling = self.head_size ** -0.5
+        scaling = self.head_size**-0.5
         assert config.rotary
         assert config.rotary_dim % 2 == 0
         self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_size,
@@ -94,8 +94,8 @@ class GPTJAttention(nn.Module):
         v, _ = self.v_proj(hidden_states)
 
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(
-            position_ids, q, k, v, k_cache, v_cache, input_metadata, cache_event)
+        attn_output = self.attn(position_ids, q, k, v, k_cache, v_cache,
+                                input_metadata, cache_event)
         if self.warmup:
             print(attn_output)
             exit()
@@ -168,7 +168,7 @@ class GPTJModel(nn.Module):
         self.config = config
         self.embed_dim = config.n_embd
         self.wte = VocabParallelEmbedding(config.vocab_size,
-                                          self.embed_dim, 
+                                          self.embed_dim,
                                           perform_initialization=False)
         self.h = nn.ModuleList(
             [GPTJBlock(config) for _ in range(config.n_layer)])
@@ -209,7 +209,7 @@ class GPTJForCausalLM(nn.Module):
         self.transformer = GPTJModel(config)
         self.lm_head = ColumnParallelLinear(config.n_embd,
                                             config.vocab_size,
-                                            gather_output=False, 
+                                            gather_output=False,
                                             perform_initialization=False)
         self.sampler = Sampler(config.vocab_size)
 
@@ -221,18 +221,21 @@ class GPTJForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
-        hidden_states = self.transformer(
-            input_ids, positions, kv_caches, input_metadata, cache_events)
-        next_tokens = self.sampler(
-            self.lm_head.weight, hidden_states, input_metadata, self.lm_head.bias)
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         input_metadata, cache_events)
+        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
+                                   input_metadata, self.lm_head.bias)
         return next_tokens
 
     # TODO(woosuk): Fuse and shard QKV Linear layers.
-    _column_parallel_weights = ["wte.weight", "lm_head.weight", "lm_head.bias",
-                                "fc_in.weight", "fc_in.bias"]
+    _column_parallel_weights = [
+        "wte.weight", "lm_head.weight", "lm_head.bias", "fc_in.weight",
+        "fc_in.bias"
+    ]
     _row_parallel_weights = ["out_proj.weight", "fc_out.weight"]
 
-    def load_weights(self, model_name_or_path: str,
+    def load_weights(self,
+                     model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
