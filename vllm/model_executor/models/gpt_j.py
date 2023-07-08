@@ -1,5 +1,6 @@
 # coding=utf-8
-# Adapted from https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gptj/modeling_gptj.py
+# Adapted from
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gptj/modeling_gptj.py
 # Copyright 2023 The vLLM team.
 # Copyright 2021 The EleutherAI and HuggingFace Teams. All rights reserved.
 #
@@ -73,7 +74,6 @@ class GPTJAttention(nn.Module):
         assert self.total_num_heads % tp_world_size == 0
         self.num_heads = self.total_num_heads // tp_world_size
 
-        # FIXME(woosuk): GPT-J's RoPE is different from GPT-NeoX's RoPE.
         scaling = self.head_size**-0.5
         assert config.rotary
         assert config.rotary_dim % 2 == 0
@@ -96,11 +96,6 @@ class GPTJAttention(nn.Module):
         k_cache, v_cache = kv_cache
         attn_output = self.attn(position_ids, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
-        if self.warmup:
-            print(attn_output)
-            exit()
-        else:
-            self.warmup = True
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
@@ -229,8 +224,8 @@ class GPTJForCausalLM(nn.Module):
 
     # TODO(woosuk): Fuse and shard QKV Linear layers.
     _column_parallel_weights = [
-        "wte.weight", "lm_head.weight", "lm_head.bias", "fc_in.weight",
-        "fc_in.bias"
+        "wte.weight", "fc_in.weight", "fc_in.bias", "lm_head.weight",
+        "lm_head.bias"
     ]
     _row_parallel_weights = ["out_proj.weight", "fc_out.weight"]
 
