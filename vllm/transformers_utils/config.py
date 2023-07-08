@@ -20,6 +20,8 @@ def get_config(model: str, trust_remote_code: bool) -> PretrainedConfig:
                 "library, consider setting `trust_remote_code=True` in LLM "
                 "or using the `--trust-remote-code` flag in the CLI.")
             raise RuntimeError(err_msg) from e
+        else:
+            raise e
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model)
