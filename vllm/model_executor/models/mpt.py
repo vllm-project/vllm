@@ -1,3 +1,4 @@
+# coding=utf-8
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/tree/main
 import math
 from typing import Dict, List, Optional, Tuple
