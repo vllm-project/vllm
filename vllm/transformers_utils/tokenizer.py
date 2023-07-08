@@ -34,8 +34,8 @@ def get_tokenizer(
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name,
-            trust_remote_code=trust_remote_code,
             *args,
+            trust_remote_code=trust_remote_code,
             **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments.
@@ -47,13 +47,14 @@ def get_tokenizer(
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
-        if (e is not None and
+        if (not trust_remote_code and
             ("does not exist or is not currently imported." in str(e)
              or "requires you to execute the tokenizer file" in str(e))):
             err_msg = (
                 "Failed to load the tokenizer. If the tokenizer is a custom "
                 "tokenizer not yet available in the HuggingFace transformers "
-                "library, consider using the --trust-remote-code flag.")
+                "library, consider setting `trust_remote_code=True` in LLM "
+                "or using the `--trust-remote-code` flag in the CLI.")
             raise RuntimeError(err_msg) from e
         else:
             raise e
