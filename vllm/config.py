@@ -54,7 +54,7 @@ class ModelConfig:
         self.use_dummy_weights = use_dummy_weights
         self.seed = seed
 
-        self.hf_config = get_config(model)
+        self.hf_config = get_config(model, trust_remote_code)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self._verify_tokenizer_mode()
 
