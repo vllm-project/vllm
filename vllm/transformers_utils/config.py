@@ -17,7 +17,8 @@ def get_config(model: str, trust_remote_code: bool) -> PretrainedConfig:
             err_msg = (
                 "Failed to load the model config. If the model is a custom "
                 "model not yet available in the HuggingFace transformers "
-                "library, consider using the --trust-remote-code flag.")
+                "library, consider setting `trust_remote_code=True` in LLM "
+                "or using the `--trust-remote-code` flag in the CLI.")
             raise RuntimeError(err_msg) from e
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
