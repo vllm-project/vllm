@@ -49,21 +49,11 @@ class GPTJAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.total_num_heads
 
-        self.q_proj = ColumnParallelLinear(config.hidden_size,
-                                           config.hidden_size,
-                                           bias=False,
-                                           gather_output=False,
-                                           perform_initialization=False)
-        self.k_proj = ColumnParallelLinear(config.hidden_size,
-                                           config.hidden_size,
-                                           bias=False,
-                                           gather_output=False,
-                                           perform_initialization=False)
-        self.v_proj = ColumnParallelLinear(config.hidden_size,
-                                           config.hidden_size,
-                                           bias=False,
-                                           gather_output=False,
-                                           perform_initialization=False)
+        self.qkv_proj = ColumnParallelLinear(config.hidden_size,
+                                             3 * config.hidden_size,
+                                             bias=False,
+                                             gather_output=False,
+                                             perform_initialization=False)
         self.out_proj = RowParallelLinear(config.hidden_size,
                                           config.hidden_size,
                                           bias=False,
@@ -89,10 +79,8 @@ class GPTJAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
-
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(position_ids, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
@@ -233,15 +221,33 @@ class GPTJForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+        tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
             if "attn.bias" in name or "attn.masked_bias" in name:
                 continue
+
+            is_attention_weight = False
+            for stride_id, att_weight_name in enumerate(
+                ["q_proj", "k_proj", "v_proj"]):
+                if att_weight_name not in name:
+                    continue
+                param = state_dict[name.replace(att_weight_name, "qkv_proj")]
+                shard_size = param.shape[0] // 3
+                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
+                                              (tp_rank + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size *
+                                         (stride_id + 1)]
+                assert param_slice.shape == loaded_weight.shape
+                param_slice.copy_(loaded_weight)
+                is_attention_weight = True
+                break
+            if is_attention_weight:
+                continue
+
             param = state_dict[name]
             # TODO(woosuk): Fuse and shard QKV Linear layers.
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
-                                         self._row_parallel_weights,
-                                         tensor_model_parallel_rank)
+                                         self._row_parallel_weights, tp_rank)
