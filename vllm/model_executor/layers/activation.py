@@ -38,3 +38,21 @@ class SiluAndMul(nn.Module):
         out = torch.empty(num_tokens, d, dtype=x.dtype, device=x.device)
         activation_ops.silu_and_mul(out, x)
         return out
+    
+
+class FastGelu(nn.Module):
+    """An activation function for GELU using approximated tanh for performance
+
+    The function computes x -> 0.5 * (1 + tanh(0.797885 * (x + 0.044715 * (x * x * x)))) where d = x.shape[1] // 2;
+
+    Shapes:
+        x: (num_tokens, 2 * d)
+        return: (num_tokens, d)
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        num_tokens = x.shape[0]
+        d = x.shape[1] // 2
+        out = torch.empty(num_tokens, d, dtype=x.dtype, device=x.device)
+        activation_ops.fast_gelu(out, x)
+        return out
