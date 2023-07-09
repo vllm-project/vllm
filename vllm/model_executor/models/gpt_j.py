@@ -210,7 +210,6 @@ class GPTJForCausalLM(nn.Module):
                                    input_metadata, self.lm_head.bias)
         return next_tokens
 
-    # TODO(woosuk): Fuse and shard QKV Linear layers.
     _column_parallel_weights = [
         "wte.weight", "fc_in.weight", "fc_in.bias", "lm_head.weight",
         "lm_head.bias"
@@ -247,7 +246,6 @@ class GPTJForCausalLM(nn.Module):
                 continue
 
             param = state_dict[name]
-            # TODO(woosuk): Fuse and shard QKV Linear layers.
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights, tp_rank)
