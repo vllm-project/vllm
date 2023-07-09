@@ -94,6 +94,7 @@ class BaiChuanAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.scaling = self.head_dim**-0.5
 
+        # pylint: disable=invalid-name
         self.W_pack = ColumnParallelLinear(
             hidden_size,
             3 * hidden_size,
