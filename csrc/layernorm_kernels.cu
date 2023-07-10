@@ -1,14 +1,14 @@
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/util/Half.h>
 #include <torch/extension.h>
 
 #include "reduction_utils.cuh"
-#include <c10/util/Half.h>
 
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
 template<typename scalar_t>
-__global__ void rms_norm_kernel_impl_float(
+__global__ void rms_norm_kernel_impl(
   scalar_t* __restrict__ out,
   const scalar_t* __restrict__ input,
   const scalar_t* __restrict__ weight,
@@ -33,7 +33,6 @@ __global__ void rms_norm_kernel_impl_float(
     out[blockIdx.x * hidden_size + idx] = ((scalar_t) (x * s_variance)) * weight[idx];
   }
 }
-  
 
 __global__ void rms_norm_kernel_impl_half(
   __half* __restrict__ out,
@@ -47,7 +46,7 @@ __global__ void rms_norm_kernel_impl_half(
   float variance = 0.0f;
 
   const float4 *input_float4 = reinterpret_cast<const float4 *>(input) + blockIdx.x * hidden_size;
-  float4 *out_float4 = reinterpret_cast<float4 *>(out)+ blockIdx.x * hidden_size;;
+  float4 *out_float4 = reinterpret_cast<float4 *>(out)+ blockIdx.x * hidden_size;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float4 val_f4 = input_float4[idx];
@@ -83,9 +82,6 @@ __global__ void rms_norm_kernel_impl_half(
     out_float4[idx] = val_f4;
   }
 }
-
-
-
 template<typename scalar_t>
 void rms_norm_kernel(
     scalar_t* __restrict__ out,
@@ -96,8 +92,6 @@ void rms_norm_kernel(
     const int hidden_size)
   {
     dim3 grid(num_tokens);
-
-    
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     if  (std::is_same<scalar_t, at::Half>::value && hidden_size % 8 == 0) {
       dim3 block(min(((hidden_size / 8 + 31) / 32) * 32, 1024));
@@ -110,7 +104,7 @@ void rms_norm_kernel(
         hidden_size / 8);
     } else {
       dim3 block(std::min(hidden_size, 1024));
-      rms_norm_kernel_impl_float<<<grid, block, 0, stream>>>(
+      rms_norm_kernel_impl<<<grid, block, 0, stream>>>(
         out,
         input,
         weight,
