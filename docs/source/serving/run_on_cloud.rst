@@ -27,6 +27,7 @@ See the vLLM SkyPilot YAML for serving, `serving.yaml <https://github.com/skypil
 
     envs:
         MODEL_NAME: decapoda-research/llama-65b-hf
+        TOKENIZER: hf-internal-testing/llama-tokenizer
 
     setup: |
         conda create -n vllm python=3.9 -y
@@ -42,7 +43,7 @@ See the vLLM SkyPilot YAML for serving, `serving.yaml <https://github.com/skypil
         python -u -m vllm.entrypoints.api_server \
                         --model $MODEL_NAME \
                         --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
-                        --tokenizer hf-internal-testing/llama-tokenizer 2>&1 | tee api_server.log &
+                        --tokenizer $TOKENIZER 2>&1 | tee api_server.log &
         echo 'Waiting for vllm api server to start...'
         while ! `cat api_server.log | grep -q 'Uvicorn running on'`; do sleep 1; done
         echo 'Starting gradio server...'
