@@ -284,8 +284,11 @@ class BloomForCausalLM(nn.Module):
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
-            if not name.startswith("transformer."):
-                name = "transformer." + name
+            if name == "lm_head.weight":
+                name = "lm_head_weight"
+            else:
+                if not name.startswith("transformer."):
+                    name = "transformer." + name
 
             param = state_dict[name]
             if "query_key_value" in name:
