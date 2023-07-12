@@ -237,30 +237,33 @@ __global__ void single_query_cached_kv_attention_kernel(
 
   for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
     const int physical_block_number = block_table[block_idx];
-    const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
-    const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
-    L_vec logits_vec;
-    from_float(logits_vec, *reinterpret_cast<Float_L_vec*>(logits + token_idx));
 
     const scalar_t* v_ptr = v_cache + physical_block_number * num_heads * HEAD_SIZE * BLOCK_SIZE
                                     + head_idx * HEAD_SIZE * BLOCK_SIZE;
 #pragma unroll
-    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-      const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-      if (row_idx < HEAD_SIZE) {
-        const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
-        V_vec v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
-        accs[i] += dot(logits_vec, v_vec);
+    for (int i = 0; i < NUM_ROWS_PER_THREAD; ++i) {
+      for (int j = lane; j < NUM_V_VECS_PER_ROW * NUM_ROWS_PER_ITER; j += WARP_SIZE) {  
+        const int physical_block_offset = (j % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
+        const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
+        L_vec logits_vec;
+        from_float(logits_vec, *reinterpret_cast<Float_L_vec*>(logits + token_idx));
+        const int row_idx = j / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
+        if (row_idx < HEAD_SIZE) {
+          const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
+          V_vec v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
+          accs[i] += dot(logits_vec, v_vec);
+        }
       }
     }
   }
 
   // Perform reduction within each warp.
+  constexpr int REDUCE_GROUP_SIZE = MIN(WARP_SIZE, NUM_V_VECS_PER_ROW);
 #pragma unroll
   for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
     float acc = accs[i];
 #pragma unroll
-    for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
+    for (int mask = REDUCE_GROUP_SIZE / 2; mask >= 1; mask /= 2) {
       acc += __shfl_xor_sync(uint32_t(-1), acc, mask);
     }
     accs[i] = acc;
@@ -314,7 +317,6 @@ __global__ void single_query_cached_kv_attention_kernel(
     }
   }
 }
-
 } // namespace vllm
 
 #define LAUNCH_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
@@ -441,9 +443,9 @@ void single_query_cached_kv_attention_launcher(
     /* case 128:                       */                           \
     /*   CALL_KERNEL_LAUNCHER(T, 128); */                           \
     /*   break;                        */                           \
-    /* case 256:                       */                           \
-    /*   CALL_KERNEL_LAUNCHER(T, 256); */                           \
-    /*   break;                        */                           \
+    case 256:                                                  \
+      CALL_KERNEL_LAUNCHER(T, 256);                            \
+      break;                                                   \
     default:                                                        \
       TORCH_CHECK(false, "Unsupported block size: ", block_size);   \
       break;                                                        \
