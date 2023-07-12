@@ -276,8 +276,9 @@ class LLMEngine:
                     seq.get_last_token_id(),
                     skip_special_tokens=True,
                 )
-                seq.output_tokens.append(new_token)
-                seq.output_text = new_output_text
+                if new_token is not None:
+                    seq.output_tokens.append(new_token)
+                    seq.output_text = new_output_text
 
     def _stop_sequences(self, seq_groups: List[SequenceGroup]) -> None:
         """Stop the finished sequences."""
