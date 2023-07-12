@@ -189,9 +189,7 @@ class LlamaModel(nn.Module):
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
-            vocab_size,
-            config.hidden_size,
-            perform_initialization=False)
+            vocab_size, config.hidden_size, perform_initialization=False)
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)
         ])
@@ -271,10 +269,11 @@ class LlamaForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if  "embed_tokens" in name or "lm_head" in name:
+            if "embed_tokens" in name or "lm_head" in name:
                 param = state_dict[name]
                 # Consider padding in the vocab size.
-                padded_vocab_size = (param.shape[0] * tensor_model_parallel_world_size)
+                padded_vocab_size = (param.shape[0] *
+                                     tensor_model_parallel_world_size)
                 num_extra_rows = padded_vocab_size - self.config.vocab_size
                 extra_rows = torch.empty(num_extra_rows,
                                          loaded_weight.shape[1])
