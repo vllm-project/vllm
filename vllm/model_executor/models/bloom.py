@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
+from torch.nn.parameter import Parameter
 from transformers import BloomConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -284,11 +285,13 @@ class BloomForCausalLM(nn.Module):
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
+            # If lm_head is provided in weights, use it instead.
             if name == "lm_head.weight":
-                name = "lm_head_weight"
-            else:
-                if not name.startswith("transformer."):
-                    name = "transformer." + name
+                self.lm_head_weight = Parameter(state_dict["lm_head_weight"])
+                continue
+
+            if not name.startswith("transformer."):
+                name = "transformer." + name
 
             param = state_dict[name]
             if "query_key_value" in name:
