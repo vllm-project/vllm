@@ -58,7 +58,7 @@ Check the output of the command. There will be a sharable gradio link (like the 
 
 .. code-block:: console
 
-    (task, pid=7431) Running on public URL: https://a8531352b74d74c7d2.gradio.live
+    (task, pid=7431) Running on public URL: https://<gradio-hash>.gradio.live
 
 **Optional**: Serve the 13B model instead of the default 65B and use less GPU:
 
