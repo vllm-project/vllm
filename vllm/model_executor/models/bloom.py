@@ -284,12 +284,12 @@ class BloomForCausalLM(nn.Module):
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
-            # If lm_head is provided in weights, use it instead.
             if name == "lm_head.weight":
                 # Since hidden_states are parallelized, we need to 
                 # load lm_head.weight in parallel.
                 self._column_parallel_weights.append(name)
-                param = state_dict["lm_head_weight"]
+                # If lm_head is provided, use it instead.
+                param = self.lm_head_weight
             else:
                 if not name.startswith("transformer."):
                     name = "transformer." + name
