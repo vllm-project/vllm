@@ -62,7 +62,7 @@ Documentation
    :caption: Serving
 
    serving/distributed_serving
-   serving/run_on_cloud
+   serving/run_on_sky
 
 .. toctree::
    :maxdepth: 1
