@@ -286,13 +286,15 @@ class BloomForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, use_np_cache):
             # If lm_head is provided in weights, use it instead.
             if name == "lm_head.weight":
-                self.lm_head_weight.data.copy_(state_dict["lm_head_weight"])
-                continue
+                # Since hidden_states are parallelized, we need to 
+                # load lm_head.weight in parallel.
+                self._column_parallel_weights.append(name)
+                param = state_dict["lm_head_weight"]
+            else:
+                if not name.startswith("transformer."):
+                    name = "transformer." + name
+                param = state_dict[name]
 
-            if not name.startswith("transformer."):
-                name = "transformer." + name
-
-            param = state_dict[name]
             if "query_key_value" in name:
                 # NOTE(woosuk): BLOOM's fused QKV has the shape of
                 # [num_heads * 3 * head_size, hidden_size], while the
