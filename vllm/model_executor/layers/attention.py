@@ -1,7 +1,6 @@
 """Multi-head attention."""
 from typing import List, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 from xformers import ops as xops
@@ -45,7 +44,10 @@ class PagedAttention(nn.Module):
     5. Output a flattened 1D tensor.
     """
 
-    def __init__(self, num_heads: int, head_size: int, scale: float,
+    def __init__(self,
+                 num_heads: int,
+                 head_size: int,
+                 scale: float,
                  num_kv_heads: Optional[int] = None) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -55,10 +57,9 @@ class PagedAttention(nn.Module):
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
         assert self.num_heads % self.num_kv_heads == 0
-        head_mapping = np.repeat(np.arange(self.num_kv_heads),
-                                 num_heads // self.num_kv_heads)
-        self.head_mapping = torch.tensor(head_mapping, dtype=torch.int32,
-                                         device="cuda")
+        self.head_mapping = torch.repeat_interleave(
+            torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
+            num_heads // self.num_kv_heads)
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
@@ -92,8 +93,13 @@ class PagedAttention(nn.Module):
 
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
-            key = torch.repeat_interleave(key, self.num_heads // self.num_kv_heads, dim=1)
-            value = torch.repeat_interleave(value, self.num_heads // self.num_kv_heads, dim=1)
+            key = torch.repeat_interleave(key,
+                                          self.num_heads // self.num_kv_heads,
+                                          dim=1)
+            value = torch.repeat_interleave(value,
+                                            self.num_heads //
+                                            self.num_kv_heads,
+                                            dim=1)
 
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(

@@ -26,7 +26,6 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-import numpy as np
 from transformers import GPTBigCodeConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -82,7 +81,8 @@ class GPTBigCodeAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
-        q, k, v = qkv.split([self.hidden_size, self.kv_dim, self.kv_dim], dim=-1)
+        q, k, v = qkv.split([self.hidden_size, self.kv_dim, self.kv_dim],
+                            dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(q, k, v, key_cache, value_cache,
                                 input_metadata, cache_event)
@@ -273,7 +273,8 @@ class GPTBigCodeForCausalLM(nn.Module):
                 # When tensor parallelism is used, we shard the weights along
                 # the head dimension.
                 total_num_heads = self.config.num_attention_heads
-                total_num_kv_heads = (1 if self.config.multi_query else total_num_heads)
+                total_num_kv_heads = (1 if self.config.multi_query else
+                                      total_num_heads)
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // total_num_heads
                 total_kv_size = head_size * total_num_kv_heads
@@ -281,7 +282,9 @@ class GPTBigCodeForCausalLM(nn.Module):
                 head_start = tensor_model_parallel_rank * num_heads
                 head_end = (tensor_model_parallel_rank + 1) * num_heads
 
-                wq, wk, wv = torch.split(loaded_weight, [hidden_size, total_kv_size, total_kv_size], dim=0)
+                wq, wk, wv = torch.split(
+                    loaded_weight, [hidden_size, total_kv_size, total_kv_size],
+                    dim=0)
 
                 wq = wq[head_size * head_start:head_size * head_end]
                 if not self.config.multi_query:
