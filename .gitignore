@@ -173,5 +173,3 @@ cython_debug/
 
 # Sphinx documentation
 _build/
-
-benchmarks/data/
