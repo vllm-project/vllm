@@ -285,7 +285,7 @@ class BloomForCausalLM(nn.Module):
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
             if name == "lm_head.weight":
-                # Since hidden_states are parallelized, we need to 
+                # Since hidden_states are parallelized, we need to
                 # load lm_head.weight in parallel.
                 self._column_parallel_weights.append(name)
                 # If lm_head is provided, use it instead.
