@@ -1,5 +1,4 @@
 import socket
-import random
 from typing import List, Optional, Tuple
 
 try:
@@ -12,10 +11,12 @@ from vllm.config import ParallelConfig
 # rank, node resource (node IP), device id
 DeviceID = Tuple[int, Optional[str], int]
 
+
 def get_open_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("",0))
+        s.bind(("", 0))
         return s.getsockname()[1]
+
 
 def initialize_cluster(
     parallel_config: ParallelConfig,
