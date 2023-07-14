@@ -24,18 +24,11 @@ from typing import AsyncGenerator, List, Tuple
 
 import aiohttp
 import numpy as np
-from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # (prompt len, output len, latency)
 REQUEST_LATENCY: List[Tuple[int, int, float]] = []
-
-
-def get_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
-    config = AutoConfig.from_pretrained(model_name)
-    if config.model_type == "llama":
-        # A workaround for potential protobuf errors.
-        model_name = "hf-internal-testing/llama-tokenizer"
-    return AutoTokenizer.from_pretrained(model_name)
 
 
 def sample_requests(
@@ -217,7 +210,7 @@ if __name__ == "__main__":
     parser.add_argument("--backend", type=str, default="vllm",
                         choices=["vllm", "tgi"])
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--dataset", type=str, required=True,
                         help="Path to the dataset.")
     parser.add_argument("--tokenizer", type=str, required=True,
