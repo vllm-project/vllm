@@ -1,7 +1,7 @@
 .. _on_cloud:
 
-Running vLLM on the cloud with SkyPilot
-=================================
+Running on clouds with SkyPilot
+========================================
 
 .. raw:: html
 
