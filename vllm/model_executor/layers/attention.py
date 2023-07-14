@@ -57,9 +57,10 @@ class PagedAttention(nn.Module):
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
         assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.head_mapping = torch.repeat_interleave(
             torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
-            num_heads // self.num_kv_heads)
+            self.num_queries_per_kv)
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
@@ -93,12 +94,9 @@ class PagedAttention(nn.Module):
 
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
-            key = torch.repeat_interleave(key,
-                                          self.num_heads // self.num_kv_heads,
-                                          dim=1)
+            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
             value = torch.repeat_interleave(value,
-                                            self.num_heads //
-                                            self.num_kv_heads,
+                                            self.num_queries_per_kv,
                                             dim=1)
 
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
