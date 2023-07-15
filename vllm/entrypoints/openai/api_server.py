@@ -114,7 +114,7 @@ async def check_length(request, prompt, model_config):
     token_num = len(input_ids)
 
     if token_num + request.max_tokens > context_len:
-        return create_error_response(
+        return input_ids, create_error_response(
             HTTPStatus.BAD_REQUEST,
             f"This model's maximum context length is {context_len} tokens. "
             f"However, you requested {request.max_tokens + token_num} tokens "
@@ -123,7 +123,7 @@ async def check_length(request, prompt, model_config):
             f"Please reduce the length of the messages or completion.",
         )
     else:
-        return None
+        return input_ids, None
 
 
 @app.get("/v1/models")
@@ -185,7 +185,7 @@ async def create_chat_completion(raw_request: Request):
                                      "logit_bias is not currently supported")
 
     prompt = await get_gen_prompt(request)
-    error_check_ret = await check_length(request, prompt, engine_model_config)
+    token_ids, error_check_ret = await check_length(request, prompt, engine_model_config)
     if error_check_ret is not None:
         return error_check_ret
 
@@ -209,7 +209,7 @@ async def create_chat_completion(raw_request: Request):
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
-    result_generator = engine.generate(prompt, sampling_params, request_id)
+    result_generator = engine.generate(prompt, sampling_params, request_id, token_ids)
 
     async def abort_request() -> None:
         await engine.abort(request_id)
@@ -380,6 +380,11 @@ async def create_completion(raw_request: Request):
         prompt = request.prompt[0]
     else:
         prompt = request.prompt
+    
+    token_ids, error_check_ret = await check_length(request, prompt, engine_model_config)
+    if error_check_ret is not None:
+        return error_check_ret
+    
     created_time = int(time.time())
     try:
         sampling_params = SamplingParams(
@@ -399,7 +404,7 @@ async def create_completion(raw_request: Request):
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
-    result_generator = engine.generate(prompt, sampling_params, request_id)
+    result_generator = engine.generate(prompt, sampling_params, request_id, token_ids)
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.
