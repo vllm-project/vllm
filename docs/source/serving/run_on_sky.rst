@@ -1,7 +1,7 @@
 .. _on_cloud:
 
 Running on clouds with SkyPilot
-========================================
+===============================
 
 .. raw:: html
 
@@ -9,7 +9,7 @@ Running on clouds with SkyPilot
         <img src="https://imgur.com/yxtzPEu.png" alt="vLLM"/>
     </p>
 
-vLLM can be run on the cloud to scale to multiple GPUs with `SkyPilot <https://github.com/skypilot-org/skypilot>`__, an open-source framework for running LLMs on any cloud. 
+vLLM can be run on the cloud to scale to multiple GPUs with `SkyPilot <https://github.com/skypilot-org/skypilot>`__, an open-source framework for running LLMs on any cloud.
 
 To install SkyPilot and setup your cloud credentials, run:
 
