@@ -23,10 +23,10 @@ See the vLLM SkyPilot YAML for serving, `serving.yaml <https://github.com/skypil
 .. code-block:: yaml
 
     resources:
-        accelerators: A100:8
+        accelerators: A100
 
     envs:
-        MODEL_NAME: decapoda-research/llama-65b-hf
+        MODEL_NAME: decapoda-research/llama-13b-hf
         TOKENIZER: hf-internal-testing/llama-tokenizer
 
     setup: |
@@ -49,7 +49,7 @@ See the vLLM SkyPilot YAML for serving, `serving.yaml <https://github.com/skypil
         echo 'Starting gradio server...'
         python vllm/examples/gradio_webserver.py
 
-Start the serving the LLaMA-65B model on 8 A100 GPUs:
+Start the serving the LLaMA-13B model on an A100 GPU:
 
 .. code-block:: console
 
@@ -61,9 +61,9 @@ Check the output of the command. There will be a sharable gradio link (like the 
 
     (task, pid=7431) Running on public URL: https://<gradio-hash>.gradio.live
 
-**Optional**: Serve the 13B model instead of the default 65B and use less GPU:
+**Optional**: Serve the 65B model instead of the default 13B and use more GPU:
 
 .. code-block:: console
 
-    sky launch -c vllm-serve -s serve.yaml --gpus A100:1 --env MODEL_NAME=decapoda-research/llama-13b-hf
+    sky launch -c vllm-serve-new -s serve.yaml --gpus A100:8 --env MODEL_NAME=decapoda-research/llama-65b-hf
 
