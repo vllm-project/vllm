@@ -127,7 +127,8 @@ class Sequence:
         self.logical_token_blocks.append(block)
 
     def _append_tokens_to_blocks(self, token_ids: List[int]) -> None:
-        while token_ids:
+        cursor = 0
+        while cursor < len(token_ids):
             if not self.logical_token_blocks:
                 self._append_logical_block()
 
@@ -137,8 +138,9 @@ class Sequence:
                 last_block = self.logical_token_blocks[-1]
 
             num_empty_slots = last_block.get_num_empty_slots()
-            last_block.append_tokens(token_ids[:num_empty_slots])
-            token_ids = token_ids[num_empty_slots:]
+            last_block.append_tokens(token_ids[cursor:cursor +
+                                               num_empty_slots])
+            cursor += num_empty_slots
 
     def append_token_id(
         self,

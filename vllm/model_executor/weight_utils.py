@@ -39,7 +39,10 @@ def hf_model_weights_iterator(
     else:
         hf_folder = model_name_or_path
 
-    hf_bin_files = glob.glob(os.path.join(hf_folder, "*.bin"))
+    hf_bin_files = [
+        x for x in glob.glob(os.path.join(hf_folder, "*.bin"))
+        if not x.endswith("training_args.bin")
+    ]
 
     if use_np_cache:
         # Convert the model weights from torch tensors to numpy arrays for
