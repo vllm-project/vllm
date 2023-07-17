@@ -13,8 +13,9 @@ from fastapi import BackgroundTasks, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastchat.conversation import (Conversation, SeparatorStyle,
-                                   get_conv_template)
+from fastchat.conversation import Conversation, SeparatorStyle
+from fastchat.model.model_adapter import get_conversation_template
+
 import uvicorn
 
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -62,7 +63,7 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 
 async def get_gen_prompt(request) -> str:
-    conv = get_conv_template(request.model)
+    conv = get_conversation_template(request.model)
     conv = Conversation(
         name=conv.name,
         system=conv.system,
@@ -268,7 +269,7 @@ async def create_chat_completion(raw_request: Request):
                         finish_reason=output.finish_reason,
                     )
                     yield f"data: {response_json}\n\n"
-            yield "data: [DONE]\n\n"
+        yield "data: [DONE]\n\n"
 
     # Streaming response
     if request.stream:
@@ -464,7 +465,7 @@ async def create_completion(raw_request: Request):
                         finish_reason=output.finish_reason,
                     )
                     yield f"data: {response_json}\n\n"
-            yield "data: [DONE]\n\n"
+        yield "data: [DONE]\n\n"
 
     # Streaming response
     if stream:
@@ -553,13 +554,13 @@ if __name__ == "__main__":
                         type=json.loads,
                         default=["*"],
                         help="allowed headers")
-    parser.add_argument(
-        "--served-model-name",
-        type=str,
-        default=None,
-        help="The model name used in the API. If not specified, "
-        "the model name will be the same as the "
-        "huggingface name.")
+    parser.add_argument("--served-model-name",
+                        type=str,
+                        default=None,
+                        help="The model name used in the API. If not "
+                        "specified, the model name will be the same as "
+                        "the huggingface name.")
+
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
@@ -573,7 +574,10 @@ if __name__ == "__main__":
 
     logger.info(f"args: {args}")
 
-    served_model = args.served_model_name or args.model
+    if args.served_model_name is not None:
+        served_model = args.served_model_name
+    else:
+        served_model = args.model
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)

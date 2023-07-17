@@ -14,9 +14,11 @@ _MODEL_REGISTRY = {
     "BloomForCausalLM": BloomForCausalLM,
     "GPT2LMHeadModel": GPT2LMHeadModel,
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
+    "GPTJForCausalLM": GPTJForCausalLM,
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
-    "LLaMAForCausalLM": LlamaForCausalLM,
+    "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
 }
 

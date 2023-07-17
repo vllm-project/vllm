@@ -68,6 +68,7 @@ class LLMEngine:
             f"model={model_config.model!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
+            f"trust_remote_code={model_config.trust_remote_code}, "
             f"dtype={model_config.dtype}, "
             f"use_dummy_weights={model_config.use_dummy_weights}, "
             f"download_dir={model_config.download_dir!r}, "
@@ -84,7 +85,9 @@ class LLMEngine:
         self._verify_args()
 
         self.tokenizer = get_tokenizer(
-            model_config.tokenizer, tokenizer_mode=model_config.tokenizer_mode)
+            model_config.tokenizer,
+            tokenizer_mode=model_config.tokenizer_mode,
+            trust_remote_code=model_config.trust_remote_code)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -319,8 +322,9 @@ class LLMEngine:
                     seq.get_last_token_id(),
                     skip_special_tokens=True,
                 )
-                seq.output_tokens.append(new_token)
-                seq.output_text = new_output_text
+                if new_token is not None:
+                    seq.output_tokens.append(new_token)
+                    seq.output_text = new_output_text
 
     def _stop_sequences(self, seq_groups: List[SequenceGroup]) -> None:
         """Stop the finished sequences."""

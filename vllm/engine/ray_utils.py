@@ -37,6 +37,12 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 
+def get_open_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
 def initialize_cluster(
     parallel_config: ParallelConfig,
     engine_use_ray: bool = False,
@@ -67,7 +73,7 @@ def initialize_cluster(
 
     if not parallel_config.worker_use_ray:
         # Initialize cluster locally.
-        port = random.randint(10000, 20000)
+        port = get_open_port()
         # We need to setup the distributed init method to make sure
         # the distributed megatron code (e.g., get world size) works correctly.
         distributed_init_method = f"tcp://localhost:{port}"
