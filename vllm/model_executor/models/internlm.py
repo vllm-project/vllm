@@ -1,25 +1,38 @@
 # -*- coding: utf-8 -*-
+import sys
 from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
+    ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding)
+from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
+                                              load_tensor_parallel_weights)
 from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+from transformers.utils import (HF_MODULES_CACHE,
+                                TRANSFORMERS_DYNAMIC_MODULE_NAME)
+
+path = sys.path.append('/'.join((HF_MODULES_CACHE, TRANSFORMERS_DYNAMIC_MODULE_NAME)))
+
+try:
+    from internlm.configuration_internlm import InternLMConfig
+    from internlm.modeling_internlm import InternLMModel
+except ImportError as e:
+    print(f"InternLM is not ported to transformers' local module cache at {path}."
+          f"Try running `AutoModelForCausalLM.from_pretrained('internlm/internlm-chat-7b')` once "
+          f"to make transformers copy the codes to its hub.")
+    raise e
 
 class InternLMMLP(nn.Module):
 
@@ -32,12 +45,12 @@ class InternLMMLP(nn.Module):
         super().__init__()
         self.gate_up_proj = ColumnParallelLinear(hidden_size,
                                                  2 * intermediate_size,
-                                                 bias=True,
+                                                 bias=False,
                                                  gather_output=False,
                                                  perform_initialization=False)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
-                                           bias=True,
+                                           bias=False,
                                            input_is_parallel=True,
                                            perform_initialization=False)
         if hidden_act != "silu":
@@ -108,7 +121,7 @@ class InternLMAttention(nn.Module):
 
 class InternLMDecoderLayer(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: InternLMConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = InternLMAttention(
@@ -155,7 +168,7 @@ class InternLMDecoderLayer(nn.Module):
 
 class InternLMModel(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: InternLMConfig):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -273,6 +286,7 @@ class InternLMForCausalLM(nn.Module):
                 break
             if is_attention_weight:
                 continue
+            # TODO: current implementation works without TP, bias is not handled
 
             is_gate_up_weight = False
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
