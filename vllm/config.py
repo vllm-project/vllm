@@ -204,10 +204,10 @@ class SchedulerConfig:
     """
 
     def __init__(self, max_num_batched_tokens: int, max_num_seqs: int,
-                 max_seq_len: int) -> None:
+                 max_model_len: int) -> None:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_seqs = max_num_seqs
-        self.max_seq_len = max_seq_len
+        self.max_model_len = max_model_len
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

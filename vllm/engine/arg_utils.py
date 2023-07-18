@@ -155,11 +155,10 @@ class EngineArgs:
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray)
-        model_max_len = getattr(model_config.hf_config,
+        max_model_len = getattr(model_config.hf_config,
                                 'max_position_embeddings', float('inf'))
-        max_seq_len = min(self.max_num_batched_tokens, model_max_len)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs, max_seq_len)
+                                           self.max_num_seqs, max_model_len)
         return model_config, cache_config, parallel_config, scheduler_config
 
 
