@@ -106,7 +106,7 @@ class LlamaAttention(nn.Module):
 
         self.qkv_proj = ColumnParallelLinear(
             hidden_size,
-            (self.total_num_heads + 2 * self.num_key_value_heads) *
+            (self.total_num_heads + 2 * self.total_num_key_value_heads) *
             self.head_dim,
             bias=False,
             gather_output=False,
@@ -277,7 +277,7 @@ class LlamaForCausalLM(nn.Module):
         q_proj_shard_size = (self.config.hidden_size //
                              tensor_model_parallel_world_size)
         kv_proj_shard_size = (self.config.hidden_size //
-                              self.config.num_heads *
+                              self.config.num_attention_heads *
                               self.config.num_key_value_heads //
                               tensor_model_parallel_world_size)
         attention_weight_specs = [

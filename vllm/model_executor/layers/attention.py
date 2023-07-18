@@ -282,7 +282,8 @@ class PagedAttentionWithRoPE(PagedAttention):
             value: shape = [num_tokens, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
-            value_cache: shape = [num_blocks, num_kv_heads, head_size, block_size]
+            value_cache: shape = [num_blocks, num_kv_heads, head_size,
+                block_size]
             input_metadata: metadata for paged attention.
             cache_event: event to wait for the cache operations to finish.
 
