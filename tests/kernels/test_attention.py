@@ -199,6 +199,7 @@ def run_single_query_cached_kv_attention(
         ]
         block_tables.append(block_table)
     block_tables = torch.tensor(block_tables, dtype=torch.int, device='cuda')
+    head_mapping = torch.arange(num_heads, dtype=torch.int32, device="cuda")
 
     scale = float(1.0 / (head_size**0.5))
     output = torch.empty(num_tokens,
@@ -211,6 +212,7 @@ def run_single_query_cached_kv_attention(
         query,
         key_cache,
         value_cache,
+        head_mapping,
         scale,
         block_tables,
         context_lens,
