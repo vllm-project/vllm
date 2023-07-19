@@ -39,27 +39,13 @@ __global__ void rotary_embedding_neox_kernel(
     const scalar_t q_y = query[token_head + y_index];
     query[out_x] = q_x * cos - q_y * sin;
     query[out_y] = q_y * cos + q_x * sin;
-  }
 
-  const int nk = num_kv_heads * embed_dim;
-  for (int i = threadIdx.x; i < nk; i += blockDim.x) {
-    const int head_idx = i / embed_dim;
-    const int token_head = token_idx * stride + head_idx * head_size;
-
-    const int rot_offset = i % embed_dim;
-    const int x_index = rot_offset;
-    const int y_index = embed_dim + rot_offset;
-
-    const int out_x = token_idx * stride + head_idx * head_size + x_index;
-    const int out_y = token_idx * stride + head_idx * head_size + y_index;
-
-    const scalar_t cos = __ldg(cache_ptr + x_index);
-    const scalar_t sin = __ldg(cache_ptr + y_index);
-
-    const scalar_t k_x = key[token_head + x_index];
-    const scalar_t k_y = key[token_head + y_index];
-    key[out_x] = k_x * cos - k_y * sin;
-    key[out_y] = k_y * cos + k_x * sin;
+    if (head_idx < num_kv_heads) {
+      const scalar_t k_x = key[token_head + x_index];
+      const scalar_t k_y = key[token_head + y_index];
+      key[out_x] = k_x * cos - k_y * sin;
+      key[out_y] = k_y * cos + k_x * sin;
+    }
   }
 }
 
