@@ -7,9 +7,11 @@ from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.mpt import MPTForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
+from vllm.model_executor.models.baichuan_13b import BaichuanForCausalLM
 
 __all__ = [
-    "BaiChuanForCausalLM",
+    "BaiChuanForCausalLM", # 7b
+    "BaichuanForCausalLM", # 13b
     "BloomForCausalLM",
     "GPT2LMHeadModel",
     "GPTBigCodeForCausalLM",
