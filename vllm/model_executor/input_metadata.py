@@ -1,18 +1,29 @@
 from typing import Dict, List, Tuple
 
 import torch
-from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
+from xformers.ops import AttentionBias
 
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData
 
 
 class InputMetadata:
+    """Metadata for input sequences. Used for PagedAttention.
+
+    Args:
+        seq_groups: List of (seq_ids, sampling_params).
+        seq_data: Seq_id -> SequenceData.
+        prompt_lens: Lengths of prompts.
+        slot_mapping: The address to write the new KV to of each token.
+        context_lens: the length of attention context for each generation token.
+        max_context_len: The maximum context length.
+        block_tables: The block tables. (Seq id -> list of physical block)
+    """
 
     def __init__(
         self,
-        seq_groups: List[Tuple[List[int], SamplingParams]],     # List of (seq_ids, sampling_params).
-        seq_data: Dict[int, SequenceData],                      # Seq_id -> SequenceData.
+        seq_groups: List[Tuple[List[int], SamplingParams]],
+        seq_data: Dict[int, SequenceData],
         prompt_lens: List[int],
         slot_mapping: torch.Tensor,
         context_lens: torch.Tensor,
@@ -27,7 +38,6 @@ class InputMetadata:
         self.max_context_len = max_context_len
         self.block_tables = block_tables
 
-        self.attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
         self.num_prompts = len(prompt_lens)
         self.num_prompt_tokens = sum(prompt_lens)
         self.num_generation_tokens = context_lens.shape[0]
@@ -38,6 +48,9 @@ class InputMetadata:
             self.max_num_blocks_per_seq = 0
         assert block_tables.shape[0] == self.num_generation_tokens
         assert context_lens.shape[0] == self.num_generation_tokens
+
+        # Set during the execution of the first attention op.
+        self.attn_bias: List[AttentionBias] = []
 
     def __repr__(self) -> str:
         # Print only useful metadata.

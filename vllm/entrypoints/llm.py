@@ -28,6 +28,8 @@ class LLM:
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
         tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
             if available, and "slow" will always use the slow tokenizer.
+        trust_remote_code: Trust remote code (e.g., from HuggingFace) when
+            downloading the model and tokenizer.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -43,6 +45,7 @@ class LLM:
         model: str,
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
+        trust_remote_code: bool = False,
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         seed: int = 0,
@@ -54,6 +57,7 @@ class LLM:
             model=model,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
+            trust_remote_code=trust_remote_code,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             seed=seed,
@@ -63,8 +67,7 @@ class LLM:
         self.request_counter = Counter()
 
     def get_tokenizer(
-        self,
-    ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+            self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer
 
     def set_tokenizer(
@@ -152,4 +155,8 @@ class LLM:
                         pbar.update(1)
         if use_tqdm:
             pbar.close()
+        # Sort the outputs by request ID.
+        # This is necessary because some requests may be finished earlier than
+        # its previous requests.
+        outputs = sorted(outputs, key=lambda x: int(x.request_id))
         return outputs

@@ -1,14 +1,15 @@
 from typing import Optional
 
 import torch
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_config
 from vllm.utils import get_cpu_memory
 
 logger = init_logger(__name__)
 
-_GiB = 1 << 30
+_GB = 1 << 30
 
 
 class ModelConfig:
@@ -19,6 +20,8 @@ class ModelConfig:
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
+        trust_remote_code: Trust remote code (e.g., from HuggingFace) when
+            downloading the model and tokenizer.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
         use_np_weights: Save a numpy copy of model weights for faster loading.
@@ -35,6 +38,7 @@ class ModelConfig:
         model: str,
         tokenizer: str,
         tokenizer_mode: str,
+        trust_remote_code: bool,
         download_dir: Optional[str],
         use_np_weights: bool,
         use_dummy_weights: bool,
@@ -44,12 +48,13 @@ class ModelConfig:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
+        self.trust_remote_code = trust_remote_code
         self.download_dir = download_dir
         self.use_np_weights = use_np_weights
         self.use_dummy_weights = use_dummy_weights
         self.seed = seed
 
-        self.hf_config: PretrainedConfig = AutoConfig.from_pretrained(model)
+        self.hf_config = get_config(model, trust_remote_code)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self._verify_tokenizer_mode()
 
@@ -89,6 +94,13 @@ class ModelConfig:
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 
     def get_num_heads(self, parallel_config: "ParallelConfig") -> int:
+        # For GPTBigCode:
+        if getattr(self.hf_config, "multi_query", False):
+            # Multi-query attention, only one KV head.
+            return 1
+        # For Falcon:
+        if getattr(self.hf_config, "n_head_kv", None) is not None:
+            return self.hf_config.n_head_kv
         total_num_attention_heads = self.hf_config.num_attention_heads
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
@@ -106,6 +118,7 @@ class CacheConfig:
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
     """
+
     def __init__(
         self,
         block_size: int,
@@ -114,7 +127,7 @@ class CacheConfig:
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
-        self.swap_space_bytes = swap_space * _GiB
+        self.swap_space_bytes = swap_space * _GB
         self._verify_args()
 
         # Will be set after profiling.
@@ -137,14 +150,13 @@ class CacheConfig:
         num_gpus_per_node = parallel_config.tensor_parallel_size
         cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
 
-        msg = (
-            f"{cpu_memory_usage / _GiB:.2f} GiB out of "
-            f"the {total_cpu_memory / _GiB:.2f} GiB total CPU memory is "
-            "allocated for the swap space.")
+        msg = (f"{cpu_memory_usage / _GB:.2f} GiB out of "
+               f"the {total_cpu_memory / _GB:.2f} GiB total CPU memory is "
+               "allocated for the swap space.")
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
-            logger.warn("Possibly too large swap space. " + msg)
+            logger.warning("Possibly too large swap space. " + msg)
 
 
 class ParallelConfig:
@@ -157,6 +169,7 @@ class ParallelConfig:
             True if either pipeline_parallel_size or tensor_parallel_size is
             greater than 1.
     """
+
     def __init__(
         self,
         pipeline_parallel_size: int,
@@ -186,14 +199,15 @@ class SchedulerConfig:
             a single iteration.
         max_num_seqs: Maximum number of sequences to be processed in a single
             iteration.
+        max_seq_len: Maximum length of a sequence (including prompt
+            and generated text).
     """
-    def __init__(
-        self,
-        max_num_batched_tokens: int,
-        max_num_seqs: int,
-    ) -> None:
+
+    def __init__(self, max_num_batched_tokens: int, max_num_seqs: int,
+                 max_model_len: int) -> None:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_seqs = max_num_seqs
+        self.max_model_len = max_model_len
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -237,7 +251,7 @@ def _get_and_verify_dtype(
             pass
         else:
             # Casting between float16 and bfloat16 is allowed with a warning.
-            logger.warn(f"Casting {config_dtype} to {torch_dtype}.")
+            logger.warning(f"Casting {config_dtype} to {torch_dtype}.")
 
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:

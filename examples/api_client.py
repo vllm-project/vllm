@@ -14,7 +14,9 @@ def clear_line(n: int = 1) -> None:
         print(LINE_UP, end=LINE_CLEAR, flush=True)
 
 
-def post_http_request(prompt: str, api_url: str, n: int = 1,
+def post_http_request(prompt: str,
+                      api_url: str,
+                      n: int = 1,
                       stream: bool = False) -> requests.Response:
     headers = {"User-Agent": "Test Client"}
     pload = {
@@ -30,7 +32,8 @@ def post_http_request(prompt: str, api_url: str, n: int = 1,
 
 
 def get_streaming_response(response: requests.Response) -> Iterable[List[str]]:
-    for chunk in response.iter_lines(chunk_size=8192, decode_unicode=False,
+    for chunk in response.iter_lines(chunk_size=8192,
+                                     decode_unicode=False,
                                      delimiter=b"\0"):
         if chunk:
             data = json.loads(chunk.decode("utf-8"))
