@@ -1,4 +1,4 @@
-import random
+import socket
 from typing import List, Optional, Tuple
 
 try:
@@ -8,7 +8,14 @@ except ImportError:
 
 from vllm.config import ParallelConfig
 
-DeviceID = Tuple[int, Optional[str], int]  # rank, node resource (node IP), device id
+# rank, node resource (node IP), device id
+DeviceID = Tuple[int, Optional[str], int]
+
+
+def get_open_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
 
 
 def initialize_cluster(
@@ -41,7 +48,7 @@ def initialize_cluster(
 
     if not parallel_config.worker_use_ray:
         # Initialize cluster locally.
-        port = random.randint(10000, 20000)
+        port = get_open_port()
         # We need to setup the distributed init method to make sure
         # the distributed megatron code (e.g., get world size) works correctly.
         distributed_init_method = f"tcp://localhost:{port}"
@@ -53,15 +60,15 @@ def initialize_cluster(
     valid_node_resources = []
     num_devices_per_node = None
     for node in ray.nodes():
-        if (not node['Alive']) or node['Resources']['GPU'] <= 0:
+        if (not node["Alive"]) or node["Resources"]["GPU"] <= 0:
             continue
         if num_devices_per_node is None:
-            num_devices_per_node = node['Resources']['GPU']
+            num_devices_per_node = node["Resources"]["GPU"]
         else:
-            assert num_devices_per_node == node['Resources']['GPU'], (
+            assert num_devices_per_node == node["Resources"]["GPU"], (
                 "The number of GPUs per node is not uniform.")
-        for key in node['Resources']:
-            if key.startswith('node:'):
+        for key in node["Resources"]:
+            if key.startswith("node:"):
                 valid_node_resources.append(key)
 
     # Verify the parallel config.
@@ -95,7 +102,7 @@ def initialize_cluster(
             stage_devices.append((rank, node_resource, current_device_id))
             if distributed_init_method is None:
                 ip = node_resource.split("node:")[-1]
-                port = random.randint(10000, 20000)
+                port = get_open_port()
                 distributed_init_method = f"tcp://{ip}:{port}"
             rank += 1
             current_device_id += 1

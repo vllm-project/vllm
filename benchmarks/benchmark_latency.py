@@ -17,6 +17,7 @@ def main(args: argparse.Namespace):
     # the engine will automatically process the request in multiple batches.
     llm = LLM(
         model=args.model,
+        tokenizer=args.tokenizer,
         tensor_parallel_size=args.tensor_parallel_size,
         max_num_seqs=args.batch_size,
         max_num_batched_tokens=args.batch_size * args.input_len,
@@ -63,6 +64,7 @@ if __name__ == '__main__':
         description='Benchmark the latency of processing a single batch of '
                     'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
+    parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
     parser.add_argument('--input-len', type=int, default=32)
     parser.add_argument('--output-len', type=int, default=128)

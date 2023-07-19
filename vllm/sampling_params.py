@@ -1,6 +1,8 @@
 """Sampling parameters for text generation."""
 from typing import List, Optional, Union
 
+_SAMPLING_EPS = 1e-5
+
 
 class SamplingParams:
     """Sampling parameters for text generation.
@@ -50,7 +52,7 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         use_beam_search: bool = False,
-        stop: Union[str, List[str]] = [],
+        stop: Union[None, str, List[str]] = None,
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
@@ -63,7 +65,12 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.use_beam_search = use_beam_search
-        self.stop = [stop] if isinstance(stop, str) else list(stop)
+        if stop is None:
+            self.stop = []
+        elif isinstance(stop, str):
+            self.stop = [stop]
+        else:
+            self.stop = list(stop)
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs
@@ -71,7 +78,7 @@ class SamplingParams:
         self._verify_args()
         if self.use_beam_search:
             self._verity_beam_search()
-        elif self.temperature == 0.0:
+        elif self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self._verify_greedy_sampling()
 
@@ -106,9 +113,9 @@ class SamplingParams:
         if self.best_of == 1:
             raise ValueError("best_of must be greater than 1 when using beam "
                              f"search. Got {self.best_of}.")
-        if self.temperature > 0.0:
+        if self.temperature > _SAMPLING_EPS:
             raise ValueError("temperature must be 0 when using beam search.")
-        if self.top_p < 1.0:
+        if self.top_p < 1.0 - _SAMPLING_EPS:
             raise ValueError("top_p must be 1 when using beam search.")
         if self.top_k != -1:
             raise ValueError("top_k must be -1 when using beam search.")
@@ -117,7 +124,7 @@ class SamplingParams:
         if self.best_of > 1:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
-        if self.top_p < 1.0:
+        if self.top_p < 1.0 - _SAMPLING_EPS:
             raise ValueError("top_p must be 1 when using greedy sampling.")
         if self.top_k != -1:
             raise ValueError("top_k must be -1 when using greedy sampling.")

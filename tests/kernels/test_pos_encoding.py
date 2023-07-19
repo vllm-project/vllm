@@ -8,8 +8,8 @@ from vllm import pos_encoding_ops
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -38,7 +38,7 @@ class RefRotaryEmbeddingNeox(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         # Create cos and sin embeddings.
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2) / dim))
+        inv_freq = 1.0 / (base**(torch.arange(0, dim, 2) / dim))
         t = torch.arange(max_position_embeddings).float()
         freqs = torch.einsum("i,j->ij", t, inv_freq.float())
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -49,16 +49,15 @@ class RefRotaryEmbeddingNeox(nn.Module):
 
     def forward(
         self,
-        positions: torch.Tensor,        # [num_tokens]
-        query: torch.Tensor,            # [num_tokens, num_heads, head_size]
-        key: torch.Tensor,              # [num_tokens, num_heads, head_size]
+        positions: torch.Tensor,  # [num_tokens]
+        query: torch.Tensor,  # [num_tokens, num_heads, head_size]
+        key: torch.Tensor,  # [num_tokens, num_heads, head_size]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        query_rot = query[..., : self.rotary_dim]
-        query_pass = query[..., self.rotary_dim :]
-        key_rot = key[..., : self.rotary_dim]
-        key_pass = key[..., self.rotary_dim :]
-
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        key_rot = key[..., :self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
 
         query_rot = query_rot.transpose(0, 1)
         key_rot = key_rot.transpose(0, 1)
@@ -85,12 +84,18 @@ def run_rotary_embedding_neox(
     dtype: torch.dtype,
     base: int = 10000,
 ) -> None:
-    positions = torch.randint(0, max_position, (num_tokens,), device='cuda')
-    query = torch.randn(num_tokens, num_heads * head_size, dtype=dtype, device='cuda')
-    key = torch.randn(num_tokens, num_heads * head_size, dtype=dtype, device='cuda')
+    positions = torch.randint(0, max_position, (num_tokens, ), device='cuda')
+    query = torch.randn(num_tokens,
+                        num_heads * head_size,
+                        dtype=dtype,
+                        device='cuda')
+    key = torch.randn(num_tokens,
+                      num_heads * head_size,
+                      dtype=dtype,
+                      device='cuda')
 
     # Create the rotary embedding.
-    inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2) / rotary_dim))
+    inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
     t = torch.arange(max_position).float()
     freqs = torch.einsum('i,j -> ij', t, inv_freq.float())
     cos = freqs.cos()
