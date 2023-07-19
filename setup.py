@@ -164,6 +164,7 @@ setuptools.setup(
     ],
     packages=setuptools.find_packages(
         exclude=("assets", "benchmarks", "csrc", "docs", "examples", "tests")),
+    package_data = {'vllm': ['py.typed']},
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
