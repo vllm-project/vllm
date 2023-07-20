@@ -408,6 +408,7 @@ class PagedAttentionWithALiBi(PagedAttention):
             query,
             key_cache,
             value_cache,
+            self.head_mapping,
             self.scale,
             input_metadata.block_tables,
             input_metadata.context_lens,
