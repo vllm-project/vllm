@@ -34,24 +34,6 @@ def _get_interleave(n):
                _get_interleave(2 * closest_power_of_2)[0::2][:n - closest_power_of_2]
 
 
-def _fill_with_neg_inf(t):
-    """FP16-compatible function that fills a tensor with -inf."""
-    return t.float().fill_(float("-inf")).type_as(t)
-
-
-def _gen_alibi_mask(n_head, max_pos):
-    """used in inference only"""
-    slopes = torch.Tensor(_get_interleave(n_head))
-    alibi = slopes.unsqueeze(1).unsqueeze(1) * torch.arange(max_pos).unsqueeze(0).unsqueeze(0).expand(
-        n_head, -1, -1)
-    alibi = alibi.view(n_head, 1, max_pos)
-    alibi_mask = torch.triu(
-        _fill_with_neg_inf(torch.zeros([max_pos, max_pos])), 1
-    )
-    alibi_mask = alibi_mask.unsqueeze(0) + alibi
-    return alibi_mask
-
-
 class MLP(nn.Module):
 
     def __init__(
@@ -129,7 +111,7 @@ class BaichuanAttention(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         head_start = tp_rank * self.num_heads
         head_end = (tp_rank + 1) * self.num_heads
-        alibi_slopes = _gen_alibi_mask(self.total_num_heads, model_max_length)
+        alibi_slopes = _get_interleave(self.total_num_heads)
         alibi_slopes = alibi_slopes[head_start:head_end].tolist()
         return alibi_slopes
 
