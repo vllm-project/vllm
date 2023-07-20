@@ -136,6 +136,7 @@ async def send_request(
 
     timeout = aiohttp.ClientTimeout(total=3 * 3600)
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        script_dir = os.path.dirname(os.path.realpath(__file__))
         while True:
             async with session.post(api_url, headers=headers, json=pload) as response:
                 chunks = []
@@ -147,6 +148,10 @@ async def send_request(
             # Re-send the request if it failed.
             if "error" not in output:
                 break
+            
+        # Write the output to a file
+        with open(os.path.join(script_dir, 'output.txt'), 'a') as f:
+            f.write(str(output) + '\n')
 
     request_end_time = time.time()
     request_latency = request_end_time - request_start_time
