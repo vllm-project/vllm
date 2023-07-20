@@ -45,6 +45,10 @@ class Sampler(nn.Module):
 
         # Get the logits for the next tokens.
         logits = torch.matmul(hidden_states, embedding.t())
+
+        # Apply and user defined logits processors.
+        logits = _apply_logits_processors(input_metadata, logits)
+
         if embedding_bias is not None:
             logits += embedding_bias
         logits = gather_from_tensor_model_parallel_region(logits)
@@ -141,6 +145,18 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
                 output_tokens.append(seq_data.output_token_ids)
     return output_tokens
 
+def _apply_logits_processors(
+    input_metadata: InputMetadata,
+    logits: torch.Tensor,
+) -> torch.Tensor:
+    for _, seq_group in enumerate(input_metadata.seq_groups):
+        _, sampling_params = seq_group
+        logits_processors = sampling_params.logits_processors
+
+        for logits_processor in logits_processors:
+            logits = logits_processor(logits)
+    
+    return logits
 
 def _apply_penalties(
     logits: torch.Tensor,
