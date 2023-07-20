@@ -338,10 +338,10 @@ class LLMEngine:
                 # Check if the sequence has generated a stop string.
                 stopped = False
                 for stop_str in sampling_params.stop:
-                    if seq.output_text.endswith(stop_str):
+                    if stop_str in seq.output_text:
                         # Truncate the output text so that the stop string is
                         # not included in the output.
-                        seq.output_text = seq.output_text[:-len(stop_str)]
+                        seq.output_text = seq.output_text[:seq.output_text.index(stop_str)]
                         self.scheduler.free_seq(
                             seq, SequenceStatus.FINISHED_STOPPED)
                         stopped = True
