@@ -1,6 +1,6 @@
 ninja  # For faster builds.
 psutil
-ray
+ray >= 2.5.1
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch >= 2.0.0
