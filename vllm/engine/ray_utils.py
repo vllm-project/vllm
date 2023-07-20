@@ -86,9 +86,8 @@ def initialize_cluster(
         # Verify that we can use the placement group.
         gpu_bundles = 0
         for bundle in bundles:
-            assert bundle.get(
-                "GPU",
-                0) > 1, "Placement group bundles cannot have more than 1 GPU"
+            assert bundle.get("GPU", 0) > 1, (
+                "Placement group bundles cannot have more than 1 GPU")
             if bundle.get("GPU", 0):
                 gpu_bundles += 1
         if parallel_config.world_size > gpu_bundles:
