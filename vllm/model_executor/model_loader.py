@@ -11,6 +11,7 @@ from vllm.model_executor.weight_utils import initialize_dummy_weights
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
+    "BaichuanForCausalLM": Baichuan13BForCausalLM,
     "BaiChuanForCausalLM": BaiChuanForCausalLM,
     "BloomForCausalLM": BloomForCausalLM,
     "GPT2LMHeadModel": GPT2LMHeadModel,

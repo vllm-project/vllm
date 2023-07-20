@@ -1,27 +1,4 @@
-# coding=utf-8
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
-#
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Inference-only BaiChuan model compatible with HuggingFace weights.
-
-The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of the input.
-"""
+import math
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -39,12 +16,43 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class BaiChuanMLP(nn.Module):
+def _get_interleave(n):
+    def _get_interleave_power_of_2(n_):
+        start = (2 ** (-2 ** -(math.log2(n_) - 3)))
+        ratio = start
+        return [start * ratio ** i for i in range(n_)]
+
+    if math.log2(n).is_integer():
+        return _get_interleave_power_of_2(n)
+    else:
+        closest_power_of_2 = 2 ** math.floor(math.log2(n))
+        return _get_interleave_power_of_2(closest_power_of_2) + \
+               _get_interleave(2 * closest_power_of_2)[0::2][:n - closest_power_of_2]
+
+
+def _fill_with_neg_inf(t):
+    """FP16-compatible function that fills a tensor with -inf."""
+    return t.float().fill_(float("-inf")).type_as(t)
+
+
+def _gen_alibi_mask(n_head, max_pos):
+    """used in inference only"""
+    slopes = torch.Tensor(_get_interleave(n_head))
+    alibi = slopes.unsqueeze(1).unsqueeze(1) * torch.arange(max_pos).unsqueeze(0).unsqueeze(0).expand(
+        n_head, -1, -1)
+    alibi = alibi.view(n_head, 1, max_pos)
+    alibi_mask = torch.triu(
+        _fill_with_neg_inf(torch.zeros([max_pos, max_pos])), 1
+    )
+    alibi_mask = alibi_mask.unsqueeze(0) + alibi
+    return alibi_mask
+
+
+class MLP(nn.Module):
 
     def __init__(
         self,
@@ -75,13 +83,14 @@ class BaiChuanMLP(nn.Module):
         return x
 
 
-class BaiChuanAttention(nn.Module):
+class BaichuanAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
+        model_max_length: int,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -92,7 +101,9 @@ class BaiChuanAttention(nn.Module):
         self.num_heads = (self.total_num_heads //
                           tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim ** -0.5
+
+        alibi_slopes = self.get_alibi_slopes(model_max_length)
 
         # pylint: disable=invalid-name
         self.W_pack = ColumnParallelLinear(
@@ -110,14 +121,17 @@ class BaiChuanAttention(nn.Module):
             perform_initialization=False,
         )
 
-        # self.attn = PagedAttentionWithRoPE(self.num_heads,
-        #                                    self.head_dim,
-        #                                    self.scaling,
-        #                                    rotary_dim=self.head_dim)
-
-
         self.attn = PagedAttentionWithALiBi(self.num_heads, self.head_dim,
-                                            scaling, alibi_slopes)
+                                            self.scaling, alibi_slopes)
+
+    def get_alibi_slopes(self, model_max_length: int):
+        # Create the alibi slopes and slice them.
+        tp_rank = get_tensor_model_parallel_rank()
+        head_start = tp_rank * self.num_heads
+        head_end = (tp_rank + 1) * self.num_heads
+        alibi_slopes = _gen_alibi_mask(self.total_num_heads, model_max_length)
+        alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+        return alibi_slopes
 
     def forward(
         self,
@@ -127,25 +141,27 @@ class BaiChuanAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
+        del positions  # unused.
         qkv, _ = self.W_pack(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
+        attn_output = self.attn(q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
         output, _ = self.o_proj(attn_output)
         return output
 
 
-class BaiChuanDecoderLayer(nn.Module):
+class BaichuanLayer(nn.Module):
 
-    def __init__(self, config: BaiChuanConfig):
+    def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = BaiChuanAttention(
+        self.self_attn = BaichuanAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
+            model_max_length=config.model_max_length
         )
-        self.mlp = BaiChuanMLP(
+        self.mlp = MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -183,9 +199,9 @@ class BaiChuanDecoderLayer(nn.Module):
         return hidden_states
 
 
-class BaiChuanModel(nn.Module):
+class BaichuanModel(nn.Module):
 
-    def __init__(self, config: BaiChuanConfig):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -196,7 +212,7 @@ class BaiChuanModel(nn.Module):
             config.hidden_size,
             perform_initialization=False)
         self.layers = nn.ModuleList([
-            BaiChuanDecoderLayer(config)
+            BaichuanLayer(config)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -227,12 +243,12 @@ class BaiChuanModel(nn.Module):
         return hidden_states
 
 
-class BaiChuanForCausalLM(nn.Module):
+class Baichuan13BForCausalLM(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.model = BaiChuanModel(config)
+        self.model = BaichuanModel(config)
         self.lm_head = ColumnParallelLinear(config.hidden_size,
                                             config.vocab_size,
                                             bias=False,
