@@ -108,7 +108,7 @@ def run_hf(
     n: int,
     use_beam_search: bool,
     max_batch_size: int,
-    trust_remote_code: bool
+    trust_remote_code: bool,
 ) -> float:
     assert not use_beam_search
     llm = AutoModelForCausalLM.from_pretrained(model,
@@ -204,7 +204,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--hf-max-batch-size", type=int, default=None,
                         help="Maximum batch size for HF backend.")
-    parser.add_argument('--trust-remote-code', action='store_true',
+    parser.add_argument('--trust-remote-code',
+                        action='store_true',
                         help='trust remote code from huggingface')
     args = parser.parse_args()
 
