@@ -177,7 +177,7 @@ def main(args: argparse.Namespace):
     np.random.seed(args.seed)
 
     api_url = f"http://{args.host}:{args.port}/generate"
-    tokenizer = get_tokenizer(args.tokenizer)
+    tokenizer = get_tokenizer(args.tokenizer, trust_remote_code=args.trust_remote_code)
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
 
     benchmark_start_time = time.time()
@@ -227,5 +227,7 @@ if __name__ == "__main__":
                              "Otherwise, we use Poisson process to synthesize "
                              "the request arrival times.")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument('--trust-remote-code', action='store_true',
+                        help='trust remote code from huggingface')
     args = parser.parse_args()
     main(args)

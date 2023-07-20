@@ -21,6 +21,7 @@ def main(args: argparse.Namespace):
         tensor_parallel_size=args.tensor_parallel_size,
         max_num_seqs=args.batch_size,
         max_num_batched_tokens=args.batch_size * args.input_len,
+        trust_remote_code=args.trust_remote_code,
     )
 
     sampling_params = SamplingParams(
@@ -74,5 +75,7 @@ if __name__ == '__main__':
     parser.add_argument('--use-beam-search', action='store_true')
     parser.add_argument('--num-iters', type=int, default=3,
                         help='Number of iterations to run.')
+    parser.add_argument('--trust-remote-code', action='store_true',
+                        help='trust remote code from huggingface')
     args = parser.parse_args()
     main(args)
