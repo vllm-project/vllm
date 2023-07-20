@@ -74,7 +74,7 @@ def run_vllm(
         tokenizer=tokenizer,
         tensor_parallel_size=tensor_parallel_size,
         seed=seed,
-        trust_remote_code=trust_remote_code
+        trust_remote_code=trust_remote_code,
     )
 
     # Add the requests to the engine.
@@ -111,7 +111,8 @@ def run_hf(
     trust_remote_code: bool,
 ) -> float:
     assert not use_beam_search
-    llm = AutoModelForCausalLM.from_pretrained(model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
+    llm = AutoModelForCausalLM.from_pretrained(model,
+        torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
@@ -173,8 +174,9 @@ def main(args: argparse.Namespace):
             args.seed, args.n, args.use_beam_search, args.trust_remote_code)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
-        elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
-                              args.use_beam_search, args.hf_max_batch_size)
+        elapsed_time = run_hf(
+            requests, args.model, tokenizer, args.n, args.use_beam_search,
+            args.hf_max_batch_size, args.trust_remote_code)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
     total_num_tokens = sum(
