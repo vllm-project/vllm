@@ -1,4 +1,5 @@
 import time
+from functools import partial
 from typing import Any, List, Optional, TYPE_CHECKING
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -106,6 +107,9 @@ class LLMEngine:
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+
+        assert self.parallel_config.world_size == 1, (
+            "Ray is required if parallel_config.world_size > 1.")
 
         self.workers: List[Worker] = []
         worker = Worker(
@@ -372,9 +376,10 @@ class LLMEngine:
         """Runs the given method on all workers."""
         all_outputs = []
         for worker in self.workers:
-            executor = getattr(worker, method)
             if self.parallel_config.worker_use_ray:
-                executor = executor.remote
+                executor = partial(worker.execute_method.remote, method)
+            else:
+                executor = getattr(worker, method)
 
             output = executor(*args, **kwargs)
             all_outputs.append(output)

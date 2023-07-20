@@ -322,6 +322,13 @@ def _init_distributed_environment(
             rank=rank,
             init_method=distributed_init_method,
         )
+    else:
+        torch_world_size = torch.distributed.get_world_size()
+        if torch_world_size != parallel_config.world_size:
+            raise RuntimeError(
+                "torch.distributed is already initialized but the torch world "
+                "size does not match parallel_config.world_size "
+                f"({torch_world_size} vs. {parallel_config.world_size}).")
     # A small all_reduce for warmup.
     torch.distributed.all_reduce(torch.zeros(1).cuda())
     initialize_model_parallel(parallel_config.tensor_parallel_size,

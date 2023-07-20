@@ -1,4 +1,4 @@
-import random
+import socket
 from typing import Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import ParallelConfig
@@ -17,17 +17,12 @@ try:
         def init_worker(self, worker_init_fn):
             self.worker = worker_init_fn()
 
-        def init_model(self, *args, **kwargs):
-            self.worker.init_model(*args, **kwargs)
+        def __getattr__(self, name):
+            return getattr(self.worker, name)
 
-        def profile_num_available_blocks(self, *args, **kwargs):
-            return self.worker.profile_num_available_blocks(*args, **kwargs)
-
-        def init_cache_engine(self, *args, **kwargs):
-            self.worker.init_cache_engine(*args, **kwargs)
-
-        def execute_model(self, *args, **kwargs):
-            return self.worker.execute_model(*args, **kwargs)
+        def execute_method(self, method, *args, **kwargs):
+            executor = getattr(self, method)
+            return executor(*args, **kwargs)
 
 except ImportError:
     ray = None
