@@ -90,6 +90,11 @@ def initialize_cluster(
                 "The number of required GPUs exceeds the total number of "
                 "available GPUs in the placement group.")
     else:
+        num_gpus_in_cluster = ray.cluster_resources().get("GPU", 0)
+        if parallel_config.world_size > num_gpus_in_cluster:
+            raise ValueError(
+                "The number of required GPUs exceeds the total number of "
+                "available GPUs in the cluster.")
         # Create a new placement group
         current_placement_group = ray.util.placement_group([{
             "GPU": 1
