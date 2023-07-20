@@ -212,6 +212,7 @@ async def create_chat_completion(raw_request: Request):
 
     result_generator = engine.generate(prompt, sampling_params, request_id,
                                        token_ids)
+
     async def abort_request() -> None:
         await engine.abort(request_id)
 
