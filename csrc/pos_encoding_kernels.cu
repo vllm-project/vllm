@@ -12,7 +12,8 @@ __global__ void rotary_embedding_neox_kernel(
   const int rot_dim,
   const int stride,
   const int num_heads,
-  const int head_size) {
+  const int head_size,
+  const bool glm) {
   // Each thread block is responsible for one token.
   const int token_idx = blockIdx.x;
   int64_t pos = positions[token_idx];
@@ -27,20 +28,20 @@ __global__ void rotary_embedding_neox_kernel(
     const int rot_offset = i % embed_dim;
     const int x_index = rot_offset;
     const int y_index = embed_dim + rot_offset;
-
-    const int out_x = token_idx * stride + head_idx * head_size + x_index;
-    const int out_y = token_idx * stride + head_idx * head_size + y_index;
+    
+    const int out_x = glm ? token_head + (rot_offset << 1)  : token_head + x_index;
+    const int out_y = glm ? out_x + 1  : token_head + y_index;
 
     const scalar_t cos = __ldg(cache_ptr + x_index);
     const scalar_t sin = __ldg(cache_ptr + y_index);
 
-    const scalar_t q_x = query[token_head + x_index];
-    const scalar_t q_y = query[token_head + y_index];
+    const scalar_t q_x = query[out_x];
+    const scalar_t q_y = query[out_y];
     query[out_x] = q_x * cos - q_y * sin;
     query[out_y] = q_y * cos + q_x * sin;
 
-    const scalar_t k_x = key[token_head + x_index];
-    const scalar_t k_y = key[token_head + y_index];
+    const scalar_t k_x = key[out_x];
+    const scalar_t k_y = key[out_y];
     key[out_x] = k_x * cos - k_y * sin;
     key[out_y] = k_y * cos + k_x * sin;
   }
@@ -53,7 +54,8 @@ void rotary_embedding_neox(
   torch::Tensor& query,             // [num_tokens, num_heads * head_size]
   torch::Tensor& key,               // [num_tokens, num_heads * head_size]
   int head_size,
-  torch::Tensor& cos_sin_cache)     // [max_position, rot_dim]
+  torch::Tensor& cos_sin_cache,
+  bool glm)     // [max_position, rot_dim]
 {
   int num_tokens = query.size(0);
   int rot_dim = cos_sin_cache.size(1);
@@ -78,6 +80,7 @@ void rotary_embedding_neox(
         rot_dim,
         stride,
         num_heads,
-        head_size);
+        head_size,
+        glm);
     });
 }

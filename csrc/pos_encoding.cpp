@@ -5,7 +5,8 @@ void rotary_embedding_neox(
   torch::Tensor& query,
   torch::Tensor& key,
   int head_size,
-  torch::Tensor& cos_sin_cache);
+  torch::Tensor& cos_sin_cache,
+  bool glm = false);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(

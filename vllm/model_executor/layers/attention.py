@@ -220,9 +220,10 @@ class PagedAttentionWithRoPE(PagedAttention):
         rotary_dim: int,
         max_position: int = 8192,
         base: int = 10000,
+        glm: bool = False
     ) -> None:
         super().__init__(num_heads, head_size, scale)
-
+        self.glm = glm
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
         t = torch.arange(max_position).float()
@@ -275,6 +276,7 @@ class PagedAttentionWithRoPE(PagedAttention):
             key,
             self.head_size,
             self.cos_sin_cache,
+            self.glm
         )
         return super().forward(
             query,
