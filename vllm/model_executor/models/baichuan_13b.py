@@ -112,7 +112,7 @@ class BaichuanAttention(nn.Module):
         head_start = tp_rank * self.num_heads
         head_end = (tp_rank + 1) * self.num_heads
         alibi_slopes = _get_interleave(self.total_num_heads)
-        alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+        alibi_slopes = alibi_slopes[head_start:head_end]
         return alibi_slopes
 
     def forward(
