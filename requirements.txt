@@ -4,7 +4,7 @@ ray >= 2.5.1
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch >= 2.0.0
-transformers >= 4.28.0  # Required for LLaMA.
+transformers >= 4.31.0  # Required for LLaMA-2.
 xformers >= 0.0.19
 fastapi
 uvicorn
