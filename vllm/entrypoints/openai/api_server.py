@@ -187,7 +187,9 @@ async def create_chat_completion(raw_request: Request):
     if not request.logit_bias:
         logit_processors = []
     else:
-        biases = dict(map(lambda bias: (int(bias[0]), bias[1]), request.logit_bias.items()))
+        biases = dict(
+            map(lambda bias: (int(bias[0]), bias[1]),
+                request.logit_bias.items()))
         logit_processors = [BiasLogitsProcessor(biases)]
 
     model_name = request.model
@@ -206,8 +208,7 @@ async def create_chat_completion(raw_request: Request):
             top_k=request.top_k,
             ignore_eos=request.ignore_eos,
             use_beam_search=request.use_beam_search,
-            logit_processors=logit_processors
-        )
+            logits_processors=logit_processors)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
@@ -366,7 +367,9 @@ async def create_completion(raw_request: Request):
     if not request.logit_bias:
         logit_processors = []
     else:
-        logit_bias = dict(map(lambda logit: (int(logit[0]), logit[1]), request.logit_bias.items()))
+        logit_bias = dict(
+            map(lambda logit: (int(logit[0]), logit[1]),
+                request.logit_bias.items()))
         logit_processors = [BiasLogitsProcessor(logit_bias)]
 
     model_name = request.model
@@ -398,8 +401,7 @@ async def create_completion(raw_request: Request):
             max_tokens=request.max_tokens,
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
-            logits_processors=logit_processors
-        )
+            logits_processors=logit_processors)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 

@@ -145,6 +145,7 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
                 output_tokens.append(seq_data.output_token_ids)
     return output_tokens
 
+
 def _apply_logits_processors(
     input_metadata: InputMetadata,
     logits: torch.Tensor,
@@ -153,10 +154,12 @@ def _apply_logits_processors(
         _, sampling_params = seq_group
         logits_processors = sampling_params.logits_processors
 
-        for logits_processor in logits_processors:
-            logits = logits_processor(logits)
-    
+        if logits_processors is not None:
+            for logits_processor in logits_processors:
+                logits = logits_processor(logits)
+
     return logits
+
 
 def _apply_penalties(
     logits: torch.Tensor,
