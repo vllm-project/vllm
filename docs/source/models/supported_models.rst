@@ -30,8 +30,8 @@ Alongside each architecture, we include some popular models that use it.
     - GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM
     - :code:`EleutherAI/gpt-neox-20b`, :code:`EleutherAI/pythia-12b`, :code:`OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, :code:`databricks/dolly-v2-12b`, :code:`stabilityai/stablelm-tuned-alpha-7b`, etc.
   * - :code:`LlamaForCausalLM`
-    - LLaMA, Vicuna, Alpaca, Koala, Guanaco
-    - :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, :code:`JosephusCheung/Guanaco`, etc.
+    - LLaMA, LLaMA-2, Vicuna, Alpaca, Koala, Guanaco
+    - :code:`meta-llama/Llama-2-13b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, :code:`JosephusCheung/Guanaco`, etc.
   * - :code:`MPTForCausalLM`
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
