@@ -37,19 +37,10 @@ class ModelConfig:
             `max_position_embeddings` to the expected new maximum. 
     """
 
-    def __init__(
-        self,
-        model: str,
-        tokenizer: str,
-        tokenizer_mode: str,
-        trust_remote_code: bool,
-        download_dir: Optional[str],
-        use_np_weights: bool,
-        use_dummy_weights: bool,
-        dtype: str,
-        seed: int,
-        rope_sclaing: Optional[dict]
-    ) -> None:
+    def __init__(self, model: str, tokenizer: str, tokenizer_mode: str,
+                 trust_remote_code: bool, download_dir: Optional[str],
+                 use_np_weights: bool, use_dummy_weights: bool, dtype: str,
+                 seed: int, rope_sclaing: Optional[dict]) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode

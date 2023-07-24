@@ -9,7 +9,9 @@ _CONFIG_REGISTRY = {
 }
 
 
-def get_config(model: str, trust_remote_code: bool, rope_scaling: Optional[dict]) -> PretrainedConfig:
+def get_config(model: str, trust_remote_code: bool,
+               rope_scaling: Optional[dict]) -> PretrainedConfig:
+
     def _rope_scaling_validation():
         """
         Validate the `rope_scaling` configuration.
@@ -20,21 +22,27 @@ def get_config(model: str, trust_remote_code: bool, rope_scaling: Optional[dict]
         if not isinstance(rope_scaling, dict) or len(rope_scaling) != 2:
             raise ValueError(
                 "`rope_scaling` must be a dictionary with with two fields, `type` and `factor`, "
-                f"got {rope_scaling}"
-            )
+                f"got {rope_scaling}")
         rope_scaling_type = rope_scaling.get("type", None)
         rope_scaling_factor = rope_scaling.get("factor", None)
-        if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic"]:
+        if rope_scaling_type is None or rope_scaling_type not in [
+                "linear", "dynamic"
+        ]:
             raise ValueError(
                 f"`rope_scaling`'s name field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
             )
-        if rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
-            raise ValueError(f"`rope_scaling`'s factor field must be an float > 1, got {rope_scaling_factor}")
-        
+        if rope_scaling_factor is None or not isinstance(
+                rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
+            raise ValueError(
+                f"`rope_scaling`'s factor field must be an float > 1, got {rope_scaling_factor}"
+            )
+
     try:
         _rope_scaling_validation()
         config = AutoConfig.from_pretrained(
-            model, trust_remote_code=trust_remote_code, rope_scaling=rope_scaling)
+            model,
+            trust_remote_code=trust_remote_code,
+            rope_scaling=rope_scaling)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
