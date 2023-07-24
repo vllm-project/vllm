@@ -128,7 +128,8 @@ class PagedAttention(nn.Module):
             query: shape = [num_generation_tokens, num_heads, head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
-            value_cache: shape = [num_blocks, num_kv_heads, head_size, block_size]
+            value_cache: shape = [num_blocks, num_kv_heads, head_size,
+                block_size]
             input_metadata: metadata for paged attention.
         """
         block_size = value_cache.shape[3]
@@ -306,9 +307,10 @@ class PagedAttentionWithRoPE(PagedAttention):
         rotary_dim: int,
         max_position: int = 8192,
         base: int = 10000,
-        rope_scaling: Optional[dict] = None
+        rope_scaling: Optional[dict] = None,
+        num_kv_heads: Optional[int] = None,
     ) -> None:
-        super().__init__(num_heads, head_size, scale)
+        super().__init__(num_heads, head_size, scale, num_kv_heads)
 
         if rope_scaling is None:
             self.rotary_emb = LlamaRotaryEmbedding(rotary_dim, max_position, base)
@@ -336,11 +338,12 @@ class PagedAttentionWithRoPE(PagedAttention):
         Args:
             positions: shape = [num_tokens]
                         query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_heads * head_size]
-            value: shape = [num_tokens, num_heads * head_size]
-            key_cache: shape = [num_blocks, num_heads, head_size/x,
+            key: shape = [num_tokens, num_kv_heads * head_size]
+            value: shape = [num_tokens, num_kv_heads * head_size]
+            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
-            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            value_cache: shape = [num_blocks, num_kv_heads, head_size,
+                block_size]
             input_metadata: metadata for paged attention.
             cache_event: event to wait for the cache operations to finish.
 
