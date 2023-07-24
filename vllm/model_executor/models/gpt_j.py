@@ -65,7 +65,7 @@ class GPTJAttention(nn.Module):
         self.num_heads = self.total_num_heads // tp_world_size
 
         scaling = self.head_size**-0.5
-        assert config.rotary
+        assert getattr(config, "rotary", True)
         assert config.rotary_dim % 2 == 0
         self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_size,
                                            scaling, config.rotary_dim)
