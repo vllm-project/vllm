@@ -99,16 +99,10 @@ async def get_gen_prompt(request) -> str:
 
 
 async def check_length(request, prompt, model_config):
-    if hasattr(model_config.hf_config, "max_sequence_length"):
-        context_len = model_config.hf_config.max_sequence_length
-    elif hasattr(model_config.hf_config, "seq_length"):
-        context_len = model_config.hf_config.seq_length
-    elif hasattr(model_config.hf_config, "max_position_embeddings"):
-        context_len = model_config.hf_config.max_position_embeddings
-    elif hasattr(model_config.hf_config, "seq_length"):
-        context_len = model_config.hf_config.seq_length
-    else:
-        context_len = 2048
+    context_len = getattr(model_config.hf_config, "max_sequence_length", None) \
+        or getattr(model_config.hf_config, "seq_length", None) \
+        or getattr(model_config.hf_config, "max_position_embeddings", None) \
+        or 2048
 
     input_ids = tokenizer(prompt).input_ids
     token_num = len(input_ids)
