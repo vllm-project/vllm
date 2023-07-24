@@ -84,6 +84,7 @@ class LlamaAttention(nn.Module):
         self,
         hidden_size: int,
         num_heads: int,
+        rope_scaling: Optional[dict]
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -113,7 +114,8 @@ class LlamaAttention(nn.Module):
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
                                            self.scaling,
-                                           rotary_dim=self.head_dim)
+                                           rotary_dim=self.head_dim,
+                                           rope_scaling=rope_scaling)
 
     def forward(
         self,
@@ -127,7 +129,7 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+                                input_metadata, cache_event, input_metadata.max_context_len + 1)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -140,6 +142,7 @@ class LlamaDecoderLayer(nn.Module):
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
+            rope_scaling=config.rope_scaling
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,

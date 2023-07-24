@@ -25,9 +25,10 @@ class EngineArgs:
     block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
-    max_num_batched_tokens: int = 2560
+    max_num_batched_tokens: int = 40960
     max_num_seqs: int = 256
     disable_log_stats: bool = False
+    rope_scaling: Optional[dict] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -148,15 +149,19 @@ class EngineArgs:
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.use_np_weights,
                                    self.use_dummy_weights, self.dtype,
-                                   self.seed)
+                                   self.seed, self.rope_scaling)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray)
+        rope_scaling = getattr(model_config.hf_config, 'rope_scaling', None)
+        scale_factor = rope_scaling['factor'] if rope_scaling else 1.0
+        max_seq_len = getattr(model_config.hf_config, 'max_sequence_length', float('inf'))
         max_model_len = getattr(model_config.hf_config,
-                                'max_position_embeddings', float('inf'))
+                                'max_position_embeddings', float('inf')) * scale_factor
+        max_model_len = min(max_model_len, max_seq_len)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs, max_model_len)
         return model_config, cache_config, parallel_config, scheduler_config

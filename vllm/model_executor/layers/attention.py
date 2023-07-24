@@ -230,6 +230,71 @@ class PagedAttention(nn.Module):
         return output.view(-1, self.num_heads * self.head_size)
 
 
+class LlamaRotaryEmbedding(nn.Module):
+    def __init__(self, rotary_dim,  max_position_embeddings=2048, base=10000) -> None:
+        super().__init__()
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        self.rotary_dim = rotary_dim
+        
+        # Create the cos and sin cache.
+        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self._set_cos_sin_cache(seq_len=max_position_embeddings)
+    
+    def _set_cache(self, t):
+        freqs = torch.einsum("i,j -> ij", t, self.inv_freq.float())
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+        # FIXME(woosuk): This assumes that we configure the default dtype when
+        # initializing the model.
+        # TODO(woosuk): Make it more robust.
+        torch_dtype = torch.get_default_dtype()
+        cache = cache.to(torch_dtype)
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        
+    def _set_cos_sin_cache(self, seq_len):
+        self.max_seq_len_cached = seq_len
+        t = torch.arange(self.max_seq_len_cached).float()
+        self._set_cache(t)
+        
+    def forward(self, seq_len):
+        if seq_len is not None and seq_len > self.max_seq_len_cached:
+            self._set_cos_sin_cache(seq_len)
+        return self.cos_sin_cache
+
+
+class LlamaLinearScalingRotaryEmbedding(LlamaRotaryEmbedding):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, scaling_factor=1.0):
+        self.scaling_factor = scaling_factor
+        super().__init__(dim, max_position_embeddings, base)
+    
+    def _set_cos_sin_cache(self, seq_len):
+        self.max_seq_len_cached = seq_len
+        t = torch.arange(self.max_seq_len_cached).float() / self.scaling_factor
+        self._set_cache(t)
+    
+
+class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, scaling_factor=1.0):
+        self.scaling_factor = scaling_factor
+        super().__init__(dim, max_position_embeddings, base)
+    
+    def _set_cos_sin_cache(self, seq_len):
+        self.max_seq_len_cached = seq_len    
+        if seq_len > self.max_position_embeddings:
+            base = self.base * (
+                (self.scaling_factor * seq_len / self.max_position_embeddings) - (self.scaling_factor - 1)
+            ) ** (self.rotary_dim / (self.rotary_dim - 2))
+            
+            inv_freq = 1.0 / (base**(torch.arange(0, self.rotary_dim, 2).float() / self.rotary_dim))
+            self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+        t = torch.arange(self.max_seq_len_cached).float()
+        self._set_cache(t)
+    
+
 class PagedAttentionWithRoPE(PagedAttention):
     """PagedAttention with GPT-NeoX style rotary embedding."""
 
@@ -241,25 +306,19 @@ class PagedAttentionWithRoPE(PagedAttention):
         rotary_dim: int,
         max_position: int = 8192,
         base: int = 10000,
+        rope_scaling: Optional[dict] = None
     ) -> None:
         super().__init__(num_heads, head_size, scale)
 
-        # Create the cos and sin cache.
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
-        t = torch.arange(max_position).float()
-        freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
-        cos = freqs.cos()
-        sin = freqs.sin()
-        cache = torch.cat((cos, sin), dim=-1)
-
-        # FIXME(woosuk): This assumes that we configure the default dtype when
-        # initializing the model.
-        # TODO(woosuk): Make it more robust.
-        torch_dtype = torch.get_default_dtype()
-        cache = cache.to(torch_dtype)
-        # Embedding size: [max_position, rotary_dim]
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
-
+        if rope_scaling is None:
+            self.rotary_emb = LlamaRotaryEmbedding(rotary_dim, max_position, base)
+        elif rope_scaling["type"] == "linear":
+            self.rotary_emb = LlamaLinearScalingRotaryEmbedding(rotary_dim, max_position, base, rope_scaling["factor"])
+        elif rope_scaling["type"] == "dynamic":
+            self.rotary_emb = LlamaDynamicNTKScalingRotaryEmbedding(rotary_dim, max_position, base, rope_scaling["factor"])
+        else:
+            raise ValueError(rope_scaling)
+        
     def forward(
         self,
         positions: torch.Tensor,
@@ -270,6 +329,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         value_cache: torch.Tensor,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
+        seq_len: int = None
     ) -> torch.Tensor:
         """ PagedAttention forward pass with rotary embedding.
 
@@ -290,12 +350,14 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
+        cos_sin_cache = self.rotary_emb(seq_len)
+        
         pos_encoding_ops.rotary_embedding_neox(
             positions,
             query,
             key,
             self.head_size,
-            self.cos_sin_cache,
+            cos_sin_cache,
         )
         return super().forward(
             query,
