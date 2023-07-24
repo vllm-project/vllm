@@ -12,7 +12,6 @@ class Device(enum.Enum):
 
 
 class Counter:
-
     def __init__(self, start: int = 0) -> None:
         self.counter = start
 

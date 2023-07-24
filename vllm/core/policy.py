@@ -4,7 +4,6 @@ from vllm.sequence import SequenceGroup
 
 
 class Policy:
-
     def get_priority(
         self,
         now: float,
@@ -25,7 +24,6 @@ class Policy:
 
 
 class FCFS(Policy):
-
     def get_priority(
         self,
         now: float,
@@ -35,7 +33,6 @@ class FCFS(Policy):
 
 
 class PolicyFactory:
-
     _POLICY_REGISTRY = {
         'fcfs': FCFS,
     }

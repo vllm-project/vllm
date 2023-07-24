@@ -7,3 +7,23 @@ requires = [
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 119
+target-version = ['py37', 'py38', 'py39']
+skip-string-normalization = true
+include = '\.pyi?$'
+exclude = '''
+(
+  /(
+      \.eggs
+    | \.git
+    | \.mypy_cache
+    | \.tox
+    | _build
+    | build
+    | dist
+  )/
+  | src/buildstream
+)
+'''

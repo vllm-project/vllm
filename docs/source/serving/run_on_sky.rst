@@ -66,4 +66,3 @@ Check the output of the command. There will be a sharable gradio link (like the 
 .. code-block:: console
 
     sky launch -c vllm-serve-new -s serve.yaml --gpus A100:8 --env MODEL_NAME=decapoda-research/llama-65b-hf
-

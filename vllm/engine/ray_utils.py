@@ -60,9 +60,7 @@ def initialize_cluster(
     """
     if parallel_config.worker_use_ray or engine_use_ray:
         if ray is None:
-            raise ImportError(
-                "Ray is not installed. Please install Ray to use distributed "
-                "serving.")
+            raise ImportError("Ray is not installed. Please install Ray to use distributed " "serving.")
         # Connect to a ray cluster.
         ray.init(address=ray_address, ignore_reinit_error=True)
 
@@ -83,24 +81,21 @@ def initialize_cluster(
         for bundle in bundles:
             bundle_gpus = bundle.get("GPU", 0)
             if bundle_gpus > 1:
-                raise ValueError(
-                    "Placement group bundle cannot have more than 1 GPU.")
+                raise ValueError("Placement group bundle cannot have more than 1 GPU.")
             if bundle_gpus:
                 gpu_bundles += 1
         if parallel_config.world_size > gpu_bundles:
             raise ValueError(
-                "The number of required GPUs exceeds the total number of "
-                "available GPUs in the placement group.")
+                "The number of required GPUs exceeds the total number of " "available GPUs in the placement group."
+            )
     else:
         num_gpus_in_cluster = ray.cluster_resources().get("GPU", 0)
         if parallel_config.world_size > num_gpus_in_cluster:
             raise ValueError(
-                "The number of required GPUs exceeds the total number of "
-                "available GPUs in the cluster.")
+                "The number of required GPUs exceeds the total number of " "available GPUs in the cluster."
+            )
         # Create a new placement group
-        current_placement_group = ray.util.placement_group([{
-            "GPU": 1
-        }] * parallel_config.world_size)
+        current_placement_group = ray.util.placement_group([{"GPU": 1}] * parallel_config.world_size)
         # Wait until PG is ready - this will block until all
         # requested resources are available, and will timeout
         # if they cannot be provisioned.

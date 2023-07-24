@@ -1,0 +1,50 @@
+---
+minimum_pre_commit_version: 2.16.0
+exclude: >
+  (?x)^(
+      .+/.venv/.+|.+/dist/.+|.+/.autovenv|.+/docs/|.github
+  )$
+fail_fast: true
+default_language_version:
+  python: python3
+default_stages:
+  - prepare-commit-msg
+  - commit
+  # - push
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: check-case-conflict
+      - id: check-merge-conflict
+        stages:
+          - commit
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+        stages:
+          - commit
+      - id: detect-aws-credentials
+        args:
+          - --allow-missing-credentials
+      - id: fix-encoding-pragma
+        args:
+          - --remove
+      - id: detect-private-key
+      - id: destroyed-symlinks
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+      - id: check-toml
+      - id: end-of-file-fixer
+        description: Ensures that a file is either empty, or ends with one newline.
+        exclude_types: [sql]
+
+  # Python: Black formatter
+  - repo: https://github.com/psf/black
+    rev: 23.7.0
+    hooks:
+      - id: black
+        args: [--safe, --quiet, --config=./pyproject.toml]
+        files: \.pyi?$
+        exclude: .github/
+        # override until resolved: https://github.com/psf/black/issues/402
+        types: []

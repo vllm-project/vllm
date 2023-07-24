@@ -12,7 +12,6 @@ from tqdm.auto import tqdm
 
 
 class Disabledtqdm(tqdm):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, disable=True)
 
@@ -32,17 +31,13 @@ def hf_model_weights_iterator(
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         with lock:
-            hf_folder = snapshot_download(model_name_or_path,
-                                          allow_patterns="*.bin",
-                                          cache_dir=cache_dir,
-                                          tqdm_class=Disabledtqdm)
+            hf_folder = snapshot_download(
+                model_name_or_path, allow_patterns="*.bin", cache_dir=cache_dir, tqdm_class=Disabledtqdm
+            )
     else:
         hf_folder = model_name_or_path
 
-    hf_bin_files = [
-        x for x in glob.glob(os.path.join(hf_folder, "*.bin"))
-        if not x.endswith("training_args.bin")
-    ]
+    hf_bin_files = [x for x in glob.glob(os.path.join(hf_folder, "*.bin")) if not x.endswith("training_args.bin")]
 
     if use_np_cache:
         # Convert the model weights from torch tensors to numpy arrays for
@@ -101,8 +96,8 @@ def load_tensor_parallel_weights(
             loaded_weight = loaded_weight[:, start_idx:end_idx]
             break
     assert param.shape == loaded_weight.shape, (
-        f"{param_name} shape mismatch between model and checkpoint: "
-        f"{param.shape} != {loaded_weight.shape}")
+        f"{param_name} shape mismatch between model and checkpoint: " f"{param.shape} != {loaded_weight.shape}"
+    )
     param.data.copy_(loaded_weight)
 
 

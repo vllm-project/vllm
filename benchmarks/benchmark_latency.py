@@ -40,9 +40,7 @@ def main(args: argparse.Namespace):
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.time()
 
-        llm.generate(prompt_token_ids=dummy_prompt_token_ids,
-                     sampling_params=sampling_params,
-                     use_tqdm=False)
+        llm.generate(prompt_token_ids=dummy_prompt_token_ids, sampling_params=sampling_params, use_tqdm=False)
 
         end_time = time.time()
         latency = end_time - start_time
@@ -62,20 +60,17 @@ def main(args: argparse.Namespace):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Benchmark the latency of processing a single batch of '
-                    'requests till completion.')
+        description='Benchmark the latency of processing a single batch of ' 'requests till completion.'
+    )
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
     parser.add_argument('--input-len', type=int, default=32)
     parser.add_argument('--output-len', type=int, default=128)
     parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--n', type=int, default=1,
-                        help='Number of generated sequences per prompt.')
+    parser.add_argument('--n', type=int, default=1, help='Number of generated sequences per prompt.')
     parser.add_argument('--use-beam-search', action='store_true')
-    parser.add_argument('--num-iters', type=int, default=3,
-                        help='Number of iterations to run.')
-    parser.add_argument('--trust-remote-code', action='store_true',
-                        help='trust remote code from huggingface')
+    parser.add_argument('--num-iters', type=int, default=3, help='Number of iterations to run.')
+    parser.add_argument('--trust-remote-code', action='store_true', help='trust remote code from huggingface')
     args = parser.parse_args()
     main(args)

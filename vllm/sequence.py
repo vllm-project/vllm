@@ -9,6 +9,7 @@ from vllm.sampling_params import SamplingParams
 
 class SequenceStatus(enum.Enum):
     """Status of a sequence."""
+
     WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()
@@ -81,10 +82,12 @@ class SequenceData:
         return self.output_token_ids[-1]
 
     def __repr__(self) -> str:
-        return (f"SequenceData("
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"output_token_ids={self.output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob})")
+        return (
+            f"SequenceData("
+            f"prompt_token_ids={self.prompt_token_ids}, "
+            f"output_token_ids={self.output_token_ids}, "
+            f"cumulative_logprob={self.cumulative_logprob})"
+        )
 
 
 class Sequence:
@@ -138,8 +141,7 @@ class Sequence:
                 last_block = self.logical_token_blocks[-1]
 
             num_empty_slots = last_block.get_num_empty_slots()
-            last_block.append_tokens(token_ids[cursor:cursor +
-                                               num_empty_slots])
+            last_block.append_tokens(token_ids[cursor : cursor + num_empty_slots])
             cursor += num_empty_slots
 
     def append_token_id(
@@ -174,15 +176,16 @@ class Sequence:
         return SequenceStatus.is_finished(self.status)
 
     def fork(self, child_seq: "Sequence") -> None:
-        child_seq.logical_token_blocks = copy.deepcopy(
-            self.logical_token_blocks)
+        child_seq.logical_token_blocks = copy.deepcopy(self.logical_token_blocks)
         child_seq.output_logprobs = copy.deepcopy(self.output_logprobs)
         child_seq.data = copy.deepcopy(self.data)
 
     def __repr__(self) -> str:
-        return (f"Sequence(seq_id={self.seq_id}, "
-                f"status={self.status.name}, "
-                f"num_blocks={len(self.logical_token_blocks)})")
+        return (
+            f"Sequence(seq_id={self.seq_id}, "
+            f"status={self.status.name}, "
+            f"num_blocks={len(self.logical_token_blocks)})"
+        )
 
 
 class SequenceGroup:
@@ -229,9 +232,11 @@ class SequenceGroup:
         return all(seq.is_finished() for seq in self.seqs)
 
     def __repr__(self) -> str:
-        return (f"SequenceGroup(request_id={self.request_id}, "
-                f"sampling_params={self.sampling_params}, "
-                f"num_seqs={len(self.seqs)})")
+        return (
+            f"SequenceGroup(request_id={self.request_id}, "
+            f"sampling_params={self.sampling_params}, "
+            f"num_seqs={len(self.seqs)})"
+        )
 
 
 class SequenceGroupMetadata:
@@ -287,15 +292,19 @@ class SequenceOutputs:
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceOutputs(seq_id={self.seq_id}, "
-                f"parent_seq_id={self.parent_seq_id}, "
-                f"output_token={self.output_token}), "
-                f"logprobs={self.logprobs}")
+        return (
+            f"SequenceOutputs(seq_id={self.seq_id}, "
+            f"parent_seq_id={self.parent_seq_id}, "
+            f"output_token={self.output_token}), "
+            f"logprobs={self.logprobs}"
+        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
             return NotImplemented
-        return (self.seq_id == other.seq_id
-                and self.parent_seq_id == other.parent_seq_id
-                and self.output_token == other.output_token
-                and self.logprobs == other.logprobs)
+        return (
+            self.seq_id == other.seq_id
+            and self.parent_seq_id == other.parent_seq_id
+            and self.output_token == other.output_token
+            and self.logprobs == other.logprobs
+        )

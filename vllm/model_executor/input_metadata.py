@@ -54,14 +54,16 @@ class InputMetadata:
 
     def __repr__(self) -> str:
         # Print only useful metadata.
-        return (f'InputMetadata('
-                f'num_valid_tokens={self.num_valid_tokens}, '
-                f'num_prompt_tokens={self.num_prompt_tokens}, '
-                f'num_prompts={self.num_prompts}, '
-                f'prompt_lens={self.prompt_lens}, '
-                f'num_generation_tokens={self.num_generation_tokens}, '
-                f'context_lens={self.context_lens}, '
-                f'max_context_len={self.max_context_len}), '
-                f'max_num_blocks_per_seq={self.max_num_blocks_per_seq}, '
-                f'block_tables={self.block_tables}), '
-                f'slot_mapping={self.slot_mapping}')
+        return (
+            f'InputMetadata('
+            f'num_valid_tokens={self.num_valid_tokens}, '
+            f'num_prompt_tokens={self.num_prompt_tokens}, '
+            f'num_prompts={self.num_prompts}, '
+            f'prompt_lens={self.prompt_lens}, '
+            f'num_generation_tokens={self.num_generation_tokens}, '
+            f'context_lens={self.context_lens}, '
+            f'max_context_len={self.max_context_len}), '
+            f'max_num_blocks_per_seq={self.max_num_blocks_per_seq}, '
+            f'block_tables={self.block_tables}), '
+            f'slot_mapping={self.slot_mapping}'
+        )

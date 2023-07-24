@@ -6,9 +6,7 @@ from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.block_manager import BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
-from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceOutputs,
-                           SequenceStatus)
+from vllm.sequence import Sequence, SequenceData, SequenceGroup, SequenceGroupMetadata, SequenceOutputs, SequenceStatus
 
 logger = init_logger(__name__)
 
@@ -24,12 +22,12 @@ class PreemptionMode(enum.Enum):
     recompute them when the sequences are resumed, treating the sequences as
     new prompts.
     """
+
     SWAP = enum.auto()
     RECOMPUTE = enum.auto()
 
 
 class SchedulerOutputs:
-
     def __init__(
         self,
         blocks_to_swap_in: Dict[int, int],
@@ -43,12 +41,10 @@ class SchedulerOutputs:
         assert not (blocks_to_swap_in and blocks_to_swap_out)
 
     def is_empty(self) -> bool:
-        return (not self.blocks_to_swap_in and not self.blocks_to_swap_out
-                and not self.blocks_to_copy)
+        return not self.blocks_to_swap_in and not self.blocks_to_swap_out and not self.blocks_to_copy
 
 
 class Scheduler:
-
     def __init__(
         self,
         scheduler_config: SchedulerConfig,
@@ -101,8 +97,7 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
-    def _schedule(
-            self) -> Tuple[SchedulerOutputs, List[str], List[SequenceGroup]]:
+    def _schedule(self) -> Tuple[SchedulerOutputs, List[str], List[SequenceGroup]]:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
@@ -157,11 +152,8 @@ class Scheduler:
             # The total number of sequences in the RUNNING state should not
             # exceed the maximum number of sequences.
             num_new_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
-            num_curr_seqs = sum(
-                seq_group.num_seqs(status=SequenceStatus.RUNNING)
-                for seq_group in self.running)
-            if (num_curr_seqs + num_new_seqs >
-                    self.scheduler_config.max_num_seqs):
+            num_curr_seqs = sum(seq_group.num_seqs(status=SequenceStatus.RUNNING) for seq_group in self.running)
+            if num_curr_seqs + num_new_seqs > self.scheduler_config.max_num_seqs:
                 break
 
             seq_group = self.swapped.pop(0)
@@ -169,9 +161,7 @@ class Scheduler:
             self._append_slot(seq_group, blocks_to_copy)
             self.running.append(seq_group)
 
-        num_batched_tokens = sum(
-            seq_group.num_seqs(status=SequenceStatus.RUNNING)
-            for seq_group in self.running)
+        num_batched_tokens = sum(seq_group.num_seqs(status=SequenceStatus.RUNNING) for seq_group in self.running)
 
         # Join waiting sequences if possible.
         prompt_group_ids: List[str] = []
@@ -191,12 +181,13 @@ class Scheduler:
 
                 num_prompt_tokens = seq_group.get_seqs()[0].get_len()
                 if num_prompt_tokens > min(
-                        self.scheduler_config.max_model_len,
-                        self.scheduler_config.max_num_batched_tokens):
+                    self.scheduler_config.max_model_len, self.scheduler_config.max_num_batched_tokens
+                ):
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         " and exceeds limit of "
-                        f"{self.scheduler_config.max_model_len}")
+                        f"{self.scheduler_config.max_model_len}"
+                    )
                     for seq in seq_group.get_seqs():
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
@@ -208,19 +199,14 @@ class Scheduler:
                     break
 
                 # If the number of batched tokens exceeds the limit, stop.
-                if (num_batched_tokens + num_prompt_tokens >
-                        self.scheduler_config.max_num_batched_tokens):
+                if num_batched_tokens + num_prompt_tokens > self.scheduler_config.max_num_batched_tokens:
                     break
 
                 # The total number of sequences in the RUNNING state should not
                 # exceed the maximum number of sequences.
-                num_new_seqs = seq_group.num_seqs(
-                    status=SequenceStatus.WAITING)
-                num_curr_seqs = sum(
-                    seq_group.num_seqs(status=SequenceStatus.RUNNING)
-                    for seq_group in self.running)
-                if (num_curr_seqs + num_new_seqs >
-                        self.scheduler_config.max_num_seqs):
+                num_new_seqs = seq_group.num_seqs(status=SequenceStatus.WAITING)
+                num_curr_seqs = sum(seq_group.num_seqs(status=SequenceStatus.RUNNING) for seq_group in self.running)
+                if num_curr_seqs + num_new_seqs > self.scheduler_config.max_num_seqs:
                     break
 
                 seq_group = self.waiting.pop(0)
@@ -244,11 +230,9 @@ class Scheduler:
         elapsed_time = now - self.last_logging_time
         if elapsed_time > _LOGGING_INTERVAL_SEC:
             self.last_logging_time = now
-            self.num_input_tokens = [(t, n) for t, n in self.num_input_tokens
-                                     if now - t < _LOGGING_INTERVAL_SEC]
+            self.num_input_tokens = [(t, n) for t, n in self.num_input_tokens if now - t < _LOGGING_INTERVAL_SEC]
             if len(self.num_input_tokens) > 1:
-                total_num_tokens = sum(n
-                                       for _, n in self.num_input_tokens[:-1])
+                total_num_tokens = sum(n for _, n in self.num_input_tokens[:-1])
                 window = now - self.num_input_tokens[0][0]
                 avg_throughput = total_num_tokens / window
             else:
@@ -261,30 +245,27 @@ class Scheduler:
 
             total_num_cpu_blocks = self.cache_config.num_cpu_blocks
             if total_num_cpu_blocks > 0:
-                num_free_cpu_blocks = (
-                    self.block_manager.get_num_free_cpu_blocks())
+                num_free_cpu_blocks = self.block_manager.get_num_free_cpu_blocks()
                 num_used_cpu_blocks = total_num_cpu_blocks - num_free_cpu_blocks
                 cpu_cache_usage = num_used_cpu_blocks / total_num_cpu_blocks
             else:
                 cpu_cache_usage = 0.0
 
-            logger.info(f"Throughput: {avg_throughput:.1f} tokens/s, "
-                        f"Running: {len(self.running)} reqs, "
-                        f"Swapped: {len(self.swapped)} reqs, "
-                        f"Pending: {len(self.waiting)} reqs, "
-                        f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
-                        f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
+            logger.info(
+                f"Throughput: {avg_throughput:.1f} tokens/s, "
+                f"Running: {len(self.running)} reqs, "
+                f"Swapped: {len(self.swapped)} reqs, "
+                f"Pending: {len(self.waiting)} reqs, "
+                f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
+                f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%"
+            )
         return scheduler_outputs, prompt_group_ids, ignored_seq_groups
 
-    def schedule(
-        self
-    ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs,
-               List[SequenceGroup]]:
+    def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, List[SequenceGroup]]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
-        (scheduler_outputs, prompt_group_ids,
-         ignored_seq_groups) = self._schedule()
+        (scheduler_outputs, prompt_group_ids, ignored_seq_groups) = self._schedule()
 
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
@@ -340,10 +321,7 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        self.running = [
-            seq_group for seq_group in self.running
-            if not seq_group.is_finished()
-        ]
+        self.running = [seq_group for seq_group in self.running if not seq_group.is_finished()]
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
@@ -437,8 +415,8 @@ class Scheduler:
             # FIXME(woosuk): Abort the sequence group instead of aborting the
             # entire engine.
             raise RuntimeError(
-                "Aborted due to the lack of CPU swap space. Please increase "
-                "the swap space to avoid this error.")
+                "Aborted due to the lack of CPU swap space. Please increase " "the swap space to avoid this error."
+            )
         mapping = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):

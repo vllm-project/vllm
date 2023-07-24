@@ -5,11 +5,10 @@
 import torch
 from typing import List, Sequence
 
+
 def ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, "{} is not divisible by {}".format(
-        numerator, denominator
-    )
+    assert numerator % denominator == 0, "{} is not divisible by {}".format(numerator, denominator)
 
 
 def divide(numerator, denominator):
@@ -24,16 +23,16 @@ def split_tensor_along_last_dim(
     num_partitions: int,
     contiguous_split_chunks: bool = False,
 ) -> List[torch.Tensor]:
-    """ Split a tensor along its last dimension.
+    """Split a tensor along its last dimension.
 
-        Arguments:
-            tensor: input tensor.
-            num_partitions: number of partitions to split the tensor
-            contiguous_split_chunks: If True, make each chunk contiguous
-                                     in memory.
+    Arguments:
+        tensor: input tensor.
+        num_partitions: number of partitions to split the tensor
+        contiguous_split_chunks: If True, make each chunk contiguous
+                                 in memory.
 
-        Returns:
-            A list of Tensors
+    Returns:
+        A list of Tensors
     """
     # Get the size and dimension.
     last_dim = tensor.dim() - 1
@@ -48,9 +47,9 @@ def split_tensor_along_last_dim(
 
 
 class VocabUtility:
-    """ Split the vocabulary into `world_size` chunks and return the first
-        and last index of the vocabulary belonging to the `rank`
-        partition: Note that indices in [fist, last)
+    """Split the vocabulary into `world_size` chunks and return the first
+    and last index of the vocabulary belonging to the `rank`
+    partition: Note that indices in [fist, last)
 
     """
 
@@ -65,6 +64,4 @@ class VocabUtility:
     @staticmethod
     def vocab_range_from_global_vocab_size(global_vocab_size: int, rank: int, world_size: int) -> Sequence[int]:
         per_partition_vocab_size = divide(global_vocab_size, world_size)
-        return VocabUtility.vocab_range_from_per_partition_vocab_size(
-            per_partition_vocab_size, rank, world_size
-        )
+        return VocabUtility.vocab_range_from_per_partition_vocab_size(per_partition_vocab_size, rank, world_size)

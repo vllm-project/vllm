@@ -10,3 +10,6 @@ types-setuptools
 
 # testing
 pytest
+
+# pre-commits
+pre-commit==3.3.2

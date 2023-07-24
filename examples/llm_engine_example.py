@@ -11,17 +11,15 @@ def main(args: argparse.Namespace):
     # Test the following prompts.
     test_prompts = [
         ("A robot may not injure a human being", SamplingParams()),
-        ("To be or not to be,",
-         SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
-        ("What is the meaning of life?",
-         SamplingParams(n=2,
-                        best_of=5,
-                        temperature=0.8,
-                        top_p=0.95,
-                        frequency_penalty=0.1)),
-        ("It is only with the heart that one can see rightly",
-         SamplingParams(n=3, best_of=3, use_beam_search=True,
-                        temperature=0.0)),
+        ("To be or not to be,", SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
+        (
+            "What is the meaning of life?",
+            SamplingParams(n=2, best_of=5, temperature=0.8, top_p=0.95, frequency_penalty=0.1),
+        ),
+        (
+            "It is only with the heart that one can see rightly",
+            SamplingParams(n=3, best_of=3, use_beam_search=True, temperature=0.0),
+        ),
     ]
 
     # Run the engine by calling `engine.step()` manually.
@@ -43,8 +41,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='Demo on using the LLMEngine class directly')
+    parser = argparse.ArgumentParser(description='Demo on using the LLMEngine class directly')
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     main(args)

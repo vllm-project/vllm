@@ -37,12 +37,14 @@ class CompletionOutput:
         return self.finish_reason is not None
 
     def __repr__(self) -> str:
-        return (f"CompletionOutput(index={self.index}, "
-                f"text={self.text!r}, "
-                f"token_ids={self.token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob}, "
-                f"logprobs={self.logprobs}, "
-                f"finish_reason={self.finish_reason})")
+        return (
+            f"CompletionOutput(index={self.index}, "
+            f"text={self.text!r}, "
+            f"token_ids={self.token_ids}, "
+            f"cumulative_logprob={self.cumulative_logprob}, "
+            f"logprobs={self.logprobs}, "
+            f"finish_reason={self.finish_reason})"
+        )
 
 
 class RequestOutput:
@@ -76,9 +78,7 @@ class RequestOutput:
         n = seq_group.sampling_params.n
         seqs = seq_group.get_seqs()
         assert n <= len(seqs)
-        sorted_seqs = sorted(seqs,
-                             key=lambda seq: seq.get_cumulative_logprob(),
-                             reverse=True)
+        sorted_seqs = sorted(seqs, key=lambda seq: seq.get_cumulative_logprob(), reverse=True)
         top_n_seqs = sorted_seqs[:n]
 
         # Create the outputs.
@@ -91,22 +91,27 @@ class RequestOutput:
                 # logprobs are not requested.
                 logprobs = {}
             finshed_reason = SequenceStatus.get_finished_reason(seq.status)
-            output = CompletionOutput(seqs.index(seq), seq.output_text,
-                                      seq.get_output_token_ids(),
-                                      seq.get_cumulative_logprob(), logprobs,
-                                      finshed_reason)
+            output = CompletionOutput(
+                seqs.index(seq),
+                seq.output_text,
+                seq.get_output_token_ids(),
+                seq.get_cumulative_logprob(),
+                logprobs,
+                finshed_reason,
+            )
             outputs.append(output)
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = top_n_seqs[0].prompt
         prompt_token_ids = top_n_seqs[0].data.prompt_token_ids
         finished = seq_group.is_finished()
-        return cls(seq_group.request_id, prompt, prompt_token_ids, outputs,
-                   finished)
+        return cls(seq_group.request_id, prompt, prompt_token_ids, outputs, finished)
 
     def __repr__(self) -> str:
-        return (f"RequestOutput(request_id={self.request_id}, "
-                f"prompt={self.prompt!r}, "
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"outputs={self.outputs}, "
-                f"finished={self.finished})")
+        return (
+            f"RequestOutput(request_id={self.request_id}, "
+            f"prompt={self.prompt!r}, "
+            f"prompt_token_ids={self.prompt_token_ids}, "
+            f"outputs={self.outputs}, "
+            f"finished={self.finished})"
+        )

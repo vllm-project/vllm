@@ -248,12 +248,12 @@ __global__ void gather_cached_kv_kernel(
     for (int i = threadIdx.x; i < num_tokens; i += blockDim.x) {
       const int tgt_key_idx = token_idx * key_stride + i;
       const int tgt_value_idx = token_idx * value_stride + i;
-  
+
       const int head_idx = i / head_size;
       const int head_offset = i % head_size;
       const int x_idx = head_offset / x;  // the offset of the [head_size/x] dimension
       const int x_offset = head_offset % x;
-  
+
       const int src_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
                               + head_idx * (head_size / x) * block_size * x
                               + x_idx * block_size * x

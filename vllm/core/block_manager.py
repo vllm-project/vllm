@@ -27,9 +27,7 @@ class BlockAllocator:
         # Initialize the free blocks.
         self.free_blocks: List[PhysicalTokenBlock] = []
         for i in range(num_blocks):
-            block = PhysicalTokenBlock(device=device,
-                                       block_number=i,
-                                       block_size=block_size)
+            block = PhysicalTokenBlock(device=device, block_number=i, block_size=block_size)
             self.free_blocks.append(block)
 
     def allocate(self) -> PhysicalTokenBlock:
@@ -71,10 +69,8 @@ class BlockSpaceManager:
         assert watermark >= 0.0
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
-        self.gpu_allocator = BlockAllocator(Device.GPU, block_size,
-                                            num_gpu_blocks)
-        self.cpu_allocator = BlockAllocator(Device.CPU, block_size,
-                                            num_cpu_blocks)
+        self.gpu_allocator = BlockAllocator(Device.GPU, block_size, num_gpu_blocks)
+        self.cpu_allocator = BlockAllocator(Device.CPU, block_size, num_cpu_blocks)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
@@ -85,8 +81,7 @@ class BlockSpaceManager:
         num_required_blocks = len(seq.logical_token_blocks)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         # Use watermark to avoid frequent cache eviction.
-        return (num_free_gpu_blocks - num_required_blocks >=
-                self.watermark_blocks)
+        return num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same
@@ -146,8 +141,7 @@ class BlockSpaceManager:
         for block in src_block_table:
             block.ref_count += 1
 
-    def _get_physical_blocks(
-            self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
+    def _get_physical_blocks(self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
         # NOTE: Here, we assume that the physical blocks are only shared by
         # the sequences in the same group.
         blocks: Set[PhysicalTokenBlock] = set()
@@ -191,8 +185,7 @@ class BlockSpaceManager:
             self.block_tables[seq.seq_id] = new_block_table
 
         block_number_mapping = {
-            cpu_block.block_number: gpu_block.block_number
-            for cpu_block, gpu_block in mapping.items()
+            cpu_block.block_number: gpu_block.block_number for cpu_block, gpu_block in mapping.items()
         }
         return block_number_mapping
 
@@ -222,8 +215,7 @@ class BlockSpaceManager:
             self.block_tables[seq.seq_id] = new_block_table
 
         block_number_mapping = {
-            gpu_block.block_number: cpu_block.block_number
-            for gpu_block, cpu_block in mapping.items()
+            gpu_block.block_number: cpu_block.block_number for gpu_block, cpu_block in mapping.items()
         }
         return block_number_mapping
 

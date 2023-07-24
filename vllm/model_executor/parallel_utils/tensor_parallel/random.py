@@ -33,6 +33,7 @@ def _set_cuda_rng_state(new_state, device=-1):
         def cb():
             with device_ctx_manager(device):
                 _C._cuda_setRNGState(new_state)
+
     else:
         # newer PyTorch
         if device == -1:
@@ -50,7 +51,6 @@ def _set_cuda_rng_state(new_state, device=-1):
             default_generator.set_state(new_state)
 
     _lazy_call(cb)
-
 
 
 class CudaRNGStatesTracker:
@@ -160,5 +160,4 @@ def model_parallel_cuda_manual_seed(seed):
     # Set the default state.
     torch.cuda.manual_seed(data_parallel_seed)
     # and model parallel state.
-    _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME,
-                                tensor_model_parallel_seed)
+    _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME, tensor_model_parallel_seed)
