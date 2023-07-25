@@ -95,7 +95,8 @@ class ModelConfig:
 
     def get_num_heads(self, parallel_config: "ParallelConfig") -> int:
         # For GPTBigCode:
-        if getattr(self.hf_config, "multi_query", False):
+        # TODO: kill it later
+        if getattr(self.hf_config, "multi_query", False) or 'refact' in self.hf_config.architectures[0].lower():
             # Multi-query attention, only one KV head.
             return 1
         # For Falcon:
