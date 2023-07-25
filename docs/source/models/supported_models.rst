@@ -14,6 +14,9 @@ Alongside each architecture, we include some popular models that use it.
   * - Architecture
     - Models
     - Example HuggingFace Models
+  * - :code:`BaiChuanForCausalLM`
+    - Baichuan-7B
+    - :code:`baichuan-inc/Baichuan-7B`.
   * - :code:`BloomForCausalLM`
     - BLOOM, BLOOMZ, BLOOMChat
     - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
