@@ -107,6 +107,8 @@ async def check_length(request, prompt, model_config):
         context_len = model_config.hf_config.max_position_embeddings
     elif hasattr(model_config.hf_config, "seq_length"):
         context_len = model_config.hf_config.seq_length
+    elif hasattr(model_config.hf_config, "max_seq_len"):
+        context_len = model_config.hf_config.max_seq_len
     else:
         context_len = 2048
 
