@@ -174,7 +174,7 @@ async def create_chat_completion(raw_request: Request):
                                      "logit_bias is not currently supported")
 
     prompt = await get_gen_prompt(request)
-    error_check_ret = await check_length(request, prompt, engine_model_config)
+    error_check_ret = await check_length(request, prompt)
     if error_check_ret is not None:
         return error_check_ret
 
