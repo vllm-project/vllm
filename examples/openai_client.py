@@ -20,7 +20,7 @@ completion = openai.Completion.create(
     stream=stream,
     logprobs=3)
 
-print("Completion results:", )
+print("Completion results:")
 if stream:
     for c in completion:
         print(c)
