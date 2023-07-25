@@ -42,6 +42,7 @@ vLLM is flexible and easy to use with:
 
 vLLM seamlessly supports many Huggingface models, including the following architectures:
 
+- Baichuan-7B (`baichuan-inc/Baichuan-7B`)
 - BLOOM (`bigscience/bloom`, `bigscience/bloomz`, etc.)
 - GPT-2 (`gpt2`, `gpt2-xl`, etc.)
 - GPT BigCode (`bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, etc.)
