@@ -46,9 +46,6 @@ class Sampler(nn.Module):
         # Get the logits for the next tokens.
         logits = torch.matmul(hidden_states, embedding.t())
 
-        # Apply and user defined logits processors.
-        logits = _apply_logits_processors(input_metadata, logits)
-
         if embedding_bias is not None:
             logits += embedding_bias
         logits = gather_from_tensor_model_parallel_region(logits)
@@ -64,6 +61,9 @@ class Sampler(nn.Module):
         assert len(frequency_penalties) == logits.shape[0]
         logits = _apply_penalties(logits, output_tokens, presence_penalties,
                                   frequency_penalties, self.vocab_size)
+
+        # Apply and user defined logits processors.
+        logits = _apply_logits_processors(input_metadata, logits, output_tokens)
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(input_metadata)
@@ -149,6 +149,7 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
 def _apply_logits_processors(
     input_metadata: InputMetadata,
     logits: torch.Tensor,
+    output_tokens: List[List[int]]
 ) -> torch.Tensor:
     for _, seq_group in enumerate(input_metadata.seq_groups):
         _, sampling_params = seq_group
@@ -156,7 +157,7 @@ def _apply_logits_processors(
 
         if logits_processors is not None:
             for logits_processor in logits_processors:
-                logits = logits_processor(logits)
+                logits = logits_processor(logits, output_tokens)
 
     return logits
 
