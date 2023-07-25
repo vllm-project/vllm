@@ -381,12 +381,14 @@ class PagedAttentionWithRoPE(PagedAttention):
 class PagedAttentionWithALiBi(PagedAttention):
     """PagedAttention with ALiBi attention bias."""
 
-    def __init__(self,
-                 num_heads: int,
-                 head_size: int,
-                 scale: float,
-                 slopes: List[float],
-                 num_kv_heads: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        slopes: List[float],
+        num_kv_heads: Optional[int] = None
+    ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
         assert len(slopes) == num_heads
 

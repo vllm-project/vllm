@@ -12,6 +12,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.mistral import MistralForCausalLM
 from vllm.model_executor.models.mpt import MPTForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
+from vllm.model_executor.models.refact import GPTRefactForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "GPT2LMHeadModel",
     "GPTBigCodeForCausalLM",
     "GPTJForCausalLM",
+    "GPTRefactForCausalLM",
     "GPTNeoXForCausalLM",
     "InternLMForCausalLM",
     "LlamaForCausalLM",

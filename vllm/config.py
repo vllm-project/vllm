@@ -150,8 +150,9 @@ class ModelConfig:
         new_decoder_arch_falcon = (
             self.hf_config.model_type in falcon_model_types
             and getattr(self.hf_config, "new_decoder_architecture", False))
+        # TODO: kill it later
         if not new_decoder_arch_falcon and getattr(self.hf_config,
-                                                   "multi_query", False):
+                                                   "multi_query", False) or 'refact' in self.hf_config.architectures[0].lower():
             # Multi-query attention, only one KV head.
             # Currently, tensor parallelism is not supported in this case.
             return 1
