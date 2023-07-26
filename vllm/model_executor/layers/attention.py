@@ -241,11 +241,13 @@ class LlamaRotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         self.rotary_dim = rotary_dim
+        self.scaling_factor = 1.0
 
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self._set_cos_sin_cache(seq_len=max_position_embeddings)
+        self._set_cos_sin_cache(
+            seq_len=max_position_embeddings * self.scaling_factor)
 
     def _set_cache(self, t):
         freqs = torch.einsum("i,j -> ij", t, self.inv_freq.float())
@@ -264,9 +266,10 @@ class LlamaRotaryEmbedding(nn.Module):
         t = torch.arange(self.max_seq_len_cached).float()
         self._set_cache(t)
 
-    def forward(self, seq_len):
-        if seq_len is not None and seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len)
+    # Unlink HF or TGI, we do not dynamically set the cos_sin_cache
+    # because vLLM needs to statically allocate memory in the beginning
+    # Therefore, we don't need to know the current seq_len
+    def forward(self):
         return self.cos_sin_cache
 
 
@@ -350,8 +353,7 @@ class PagedAttentionWithRoPE(PagedAttention):
                 key_cache: torch.Tensor,
                 value_cache: torch.Tensor,
                 input_metadata: InputMetadata,
-                cache_event: Optional[torch.cuda.Event],
-                seq_len: int = None) -> torch.Tensor:
+                cache_event: Optional[torch.cuda.Event]) -> torch.Tensor:
         """ PagedAttention forward pass with rotary embedding.
 
         Args:
@@ -372,7 +374,7 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
-        cos_sin_cache = self.rotary_emb(seq_len)
+        cos_sin_cache = self.rotary_emb()
 
         pos_encoding_ops.rotary_embedding_neox(
             positions,
