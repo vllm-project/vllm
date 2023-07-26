@@ -163,7 +163,7 @@ class FalconAttention(nn.Module):
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
             head_end = (tp_rank + 1) * self.num_heads
-            alibi_slopes = _get_alibi_slopes(self.total_num_heads)
+            alibi_slopes = (_get_alibi_slopes(self.total_num_heads) * self.inv_norm_factor)
             alibi_slopes = alibi_slopes[head_start:head_end].tolist()
             self.attn = PagedAttentionWithALiBi(self.num_heads,
                                                 self.head_dim,
@@ -185,7 +185,9 @@ class FalconAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         if not self.new_decoder_architecture and self.multi_query:
-            q = self.query(hidden_states)
+            q, bias = self.query(hidden_states)
+            if bias is not None:
+                q += bias
             kv = self.key_value(hidden_states)
             k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
         else:
@@ -423,15 +425,20 @@ class FalconForCausalLM(nn.Module):
             kv_head_start = tp_rank * num_kv_heads
             kv_head_end = (tp_rank + 1) * num_kv_heads
         total_kv_size = total_num_kv_heads * head_size
-
+        num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
             if "query_key_value" in name:
-                wq, wk, wv = torch.split(
-                    loaded_weight, [hidden_size, total_kv_size, total_kv_size],
-                    dim=0)
+                loaded_weight_size = loaded_weight.size()
+                loaded_weight = loaded_weight.view(
+                    total_num_kv_heads, num_query_heads_per_kv_head + 2, head_size,
+                    *loaded_weight_size[1:])
+
+                wq = loaded_weight[:, :-2].reshape(-1, *loaded_weight_size[1:])
+                wk = loaded_weight[:, [-2]].reshape(-1, *loaded_weight_size[1:])
+                wv = loaded_weight[:, [-1]].reshape(-1, *loaded_weight_size[1:])
 
                 wq = wq[head_size * head_start:head_size * head_end]
                 wk = wk[head_size * kv_head_start:head_size * kv_head_end]
