@@ -31,10 +31,12 @@ class ModelConfig:
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
         seed: Random seed for reproducibility.
-        rope_scaling: Dictionary containing the scaling configuration for the RoPE embeddings. Currently supports three scaling
-            strategies: linear and dynamic. Their scaling factor must be an float greater than 1. The expected format
-            is `{"type": strategy name, "factor": scaling factor}`. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum. 
+        rope_scaling: Dictionary containing the scaling configuration for the
+            RoPE embeddings. Currently supports three scaling strategies:
+            linear and dynamic. Their scaling factor must be an float greater
+            than 1. The expected format is `{"type": strategy name,
+            "factor": scaling factor}`. When using this flag, don't update
+            `max_position_embeddings` to the expected new maximum.
     """
 
     def __init__(self, model: str, tokenizer: str, tokenizer_mode: str,

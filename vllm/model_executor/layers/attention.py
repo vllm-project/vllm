@@ -241,13 +241,11 @@ class LlamaRotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         self.rotary_dim = rotary_dim
-        self.scaling_factor = 1.0
 
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self._set_cos_sin_cache(seq_len=max_position_embeddings *
-                                self.scaling_factor)
+        self._set_cos_sin_cache(seq_len=max_position_embeddings)
 
     def _set_cache(self, t):
         freqs = torch.einsum("i,j -> ij", t, self.inv_freq.float())
@@ -284,7 +282,7 @@ class LlamaLinearScalingRotaryEmbedding(LlamaRotaryEmbedding):
         super().__init__(rotary_dim, max_position_embeddings, base)
 
     def _set_cos_sin_cache(self, seq_len):
-        self.max_seq_len_cached = seq_len
+        self.max_seq_len_cached = seq_len * self.scaling_factor
         t = torch.arange(self.max_seq_len_cached).float() / self.scaling_factor
         self._set_cache(t)
 
@@ -300,7 +298,7 @@ class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
         super().__init__(rotary_dim, max_position_embeddings, base)
 
     def _set_cos_sin_cache(self, seq_len):
-        self.max_seq_len_cached = seq_len
+        self.max_seq_len_cached = seq_len * self.scaling_factor
         if seq_len > self.max_position_embeddings:
             base = self.base * (
                 (self.scaling_factor * seq_len / self.max_position_embeddings)

@@ -21,7 +21,8 @@ def get_config(model: str, trust_remote_code: bool,
 
         if not isinstance(rope_scaling, dict) or len(rope_scaling) != 2:
             raise ValueError(
-                "`rope_scaling` must be a dictionary with with two fields, `type` and `factor`, "
+                "`rope_scaling` must be a dictionary with",
+                "with two fields, `type` and `factor`, "
                 f"got {rope_scaling}")
         rope_scaling_type = rope_scaling.get("type", None)
         rope_scaling_factor = rope_scaling.get("factor", None)
@@ -29,13 +30,13 @@ def get_config(model: str, trust_remote_code: bool,
                 "linear", "dynamic"
         ]:
             raise ValueError(
-                f"`rope_scaling`'s name field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
-            )
+                "`rope_scaling`'s name field must be one ",
+                f"of ['linear', 'dynamic'], got {rope_scaling_type}")
         if rope_scaling_factor is None or not isinstance(
                 rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
             raise ValueError(
-                f"`rope_scaling`'s factor field must be an float > 1, got {rope_scaling_factor}"
-            )
+                "`rope_scaling`'s factor field must be an float > 1,",
+                f" got {rope_scaling_factor}")
 
     try:
         _rope_scaling_validation()
