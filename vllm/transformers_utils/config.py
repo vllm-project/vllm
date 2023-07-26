@@ -5,10 +5,15 @@ from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
 _CONFIG_REGISTRY = {
     "mpt": MPTConfig,
     "baichuan": BaiChuanConfig,
+    "skywork": SkyWorkConfig,
 }
 
 
 def get_config(model: str, trust_remote_code: bool) -> PretrainedConfig:
+    if model == "skywork":
+        AutoConfig.register(model, SkyWorkConfig) # we should register our config file head of time, because this can't be found in HungingFace.co
+        config = SkyWorkConfig()
+        config.save_pretrained("skywork")
     try:
         config = AutoConfig.from_pretrained(
             model, trust_remote_code=trust_remote_code)
