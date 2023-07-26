@@ -13,9 +13,6 @@ from fastapi import BackgroundTasks, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastchat.conversation import Conversation, SeparatorStyle
-from fastchat.model.model_adapter import get_conversation_template
-
 import uvicorn
 
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -32,6 +29,13 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import random_uuid
+
+try:
+    from fastchat.conversation import Conversation, SeparatorStyle
+    from fastchat.model.model_adapter import get_conversation_template
+    _fastchat_available = True
+except ImportError:
+    _fastchat_available = False
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -63,6 +67,11 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 
 async def get_gen_prompt(request) -> str:
+    if not _fastchat_available:
+        raise ModuleNotFoundError(
+            "fastchat is not installed. Please install fastchat to use "
+            "the chat completion and conversation APIs: `$ pip install fschat`"
+        )
     conv = get_conversation_template(request.model)
     conv = Conversation(
         name=conv.name,
