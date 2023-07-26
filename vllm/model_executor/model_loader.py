@@ -13,6 +13,7 @@ from vllm.model_executor.weight_utils import initialize_dummy_weights
 _MODEL_REGISTRY = {
     "BaiChuanForCausalLM": BaiChuanForCausalLM,
     "BloomForCausalLM": BloomForCausalLM,
+    "FalconForCausalLM": FalconForCausalLM,
     "GPT2LMHeadModel": GPT2LMHeadModel,
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
     "GPTJForCausalLM": GPTJForCausalLM,
