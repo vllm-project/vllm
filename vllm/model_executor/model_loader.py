@@ -27,6 +27,7 @@ _MODEL_REGISTRY = {
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
     "RWForCausalLM": FalconForCausalLM,
+    "SkyWorkLMHeadModel": SkyWorkLMHeadModel,
 }
 
 

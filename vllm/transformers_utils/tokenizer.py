@@ -4,6 +4,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.sky_tokenizer import SkyTokenizer
 
 logger = init_logger(__name__)
 
@@ -32,11 +33,14 @@ def get_tokenizer(
             f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
             "tokenizer.")
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            **kwargs)
+        if tokenizer_name == "skywork":
+            tokenizer = SkyTokenizer(tokenizer_name + "/vocab.json")
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments.
         err_msg = (

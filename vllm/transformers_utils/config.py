@@ -9,13 +9,18 @@ _CONFIG_REGISTRY = {
     "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
+    "skywork": SkyWorkConfig,
 }
 
 
 def get_config(model: str, trust_remote_code: bool) -> PretrainedConfig:
     try:
-        config = AutoConfig.from_pretrained(
-            model, trust_remote_code=trust_remote_code)
+        if model == "skywork":
+            config = SkyWorkConfig()
+            config.save_pretrained(model)
+        else:
+            config = AutoConfig.from_pretrained(
+                model, trust_remote_code=trust_remote_code)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
