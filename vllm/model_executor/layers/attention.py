@@ -246,8 +246,8 @@ class LlamaRotaryEmbedding(nn.Module):
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self._set_cos_sin_cache(
-            seq_len=max_position_embeddings * self.scaling_factor)
+        self._set_cos_sin_cache(seq_len=max_position_embeddings *
+                                self.scaling_factor)
 
     def _set_cache(self, t):
         freqs = torch.einsum("i,j -> ij", t, self.inv_freq.float())
@@ -345,13 +345,9 @@ class PagedAttentionWithRoPE(PagedAttention):
         else:
             raise ValueError(rope_scaling)
 
-    def forward(self,
-                positions: torch.Tensor,
-                query: torch.Tensor,
-                key: torch.Tensor,
-                value: torch.Tensor,
-                key_cache: torch.Tensor,
-                value_cache: torch.Tensor,
+    def forward(self, positions: torch.Tensor, query: torch.Tensor,
+                key: torch.Tensor, value: torch.Tensor,
+                key_cache: torch.Tensor, value_cache: torch.Tensor,
                 input_metadata: InputMetadata,
                 cache_event: Optional[torch.cuda.Event]) -> torch.Tensor:
         """ PagedAttention forward pass with rotary embedding.

@@ -160,8 +160,8 @@ class Scheduler:
             num_curr_seqs = sum(
                 seq_group.num_seqs(status=SequenceStatus.RUNNING)
                 for seq_group in self.running)
-            if (num_curr_seqs + num_new_seqs
-                    > self.scheduler_config.max_num_seqs):
+            if (num_curr_seqs + num_new_seqs >
+                    self.scheduler_config.max_num_seqs):
                 break
 
             seq_group = self.swapped.pop(0)
@@ -209,8 +209,8 @@ class Scheduler:
                     break
 
                 # If the number of batched tokens exceeds the limit, stop.
-                if (num_batched_tokens + num_prompt_tokens
-                        > self.scheduler_config.max_num_batched_tokens):
+                if (num_batched_tokens + num_prompt_tokens >
+                        self.scheduler_config.max_num_batched_tokens):
                     break
 
                 # The total number of sequences in the RUNNING state should not
@@ -220,8 +220,8 @@ class Scheduler:
                 num_curr_seqs = sum(
                     seq_group.num_seqs(status=SequenceStatus.RUNNING)
                     for seq_group in self.running)
-                if (num_curr_seqs + num_new_seqs
-                        > self.scheduler_config.max_num_seqs):
+                if (num_curr_seqs + num_new_seqs >
+                        self.scheduler_config.max_num_seqs):
                     break
 
                 seq_group = self.waiting.pop(0)
