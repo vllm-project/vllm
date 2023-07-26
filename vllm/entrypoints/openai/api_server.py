@@ -267,22 +267,27 @@ async def create_chat_completion(raw_request: Request):
 
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
+        previous_delta = ""
         async for res in result_generator:
             res: RequestOutput
             for output in res.outputs:
                 i = output.index
-                delta_text = output.text[len(previous_texts[i]):]
+                prev_len = len(previous_texts[i])
+                delta_text = output.text[prev_len:]
+                if prev_len != 0:
+                    if len(output.text) > prev_len:
+                        response_json = create_stream_response_json(
+                            index=i, text=previous_delta)
+                        yield f"data: {response_json}\n\n"
+                    else:
+                        delta_text = output.text[prev_len - 1:]
+                previous_delta = delta_text
                 previous_texts[i] = output.text
                 previous_num_tokens[i] = len(output.token_ids)
-                response_json = create_stream_response_json(
-                    index=i,
-                    text=delta_text,
-                )
-                yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
                     response_json = create_stream_response_json(
                         index=i,
-                        text="",
+                        text=previous_delta,
                         finish_reason=output.finish_reason,
                     )
                     yield f"data: {response_json}\n\n"
@@ -476,32 +481,38 @@ async def create_completion(raw_request: Request):
     async def completion_stream_generator() -> AsyncGenerator[str, None]:
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
+        previous_delta = ""
         async for res in result_generator:
             res: RequestOutput
             for output in res.outputs:
                 i = output.index
-                delta_text = output.text[len(previous_texts[i]):]
+                prev_len = len(previous_texts[i])
+                delta_text = output.text[prev_len:]
                 if request.logprobs is not None:
                     logprobs = create_logprobs(
                         output.token_ids[previous_num_tokens[i]:],
-                        output.logprobs[previous_num_tokens[i]:],
-                        len(previous_texts[i]))
+                        output.logprobs[previous_num_tokens[i]:], prev_len)
                 else:
                     logprobs = None
+                # skip first word
+                if prev_len != 0:
+                    # valid word
+                    if len(output.text) > prev_len:
+                        response_json = create_stream_response_json(
+                            index=i, text=previous_delta)
+                        yield f"data: {response_json}\n\n"
+                    else:
+                        # cache previous word which is not valid.
+                        delta_text = output.text[prev_len - 1:]
+                previous_delta = delta_text
                 previous_texts[i] = output.text
                 previous_num_tokens[i] = len(output.token_ids)
-                response_json = create_stream_response_json(
-                    index=i,
-                    text=delta_text,
-                    logprobs=logprobs,
-                )
-                yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
                     logprobs = (LogProbs()
                                 if request.logprobs is not None else None)
                     response_json = create_stream_response_json(
                         index=i,
-                        text="",
+                        text=previous_delta,
                         logprobs=logprobs,
                         finish_reason=output.finish_reason,
                     )
