@@ -67,9 +67,11 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 
 async def get_gen_prompt(request) -> str:
-    assert _fastchat_available, (
-        "fastchat is not installed. Please install fastchat to use "
-        "the chat completion and conversation APIs: `$ pip install fschat`")
+    if not _fastchat_available:
+        raise ModuleNotFoundError(
+            "fastchat is not installed. Please install fastchat to use "
+            "the chat completion and conversation APIs: `$ pip install fschat`"
+        )
     conv = get_conversation_template(request.model)
     conv = Conversation(
         name=conv.name,
