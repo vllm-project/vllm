@@ -424,7 +424,6 @@ class FalconForCausalLM(nn.Module):
             separated_q_kv = False
             kv_head_start = tp_rank * num_kv_heads
             kv_head_end = (tp_rank + 1) * num_kv_heads
-        total_kv_size = total_num_kv_heads * head_size
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         state_dict = self.state_dict()
 

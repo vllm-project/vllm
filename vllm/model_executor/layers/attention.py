@@ -334,6 +334,7 @@ class PagedAttentionWithALiBi(PagedAttention):
         for prompt_len in input_metadata.prompt_lens:
             bias = torch.arange(prompt_len)
             bias = bias[None, :] - bias[:, None]
+            # bias = bias[None, :].repeat(prompt_len, 1)
             bias = bias.to(self.alibi_slopes.device)
 
             # When using custom attention bias, xformers requires the bias to
