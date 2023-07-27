@@ -68,6 +68,10 @@ class RWConfig(PretrainedConfig):
         self.parallel_attn = parallel_attn
         self.new_decoder_architecture = new_decoder_architecture
 
+        if self.model_type == "RefinedWeb":
+            # Hack for falcon-40b
+            self.new_decoder_architecture = True
+
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 
     @property
