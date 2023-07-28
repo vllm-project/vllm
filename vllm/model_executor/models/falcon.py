@@ -19,12 +19,12 @@
 """PyTorch Falcon model."""
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
 from torch.nn import LayerNorm
-from transformers import FalconConfig
+from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import (PagedAttention,
@@ -39,9 +39,10 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear,
     reduce_from_tensor_model_parallel_region)
 from vllm.sequence import SequenceOutputs
+from vllm.transformers_utils.configs import RWConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
-
+FalconConfig = Union[HF_FalconConfig, RWConfig]
 
 # NOTE(Hesslow): Unfortunately we did not fuse matmul and bias during
 # training, this means that there's one additional quantization to bfloat16
