@@ -1,6 +1,8 @@
-# Adapted from https://huggingface.co/tiiuae/falcon-7b/blob/main/configuration_RW.py
+# Adapted from
+# https://huggingface.co/tiiuae/falcon-7b/blob/main/configuration_RW.py
 # Copyright 2023 The vLLM team.
-# Copyright 2022 the Big Science Workshop and HuggingFace Inc. team.  All rights reserved.
+# Copyright 2022 the Big Science Workshop and HuggingFace Inc. team.
+# All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
