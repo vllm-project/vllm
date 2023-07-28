@@ -260,12 +260,38 @@ class BaiChuanForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
+        tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
             if "rotary_emb.inv_freq" in name:
+                continue
+
+            is_attention_weight = False
+            for stride_id, att_weight_name in enumerate(["W_pack"]):
+                if att_weight_name not in name:
+                    continue
+                param = state_dict[name.replace(att_weight_name, "W_pack")]
+                shard_size = loaded_weight.shape[0] // 3
+                q = loaded_weight[0:shard_size]
+                k = loaded_weight[shard_size:shard_size * 2]
+                v = loaded_weight[shard_size * 2:shard_size * 3]
+                delta = shard_size // tensor_model_parallel_world_size
+                qi = q[delta * tensor_model_parallel_rank:delta *
+                       (tensor_model_parallel_rank + 1)]
+                ki = k[delta * tensor_model_parallel_rank:delta *
+                       (tensor_model_parallel_rank + 1)]
+                vi = v[delta * tensor_model_parallel_rank:delta *
+                       (tensor_model_parallel_rank + 1)]
+                qkv_pack = torch.cat((qi, ki, vi))
+                loaded_weight = qkv_pack
+                param.copy_(loaded_weight)
+                is_attention_weight = True
+                break
+            if is_attention_weight:
                 continue
 
             is_gate_up_weight = False
