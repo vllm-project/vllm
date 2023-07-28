@@ -27,6 +27,7 @@ try:
 except ImportError:
     ray = None
     TorchDistributedWorker = None
+    RayWorker = None  # pylint: disable=invalid-name
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
