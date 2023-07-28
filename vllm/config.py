@@ -94,8 +94,10 @@ class ModelConfig:
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 
     def get_num_heads(self, parallel_config: "ParallelConfig") -> int:
-        # For GPTBigCode:
-        if getattr(self.hf_config, "multi_query", False):
+        # For GPTBigCode & Falcon:
+        if (getattr(self.hf_config, "multi_query", False) and
+            (self.hf_config.model_type == "falcon" and
+             not getattr(self.hf_config, "new_decoder_architecture", False))):
             # Multi-query attention, only one KV head.
             return 1
         # For Falcon:

@@ -163,7 +163,8 @@ class FalconAttention(nn.Module):
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
             head_end = (tp_rank + 1) * self.num_heads
-            alibi_slopes = (_get_alibi_slopes(self.total_num_heads) * self.inv_norm_factor)
+            alibi_slopes = (_get_alibi_slopes(self.total_num_heads) *
+                            self.inv_norm_factor)
             alibi_slopes = alibi_slopes[head_start:head_end].tolist()
             self.attn = PagedAttentionWithALiBi(self.num_heads,
                                                 self.head_dim,
@@ -288,6 +289,10 @@ class FalconDecoderLayer(nn.Module):
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
+        # The all-reduce operator in vLLM uses a shared buffer for all results.
+        # When we need to keep two all-reduce results at the same time, we need
+        # to copy one of the result.
+        attention_output = attention_output.clone()
 
         if not self.config.new_decoder_architecture:
             if self.config.parallel_attn:
@@ -432,12 +437,14 @@ class FalconForCausalLM(nn.Module):
             if "query_key_value" in name:
                 loaded_weight_size = loaded_weight.size()
                 loaded_weight = loaded_weight.view(
-                    total_num_kv_heads, num_query_heads_per_kv_head + 2, head_size,
-                    *loaded_weight_size[1:])
+                    total_num_kv_heads, num_query_heads_per_kv_head + 2,
+                    head_size, *loaded_weight_size[1:])
 
                 wq = loaded_weight[:, :-2].reshape(-1, *loaded_weight_size[1:])
-                wk = loaded_weight[:, [-2]].reshape(-1, *loaded_weight_size[1:])
-                wv = loaded_weight[:, [-1]].reshape(-1, *loaded_weight_size[1:])
+                wk = loaded_weight[:, [-2]].reshape(-1,
+                                                    *loaded_weight_size[1:])
+                wv = loaded_weight[:, [-1]].reshape(-1,
+                                                    *loaded_weight_size[1:])
 
                 wq = wq[head_size * head_start:head_size * head_end]
                 wk = wk[head_size * kv_head_start:head_size * kv_head_end]
