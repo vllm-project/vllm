@@ -1,4 +1,5 @@
 import time
+import copy
 from functools import partial
 from typing import Any, List, Optional, TYPE_CHECKING
 
@@ -14,7 +15,6 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
-import copy
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
