@@ -289,10 +289,6 @@ class FalconDecoderLayer(nn.Module):
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
-        # The all-reduce operator in vLLM uses a shared buffer for all results.
-        # When we need to keep two all-reduce results at the same time, we need
-        # to copy one of the result.
-        attention_output = attention_output.clone()
 
         if not self.config.new_decoder_architecture:
             if self.config.parallel_attn:

@@ -14,7 +14,6 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_all_reduce_launcher,
 )
 from .mappings import (
     copy_to_tensor_model_parallel_region,
@@ -427,17 +426,9 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = input_
         else:
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
-        if get_tensor_model_parallel_world_size() == 1:
-            # Matrix multiply.
-            output_ = F.linear(input_parallel, self.weight)
-        else:
-            # Matrix multiply.
-            all_reduce_launcher = get_all_reduce_launcher()
-            num_tokens = input_parallel.shape[0]
-            output_buffer = all_reduce_launcher.buffer[:num_tokens]
-            torch.matmul(input_parallel, self.weight_t, out=output_buffer)
-            # All-reduce across all the partitions.
-            output_ = all_reduce_launcher.launch(output_buffer)
+        # Matrix multiply.
+        output_parallel = F.linear(input_parallel, self.weight)
+        output_ = reduce_from_tensor_model_parallel_region(output_parallel)
 
         if not self.skip_bias_add:
             output = output_ + self.bias if self.bias is not None else output_
