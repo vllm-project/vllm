@@ -315,6 +315,9 @@ class FalconDecoderLayer(nn.Module):
             mlp_output += mlp_bias
 
         if not self.reduce_row_parallel_results:
+            # When MLP and Attention layers are parallel, we can use
+            # only one all-reduce operator to reduce the results from
+            # both MLP and Attention layers.
             mlp_output += attention_output
             mlp_output = reduce_from_tensor_model_parallel_region(mlp_output)
             if attention_bias is not None:
