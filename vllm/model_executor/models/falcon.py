@@ -36,7 +36,8 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
+    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear,
+    reduce_from_tensor_model_parallel_region)
 from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -140,12 +141,16 @@ class FalconAttention(nn.Module):
 
         # Layer-wise attention scaling
         self.inv_norm_factor = 1.0 / math.sqrt(self.head_dim)
-        self.dense = RowParallelLinear(self.hidden_size,
-                                       self.hidden_size,
-                                       bias=config.bias,
-                                       input_is_parallel=True,
-                                       perform_initialization=False,
-                                       skip_bias_add=True)
+        self.reduce_row_parallel_results = not (config.new_decoder_architecture
+                                                or config.parallel_attn)
+        self.dense = RowParallelLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=config.bias,
+            input_is_parallel=True,
+            perform_initialization=False,
+            skip_bias_add=True,
+            reduce_results=self.reduce_row_parallel_results)
 
         self.use_rotary = config.rotary
         self.use_alibi = config.alibi
@@ -205,9 +210,7 @@ class FalconAttention(nn.Module):
             attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
                                     cache_event)
         attn_output, bias = self.dense(attn_output)
-        if bias is not None:
-            attn_output += bias
-        return attn_output
+        return attn_output, bias
 
 
 class FalconMLP(nn.Module):
@@ -223,12 +226,16 @@ class FalconMLP(nn.Module):
                                                   perform_initialization=False,
                                                   skip_bias_add=True)
         self.act = nn.GELU()
-        self.dense_4h_to_h = RowParallelLinear(4 * hidden_size,
-                                               hidden_size,
-                                               bias=config.bias,
-                                               input_is_parallel=True,
-                                               perform_initialization=False,
-                                               skip_bias_add=True)
+        self.reduce_row_parallel_results = not (config.new_decoder_architecture
+                                                or config.parallel_attn)
+        self.dense_4h_to_h = RowParallelLinear(
+            4 * hidden_size,
+            hidden_size,
+            bias=config.bias,
+            input_is_parallel=True,
+            perform_initialization=False,
+            skip_bias_add=True,
+            reduce_results=self.reduce_row_parallel_results)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # NOTE(zhuohan): Following huggingface, we do not fuse bias add here.
@@ -237,9 +244,7 @@ class FalconMLP(nn.Module):
             x += bias
         x = self.act(x)
         x, bias = self.dense_4h_to_h(x)
-        if bias is not None:
-            x += bias
-        return x
+        return x, bias
 
 
 class FalconDecoderLayer(nn.Module):
@@ -265,6 +270,9 @@ class FalconDecoderLayer(nn.Module):
                 self.post_attention_layernorm = LayerNorm(
                     hidden_size, eps=config.layer_norm_epsilon)
 
+        self.reduce_row_parallel_results = not (config.new_decoder_architecture
+                                                or config.parallel_attn)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -282,13 +290,15 @@ class FalconDecoderLayer(nn.Module):
             attention_layernorm_out = self.input_layernorm(hidden_states)
 
         # Self attention.
-        attention_output = self.self_attention(
+        attention_output, attention_bias = self.self_attention(
             positions=positions,
             hidden_states=attention_layernorm_out,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
+        if self.reduce_row_parallel_results and attention_bias is not None:
+            attention_output += attention_bias
 
         if not self.config.new_decoder_architecture:
             if self.config.parallel_attn:
@@ -298,10 +308,17 @@ class FalconDecoderLayer(nn.Module):
                 mlp_layernorm_out = self.post_attention_layernorm(residual)
 
         # MLP.
-        mlp_output = self.mlp(mlp_layernorm_out)
+        mlp_output, mlp_bias = self.mlp(mlp_layernorm_out)
+        if self.reduce_row_parallel_results and mlp_bias is not None:
+            mlp_output += mlp_bias
 
-        if self.config.new_decoder_architecture or self.config.parallel_attn:
+        if not self.reduce_row_parallel_results:
             mlp_output += attention_output
+            mlp_output = reduce_from_tensor_model_parallel_region(mlp_output)
+            if attention_bias is not None:
+                mlp_output += attention_bias
+            if mlp_bias is not None:
+                mlp_output += mlp_bias
 
         output = mlp_output + residual
 
