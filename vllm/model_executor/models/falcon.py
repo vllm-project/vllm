@@ -44,6 +44,7 @@ from vllm.transformers_utils.configs import RWConfig
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 FalconConfig = Union[HF_FalconConfig, RWConfig]
 
+
 # NOTE(Hesslow): Unfortunately we did not fuse matmul and bias during
 # training, this means that there's one additional quantization to bfloat16
 # between the operations. In order not to degrade the quality of our HF-port,
