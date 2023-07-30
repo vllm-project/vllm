@@ -1,4 +1,5 @@
 import time
+import copy
 from functools import partial
 from typing import Any, List, Optional, TYPE_CHECKING
 
@@ -145,12 +146,15 @@ class LLMEngine:
 
         # Initialize torch distributed process group for the workers.
         init_torch_dist_process_group(self.workers, backend="nccl")
+        model_config = copy.deepcopy(self.model_config)
+        parallel_config = copy.deepcopy(self.parallel_config)
+        scheduler_config = copy.deepcopy(self.scheduler_config)
         self._run_workers("init_worker",
                           get_all_outputs=True,
                           worker_init_fn=lambda: Worker(
-                              self.model_config,
-                              self.parallel_config,
-                              self.scheduler_config,
+                              model_config,
+                              parallel_config,
+                              scheduler_config,
                               None,
                               None,
                           ))
