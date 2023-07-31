@@ -20,6 +20,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`BloomForCausalLM`
     - BLOOM, BLOOMZ, BLOOMChat
     - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
+  * - :code:`ChatGLMModel`
+    - ChatGLM, ChatGLM2
+    - :code:`THUDM/ChatGLM-6B`, :code:`THUDM/ChatGLM2-6B`, etc.
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.

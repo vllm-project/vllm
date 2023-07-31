@@ -3,8 +3,9 @@ from transformers import AutoConfig, PretrainedConfig
 from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
 
 _CONFIG_REGISTRY = {
-    "mpt": MPTConfig,
     "baichuan": BaiChuanConfig,
+    "chatglm": ChatGLMConfig,
+    "mpt": MPTConfig,
 }
 
 
