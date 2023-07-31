@@ -224,7 +224,7 @@ class SchedulerConfig:
             a single iteration.
         max_num_seqs: Maximum number of sequences to be processed in a single
             iteration.
-        max_seq_len: Maximum length of a sequence (including prompt
+        max_model_len: Maximum length of a sequence (including prompt
             and generated text).
     """
 
