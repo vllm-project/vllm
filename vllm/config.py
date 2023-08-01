@@ -95,8 +95,40 @@ class ModelConfig:
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 
     def get_num_heads(self, parallel_config: "ParallelConfig") -> int:
+        # For GPTBigCode:
+        if getattr(self.hf_config, "multi_query", False):
+            # Multi-query attention, only one KV head.
+            return 1
+        # For Falcon:
+        if getattr(self.hf_config, "n_head_kv", None) is not None:
+            return (self.hf_config.n_head_kv //
+                    parallel_config.tensor_parallel_size)
+        # For LLaMA-2:
+        if getattr(self.hf_config, "num_key_value_heads", None) is not None:
+            return (self.hf_config.num_key_value_heads //
+                    parallel_config.tensor_parallel_size)
         total_num_attention_heads = self.hf_config.num_attention_heads
         return total_num_attention_heads // parallel_config.tensor_parallel_size
+
+    def get_max_model_len(self) -> int:
+        max_model_len = float("inf")
+        possible_keys = [
+            # OPT
+            "max_position_embeddings",
+            # GPT-2
+            "n_positions",
+            # MPT
+            "max_seq_len",
+            # Others
+            "max_sequence_length",
+            "max_seq_length",
+            "seq_len",
+        ]
+        for key in possible_keys:
+            max_len_key = getattr(self.hf_config, key, None)
+            if max_len_key is not None:
+                max_model_len = min(max_model_len, max_len_key)
+        return max_model_len
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         if hasattr(self.hf_config, "num_hidden_layers"):
@@ -196,15 +228,15 @@ class SchedulerConfig:
             a single iteration.
         max_num_seqs: Maximum number of sequences to be processed in a single
             iteration.
-        max_seq_len: Maximum length of a sequence (including prompt
+        max_model_len: Maximum length of a sequence (including prompt
             and generated text).
     """
 
     def __init__(self, max_num_batched_tokens: int, max_num_seqs: int,
-                 max_seq_len: int) -> None:
+                 max_model_len: int) -> None:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_seqs = max_num_seqs
-        self.max_seq_len = max_seq_len
+        self.max_model_len = max_model_len
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

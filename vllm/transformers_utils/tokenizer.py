@@ -80,6 +80,8 @@ def detokenize_incrementally(
         new_token: The new token as a string.
         output_text: The new output text as a string.
     """
+    if skip_special_tokens and (new_token_id in tokenizer.all_special_ids):
+        return None, prev_output_tokens
     new_token = tokenizer.convert_ids_to_tokens(
         new_token_id, skip_special_tokens=skip_special_tokens)
     output_tokens = prev_output_tokens + [new_token]
@@ -99,7 +101,7 @@ def detokenize_incrementally(
     sub_texts = []
     current_sub_text = []
     for token in output_tokens:
-        if skip_special_tokens and token in tokenizer.all_special_ids:
+        if skip_special_tokens and token in tokenizer.all_special_tokens:
             continue
         if token in tokenizer.added_tokens_encoder:
             if current_sub_text:
