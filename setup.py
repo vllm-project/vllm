@@ -210,6 +210,22 @@ elif _is_hip():
             f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
             f"amdgpu_arch_found: {amd_arch}")
 
+# Setup CPU Operations
+BUILD_CPU_OPS = os.getenv('VLLM_BUILD_CPU_OPS', "0") == "1"
+CPU_OPS_SOURCES = []
+if BUILD_CPU_OPS:
+    CXX_FLAGS += [
+        "-DVLLM_BUILD_CPU_OPS", "-fopenmp", "-mavx512f", "-mavx512bf16",
+        "-mavx512vl"
+    ]
+    CPU_OPS_SOURCES += [
+        "csrc/cpu/activation_impl.cpp",
+        "csrc/cpu/attention_impl.cpp",
+        "csrc/cpu/cache_impl.cpp",
+        "csrc/cpu/layernorm_impl.cpp",
+        "csrc/cpu/pos_encoding_impl.cpp",
+    ]
+
 ext_modules = []
 
 vllm_extension_sources = [
@@ -222,7 +238,7 @@ vllm_extension_sources = [
     "csrc/quantization/gptq/q_gemm.cu",
     "csrc/cuda_utils_kernels.cu",
     "csrc/pybind.cpp",
-]
+] + CPU_OPS_SOURCES
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")

@@ -11,11 +11,13 @@ def create_kv_caches(
     num_heads: int,
     head_size: int,
     dtype: torch.dtype,
-    seed: int,
     device: str,
+    seed: int,
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=dtype).element_size()

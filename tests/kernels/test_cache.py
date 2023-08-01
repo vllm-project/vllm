@@ -14,7 +14,7 @@ BLOCK_SIZES = [8, 16, 32]
 NUM_BLOCKS = [1024, 3600]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
-DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -36,13 +36,15 @@ def test_copy_blocks(
     block_size: int,
     num_blocks: int,
     dtype: torch.dtype,
+    device: str,
     seed: int,
-    device: int,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    gpu_id = f"cuda:{device}"
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
     # Generate random block mappings where each source block is mapped to two
     # destination blocks.
     assert 2 * num_mappings <= num_blocks
@@ -59,7 +61,7 @@ def test_copy_blocks(
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size,
                                                 num_layers, num_heads,
-                                                head_size, dtype, seed, gpu_id)
+                                                head_size, dtype, device, seed)
 
     # Clone the KV caches.
     cloned_key_caches = [key_cache.clone() for key_cache in key_caches]
@@ -84,6 +86,32 @@ def test_copy_blocks(
         assert torch.allclose(value_cache, cloned_value_cache)
 
 
+@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
+@pytest.mark.parametrize("num_layers", NUM_LAYERS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", ['cpu'])
+@torch.inference_mode()
+def test_copy_blocks_cpu(
+    kv_cache_factory,
+    num_mappings: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    device: str,
+    seed: int,
+) -> None:
+    test_copy_blocks(kv_cache_factory, num_mappings, num_layers, num_heads,
+                     head_size, block_size, num_blocks, dtype, device, seed)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -101,30 +129,32 @@ def test_reshape_and_cache(
     block_size: int,
     num_blocks: int,
     dtype: torch.dtype,
+    device: str,
     seed: int,
-    device: int,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    gpu_id = f"cuda:{device}"
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=gpu_id)
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=device)
 
     qkv = torch.randn(num_tokens,
                       3,
                       num_heads,
                       head_size,
                       dtype=dtype,
-                      device=gpu_id)
+                      device=device)
     _, key, value = qkv.unbind(dim=1)
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
                                                 num_heads, head_size, dtype,
-                                                seed, gpu_id)
+                                                device, seed)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
@@ -149,3 +179,27 @@ def test_reshape_and_cache(
 
     assert torch.allclose(key_cache, cloned_key_cache)
     assert torch.allclose(value_cache, cloned_value_cache)
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", ['cpu'])
+@torch.inference_mode()
+def test_reshape_and_cache_cpu(
+    kv_cache_factory,
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    device: str,
+    seed: int,
+) -> None:
+    test_reshape_and_cache(kv_cache_factory, num_tokens, num_heads, head_size,
+                           block_size, num_blocks, dtype, device, seed)

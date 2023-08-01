@@ -23,7 +23,9 @@ def main(args: argparse.Namespace):
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
+        device=args.device,
         enforce_eager=args.enforce_eager,
+        swap_space=args.swap_space,
     )
 
     sampling_params = SamplingParams(
@@ -127,5 +129,15 @@ if __name__ == '__main__':
             'path to save the pytorch profiler output. Can be visualized '
             'with ui.perfetto.dev or Tensorboard.'
         ))
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help='device type for vLLM execution, supporting CUDA and CPU.')
+    parser.add_argument("--swap-space",
+                        type=int,
+                        default=4,
+                        help="memory space available for CPU (GB).")
     args = parser.parse_args()
     main(args)
