@@ -183,11 +183,11 @@ class LlamaAttentionWithLora(nn.Module):
 
         # TODO: update lora
         self.lora_rank = 4
-        self.qkv_lora_a = torch.randn(self.hidden_size, self.lora_rank)
-        self.qkv_lora_b = torch.randn(self.lora_rank, (self.total_num_heads + 2 * self.total_num_kv_heads) *
-            self.head_dim // tp_size)
-        self.o_lora_a = torch.randn(self.total_num_heads * self.head_dim // tp_size, self.lora_rank)
-        self.o_lora_b = torch.randn(self.lora_rank, self.hidden_size)
+        self.qkv_lora_a = torch.randn(self.hidden_size, self.lora_rank).to(torch.cuda.current_device())
+        self.qkv_lora_b = torch.zeros(self.lora_rank, (self.total_num_heads + 2 * self.total_num_kv_heads) *
+            self.head_dim // tp_size).to(torch.cuda.current_device())
+        self.o_lora_a = torch.randn(self.total_num_heads * self.head_dim // tp_size, self.lora_rank).to(torch.cuda.current_device())
+        self.o_lora_b = torch.zeros(self.lora_rank, self.hidden_size).to(torch.cuda.current_device())
 
 
     def forward(
@@ -214,15 +214,11 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
-        # self.self_attn = LlamaAttentionWithLora(
-        #     hidden_size=self.hidden_size,
-        #     num_heads=config.num_attention_heads,
-        #     num_kv_heads=config.num_key_value_heads,
-        # )
-        self.self_attn = LlamaAttention(
-             hidden_size=self.hidden_size,
-             num_heads=config.num_attention_heads,
-             num_kv_heads=config.num_key_value_heads,
+        self.self_attn = LlamaAttentionWithLora(
+        #self.self_attn = LlamaAttention(
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,

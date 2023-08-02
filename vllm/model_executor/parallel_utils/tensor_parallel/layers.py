@@ -565,14 +565,14 @@ class RowParallelLinearWithLora(torch.nn.Module):
         if get_tensor_model_parallel_world_size() == 1:
             # Matrix multiply.
             output_ = F.linear(input_parallel, self.weight)
-            output_ += F.linear(F.linear(input_parallel, self.lora_a), self.lora_b)
+            output_ += input_parallel @ self.lora_a @ self.lora_b
         else:
             # Matrix multiply.
             all_reduce_launcher = get_all_reduce_launcher()
             num_tokens = input_parallel.shape[0]
             output_buffer = all_reduce_launcher.buffer[:num_tokens]
             torch.matmul(input_parallel, self.weight_t, out=output_buffer)
-            output_buffer += F.linear(F.linear(input_parallel, self.lora_a), self.lora_b)
+            output_buffer += input_parallel @ self.lora_a @ self.lora_b
             # All-reduce across all the partitions.
             output_ = all_reduce_launcher.launch(output_buffer)
 
