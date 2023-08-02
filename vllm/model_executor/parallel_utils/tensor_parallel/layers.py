@@ -492,7 +492,7 @@ class RowParallelLinearWithLora(torch.nn.Module):
                  use_cpu_initialization=False,
                  perform_initialization=True,
                  ):
-        super(RowParallelLinear, self).__init__()
+        super(RowParallelLinearWithLora, self).__init__()
 
         # Keep input parameters
         self.input_size = input_size
