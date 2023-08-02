@@ -7,6 +7,7 @@ from http import HTTPStatus
 import json
 import time
 from typing import AsyncGenerator, Dict, List, Optional
+from packaging import version
 
 import fastapi
 from fastapi import BackgroundTasks, Request
@@ -73,7 +74,7 @@ async def get_gen_prompt(request) -> str:
             "fastchat is not installed. Please install fastchat to use "
             "the chat completion and conversation APIs: `$ pip install fschat`"
         )
-    if fastchat.__version__ < "0.2.23":
+    if version.parse(fastchat.__version__) < version.parse("0.2.23"):
         raise ImportError(
             f"fastchat version is low. Current version: {fastchat.__version__} "
             "Please upgrade fastchat to use: `$ pip install -U fschat`"
