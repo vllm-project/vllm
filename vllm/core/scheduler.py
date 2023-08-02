@@ -196,8 +196,7 @@ class Scheduler:
                 if num_prompt_tokens > prompt_limit:
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
-                        " and exceeds limit of "
-                        f"{prompt_limit}")
+                        f" and exceeds limit of {prompt_limit}")
                     for seq in seq_group.get_seqs():
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
