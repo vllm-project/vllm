@@ -182,9 +182,12 @@ class LlamaAttentionWithLora(nn.Module):
                                            num_kv_heads=self.num_kv_heads)
 
         # TODO: update lora
-        self.qkv_lora_a = torch.nn.Parameter(torch.randn(self.q_size, self.kv_size))
-        self.o_lora_a = torch.nn.Parameter(torch.randn(self.q_size, self.kv_size))
-        self.o_lora_b = torch.nn.Parameter(torch.randn(self.q_size, self.kv_size))
+        self.lora_rank = 4
+        self.qkv_lora_a = torch.randn(self.hidden_size, self.lora_rank)
+        self.qkv_lora_b = torch.randn(self.lora_rank, (self.total_num_heads + 2 * self.total_num_kv_heads) *
+            self.head_dim // tp_size)
+        self.o_lora_a = torch.randn(self.total_num_heads * self.head_dim // tp_size, self.lora_rank)
+        self.o_lora_b = torch.randn(self.lora_rank, self.hidden_size)
 
 
     def forward(
