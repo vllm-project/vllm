@@ -20,12 +20,20 @@ class PagedAttention(nn.Module):
     """GPT-style multi-head PagedAttention.
 
     This class takes flattened 1D query, key, and value tensors as input. The
-    input 1D tensors can be split into three parts: the prompt tokens, the
-    generation tokens, and the paddings.
+    input 1D tensors can either contain prompt tokens or generation tokens, in
+    addition to paddings.
 
-    |<------------------------------------- num_valid_tokens ------------------------------------->|
-    |<--------------- num_prompt_tokens -------------->|<------- num_generation_tokens (M) ------->|
-    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--generation_0-->|...|<--generation_M-1-->|<--padding-->|
+    If the input tensors contain prompt tokens, the layout is as follows:
+
+    |<---------------------- num_valid_tokens ---------------------->|
+    |<--------------- num_prompt_tokens -------------->|
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--padding-->|
+
+    Otherwise, the layout is as follows:
+
+    |<------------------ num_valid_tokens ------------------->|
+    |<------- num_generation_tokens (M) ------->|
+    |<--generation_0-->|...|<--generation_M-1-->|<--padding-->|
 
     The prompts might have different lengths, while the generation tokens always
     have length 1. The paddings are appended to make the input length a multiple
@@ -188,6 +196,8 @@ class PagedAttention(nn.Module):
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
+            # Prompt run.
+            assert input_metadata.num_generation_tokens == 0
             self.set_attn_bias(input_metadata)
             self.multi_query_kv_attention(
                 output[:num_prompt_tokens],
@@ -217,6 +227,8 @@ class PagedAttention(nn.Module):
             )
 
         if input_metadata.num_generation_tokens > 0:
+            # Decoding run.
+            assert input_metadata.num_prompt_tokens == 0
             assert key_cache is not None and value_cache is not None, (
                 "key_cache and value_cache must be provided when "
                 "generating tokens.")
