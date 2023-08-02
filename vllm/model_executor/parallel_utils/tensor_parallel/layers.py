@@ -14,7 +14,6 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_all_reduce_launcher,
 )
 from .mappings import (
     copy_to_tensor_model_parallel_region,
@@ -248,8 +247,8 @@ class ColumnParallelLinear(torch.nn.Module):
         self.output_size = output_size
         self.gather_output = gather_output
         # Divide the weight matrix along the last dimension.
-        world_size = get_tensor_model_parallel_world_size()
-        self.output_size_per_partition = divide(output_size, world_size)
+        self.world_size = get_tensor_model_parallel_world_size()
+        self.output_size_per_partition = divide(output_size, self.world_size)
         self.skip_bias_add = skip_bias_add
 
         if params_dtype is None:
@@ -350,6 +349,7 @@ class RowParallelLinear(torch.nn.Module):
         params_dtype:
         use_cpu_initialization:
         perform_initialization:
+        reduce_results:
     """
 
     def __init__(self, input_size, output_size, *,
@@ -360,6 +360,7 @@ class RowParallelLinear(torch.nn.Module):
                  params_dtype=None,
                  use_cpu_initialization=False,
                  perform_initialization=True,
+                 reduce_results=True,
                  ):
         super(RowParallelLinear, self).__init__()
 
@@ -367,13 +368,18 @@ class RowParallelLinear(torch.nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.input_is_parallel = input_is_parallel
+        self.reduce_results = reduce_results
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
         # Divide the weight matrix along the last dimension.
-        world_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, world_size)
+        self.world_size = get_tensor_model_parallel_world_size()
+        self.input_size_per_partition = divide(input_size, self.world_size)
         self.skip_bias_add = skip_bias_add
+
+        if not reduce_results and (bias and not skip_bias_add):
+            raise ValueError("When not reduce the results, adding bias to the "
+                             "results can lead to incorrect results")
 
         # Parameters.
         # Note: torch.nn.functional.linear performs XA^T + b and as a result
@@ -427,17 +433,12 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = input_
         else:
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
-        if get_tensor_model_parallel_world_size() == 1:
-            # Matrix multiply.
-            output_ = F.linear(input_parallel, self.weight)
+        # Matrix multiply.
+        output_parallel = F.linear(input_parallel, self.weight)
+        if self.reduce_results and self.world_size > 1:
+            output_ = reduce_from_tensor_model_parallel_region(output_parallel)
         else:
-            # Matrix multiply.
-            all_reduce_launcher = get_all_reduce_launcher()
-            num_tokens = input_parallel.shape[0]
-            output_buffer = all_reduce_launcher.buffer[:num_tokens]
-            torch.matmul(input_parallel, self.weight_t, out=output_buffer)
-            # All-reduce across all the partitions.
-            output_ = all_reduce_launcher.launch(output_buffer)
+            output_ = output_parallel
 
         if not self.skip_bias_add:
             output = output_ + self.bias if self.bias is not None else output_

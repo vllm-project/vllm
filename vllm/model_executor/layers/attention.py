@@ -314,14 +314,13 @@ class PagedAttentionWithRoPE(PagedAttention):
 class PagedAttentionWithALiBi(PagedAttention):
     """PagedAttention with ALiBi attention bias."""
 
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        slopes: List[float],
-    ) -> None:
-        super().__init__(num_heads, head_size, scale)
+    def __init__(self,
+                 num_heads: int,
+                 head_size: int,
+                 scale: float,
+                 slopes: List[float],
+                 num_kv_heads: Optional[int] = None) -> None:
+        super().__init__(num_heads, head_size, scale, num_kv_heads)
         assert len(slopes) == num_heads
 
         slopes = torch.tensor(slopes, dtype=torch.float32)
@@ -334,6 +333,11 @@ class PagedAttentionWithALiBi(PagedAttention):
         # Generates ALiBi mask for each prompt.
         for prompt_len in input_metadata.prompt_lens:
             bias = torch.arange(prompt_len)
+            # Note(zhuohan): HF uses
+            #     `bias = bias[None, :].repeat(prompt_len, 1)`
+            # here. We find that both biases give the same results, but
+            # the bias below more accurately follows the original ALiBi
+            # paper.
             bias = bias[None, :] - bias[:, None]
             bias = bias.to(self.alibi_slopes.device)
 
@@ -363,10 +367,17 @@ class PagedAttentionWithALiBi(PagedAttention):
         Args:
             output: shape = [num_prompt_tokens, num_heads, head_size]
             query: shape = [num_prompt_tokens, num_heads, head_size]
-            key: shape = [num_prompt_tokens, num_heads, head_size]
-            value: shape = [num_prompt_tokens, num_heads, head_size]
+            key: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            value: shape = [num_prompt_tokens, num_kv_heads, head_size]
             input_metadata: metadata for paged attention.
         """
+        if self.num_kv_heads != self.num_heads:
+            # Project the key and value tensors to the desired number of heads.
+            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
+            value = torch.repeat_interleave(value,
+                                            self.num_queries_per_kv,
+                                            dim=1)
+
         # FIXME(woosuk): Because xformers does not support dynamic sequence
         # lengths with custom attention bias, we process each prompt one by
         # one. This is inefficient, especially when we have many short prompts.
@@ -400,9 +411,10 @@ class PagedAttentionWithALiBi(PagedAttention):
         Args:
             output: shape = [num_generation_tokens, num_heads, head_size]
             query: shape = [num_generation_tokens, num_heads, head_size]
-            key_cache: shape = [num_blocks, num_heads, head_size/x,
+            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
-            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            value_cache: shape = [num_blocks, num_kv_heads, head_size,
+                block_size]
             input_metadata: metadata for paged attention.
         """
         block_size = value_cache.shape[3]
