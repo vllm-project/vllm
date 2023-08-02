@@ -28,7 +28,7 @@ def main(args: argparse.Namespace):
     # Run the engine by calling `engine.step()` manually.
     request_id = 0
     while True:
-        # To test iteration-level scheduling, we add one request at each step.
+        # To test continuous batching, we add one request at each step.
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
             engine.add_request(str(request_id), prompt, sampling_params)
