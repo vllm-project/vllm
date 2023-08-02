@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import get_model, InputMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
-    initialize_model_parallel, initialize_all_reduce_launcher)
+    initialize_model_parallel)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData, SequenceGroupMetadata, SequenceOutputs
 from vllm.worker.cache_engine import CacheEngine
@@ -65,11 +65,6 @@ class Worker:
         # Initialize the model.
         set_random_seed(self.model_config.seed)
         self.model = get_model(self.model_config)
-        initialize_all_reduce_launcher(
-            self.scheduler_config.max_num_batched_tokens,
-            self.model_config.get_hidden_size(),
-            self.model_config.dtype,
-        )
 
     @torch.inference_mode()
     def profile_num_available_blocks(
