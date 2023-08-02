@@ -391,9 +391,9 @@ class LLMEngine:
         else:
             cpu_cache_usage = 0.0
 
-        logger.info("Average prompt throughput: "
+        logger.info("Avg prompt throughput: "
                     f"{avg_prompt_throughput:.1f} tokens/s, "
-                    "Average generation throughput: "
+                    "Avg generation throughput: "
                     f"{avg_generation_throughput:.1f} tokens/s, "
                     f"Running: {len(self.scheduler.running)} reqs, "
                     f"Swapped: {len(self.scheduler.swapped)} reqs, "
