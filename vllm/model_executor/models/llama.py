@@ -41,7 +41,7 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
+    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear, RowParallelLinearWithLora)
 from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -134,6 +134,74 @@ class LlamaAttention(nn.Module):
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
+        output, _ = self.o_proj(attn_output)
+        return output
+
+
+class LlamaAttentionWithLora(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        assert self.total_num_kv_heads % tp_size == 0
+        self.num_kv_heads = self.total_num_kv_heads // tp_size
+        self.head_dim = hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+
+        self.qkv_proj = ColumnParallelLinear(
+            hidden_size,
+            (self.total_num_heads + 2 * self.total_num_kv_heads) *
+            self.head_dim,
+            bias=False,
+            gather_output=False,
+            perform_initialization=False,
+        )
+        self.o_proj = RowParallelLinearWithLora(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+            perform_initialization=False,
+        )
+        self.attn = PagedAttentionWithRoPE(self.num_heads,
+                                           self.head_dim,
+                                           self.scaling,
+                                           rotary_dim=self.head_dim,
+                                           num_kv_heads=self.num_kv_heads)
+
+        # TODO: update lora
+        self.qkv_lora_a = torch.nn.Parameter(torch.randn(self.q_size, self.kv_size))
+        self.o_lora_a = torch.nn.Parameter(torch.randn(self.q_size, self.kv_size))
+        self.o_lora_b = torch.nn.Parameter(torch.randn(self.q_size, self.kv_size))
+
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: KVCache,
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        qkv += hidden_states @ self.qkv_lora_a @ self.qkv_lora_b
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        k_cache, v_cache = kv_cache
+        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
+                                input_metadata, cache_event)
+        self.o_proj.update_lora(self.o_lora_a, self.o_lora_b)
         output, _ = self.o_proj(attn_output)
         return output
 
