@@ -38,6 +38,7 @@ class SamplingParams:
             The returned output will not contain the stop strings.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
+        eos_token_id: Token id of EOS token in tokenizer.
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
     """
@@ -54,7 +55,9 @@ class SamplingParams:
         use_beam_search: bool = False,
         stop: Union[None, str, List[str]] = None,
         ignore_eos: bool = False,
+        eos_token_id: Optional[int] = None,
         max_tokens: int = 16,
+        length_penalty: float = 1.0,
         logprobs: Optional[int] = None,
     ) -> None:
         self.n = n
@@ -72,7 +75,9 @@ class SamplingParams:
         else:
             self.stop = list(stop)
         self.ignore_eos = ignore_eos
+        self.eos_token_id = eos_token_id
         self.max_tokens = max_tokens
+        self.length_penalty = length_penalty
         self.logprobs = logprobs
 
         self._verify_args()

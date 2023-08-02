@@ -90,7 +90,7 @@ class Worker:
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data = SequenceData([0] * seq_len)
+            seq_data = SequenceData("", [0] * seq_len)
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,

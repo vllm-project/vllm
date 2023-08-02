@@ -46,25 +46,41 @@ class SequenceData:
 
 
     Args:
+        prompt: The prompt of the sequence.
         prompt_token_ids: The token IDs of the prompt.
 
     Attributes:
+        prompt: The prompt of the sequence.
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
+        output_tokens: The tokens of the output.
+        output_text: The full output text.
+        output_logprobs: The (token ID, log probability) pair of the output.
         cumulative_logprob: The cumulative log probability of the output.
     """
 
     def __init__(
         self,
+        prompt: str,
         prompt_token_ids: List[int],
     ) -> None:
+        self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
+        self.output_tokens: List[str] = []
+        self.output_text = ""
+        self.output_logprobs: List[Dict[int, float]] = []
         self.cumulative_logprob = 0.0
 
-    def append_token_id(self, token_id: int, logprob: float) -> None:
+    def append_token_id(
+        self,
+        token_id: int,
+        logprobs: Dict[int, float],
+    ) -> None:
+        assert token_id in logprobs
         self.output_token_ids.append(token_id)
-        self.cumulative_logprob += logprob
+        self.output_logprobs.append(logprobs)
+        self.cumulative_logprob += logprobs[token_id]
 
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
@@ -80,10 +96,14 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
+    def get_score(self, length_penalty: float = 1.0) -> float:
+        return self.cumulative_logprob / (self.get_len()**length_penalty)
+
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
+                f"output_text={self.output_text}, "
                 f"cumulative_logprob={self.cumulative_logprob})")
 
 
@@ -109,10 +129,8 @@ class Sequence:
         self.prompt = prompt
         self.block_size = block_size
 
-        self.data = SequenceData(prompt_token_ids)
-        self.output_logprobs: List[Dict[int, float]] = []
-        self.output_tokens: List[str] = []
-        self.output_text = ""
+        # Put prompt, logprobs, tokens and text in data
+        self.data = SequenceData(prompt, prompt_token_ids)
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
@@ -145,12 +163,8 @@ class Sequence:
     def append_token_id(
         self,
         token_id: int,
-        logprobs: Dict[int, float],
     ) -> None:
-        assert token_id in logprobs
         self._append_tokens_to_blocks([token_id])
-        self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id])
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -176,7 +190,6 @@ class Sequence:
     def fork(self, child_seq: "Sequence") -> None:
         child_seq.logical_token_blocks = copy.deepcopy(
             self.logical_token_blocks)
-        child_seq.output_logprobs = copy.deepcopy(self.output_logprobs)
         child_seq.data = copy.deepcopy(self.data)
 
     def __repr__(self) -> str:
@@ -216,11 +229,18 @@ class SequenceGroup:
         else:
             return [seq for seq in self.seqs if seq.status == status]
 
+    def append_seq(self, seq: Sequence) -> None:
+        self.seqs.append(seq)
+
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
 
-    def find(self, seq_id: int) -> Sequence:
-        for seq in self.seqs:
+    def find(
+        self,
+        seq_id: int,
+        status: Optional[SequenceStatus] = None,
+    ) -> Sequence:
+        for seq in self.get_seqs(status):
             if seq.seq_id == seq_id:
                 return seq
         raise ValueError(f"Sequence {seq_id} not found.")

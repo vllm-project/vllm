@@ -74,31 +74,33 @@ class RequestOutput:
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
         # Get the top-n sequences.
         n = seq_group.sampling_params.n
+        length_penalty = seq_group.sampling_params.length_penalty
         seqs = seq_group.get_seqs()
         assert n <= len(seqs)
-        sorted_seqs = sorted(seqs,
-                             key=lambda seq: seq.get_cumulative_logprob(),
-                             reverse=True)
+        sorted_seqs = sorted(
+            seqs,
+            key=lambda seq: seq.data.get_score(length_penalty),
+            reverse=True)
         top_n_seqs = sorted_seqs[:n]
 
         # Create the outputs.
         outputs: List[CompletionOutput] = []
         for seq in top_n_seqs:
-            logprobs = seq.output_logprobs
+            logprobs = seq.data.output_logprobs
             if seq_group.sampling_params.logprobs is None:
                 # NOTE: We need to take care of this case because the sequence
                 # always has the logprobs of the sampled tokens even if the
                 # logprobs are not requested.
                 logprobs = {}
             finshed_reason = SequenceStatus.get_finished_reason(seq.status)
-            output = CompletionOutput(seqs.index(seq), seq.output_text,
+            output = CompletionOutput(seqs.index(seq), seq.data.output_text,
                                       seq.get_output_token_ids(),
                                       seq.get_cumulative_logprob(), logprobs,
                                       finshed_reason)
             outputs.append(output)
 
         # Every sequence in the sequence group should have the same prompt.
-        prompt = top_n_seqs[0].prompt
+        prompt = top_n_seqs[0].data.prompt
         prompt_token_ids = top_n_seqs[0].data.prompt_token_ids
         finished = seq_group.is_finished()
         return cls(seq_group.request_id, prompt, prompt_token_ids, outputs,

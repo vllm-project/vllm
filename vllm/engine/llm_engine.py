@@ -11,7 +11,7 @@ from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.sequence import Sequence, SequenceGroup
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
@@ -262,6 +262,7 @@ class LLMEngine:
             seqs.append(seq)
 
         # Create the sequence group.
+        sampling_params.eos_token_id = self.tokenizer.eos_token_id
         seq_group = SequenceGroup(request_id, seqs, sampling_params,
                                   arrival_time)
 
@@ -317,13 +318,14 @@ class LLMEngine:
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
-        # Update the scheduler with the model outputs.
-        seq_groups = self.scheduler.update(output)
+        # Update the scheduler with the
+        # decoded and stopped model outputs.
+        seq_groups = self.scheduler.update(
+            output,
+            partial(detokenize_incrementally,
+                    tokenizer=self.tokenizer,
+                    skip_special_tokens=True))
 
-        # Decode the sequences.
-        self._decode_sequences(seq_groups)
-        # Stop the sequences that meet the stopping criteria.
-        self._stop_sequences(seq_groups)
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
@@ -401,56 +403,6 @@ class LLMEngine:
                     f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
                     f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         self.last_logging_time = now
-
-    def _decode_sequences(self, seq_groups: List[SequenceGroup]) -> None:
-        """Decodes the sequence outputs."""
-        for seq_group in seq_groups:
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                new_token, new_output_text = detokenize_incrementally(
-                    self.tokenizer,
-                    seq.output_tokens,
-                    seq.get_last_token_id(),
-                    skip_special_tokens=True,
-                )
-                if new_token is not None:
-                    seq.output_tokens.append(new_token)
-                    seq.output_text = new_output_text
-
-    def _stop_sequences(self, seq_groups: List[SequenceGroup]) -> None:
-        """Stop the finished sequences."""
-        for seq_group in seq_groups:
-            sampling_params = seq_group.sampling_params
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                # Check if the sequence has generated a stop string.
-                stopped = False
-                for stop_str in sampling_params.stop:
-                    if seq.output_text.endswith(stop_str):
-                        # Truncate the output text so that the stop string is
-                        # not included in the output.
-                        seq.output_text = seq.output_text[:-len(stop_str)]
-                        self.scheduler.free_seq(
-                            seq, SequenceStatus.FINISHED_STOPPED)
-                        stopped = True
-                        break
-                if stopped:
-                    continue
-
-                # Check if the sequence has reached max_model_len.
-                if seq.get_len() > self.scheduler_config.max_model_len:
-                    self.scheduler.free_seq(
-                        seq, SequenceStatus.FINISHED_LENGTH_CAPPED)
-                    continue
-                # Check if the sequence has reached max_tokens.
-                if seq.get_output_len() == sampling_params.max_tokens:
-                    self.scheduler.free_seq(
-                        seq, SequenceStatus.FINISHED_LENGTH_CAPPED)
-                    continue
-                # Check if the sequence has generated the EOS token.
-                if not sampling_params.ignore_eos:
-                    if seq.get_last_token_id() == self.tokenizer.eos_token_id:
-                        self.scheduler.free_seq(
-                            seq, SequenceStatus.FINISHED_STOPPED)
-                        continue
 
     def _run_workers(
         self,

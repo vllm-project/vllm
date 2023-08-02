@@ -327,30 +327,15 @@ def _sample_from_generation_tokens(
         logprobs = logprobs + seq_logprobs.unsqueeze(dim=1)
 
         vocab_size = logprobs.size(-1)
-        beam_width = len(seq_ids)
-        _, topk_ids = torch.topk(logprobs.flatten(), beam_width)
+        _, topk_ids = torch.topk(logprobs.flatten(),
+                                 2 * sampling_params.n,
+                                 sorted=True)
         topk_ids = topk_ids.tolist()
         seq_idx = [i // vocab_size for i in topk_ids]
         beam_seq_ids = [seq_ids[i] for i in seq_idx]
         token_ids = [i % vocab_size for i in topk_ids]
 
-        beam_outputs: Dict[int, Tuple[int, int]] = {}
-        outstanding_beams: List[Tuple[int, int]] = []
-        # If a beam survives, continue with it.
-        for seq_id, token_id in zip(beam_seq_ids, token_ids):
-            if seq_id not in beam_outputs:
-                beam_outputs[seq_id] = (seq_id, token_id)
-            else:
-                outstanding_beams.append((seq_id, token_id))
-
-        # If a beam is discarded, fork another beam.
-        for seq_id in seq_ids:
-            if seq_id not in beam_outputs:
-                beam_outputs[seq_id] = outstanding_beams.pop()
-        assert not outstanding_beams
-
-        parent_seq_ids = [beam_outputs[seq_id][0] for seq_id in seq_ids]
-        next_token_ids = [beam_outputs[seq_id][1] for seq_id in seq_ids]
+        return beam_seq_ids, token_ids
     elif sampling_params.temperature < _SAMPLING_EPS:
         # Greedy sampling.
         assert len(seq_ids) == 1
@@ -373,11 +358,12 @@ def _sample(
     logprobs: torch.Tensor,
     input_metadata: InputMetadata,
 ) -> Dict[int, SequenceOutputs]:
-    seq_outputs: Dict[int, SequenceOutputs] = {}
+    seq_outputs: List[Dict[int, SequenceOutputs]] = []
 
     # TODO(woosuk): Optimize.
     idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
+        seq_group_outputs = {}
         seq_ids, sampling_params = seq_group
         if i < input_metadata.num_prompts:
             # Generate the next tokens for a prompt input.
@@ -396,9 +382,8 @@ def _sample(
             for seq_id, next_token_id in zip(seq_ids, next_token_ids):
                 output_logprobs = next_logprobs.copy()
                 output_logprobs[next_token_id] = logprob[next_token_id].item()
-                seq_outputs[seq_id] = SequenceOutputs(seq_id, seq_id,
-                                                      next_token_id,
-                                                      output_logprobs)
+                seq_group_outputs[seq_id] = SequenceOutputs(
+                    seq_id, seq_id, next_token_id, output_logprobs)
         else:
             # Generate the next tokens for generation tokens.
             prob = probs[idx:idx + len(seq_ids)]
@@ -420,17 +405,17 @@ def _sample(
                     logprob[j], sampling_params.logprobs)
 
             # Build the output.
-            for seq_id, parent_seq_id, next_token_id in zip(
-                    seq_ids, parent_seq_ids, next_token_ids):
+            for pseudo_seq_id, (parent_seq_id, next_token_id) in enumerate(
+                    zip(parent_seq_ids, next_token_ids)):
                 j = seq_ids.index(parent_seq_id)
                 output_logprobs = next_logprobs[parent_seq_id].copy()
                 output_logprobs[next_token_id] = logprob[j,
                                                          next_token_id].item()
-                seq_outputs[seq_id] = SequenceOutputs(
-                    seq_id,
+                seq_group_outputs[pseudo_seq_id] = SequenceOutputs(
+                    pseudo_seq_id,
                     parent_seq_id,
                     next_token_id,
                     output_logprobs,
                 )
-
+        seq_outputs.append(seq_group_outputs)
     return seq_outputs
