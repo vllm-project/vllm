@@ -77,8 +77,7 @@ async def get_gen_prompt(request) -> str:
     if version.parse(fastchat.__version__) < version.parse("0.2.23"):
         raise ImportError(
             f"fastchat version is low. Current version: {fastchat.__version__} "
-            "Please upgrade fastchat to use: `$ pip install -U fschat`"
-        )
+            "Please upgrade fastchat to use: `$ pip install -U fschat`")
 
     conv = get_conversation_template(request.model)
     conv = Conversation(
