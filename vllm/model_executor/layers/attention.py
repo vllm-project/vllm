@@ -333,8 +333,12 @@ class PagedAttentionWithALiBi(PagedAttention):
         # Generates ALiBi mask for each prompt.
         for prompt_len in input_metadata.prompt_lens:
             bias = torch.arange(prompt_len)
+            # Note(zhuohan): HF uses
+            #     `bias = bias[None, :].repeat(prompt_len, 1)`
+            # here. We find that both biases give the same results, but
+            # the bias below more accurately follows the original ALiBi
+            # paper.
             bias = bias[None, :] - bias[:, None]
-            # bias = bias[None, :].repeat(prompt_len, 1)
             bias = bias.to(self.alibi_slopes.device)
 
             # When using custom attention bias, xformers requires the bias to

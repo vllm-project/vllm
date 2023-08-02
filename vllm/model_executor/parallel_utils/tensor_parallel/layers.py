@@ -247,8 +247,8 @@ class ColumnParallelLinear(torch.nn.Module):
         self.output_size = output_size
         self.gather_output = gather_output
         # Divide the weight matrix along the last dimension.
-        world_size = get_tensor_model_parallel_world_size()
-        self.output_size_per_partition = divide(output_size, world_size)
+        self.world_size = get_tensor_model_parallel_world_size()
+        self.output_size_per_partition = divide(output_size, self.world_size)
         self.skip_bias_add = skip_bias_add
 
         if params_dtype is None:
@@ -373,8 +373,8 @@ class RowParallelLinear(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
 
         # Divide the weight matrix along the last dimension.
-        world_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, world_size)
+        self.world_size = get_tensor_model_parallel_world_size()
+        self.input_size_per_partition = divide(input_size, self.world_size)
         self.skip_bias_add = skip_bias_add
 
         if not reduce_results and (bias and not skip_bias_add):
@@ -435,7 +435,7 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
         # Matrix multiply.
         output_parallel = F.linear(input_parallel, self.weight)
-        if self.reduce_results:
+        if self.reduce_results and self.world_size > 1:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
         else:
             output_ = output_parallel
