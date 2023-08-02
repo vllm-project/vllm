@@ -75,7 +75,8 @@ async def get_gen_prompt(request) -> str:
     conv = get_conversation_template(request.model)
     conv = Conversation(
         name=conv.name,
-        system=conv.system,
+        system_template=conv.system_template,
+        system_message=conv.system_message,
         roles=conv.roles,
         messages=list(conv.messages),  # prevent in-place modification
         offset=conv.offset,
