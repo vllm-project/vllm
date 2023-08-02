@@ -26,4 +26,6 @@ def get_config(model: str, trust_remote_code: bool) -> PretrainedConfig:
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model)
+    if 'chatglm' in config.model_type:
+        config.num_hidden_layers = config.num_layers
     return config
