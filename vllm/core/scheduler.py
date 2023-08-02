@@ -243,7 +243,7 @@ class Scheduler:
             ignored_seq_groups=[],
         )
         if not self.log_stats:
-            return scheduler_outputs, prompt_group_ids, ignored_seq_groups
+            return scheduler_outputs
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
         # Schedule sequence groups.
