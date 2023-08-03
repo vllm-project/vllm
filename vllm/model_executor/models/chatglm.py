@@ -84,14 +84,18 @@ class GLMAttention(nn.Module):
             self.qkv_hidden_size = (
                     self.projection_size + 2 * self.hidden_size_per_attention_head * config.multi_query_group_num
             )
-        self.query_key_value = nn.Linear(config.hidden_size, self.qkv_hidden_size,
-                                         bias=config.add_bias_linear or config.add_qkv_bias
-                                         )
+        self.query_key_value = ColumnParallelLinear(config.hidden_size,
+                                                    self.qkv_hidden_size,
+                                                    bias=config.add_bias_linear or config.add_qkv_bias,
+                                                    gather_output=False,
+                                                    perform_initialization=False
+                                                    )
         rotary_dim = (
             config.hidden_size // config.num_attention_heads if config.kv_channels is None else config.kv_channels
         )
-
-        self.attn = PagedAttentionWithRoPE(config.num_attention_heads,
+        tp_size = get_tensor_model_parallel_world_size()
+        assert config.num_attention_heads % tp_size == 0
+        self.attn = PagedAttentionWithRoPE(config.num_attention_heads // tp_size,
                                    config.kv_channels ,
                                    scale=config.kv_channels**-0.5,
                                    rotary_dim = rotary_dim // 2,
@@ -99,10 +103,11 @@ class GLMAttention(nn.Module):
                                    glm = True)
 
         # Output.
-        self.dense = nn.Linear(self.projection_size,
+        self.dense = RowParallelLinear(self.projection_size,
                                 config.hidden_size, 
-                                bias=config.add_bias_linear
-                               )
+                                bias=config.add_bias_linear,
+                                input_is_parallel=True,
+                                perform_initialization=False)
 
     def forward(
         self,
@@ -113,7 +118,7 @@ class GLMAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         # Attention heads [num_toknens, h] --> [num_toknens, (np * 3 * hn)]
-        qkv = self.query_key_value(hidden_states)
+        qkv, _ = self.query_key_value(hidden_states)
         if self.multi_query_attention:
             (query_layer, key_layer, value_layer) = qkv.split(
                 [
@@ -138,7 +143,7 @@ class GLMAttention(nn.Module):
         key_cache, value_cache = kv_cache
         context_layer = self.attn(position_ids, query_layer, key_layer, value_layer, key_cache, value_cache,
                                 input_metadata, cache_event)
-        attn_output = self.dense(context_layer)
+        attn_output, _ = self.dense(context_layer)
         return attn_output
 
 
@@ -156,11 +161,12 @@ class GLMMLP(nn.Module):
         self.add_bias = config.add_bias_linear
 
         # Project to 4h. If using swiglu double the output width, see https://arxiv.org/pdf/2002.05202.pdf
-        self.dense_h_to_4h = nn.Linear(
-            config.hidden_size,
-            config.ffn_hidden_size * 2,
-            bias=self.add_bias
-        )
+        self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
+                                                  config.ffn_hidden_size * 2,
+                                                  bias=config.add_bias_linear,
+                                                  gather_output=False,
+                                                  perform_initialization=False
+                                                )
 
         def swiglu(x):
             x = torch.chunk(x, 2, dim=-1)
@@ -169,18 +175,18 @@ class GLMMLP(nn.Module):
         self.activation_func = swiglu
 
         # Project back to h.
-        self.dense_4h_to_h = nn.Linear(
-            config.ffn_hidden_size,
-            config.hidden_size,
-            bias=self.add_bias
-        )
+        self.dense_4h_to_h = RowParallelLinear(config.ffn_hidden_size,
+                                config.hidden_size,
+                                bias=config.add_bias_linear,
+                                input_is_parallel=True,
+                                perform_initialization=False)
 
     def forward(self, hidden_states):
         # [s, b, 4hp]
-        intermediate_parallel = self.dense_h_to_4h(hidden_states)
+        intermediate_parallel, _ = self.dense_h_to_4h(hidden_states)
         intermediate_parallel = self.activation_func(intermediate_parallel)
         # [s, b, h]
-        output = self.dense_4h_to_h(intermediate_parallel)
+        output, _ = self.dense_4h_to_h(intermediate_parallel)
         return output
 
 
@@ -303,73 +309,25 @@ class GLMTransformer(nn.Module):
         return hidden_states
 
 
-class Embedding(nn.Module):
-    """Language model embeddings."""
-
-    def __init__(self, config, ):
-        super(Embedding, self).__init__()
-
-        self.hidden_size = config.hidden_size
-        # Word embeddings (parallel).
-        self.word_embeddings = nn.Embedding(
-            config.padded_vocab_size,
-            self.hidden_size,
-            dtype=config.torch_dtype,
-        )
-        self.fp32_residual_connection = config.fp32_residual_connection
-
-    def forward(self, input_ids):
-        # Embeddings.
-        words_embeddings = self.word_embeddings(input_ids)
-        embeddings = words_embeddings
-        # Data format change to avoid explicit tranposes : [b s h] --> [s b h].
-        # embeddings = embeddings.transpose(0, 1).contiguous()
-        # If the input flag for fp32 residual connection is set, convert for float.
-        if self.fp32_residual_connection:
-            embeddings = embeddings.float()
-        return embeddings
-
-
 class ChatGLMModel(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.embedding = Embedding(config)
+        self.embedding = VocabParallelEmbedding(
+                config.padded_vocab_size,
+                config.hidden_size,
+                perform_initialization=False)
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
         self.encoder = GLMTransformer(config)
-        self.output_layer = nn.Linear(config.hidden_size,
-                                      config.padded_vocab_size, 
-                                      bias=False,
-                                      dtype=config.torch_dtype
-                                    )
-        # TODO(fengxi) promptlearning 
-        self.pre_seq_len = config.pre_seq_len
-        self.prefix_projection = config.prefix_projection
-        if self.pre_seq_len is not None:
-            for param in self.parameters():
-                param.requires_grad = False
-            self.prefix_tokens = torch.arange(self.pre_seq_len).long()
-            self.prefix_encoder = PrefixEncoder(config)
-
-    def get_input_embeddings(self):
-        return self.embedding.word_embeddings
-
-    # def get_prompt(self, batch_size, device=None, dtype=torch.half):
-    #     prefix_tokens = self.prefix_tokens.unsqueeze(0).expand(batch_size, -1).to(device)
-    #     .unsqueeze(0).expand(batch_size, -1)
-    #     past_key_values = self.prefix_encoder(prefix_tokens).type(dtype)
-    #     past_key_values = past_key_values.view(
-    #         batch_size,
-    #         self.pre_seq_len,
-    #         self.num_layers * 2,
-    #         self.multi_query_group_num,
-    #         self.kv_channels
-    #     )
-    #     # seq_len, b, nh, hidden_size
-    #     past_key_values = past_key_values.permute([2, 1, 0, 3, 4]).split(2)
-    #     return past_key_values
+        
+        self.output_layer = ColumnParallelLinear(config.hidden_size,
+                                            config.padded_vocab_size,
+                                            bias=False,
+                                            gather_output=False,
+                                            perform_initialization=False,
+                                            params_dtype=config.torch_dtype)
 
     def forward(
             self, 
@@ -393,7 +351,7 @@ class ChatGLMModel(nn.Module):
         return hidden_states
 
 
-class ChatGLMForConditionalGeneration(nn.Module):
+class ChatGLMForCausalLM(nn.Module):
 
     def __init__(self, config):
         super().__init__()
@@ -415,16 +373,29 @@ class ChatGLMForConditionalGeneration(nn.Module):
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
                                    input_metadata)
         return next_tokens
+        
+    _column_parallel_weights = [
+        "dense_h_to_4h", "query_key_value", "output_layer.weight",
+        "embedding.weight"
+    ]
+    _row_parallel_weights = ["dense_4h_to_h", "dense.weight",'dense.bias']
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
+        
+        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
             model_name_or_path, cache_dir, use_np_cache):
+            if "word_embeddings" in name:
+                name = name.replace(".word_embeddings", "")
+
             if name in state_dict:
-                state_dict[name].copy_(loaded_weight)
+                load_tensor_parallel_weights(state_dict[name], loaded_weight, name,
+                                        self._column_parallel_weights,
+                                        self._row_parallel_weights,
+                                        tensor_model_parallel_rank)
             else:
                 print("Warning never found tensor's name:", name)
-

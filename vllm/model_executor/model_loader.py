@@ -21,7 +21,7 @@ _MODEL_REGISTRY = {
     "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
-    "ChatGLMModel":ChatGLMForConditionalGeneration,
+    "ChatGLMModel":ChatGLMForCausalLM,
 }
 
 
