@@ -14,6 +14,9 @@ Alongside each architecture, we include some popular models that use it.
   * - Architecture
     - Models
     - Example HuggingFace Models
+  * - :code:`ChatGLMForCausalLM`
+    - ChatGLM2-6B
+    - :code:`THUDM/chatglm2-6b`.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan-7B
     - :code:`baichuan-inc/Baichuan-7B`.
