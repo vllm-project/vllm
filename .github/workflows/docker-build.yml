@@ -16,6 +16,8 @@ jobs:
       - name: Clear disk space
         run: |
           sudo rm -rf "/usr/local/share/boost"
+
+          # Remove tool cache
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
           
           # Remove android library
