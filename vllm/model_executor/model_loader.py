@@ -25,7 +25,6 @@ _MODEL_REGISTRY = {
     "OPTForCausalLM": OPTForCausalLM,
     "AquilaModel": AquilaForCausalLM,
     "RWForCausalLM": FalconForCausalLM,
-、
 }
 
 
