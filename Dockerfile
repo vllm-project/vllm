@@ -7,6 +7,7 @@ ENV PYTHONUNBUFFERED=TRUE
 
 WORKDIR /app/
 
+RUN pip uninstall torch -y
 COPY . .
 RUN conda run -n vllm pip install .
 
