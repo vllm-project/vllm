@@ -9,6 +9,14 @@ jobs:
     steps:
       - name: Check disk space
         run: df . -h
+      - name: Clear disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+      - name: Check disk space
+        run: df . -h
       - uses: actions/checkout@v3
       - name: Login to container registry
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
