@@ -5,6 +5,11 @@ ENV PYTHONUNBUFFERED=TRUE
 
 WORKDIR /app/
 
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.8-venv \
+    && rm -rf /var/lib/apt/lists/*
+
 # Setup virtual environment
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3 -m venv $VIRTUAL_ENV
