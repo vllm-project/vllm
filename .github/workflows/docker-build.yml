@@ -30,7 +30,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
         with:
-          images: ghcr.io/stability-ai/stability-bot-base
+          images: ghcr.io/{{ github.repository }}
           tags: |
             type=sha,prefix=,format=short
       - name: Build and push Docker image
