@@ -137,7 +137,7 @@ def read_readme() -> str:
 
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.in."""
-    with open(get_path("requirements.in")) as f:
+    with open(get_path("requirements.txt")) as f:
         requirements = f.read().strip().split("\n")
     return requirements
 

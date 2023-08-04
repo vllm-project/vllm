@@ -1,11 +1,12 @@
 ninja  # For faster builds.
 psutil
-ray >= 2.5.1
+ray
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch >= 2.0.0
-transformers >= 4.31.0  # Required for LLaMA-2.
+transformers >= 4.28.0  # Required for LLaMA.
 xformers >= 0.0.19
 fastapi
 uvicorn
-pydantic < 2  # Required for OpenAI server.
+pydantic  # Required for OpenAI server.
+fschat  # Required for OpenAI ChatCompletion Endpoint.

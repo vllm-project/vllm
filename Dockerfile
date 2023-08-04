@@ -12,8 +12,8 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Install base requirements
 RUN pip uninstall torch -y
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY requirements-pinned.txt .
+RUN pip install -r requirements-pinned.txt
 
 # Install vllm
 COPY . .
