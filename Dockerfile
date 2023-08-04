@@ -5,7 +5,7 @@ ENV PYTHONUNBUFFERED=TRUE
 
 WORKDIR /app/
 
-RUN pip uninstall pytorch -y
+RUN pip uninstall torch -y
 COPY . .
 RUN pip install .
 
