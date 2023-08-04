@@ -18,11 +18,10 @@ RUN python3 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Install base requirements
-RUN pip uninstall torch -y
-COPY requirements-docker.txt .
-RUN pip install -r requirements-docker.txt
+COPY requirements.docker.txt .
+RUN pip install -r requirements.docker.txt
 
-# Install vllm
+# # Install vllm
 COPY . .
 RUN pip install .
 
