@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y \
     python3.8-venv \
     && rm -rf /var/lib/apt/lists/*
 
+RUN pip install --upgrade pip setuptools wheel
+
 # Setup virtual environment
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3 -m venv $VIRTUAL_ENV
