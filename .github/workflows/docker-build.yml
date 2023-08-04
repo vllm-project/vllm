@@ -11,6 +11,8 @@ jobs:
         run: df . -h
       - name: Clear disk space
         run: |
+          # Frees up 13GB of disk space
+          # https://github.com/actions/runner-images/issues/2840#issuecomment-790492173
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf "/usr/local/share/boost"
