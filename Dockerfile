@@ -1,4 +1,4 @@
-FROM 763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-inference:2.0.1-gpu-py310-cu118-ubuntu20.04-ec2
+FROM nvcr.io/nvidia/pytorch:22.12-py3
 
 RUN conda create -n vllm python=3.10.11 -y
 
