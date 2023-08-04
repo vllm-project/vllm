@@ -7,6 +7,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Check disk space
+        run: df . -h
       - uses: actions/checkout@v3
       - name: Login to container registry
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
