@@ -15,12 +15,27 @@ jobs:
         run: df . -h
       - name: Clear disk space
         run: |
-          # Frees up 13GB of disk space
-          # https://github.com/actions/runner-images/issues/2840#issuecomment-790492173
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
           sudo rm -rf "/usr/local/share/boost"
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          
+          # Remove android library
+          sudo rm -rf /usr/local/lib/android
+
+          # Remove dotnet runtime
+          sudo rm -rf /usr/share/dotnet
+
+          # Remove haskell runtime
+          sudo rm -rf /opt/ghc
+
+          # Remove large packages
+          sudo apt-get remove -y '^dotnet-.*'
+          sudo apt-get remove -y '^llvm-.*'
+          sudo apt-get remove -y 'php.*'
+          sudo apt-get remove -y '^mongodb-.*'
+          sudo apt-get remove -y '^mysql-.*'
+          sudo apt-get remove -y azure-cli google-cloud-sdk google-chrome-stable firefox powershell mono-devel libgl1-mesa-dri
+          sudo apt-get autoremove -y
+          sudo apt-get clean
       - name: Check disk space
         run: df . -h
       - uses: actions/checkout@v3
