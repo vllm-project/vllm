@@ -1,5 +1,6 @@
 import argparse
 import dataclasses
+import json
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -133,6 +134,7 @@ class EngineArgs:
                             help='disable logging statistics')
         parser.add_argument('--rope-scaling',
                             default=None,
+                            type=json.loads,
                             help='RoPE scaling configuration')
         return parser
 
