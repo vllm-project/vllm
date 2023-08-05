@@ -123,12 +123,16 @@ def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
     use_np_cache: bool = False,
+    allow_patterns: str = "*.bin",
 ) -> Iterator[Tuple[str, torch.Tensor]]:
-    hf_folder, hf_bin_files = prepare_hf_model_weights(
-        model_name_or_path, cache_dir=cache_dir, allow_patterns="*.bin"
+    hf_folder, hf_weights_files = prepare_hf_model_weights(
+        model_name_or_path, cache_dir=cache_dir, allow_patterns=allow_patterns
     )
 
     if use_np_cache:
+        # Currently np_cache only support *.bin checkpoints
+        assert allow_patterns == "*.bin"
+
         # Convert the model weights from torch tensors to numpy arrays for
         # faster loading.
         np_folder = os.path.join(hf_folder, "np")
@@ -139,7 +143,7 @@ def hf_model_weights_iterator(
         with get_lock(model_name_or_path, cache_dir):
             if not os.path.exists(weight_names_file):
                 weight_names = []
-                for bin_file in hf_bin_files:
+                for bin_file in hf_weights_files:
                     state = torch.load(bin_file, map_location="cpu")
                     for name, param in state.items():
                         param_path = os.path.join(np_folder, name)
@@ -157,8 +161,14 @@ def hf_model_weights_iterator(
             with open(param_path, "rb") as f:
                 param = np.load(f)
             yield name, torch.from_numpy(param)
+    elif allow_patterns == "*.safetensors":
+        for st_file in hf_weights_files:
+            with safe_open(st_file, framework="pt") as f:
+                for name in f.keys():
+                    param = f.get_slice(name)
+                    yield name, param
     else:
-        for bin_file in hf_bin_files:
+        for bin_file in hf_weights_files:
             state = torch.load(bin_file, map_location="cpu")
             for name, param in state.items():
                 yield name, param
