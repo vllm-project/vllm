@@ -131,6 +131,9 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+        parser.add_argument('--rope-scaling',
+                            default=None,
+                            help='RoPE scaling configuration')
         return parser
 
     @classmethod
