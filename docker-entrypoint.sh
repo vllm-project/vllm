@@ -14,7 +14,7 @@ echo "HOST=$HOST"
 echo "PORT=$PORT"
 echo "=============="
 
-python -u -m vllm.entrypoints.api_server \
+python -u -m vllm.entrypoints.openai.api_server \
     --model $MODEL \
     --tokenizer $TOKENIZER \
     --host $HOST \
