@@ -2,6 +2,7 @@
 
 set -e
 
+ENTRYPOINT=${ENTRYPOINT:-vllm.entrypoints.api_server}
 MODEL=${MODEL:-stabilityai/StableBeluga-7B}
 TOKENIZER=${TOKENIZER:-$MODEL}
 NUM_SHARD=${NUM_SHARD:-1}
@@ -9,6 +10,7 @@ HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-80}
 
 echo "=== Config ==="
+echo "ENTRYPOINT=$ENTRYPOINT"
 echo "MODEL=$MODEL"
 echo "TOKENIZER=$TOKENIZER"
 echo "NUM_SHARD=$NUM_SHARD"
@@ -36,7 +38,7 @@ if [[ $TOKENIZER == s3://* ]]; then
     TOKENIZER=./tokenizer
 fi
 
-python -u -m vllm.entrypoints.api_server \
+python -u -m $ENTRYPOINT \
     --model $MODEL \
     --tokenizer $TOKENIZER \
     --host $HOST \
