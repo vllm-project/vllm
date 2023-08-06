@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
     python3.8-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# Install s5cmd
+RUN curl -sSL https://github.com/peak/s5cmd/releases/download/v2.0.0/s5cmd_2.0.0_Linux-64bit.tar.gz | tar xz -C /usr/local/bin s5cmd
+
 RUN pip install --upgrade pip setuptools wheel
 
 # Setup virtual environment

@@ -14,6 +14,13 @@ echo "HOST=$HOST"
 echo "PORT=$PORT"
 echo "=============="
 
+# Check if model starts with s3://
+if [[ $MODEL == s3://* ]]; then
+    echo "Downloading model from S3..."
+    s5cmd cp $MODEL ./model
+    MODEL=./model
+fi
+
 python -u -m vllm.entrypoints.openai.api_server \
     --model $MODEL \
     --tokenizer $TOKENIZER \
