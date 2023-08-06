@@ -36,7 +36,7 @@ if [[ $TOKENIZER == s3://* ]]; then
     TOKENIZER=./tokenizer
 fi
 
-python -u -m vllm.entrypoints.openai.api_server \
+python -u -m vllm.entrypoints.api_server \
     --model $MODEL \
     --tokenizer $TOKENIZER \
     --host $HOST \
