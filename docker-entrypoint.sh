@@ -1,5 +1,7 @@
 #!/bin/sh
 
+set -e
+
 MODEL=${MODEL:-stabilityai/StableBeluga-7B}
 TOKENIZER=${TOKENIZER:-$MODEL}
 NUM_SHARD=${NUM_SHARD:-1}
@@ -18,7 +20,20 @@ echo "=============="
 if [[ $MODEL == s3://* ]]; then
     echo "Downloading model from S3..."
     s5cmd cp $MODEL ./model
-    MODEL=./model
+
+    if [[ $MODEL == $TOKENIZER ]]; then
+        TOKENIZER=./model
+        MODEL=./model
+    else
+        MODEL=./model
+    fi
+fi
+
+# Check if tokenizer starts with s3://
+if [[ $TOKENIZER == s3://* ]]; then
+    echo "Downloading tokenizer from S3..."
+    s5cmd cp $TOKENIZER ./tokenizer
+    TOKENIZER=./tokenizer
 fi
 
 python -u -m vllm.entrypoints.openai.api_server \
