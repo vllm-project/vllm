@@ -1,5 +1,6 @@
 import argparse
 import dataclasses
+import json
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -131,6 +132,10 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+        parser.add_argument('--rope-scaling',
+                            default=None,
+                            type=json.loads,
+                            help='RoPE scaling configuration')
         return parser
 
     @classmethod
