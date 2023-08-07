@@ -27,7 +27,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # # Install vllm
 # COPY . .
 # RUN pip install .
-RUN pip install vllm==0.1.3 ray[air]==2.6.2
+RUN pip install vllm==0.1.3 ray[air]==2.6.2 hf-transfer~=0.1
 
 COPY docker-entrypoint.sh .
 
