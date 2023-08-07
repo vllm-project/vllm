@@ -5,17 +5,27 @@ set -e
 ENTRYPOINT=${ENTRYPOINT:-vllm.entrypoints.api_server}
 MODEL=${MODEL:-stabilityai/StableBeluga-7B}
 TOKENIZER=${TOKENIZER:-$MODEL}
-NUM_SHARD=${NUM_SHARD:-1}
+TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-1}
 HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-80}
+PIPELINE_PARALLEL_SIZE=${PIPELINE_PARALLEL_SIZE:-1}
+BLOCK_SIZE=${BLOCK_SIZE:-16}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.90}
+MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-2560}
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-256}
 
 echo "=== Config ==="
 echo "ENTRYPOINT=$ENTRYPOINT"
 echo "MODEL=$MODEL"
 echo "TOKENIZER=$TOKENIZER"
-echo "NUM_SHARD=$NUM_SHARD"
 echo "HOST=$HOST"
 echo "PORT=$PORT"
+echo "TENSOR_PARALLEL_SIZE=$TENSOR_PARALLEL_SIZE"
+echo "PIPELINE_PARALLEL_SIZE=$PIPELINE_PARALLEL_SIZE"
+echo "BLOCK_SIZE=$BLOCK_SIZE"
+echo "GPU_MEMORY_UTILIZATION=$GPU_MEMORY_UTILIZATION"
+echo "MAX_NUM_BATCHED_TOKENS=$MAX_NUM_BATCHED_TOKENS"
+echo "MAX_NUM_SEQS=$MAX_NUM_SEQS"
 echo "=============="
 
 # Check if model starts with s3://
@@ -43,4 +53,9 @@ python -u -m $ENTRYPOINT \
     --tokenizer $TOKENIZER \
     --host $HOST \
     --port $PORT \
-    --tensor-parallel-size $NUM_SHARD
+    --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
+    --pipeline-parallel-size $PIPELINE_PARALLEL_SIZE \
+    --block-size $BLOCK_SIZE \
+    --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+    --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
+    --max-num-seqs $MAX_NUM_SEQS
