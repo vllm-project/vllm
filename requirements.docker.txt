@@ -4,9 +4,6 @@
 #
 #    pip-compile --output-file=requirements.docker.txt requirements.txt
 #
---extra-index-url https://pypi.ngc.nvidia.com
---trusted-host pypi.ngc.nvidia.com
-
 accelerate==0.21.0
     # via
     #   fschat
@@ -376,13 +373,11 @@ triton==2.0.0
 typing-extensions==4.7.1
     # via
     #   altair
-    #   annotated-types
     #   fastapi
     #   gradio
     #   gradio-client
     #   huggingface-hub
     #   pydantic
-    #   pydantic-core
     #   pyre-extensions
     #   rich
     #   starlette

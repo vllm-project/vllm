@@ -20,14 +20,16 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN python3 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Install base requirements
-# COPY requirements.docker.txt .
-# RUN pip install -r requirements.docker.txt
+# Install serving dependencies
+RUN pip install ray[air]==2.6.2 hf-transfer~=0.1
 
-# # Install vllm
-# COPY . .
-# RUN pip install .
-RUN pip install vllm==0.1.3 ray[air]==2.6.2 hf-transfer~=0.1
+# Install pinned vllm dependencies
+COPY requirements.docker.txt .
+RUN pip install -r requirements.docker.txt
+
+# Install vllm from source
+COPY . .
+RUN pip install .
 
 COPY docker-entrypoint.sh .
 
