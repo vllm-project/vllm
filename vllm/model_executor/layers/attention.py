@@ -76,10 +76,8 @@ class PagedAttention(nn.Module):
         )
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
-            raise ValueError(
-                f"head_size ({self.head_size}) is not supported. "
-                f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}."
-            )
+            raise ValueError(f"head_size ({self.head_size}) is not supported. "
+                             f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
 
     def set_attn_bias(self, input_metadata: InputMetadata) -> None:
         if input_metadata.attn_bias:
@@ -110,7 +108,9 @@ class PagedAttention(nn.Module):
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
             key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
-            value = torch.repeat_interleave(value, self.num_queries_per_kv, dim=1)
+            value = torch.repeat_interleave(value,
+                                            self.num_queries_per_kv,
+                                            dim=1)
 
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(
@@ -234,8 +234,8 @@ class PagedAttention(nn.Module):
             # Decoding run.
             assert input_metadata.num_prompt_tokens == 0
             assert key_cache is not None and value_cache is not None, (
-                "key_cache and value_cache must be provided when " "generating tokens."
-            )
+                "key_cache and value_cache must be provided when "
+                "generating tokens.")
             # Compute the attention op for generation tokens.
             self.single_query_cached_kv_attention(
                 output[num_prompt_tokens:num_valid_tokens],
@@ -270,7 +270,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         max_position = max_position * self.rope_scaling_factor
 
         # Create the cos and sin cache.
-        inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2) / rotary_dim))
+        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
         t = torch.arange(max_position).float() / self.rope_scaling_factor
         freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
         cos = freqs.cos()
@@ -399,7 +399,9 @@ class PagedAttentionWithALiBi(PagedAttention):
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
             key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
-            value = torch.repeat_interleave(value, self.num_queries_per_kv, dim=1)
+            value = torch.repeat_interleave(value,
+                                            self.num_queries_per_kv,
+                                            dim=1)
 
         # FIXME(woosuk): Because xformers does not support dynamic sequence
         # lengths with custom attention bias, we process each prompt one by
