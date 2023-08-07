@@ -85,6 +85,7 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        rope_scaling_factor: float = 1,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -119,7 +120,8 @@ class LlamaAttention(nn.Module):
                                            self.head_dim,
                                            self.scaling,
                                            rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads)
+                                           num_kv_heads=self.num_kv_heads,
+                                           rope_scaling_factor=rope_scaling_factor)
 
     def forward(
         self,
@@ -143,10 +145,15 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
+        if config.rope_scaling is None:
+            rope_scaling_factor = 1
+        else:
+            rope_scaling_factor = config.rope_scaling["factor"]
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
+            rope_scaling_factor=rope_scaling_factor,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,

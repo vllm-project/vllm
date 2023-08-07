@@ -255,12 +255,16 @@ class PagedAttentionWithRoPE(PagedAttention):
         max_position: int = 8192,
         base: int = 10000,
         num_kv_heads: Optional[int] = None,
+        rope_scaling_factor: float = 1,
     ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
 
+        self.rope_scaling_factor = rope_scaling_factor
+        max_position = max_position * self.rope_scaling_factor
+
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
-        t = torch.arange(max_position).float()
+        t = torch.arange(max_position).float() / self.rope_scaling_factor
         freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
         cos = freqs.cos()
         sin = freqs.sin()
