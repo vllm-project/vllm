@@ -2,7 +2,6 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import GPT2Config
 from typing import Iterator, List, Optional, Tuple
 import glob
 import os
@@ -19,13 +18,14 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.sequence import SequenceOutputs
+from vllm.transformers_utils.configs.skywork import SkyWorkConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GPT2Attention(nn.Module):
 
-    def __init__(self, config: GPT2Config):
+    def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
         total_num_heads = config.num_attention_heads
@@ -71,7 +71,7 @@ class GPT2MLP(nn.Module):
     def __init__(
         self,
         intermediate_size: int,
-        config: GPT2Config,
+        config: SkyWorkConfig,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -96,7 +96,7 @@ class GPT2MLP(nn.Module):
 
 class GPT2Block(nn.Module):
 
-    def __init__(self, config: GPT2Config):
+    def __init__(self, config: SkyWorkConfig):
         super().__init__()
         hidden_size = config.hidden_size
         inner_dim = (config.n_inner if config.n_inner is not None else 4 *
@@ -135,7 +135,7 @@ class GPT2Block(nn.Module):
 
 class GPT2Model(nn.Module):
 
-    def __init__(self, config: GPT2Config):
+    def __init__(self, config: SkyWorkConfig):
         super().__init__()
         self.config = config
         assert not config.add_cross_attention
@@ -182,7 +182,7 @@ class GPT2Model(nn.Module):
 
 class SkyWorkLMHeadModel(nn.Module):
 
-    def __init__(self, config: GPT2Config):
+    def __init__(self, config: SkyWorkConfig):
         super().__init__()
         self.config = config
         self.transformer = GPT2Model(config)
@@ -199,6 +199,7 @@ class SkyWorkLMHeadModel(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
+        print(f"inputs: {input_ids.size()}")
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,

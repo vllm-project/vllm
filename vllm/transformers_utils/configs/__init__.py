@@ -7,6 +7,7 @@ from vllm.transformers_utils.configs.qwen import QWenConfig
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.skywork import SkyWorkConfig
+from vllm.transformers_utils.configs.skywork import SkyWork_2_6BConfig
 
 __all__ = [
     "MPTConfig",
@@ -15,4 +16,5 @@ __all__ = [
     "QWenConfig",
     "RWConfig",
     "SkyWorkConfig",
+    "SkyWork_2_6BConfig",
 ]

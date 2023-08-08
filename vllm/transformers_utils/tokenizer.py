@@ -33,7 +33,7 @@ def get_tokenizer(
             f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
             "tokenizer.")
     try:
-        if tokenizer_name == "skywork":
+        if tokenizer_name.find("skywork") != -1 or tokenizer_name.find("skywork2.6B") != -1:
             tokenizer = SkyTokenizer(tokenizer_name + "/vocab.json")
         else:
             tokenizer = AutoTokenizer.from_pretrained(

@@ -10,14 +10,18 @@ _CONFIG_REGISTRY = {
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "skywork": SkyWorkConfig,
+    "skywork2.6B": SkyWork_2_6BConfig,
 }
 
 
 def get_config(model: str, trust_remote_code: bool) -> PretrainedConfig:
     try:
-        if model == "skywork":
+        if model.find("skywork") != -1:
             config = SkyWorkConfig()
-            config.save_pretrained(model)
+            config.save_pretrained("skywork")
+        elif model.find("skywork2.6B") != -1:
+            config = SkyWork_2_6BConfig()
+            config.save_pretrained("skywork2.6B")
         else:
             config = AutoConfig.from_pretrained(
                 model, trust_remote_code=trust_remote_code)
@@ -36,3 +40,6 @@ def get_config(model: str, trust_remote_code: bool) -> PretrainedConfig:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model)
     return config
+
+
+
