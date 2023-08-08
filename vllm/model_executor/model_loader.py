@@ -14,6 +14,7 @@ _MODEL_REGISTRY = {
     "BaiChuanForCausalLM": BaiChuanForCausalLM,  # baichuan-7b
     "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
     "BloomForCausalLM": BloomForCausalLM,
+    "FalconForCausalLM": FalconForCausalLM,
     "GPT2LMHeadModel": GPT2LMHeadModel,
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
     "GPTJForCausalLM": GPTJForCausalLM,
@@ -23,6 +24,8 @@ _MODEL_REGISTRY = {
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
     "ChatGLMModel": ChatGLMModel,
+    "QWenLMHeadModel": QWenLMHeadModel,
+    "RWForCausalLM": FalconForCausalLM,
 }
 
 
