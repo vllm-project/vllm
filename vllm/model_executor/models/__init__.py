@@ -9,17 +9,11 @@ from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.mpt import MPTForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
+from vllm.model_executor.models.qwen import QWenLMHeadModel
 
 __all__ = [
-    "BaiChuanForCausalLM",
-    "BaichuanForCausalLM",
-    "BloomForCausalLM",
-    "FalconForCausalLM",
-    "GPT2LMHeadModel",
-    "GPTBigCodeForCausalLM",
-    "GPTJForCausalLM",
-    "GPTNeoXForCausalLM",
-    "LlamaForCausalLM",
-    "MPTForCausalLM",
-    "OPTForCausalLM",
+    "BaiChuanForCausalLM", "BaichuanForCausalLM", "BloomForCausalLM",
+    "FalconForCausalLM", "GPT2LMHeadModel", "GPTBigCodeForCausalLM",
+    "GPTJForCausalLM", "GPTNeoXForCausalLM", "LlamaForCausalLM",
+    "MPTForCausalLM", "OPTForCausalLM", "QWenLMHeadModel"
 ]
