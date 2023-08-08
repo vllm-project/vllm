@@ -44,7 +44,6 @@ _PIPELINE_GLOBAL_RANKS = None
 # rank when broadcasting weights from src to all other data parallel ranks
 _DATA_PARALLEL_GLOBAL_RANKS = None
 
-_ALL_REDUCE_LAUNCHER: Optional['GraphAllReduce'] = None
 
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
@@ -195,20 +194,6 @@ def initialize_model_parallel(
             _POSITION_EMBEDDING_GROUP = group
         if rank in ranks:
             _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
-
-def initialize_all_reduce_launcher(
-    max_num_tokens: int,
-    hidden_size: int,
-    dtype: torch.dtype,
-    disable_graph: bool = False,
-) -> None:
-    global _ALL_REDUCE_LAUNCHER
-    _ALL_REDUCE_LAUNCHER = GraphAllReduce(
-        max_num_tokens=max_num_tokens,
-        hidden_size=hidden_size,
-        dtype=dtype,
-        disable_graph=disable_graph,
-    )
 
 def model_parallel_is_initialized():
     """Check if model and data parallel groups are initialized."""
@@ -458,6 +443,7 @@ def get_pipeline_model_parallel_last_rank():
     last_rank_local = get_pipeline_model_parallel_world_size() - 1
     return _PIPELINE_GLOBAL_RANKS[last_rank_local]
 
+
 def get_pipeline_model_parallel_next_rank():
     """Return the global rank that follows the caller in the pipeline"""
     assert _PIPELINE_GLOBAL_RANKS is not None, \
@@ -485,10 +471,6 @@ def get_data_parallel_rank():
     """Return my rank for the data parallel group."""
     return torch.distributed.get_rank(group=get_data_parallel_group())
 
-def get_all_reduce_launcher() -> 'GraphAllReduce':
-    assert _ALL_REDUCE_LAUNCHER is not None, 'all reduce launcher is not initialized'
-    return _ALL_REDUCE_LAUNCHER
-
 def destroy_model_parallel():
     """Set the groups to none."""
     global _MODEL_PARALLEL_GROUP
@@ -515,56 +497,3 @@ def destroy_model_parallel():
     _MPU_TENSOR_MODEL_PARALLEL_RANK = None
     global _MPU_PIPELINE_MODEL_PARALLEL_RANK
     _MPU_PIPELINE_MODEL_PARALLEL_RANK = None
-
-
-class GraphAllReduce:
-
-    def __init__(
-        self,
-        max_num_tokens: int,
-        hidden_size: int,
-        dtype: torch.dtype,
-        disable_graph: bool = False,
-    ) -> None:
-        self.max_num_tokens = max_num_tokens
-        self.hidden_size = hidden_size
-        self.disable_graph = disable_graph
-
-        tp_world_size = get_tensor_model_parallel_world_size()
-        if tp_world_size == 1:
-            return
-
-        self.group = get_tensor_model_parallel_group()
-        self.buffer = torch.empty(
-            size=(max_num_tokens, hidden_size),
-            dtype=dtype,
-            device='cuda',
-        )
-
-        # Build graphs for different number of tokens.
-        if not self.disable_graph:
-            self.graphs = {}
-            for num_tokens in range(8, max_num_tokens + 1, 8):
-                self.graphs[num_tokens] = self._build_graph(num_tokens)
-
-    def _build_graph(self, num_tokens: int) -> torch.cuda.CUDAGraph:
-        # Warm up.
-        torch.distributed.all_reduce(self.buffer[:num_tokens], group=self.group)
-        torch.cuda.synchronize()
-
-        # Build graph.
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            torch.distributed.all_reduce(
-                self.buffer[:num_tokens], group=self.group)
-        torch.cuda.synchronize()
-        return graph
-
-    def launch(self, x: torch.Tensor) -> torch.Tensor:
-        # NOTE: x must be a slice of self.buffer.
-        num_tokens = x.shape[0]
-        if self.disable_graph:
-            torch.distributed.all_reduce(x, group=self.group)
-        else:
-            self.graphs[num_tokens].replay()
-        return x
