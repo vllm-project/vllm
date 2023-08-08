@@ -376,15 +376,24 @@ async def create_completion(raw_request: Request):
 
     model_name = request.model
     request_id = f"cmpl-{random_uuid()}"
+
+    use_token_ids = False
     if isinstance(request.prompt, list):
         if len(request.prompt) == 0:
             return create_error_response(HTTPStatus.BAD_REQUEST,
                                          "please provide at least one prompt")
-        if len(request.prompt) > 1:
-            return create_error_response(
-                HTTPStatus.BAD_REQUEST,
-                "multiple prompts in a batch is not currently supported")
-        prompt = request.prompt[0]
+        first_element = request.prompt[0]
+        if isinstance(first_element, int):
+            use_token_ids = True
+            prompt = request.prompt
+        elif isinstance(first_element, str) or isinstance(first_element, list):
+            # TODO: handles multiple prompt case in list[list[int]]
+            if len(request.prompt) > 1:
+                return create_error_response(
+                    HTTPStatus.BAD_REQUEST,
+                    "multiple prompts in a batch is not currently supported")
+            use_token_ids = not isinstance(first_element, str)
+            prompt = request.prompt[0]
     else:
         prompt = request.prompt
 
@@ -411,8 +420,10 @@ async def create_completion(raw_request: Request):
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
-    result_generator = engine.generate(prompt, sampling_params, request_id,
-                                       token_ids)
+    if use_token_ids:
+        result_generator = engine.generate(None, sampling_params, request_id, prompt_token_ids=prompt)
+    else:
+        result_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.

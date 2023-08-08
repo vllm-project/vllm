@@ -74,7 +74,8 @@ class ChatCompletionRequest(BaseModel):
 
 class CompletionRequest(BaseModel):
     model: str
-    prompt: Union[str, List[str]]
+    # a string, array of strings, array of tokens, or array of token arrays
+    prompt: Union[List[int], List[List[int]], str, List[str]]
     suffix: Optional[str] = None
     max_tokens: Optional[int] = 16
     temperature: Optional[float] = 1.0
@@ -99,8 +100,7 @@ class LogProbs(BaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
-    top_logprobs: List[Optional[Dict[str,
-                                     float]]] = Field(default_factory=list)
+    top_logprobs: List[Optional[Dict[str, float]]] = Field(default_factory=list)
 
 
 class CompletionResponseChoice(BaseModel):
