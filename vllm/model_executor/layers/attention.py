@@ -20,12 +20,20 @@ class PagedAttention(nn.Module):
     """GPT-style multi-head PagedAttention.
 
     This class takes flattened 1D query, key, and value tensors as input. The
-    input 1D tensors can be split into three parts: the prompt tokens, the
-    generation tokens, and the paddings.
+    input 1D tensors can either contain prompt tokens or generation tokens, in
+    addition to paddings.
 
-    |<------------------------------------- num_valid_tokens ------------------------------------->|
-    |<--------------- num_prompt_tokens -------------->|<------- num_generation_tokens (M) ------->|
-    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--generation_0-->|...|<--generation_M-1-->|<--padding-->|
+    If the input tensors contain prompt tokens, the layout is as follows:
+
+    |<---------------------- num_valid_tokens ---------------------->|
+    |<--------------- num_prompt_tokens -------------->|
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--padding-->|
+
+    Otherwise, the layout is as follows:
+
+    |<------------------ num_valid_tokens ------------------->|
+    |<------- num_generation_tokens (M) ------->|
+    |<--generation_0-->|...|<--generation_M-1-->|<--padding-->|
 
     The prompts might have different lengths, while the generation tokens always
     have length 1. The paddings are appended to make the input length a multiple
@@ -188,6 +196,8 @@ class PagedAttention(nn.Module):
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
+            # Prompt run.
+            assert input_metadata.num_generation_tokens == 0
             self.set_attn_bias(input_metadata)
             self.multi_query_kv_attention(
                 output[:num_prompt_tokens],
@@ -217,6 +227,8 @@ class PagedAttention(nn.Module):
             )
 
         if input_metadata.num_generation_tokens > 0:
+            # Decoding run.
+            assert input_metadata.num_prompt_tokens == 0
             assert key_cache is not None and value_cache is not None, (
                 "key_cache and value_cache must be provided when "
                 "generating tokens.")
@@ -314,14 +326,13 @@ class PagedAttentionWithRoPE(PagedAttention):
 class PagedAttentionWithALiBi(PagedAttention):
     """PagedAttention with ALiBi attention bias."""
 
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        slopes: List[float],
-    ) -> None:
-        super().__init__(num_heads, head_size, scale)
+    def __init__(self,
+                 num_heads: int,
+                 head_size: int,
+                 scale: float,
+                 slopes: List[float],
+                 num_kv_heads: Optional[int] = None) -> None:
+        super().__init__(num_heads, head_size, scale, num_kv_heads)
         assert len(slopes) == num_heads
 
         slopes = torch.tensor(slopes, dtype=torch.float32)
@@ -334,6 +345,11 @@ class PagedAttentionWithALiBi(PagedAttention):
         # Generates ALiBi mask for each prompt.
         for prompt_len in input_metadata.prompt_lens:
             bias = torch.arange(prompt_len)
+            # Note(zhuohan): HF uses
+            #     `bias = bias[None, :].repeat(prompt_len, 1)`
+            # here. We find that both biases give the same results, but
+            # the bias below more accurately follows the original ALiBi
+            # paper.
             bias = bias[None, :] - bias[:, None]
             bias = bias.to(self.alibi_slopes.device)
 
@@ -363,10 +379,17 @@ class PagedAttentionWithALiBi(PagedAttention):
         Args:
             output: shape = [num_prompt_tokens, num_heads, head_size]
             query: shape = [num_prompt_tokens, num_heads, head_size]
-            key: shape = [num_prompt_tokens, num_heads, head_size]
-            value: shape = [num_prompt_tokens, num_heads, head_size]
+            key: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            value: shape = [num_prompt_tokens, num_kv_heads, head_size]
             input_metadata: metadata for paged attention.
         """
+        if self.num_kv_heads != self.num_heads:
+            # Project the key and value tensors to the desired number of heads.
+            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
+            value = torch.repeat_interleave(value,
+                                            self.num_queries_per_kv,
+                                            dim=1)
+
         # FIXME(woosuk): Because xformers does not support dynamic sequence
         # lengths with custom attention bias, we process each prompt one by
         # one. This is inefficient, especially when we have many short prompts.
@@ -400,9 +423,10 @@ class PagedAttentionWithALiBi(PagedAttention):
         Args:
             output: shape = [num_generation_tokens, num_heads, head_size]
             query: shape = [num_generation_tokens, num_heads, head_size]
-            key_cache: shape = [num_blocks, num_heads, head_size/x,
+            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
-            value_cache: shape = [num_blocks, num_heads, head_size, block_size]
+            value_cache: shape = [num_blocks, num_kv_heads, head_size,
+                block_size]
             input_metadata: metadata for paged attention.
         """
         block_size = value_cache.shape[3]
