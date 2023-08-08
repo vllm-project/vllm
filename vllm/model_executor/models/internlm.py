@@ -165,7 +165,8 @@ class InternLMModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             vocab_size, config.hidden_size, perform_initialization=False)
         self.layers = nn.ModuleList([
-            InternLMDecoderLayer(config) for _ in range(config.num_hidden_layers)
+            InternLMDecoderLayer(config)
+            for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -296,5 +297,3 @@ class InternLMForCausalLM(nn.Module):
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
-
-
