@@ -63,8 +63,7 @@ class ModelConfig:
         if tokenizer_mode not in ["auto", "slow"]:
             raise ValueError(
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
-                "either 'auto' or 'slow'."
-            )
+                "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
 
     def verify_with_parallel_config(
@@ -77,8 +76,7 @@ class ModelConfig:
             raise ValueError(
                 f"Total number of attention heads ({total_num_attention_heads})"
                 " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size})."
-            )
+                f"({tensor_parallel_size}).")
 
         total_num_hidden_layers = self.hf_config.num_hidden_layers
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
@@ -86,8 +84,7 @@ class ModelConfig:
             raise ValueError(
                 f"Total number of hidden layers ({total_num_hidden_layers}) "
                 "must be divisible by pipeline parallel size "
-                f"({pipeline_parallel_size})."
-            )
+                f"({pipeline_parallel_size}).")
 
     def get_hidden_size(self) -> int:
         return self.hf_config.hidden_size
@@ -102,11 +99,9 @@ class ModelConfig:
         # multi_query flag is ignored and we use n_head_kv for the number of
         # KV heads.
         new_decoder_arch_falcon = self.hf_config.model_type == "falcon" and getattr(
-            self.hf_config, "new_decoder_architecture", False
-        )
-        if not new_decoder_arch_falcon and getattr(
-            self.hf_config, "multi_query", False
-        ):
+            self.hf_config, "new_decoder_architecture", False)
+        if not new_decoder_arch_falcon and getattr(self.hf_config,
+                                                   "multi_query", False):
             # Multi-query attention, only one KV head.
             return 1
         # For Falcon:
@@ -114,10 +109,8 @@ class ModelConfig:
             return self.hf_config.n_head_kv // parallel_config.tensor_parallel_size
         # For LLaMA-2:
         if getattr(self.hf_config, "num_key_value_heads", None) is not None:
-            return (
-                self.hf_config.num_key_value_heads
-                // parallel_config.tensor_parallel_size
-            )
+            return (self.hf_config.num_key_value_heads //
+                    parallel_config.tensor_parallel_size)
         total_num_attention_heads = self.hf_config.num_attention_heads
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
@@ -135,9 +128,8 @@ class ModelConfig:
             # GPT-2
             "n_positions",
         ]
-        rope_scaling_factor = getattr(self.hf_config, "rope_scaling", {}).get(
-            "factor", 1.0
-        )
+        rope_scaling_factor = getattr(self.hf_config, "rope_scaling",
+                                      {}).get("factor", 1.0)
         for key in length_keys:
             max_len_key = getattr(self.hf_config, key, None)
             if max_len_key is not None:
@@ -145,7 +137,8 @@ class ModelConfig:
         for key in position_keys:
             max_len_key = getattr(self.hf_config, key, None)
             if max_len_key is not None:
-                max_model_len = min(max_model_len, max_len_key * rope_scaling_factor)
+                max_model_len = min(max_model_len,
+                                    max_len_key * rope_scaling_factor)
         return max_model_len
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
@@ -182,8 +175,7 @@ class CacheConfig:
         if self.gpu_memory_utilization > 1.0:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
-                f"{self.gpu_memory_utilization}."
-            )
+                f"{self.gpu_memory_utilization}.")
 
     def verify_with_parallel_config(
         self,
@@ -195,11 +187,9 @@ class CacheConfig:
         num_gpus_per_node = parallel_config.tensor_parallel_size
         cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
 
-        msg = (
-            f"{cpu_memory_usage / _GB:.2f} GiB out of "
-            f"the {total_cpu_memory / _GB:.2f} GiB total CPU memory is "
-            "allocated for the swap space."
-        )
+        msg = (f"{cpu_memory_usage / _GB:.2f} GiB out of "
+               f"the {total_cpu_memory / _GB:.2f} GiB total CPU memory is "
+               "allocated for the swap space.")
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
@@ -234,7 +224,8 @@ class ParallelConfig:
 
     def _verify_args(self) -> None:
         if self.pipeline_parallel_size > 1:
-            raise NotImplementedError("Pipeline parallelism is not supported yet.")
+            raise NotImplementedError(
+                "Pipeline parallelism is not supported yet.")
 
 
 class SchedulerConfig:
@@ -249,9 +240,8 @@ class SchedulerConfig:
             and generated text).
     """
 
-    def __init__(
-        self, max_num_batched_tokens: int, max_num_seqs: int, max_model_len: int
-    ) -> None:
+    def __init__(self, max_num_batched_tokens: int, max_num_seqs: int,
+                 max_model_len: int) -> None:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
@@ -308,6 +298,5 @@ def _get_and_verify_dtype(
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}."
-            )
+                f"{compute_capability[0]}.{compute_capability[1]}.")
     return torch_dtype
