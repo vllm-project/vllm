@@ -118,22 +118,27 @@ class ModelConfig:
 
     def get_max_model_len(self) -> int:
         max_model_len = float("inf")
-        possible_keys = [
-            # OPT
-            "max_position_embeddings",
-            # GPT-2
-            "n_positions",
-            # MPT
+        length_keys = [
             "max_seq_len",
-            # Others
             "max_sequence_length",
             "max_seq_length",
             "seq_len",
         ]
-        for key in possible_keys:
+        position_keys = [
+            # OPT
+            "max_position_embeddings",
+            # GPT-2
+            "n_positions",
+        ]
+        rope_scaling_factor = getattr(self.hf_config, "rope_scaling", {}).get("factor", 1.0)
+        for key in length_keys:
             max_len_key = getattr(self.hf_config, key, None)
             if max_len_key is not None:
                 max_model_len = min(max_model_len, max_len_key)
+        for key in position_keys:
+            max_len_key = getattr(self.hf_config, key, None)
+            if max_len_key is not None:
+                max_model_len = min(max_model_len, max_len_key * rope_scaling_factor)
         return max_model_len
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
