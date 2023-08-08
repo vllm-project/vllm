@@ -130,7 +130,8 @@ class ModelConfig:
             # GPT-2
             "n_positions",
         ]
-        rope_scaling_factor = getattr(self.hf_config, "rope_scaling", {}).get("factor", 1.0)
+        rope_scaling_factor = getattr(self.hf_config, "rope_scaling",
+                                      {}).get("factor", 1.0)
         for key in length_keys:
             max_len_key = getattr(self.hf_config, key, None)
             if max_len_key is not None:
@@ -138,7 +139,8 @@ class ModelConfig:
         for key in position_keys:
             max_len_key = getattr(self.hf_config, key, None)
             if max_len_key is not None:
-                max_model_len = min(max_model_len, max_len_key * rope_scaling_factor)
+                max_model_len = min(max_model_len,
+                                    max_len_key * rope_scaling_factor)
         return max_model_len
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
