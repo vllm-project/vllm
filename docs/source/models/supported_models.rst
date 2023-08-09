@@ -14,9 +14,15 @@ Alongside each architecture, we include some popular models that use it.
   * - Architecture
     - Models
     - Example HuggingFace Models
+  * - :code:`BaiChuanForCausalLM`
+    - Baichuan
+    - :code:`baichuan-inc/Baichuan-7B`, `baichuan-inc/Baichuan-13B-Chat`, etc.
   * - :code:`BloomForCausalLM`
     - BLOOM, BLOOMZ, BLOOMChat
     - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
+  * - :code:`FalconForCausalLM`
+    - Falcon
+    - :code:`tiiuae/falcon-7b``, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
@@ -30,8 +36,8 @@ Alongside each architecture, we include some popular models that use it.
     - GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM
     - :code:`EleutherAI/gpt-neox-20b`, :code:`EleutherAI/pythia-12b`, :code:`OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, :code:`databricks/dolly-v2-12b`, :code:`stabilityai/stablelm-tuned-alpha-7b`, etc.
   * - :code:`LlamaForCausalLM`
-    - LLaMA, Vicuna, Alpaca, Koala, Guanaco
-    - :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, :code:`JosephusCheung/Guanaco`, etc.
+    - LLaMA, LLaMA-2, Vicuna, Alpaca, Koala, Guanaco
+    - :code:`meta-llama/Llama-2-13b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, :code:`JosephusCheung/Guanaco`, etc.
   * - :code:`MPTForCausalLM`
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.

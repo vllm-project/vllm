@@ -1,11 +1,13 @@
 import time
-from typing import Any, List, Optional
+import copy
+from functools import partial
+from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.ray_utils import DeviceID, initialize_cluster, ray
+from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -13,9 +15,17 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
-from vllm.worker.worker import Worker
+
+if ray:
+    from ray.air.util.torch_dist import init_torch_dist_process_group
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
+
+_LOGGING_INTERVAL_SEC = 5
 
 
 class LLMEngine:
@@ -54,7 +64,7 @@ class LLMEngine:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         distributed_init_method: str,
-        stage_devices: List[List[DeviceID]],
+        placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
         logger.info(
@@ -85,30 +95,82 @@ class LLMEngine:
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
-        self.workers: List[Worker] = []
-        assert len(stage_devices) == 1, "Only support one stage for now."
-        for rank, node_resource, _ in stage_devices[0]:
-            worker_cls = Worker
-            if self.parallel_config.worker_use_ray:
-                worker_cls = ray.remote(
-                    num_cpus=0,
-                    num_gpus=1,
-                    resources={node_resource: 1e-3},
-                )(worker_cls).remote
+        if self.parallel_config.worker_use_ray:
+            self._init_workers_ray(placement_group)
+        else:
+            self._init_workers(distributed_init_method)
 
-            worker = worker_cls(
-                model_config,
-                parallel_config,
-                scheduler_config,
-                rank,
-                distributed_init_method,
-            )
-            self.workers.append(worker)
         # Profile the memory usage and initialize the cache.
         self._init_cache()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config, log_stats)
+        self.scheduler = Scheduler(scheduler_config, cache_config)
+
+        # Logging.
+        self.last_logging_time = 0.0
+        # List of (timestamp, num_tokens)
+        self.num_prompt_tokens: List[Tuple[float, int]] = []
+        # List of (timestamp, num_tokens)
+        self.num_generation_tokens: List[Tuple[float, int]] = []
+
+    def _init_workers(self, distributed_init_method: str):
+        # Lazy import the Worker to avoid importing torch.cuda/xformers
+        # before CUDA_VISIBLE_DEVICES is set in the Worker
+        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+
+        assert self.parallel_config.world_size == 1, (
+            "Ray is required if parallel_config.world_size > 1.")
+
+        self.workers: List[Worker] = []
+        worker = Worker(
+            self.model_config,
+            self.parallel_config,
+            self.scheduler_config,
+            0,
+            distributed_init_method,
+        )
+        self.workers.append(worker)
+        self._run_workers(
+            "init_model",
+            get_all_outputs=True,
+        )
+
+    def _init_workers_ray(self, placement_group: "PlacementGroup"):
+        # Lazy import the Worker to avoid importing torch.cuda/xformers
+        # before CUDA_VISIBLE_DEVICES is set in the Worker
+        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+
+        self.workers: List[Worker] = []
+        for bundle in placement_group.bundle_specs:
+            if not bundle.get("GPU", 0):
+                continue
+            worker = ray.remote(
+                num_cpus=0,
+                num_gpus=1,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=placement_group,
+                    placement_group_capture_child_tasks=True),
+            )(RayWorker).remote()
+            self.workers.append(worker)
+
+        # Initialize torch distributed process group for the workers.
+        init_torch_dist_process_group(self.workers, backend="nccl")
+        model_config = copy.deepcopy(self.model_config)
+        parallel_config = copy.deepcopy(self.parallel_config)
+        scheduler_config = copy.deepcopy(self.scheduler_config)
+        self._run_workers("init_worker",
+                          get_all_outputs=True,
+                          worker_init_fn=lambda: Worker(
+                              model_config,
+                              parallel_config,
+                              scheduler_config,
+                              None,
+                              None,
+                          ))
+        self._run_workers(
+            "init_model",
+            get_all_outputs=True,
+        )
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -152,11 +214,12 @@ class LLMEngine:
         engine_configs = engine_args.create_engine_configs()
         parallel_config = engine_configs[2]
         # Initialize the cluster.
-        distributed_init_method, devices = initialize_cluster(parallel_config)
+        distributed_init_method, placement_group = initialize_cluster(
+            parallel_config)
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      distributed_init_method,
-                     devices,
+                     placement_group,
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
@@ -234,12 +297,17 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        (seq_group_metadata_list, scheduler_outputs,
-         ignored_seq_groups) = self.scheduler.schedule()
-        if ((not seq_group_metadata_list) and scheduler_outputs.is_empty()
-                and (not ignored_seq_groups)):
-            # Nothing to do.
-            return []
+        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        if scheduler_outputs.is_empty():
+            if not scheduler_outputs.ignored_seq_groups:
+                # Nothing to do.
+                return []
+            # If there are ignored seq groups, we need to return them as the
+            # request outputs.
+            return [
+                RequestOutput.from_seq_group(seq_group)
+                for seq_group in scheduler_outputs.ignored_seq_groups
+            ]
 
         # Execute the model.
         output = self._run_workers(
@@ -261,10 +329,78 @@ class LLMEngine:
 
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
-        for seq_group in seq_groups + ignored_seq_groups:
+        for seq_group in seq_groups + scheduler_outputs.ignored_seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
+
+        if self.log_stats:
+            # Log the system stats.
+            self._log_system_stats(scheduler_outputs.prompt_run,
+                                   scheduler_outputs.num_batched_tokens)
         return request_outputs
+
+    def _log_system_stats(
+        self,
+        prompt_run: bool,
+        num_batched_tokens: int,
+    ) -> None:
+        now = time.time()
+        # Log the number of batched input tokens.
+        if prompt_run:
+            self.num_prompt_tokens.append((now, num_batched_tokens))
+        else:
+            self.num_generation_tokens.append((now, num_batched_tokens))
+
+        elapsed_time = now - self.last_logging_time
+        if elapsed_time < _LOGGING_INTERVAL_SEC:
+            return
+
+        # Discard the old stats.
+        self.num_prompt_tokens = [(t, n) for t, n in self.num_prompt_tokens
+                                  if now - t < _LOGGING_INTERVAL_SEC]
+        self.num_generation_tokens = [(t, n)
+                                      for t, n in self.num_generation_tokens
+                                      if now - t < _LOGGING_INTERVAL_SEC]
+
+        if len(self.num_prompt_tokens) > 1:
+            total_num_tokens = sum(n for _, n in self.num_prompt_tokens[:-1])
+            window = now - self.num_prompt_tokens[0][0]
+            avg_prompt_throughput = total_num_tokens / window
+        else:
+            avg_prompt_throughput = 0.0
+        if len(self.num_generation_tokens) > 1:
+            total_num_tokens = sum(n
+                                   for _, n in self.num_generation_tokens[:-1])
+            window = now - self.num_generation_tokens[0][0]
+            avg_generation_throughput = total_num_tokens / window
+        else:
+            avg_generation_throughput = 0.0
+
+        total_num_gpu_blocks = self.cache_config.num_gpu_blocks
+        num_free_gpu_blocks = (
+            self.scheduler.block_manager.get_num_free_gpu_blocks())
+        num_used_gpu_blocks = total_num_gpu_blocks - num_free_gpu_blocks
+        gpu_cache_usage = num_used_gpu_blocks / total_num_gpu_blocks
+
+        total_num_cpu_blocks = self.cache_config.num_cpu_blocks
+        if total_num_cpu_blocks > 0:
+            num_free_cpu_blocks = (
+                self.scheduler.block_manager.get_num_free_cpu_blocks())
+            num_used_cpu_blocks = total_num_cpu_blocks - num_free_cpu_blocks
+            cpu_cache_usage = num_used_cpu_blocks / total_num_cpu_blocks
+        else:
+            cpu_cache_usage = 0.0
+
+        logger.info("Avg prompt throughput: "
+                    f"{avg_prompt_throughput:.1f} tokens/s, "
+                    "Avg generation throughput: "
+                    f"{avg_generation_throughput:.1f} tokens/s, "
+                    f"Running: {len(self.scheduler.running)} reqs, "
+                    f"Swapped: {len(self.scheduler.swapped)} reqs, "
+                    f"Pending: {len(self.scheduler.waiting)} reqs, "
+                    f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
+                    f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
+        self.last_logging_time = now
 
     def _decode_sequences(self, seq_groups: List[SequenceGroup]) -> None:
         """Decodes the sequence outputs."""
@@ -299,9 +435,8 @@ class LLMEngine:
                 if stopped:
                     continue
 
-                # Check if the sequence has reached max_seq_len.
-                if (seq.get_len() >=
-                        self.scheduler.scheduler_config.max_seq_len):
+                # Check if the sequence has reached max_model_len.
+                if seq.get_len() > self.scheduler_config.max_model_len:
                     self.scheduler.free_seq(
                         seq, SequenceStatus.FINISHED_LENGTH_CAPPED)
                     continue
@@ -327,9 +462,10 @@ class LLMEngine:
         """Runs the given method on all workers."""
         all_outputs = []
         for worker in self.workers:
-            executor = getattr(worker, method)
             if self.parallel_config.worker_use_ray:
-                executor = executor.remote
+                executor = partial(worker.execute_method.remote, method)
+            else:
+                executor = getattr(worker, method)
 
             output = executor(*args, **kwargs)
             all_outputs.append(output)

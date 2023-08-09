@@ -7,15 +7,13 @@ from http import HTTPStatus
 import json
 import time
 from typing import AsyncGenerator, Dict, List, Optional
+from packaging import version
 
 import fastapi
 from fastapi import BackgroundTasks, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastchat.conversation import Conversation, SeparatorStyle
-from fastchat.model.model_adapter import get_conversation_template
-
 import uvicorn
 
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -32,6 +30,14 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import random_uuid
+
+try:
+    import fastchat
+    from fastchat.conversation import Conversation, SeparatorStyle
+    from fastchat.model.model_adapter import get_conversation_template
+    _fastchat_available = True
+except ImportError:
+    _fastchat_available = False
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -63,10 +69,21 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 
 async def get_gen_prompt(request) -> str:
+    if not _fastchat_available:
+        raise ModuleNotFoundError(
+            "fastchat is not installed. Please install fastchat to use "
+            "the chat completion and conversation APIs: `$ pip install fschat`"
+        )
+    if version.parse(fastchat.__version__) < version.parse("0.2.23"):
+        raise ImportError(
+            f"fastchat version is low. Current version: {fastchat.__version__} "
+            "Please upgrade fastchat to use: `$ pip install -U fschat`")
+
     conv = get_conversation_template(request.model)
     conv = Conversation(
         name=conv.name,
-        system=conv.system,
+        system_template=conv.system_template,
+        system_message=conv.system_message,
         roles=conv.roles,
         messages=list(conv.messages),  # prevent in-place modification
         offset=conv.offset,
@@ -83,7 +100,7 @@ async def get_gen_prompt(request) -> str:
         for message in request.messages:
             msg_role = message["role"]
             if msg_role == "system":
-                conv.system = message["content"]
+                conv.system_message = message["content"]
             elif msg_role == "user":
                 conv.append_message(conv.roles[0], message["content"])
             elif msg_role == "assistant":
@@ -98,25 +115,14 @@ async def get_gen_prompt(request) -> str:
     return prompt
 
 
-async def check_length(request, prompt, model_config):
-    if hasattr(model_config.hf_config, "max_sequence_length"):
-        context_len = model_config.hf_config.max_sequence_length
-    elif hasattr(model_config.hf_config, "seq_length"):
-        context_len = model_config.hf_config.seq_length
-    elif hasattr(model_config.hf_config, "max_position_embeddings"):
-        context_len = model_config.hf_config.max_position_embeddings
-    elif hasattr(model_config.hf_config, "seq_length"):
-        context_len = model_config.hf_config.seq_length
-    else:
-        context_len = 2048
-
+async def check_length(request, prompt):
     input_ids = tokenizer(prompt).input_ids
     token_num = len(input_ids)
 
-    if token_num + request.max_tokens > context_len:
+    if token_num + request.max_tokens > max_model_len:
         return input_ids, create_error_response(
             HTTPStatus.BAD_REQUEST,
-            f"This model's maximum context length is {context_len} tokens. "
+            f"This model's maximum context length is {max_model_len} tokens. "
             f"However, you requested {request.max_tokens + token_num} tokens "
             f"({token_num} in the messages, "
             f"{request.max_tokens} in the completion). "
@@ -185,8 +191,7 @@ async def create_chat_completion(raw_request: Request):
                                      "logit_bias is not currently supported")
 
     prompt = await get_gen_prompt(request)
-    token_ids, error_check_ret = await check_length(request, prompt,
-                                                    engine_model_config)
+    token_ids, error_check_ret = await check_length(request, prompt)
     if error_check_ret is not None:
         return error_check_ret
 
@@ -591,10 +596,12 @@ if __name__ == "__main__":
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     engine_model_config = asyncio.run(engine.get_model_config())
+    max_model_len = engine_model_config.get_max_model_len()
 
     # A separate tokenizer to map token IDs to strings.
     tokenizer = get_tokenizer(engine_args.tokenizer,
-                              tokenizer_mode=engine_args.tokenizer_mode)
+                              tokenizer_mode=engine_args.tokenizer_mode,
+                              trust_remote_code=engine_args.trust_remote_code)
 
     uvicorn.run(app,
                 host=args.host,

@@ -1,7 +1,4 @@
 # coding=utf-8
-# Adapted from
-# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
-# Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -20,21 +17,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights.
+"""Inference-only BaiChuan model compatible with HuggingFace weights.
 
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
+import math
 from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
 
+from vllm.sequence import SequenceOutputs
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, PagedAttentionWithALiBi
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
@@ -42,12 +40,37 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.sequence import SequenceOutputs
+from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class LlamaMLP(nn.Module):
+def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
+    closest_power_of_2 = 2**math.floor(math.log2(total_num_heads))
+    base = torch.tensor(
+        2**(-(2**-(math.log2(closest_power_of_2) - 3))),
+        dtype=torch.float32,
+    )
+    powers = torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32)
+    slopes = torch.pow(base, powers)
+
+    if closest_power_of_2 != total_num_heads:
+        extra_base = torch.tensor(
+            2**(-(2**-(math.log2(2 * closest_power_of_2) - 3))),
+            dtype=torch.float32,
+        )
+        num_remaining_heads = min(closest_power_of_2,
+                                  total_num_heads - closest_power_of_2)
+        extra_powers = torch.arange(start=1,
+                                    end=1 + 2 * num_remaining_heads,
+                                    step=2,
+                                    dtype=torch.int32)
+        slopes = torch.cat(
+            [slopes, torch.pow(extra_base, extra_powers)], dim=0)
+    return slopes
+
+
+class BaiChuanMLP(nn.Module):
 
     def __init__(
         self,
@@ -78,32 +101,30 @@ class LlamaMLP(nn.Module):
         return x
 
 
-class LlamaAttention(nn.Module):
+class BaiChuanAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
-        num_kv_heads: int,
+        position_embedding: str,
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
+        )
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        assert self.total_num_kv_heads % tp_size == 0
-        self.num_kv_heads = self.total_num_kv_heads // tp_size
+        assert self.total_num_heads % tensor_model_parallel_world_size == 0
+        self.num_heads = (self.total_num_heads //
+                          tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
+        self.postion_embedding = position_embedding
 
-        self.qkv_proj = ColumnParallelLinear(
+        # pylint: disable=invalid-name
+        self.W_pack = ColumnParallelLinear(
             hidden_size,
-            (self.total_num_heads + 2 * self.total_num_kv_heads) *
-            self.head_dim,
+            3 * hidden_size,
             bias=False,
             gather_output=False,
             perform_initialization=False,
@@ -115,11 +136,23 @@ class LlamaAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads)
+        # Create the alibi slopes and slice them.
+        if self.postion_embedding == "ALIBI":
+            tp_rank = get_tensor_model_parallel_rank()
+            head_start = tp_rank * self.num_heads
+            head_end = (tp_rank + 1) * self.num_heads
+            alibi_slopes = _get_alibi_slopes(self.total_num_heads)
+            alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+
+            scaling = self.head_dim**-0.5
+            self.attn = PagedAttentionWithALiBi(self.num_heads, self.head_dim,
+                                                scaling, alibi_slopes)
+        else:
+            self.scaling = self.head_dim**-0.5
+            self.attn = PagedAttentionWithRoPE(self.num_heads,
+                                               self.head_dim,
+                                               self.scaling,
+                                               rotary_dim=self.head_dim)
 
     def forward(
         self,
@@ -129,26 +162,31 @@ class LlamaAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        qkv, _ = self.W_pack(hidden_states)
+        q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        if self.postion_embedding == "ALIBI":
+            attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                    cache_event)
+        else:
+            attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
+                                    input_metadata, cache_event)
+
         output, _ = self.o_proj(attn_output)
         return output
 
 
-class LlamaDecoderLayer(nn.Module):
+class BaiChuanDecoderLayer(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: BaiChuanConfig, position_embedding: str):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = LlamaAttention(
+        self.self_attn = BaiChuanAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
+            position_embedding=position_embedding,
         )
-        self.mlp = LlamaMLP(
+        self.mlp = BaiChuanMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -186,19 +224,21 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states
 
 
-class LlamaModel(nn.Module):
+class BaiChuanModel(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: BaiChuanConfig, position_embedding: str):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
-            vocab_size, config.hidden_size, perform_initialization=False)
+            config.vocab_size,
+            config.hidden_size,
+            perform_initialization=False)
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)
+            BaiChuanDecoderLayer(config, position_embedding)
+            for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -228,15 +268,14 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-class LlamaForCausalLM(nn.Module):
+class BaiChuanBaseForCausalLM(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, position_embedding: str):
         super().__init__()
         self.config = config
-        self.model = LlamaModel(config)
-        vocab_size = ((config.vocab_size + 63) // 64) * 64
+        self.model = BaiChuanModel(config, position_embedding)
         self.lm_head = ColumnParallelLinear(config.hidden_size,
-                                            vocab_size,
+                                            config.vocab_size,
                                             bias=False,
                                             gather_output=False,
                                             perform_initialization=False)
@@ -257,8 +296,8 @@ class LlamaForCausalLM(nn.Module):
         return next_tokens
 
     _column_parallel_weights = [
-        "embed_tokens.weight", "lm_head.weight", "qkv_proj.weight",
-        "gate_proj.weight", "up_proj.weight"
+        "embed_tokens.weight",
+        "lm_head.weight",
     ]
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
@@ -266,19 +305,8 @@ class LlamaForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
-        tp_size = get_tensor_model_parallel_world_size()
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        q_proj_shard_size = (self.config.hidden_size // tp_size)
-        kv_proj_shard_size = (self.config.hidden_size //
-                              self.config.num_attention_heads *
-                              self.config.num_key_value_heads // tp_size)
-        attention_weight_specs = [
-            # (weight_name, shard_size, offset)
-            ("q_proj", q_proj_shard_size, 0),
-            ("k_proj", kv_proj_shard_size, q_proj_shard_size),
-            ("v_proj", kv_proj_shard_size,
-             q_proj_shard_size + kv_proj_shard_size),
-        ]
+        tp_world_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
@@ -287,32 +315,27 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             if "embed_tokens" in name or "lm_head" in name:
-                param = state_dict[name]
                 # Consider padding in the vocab size.
-                padded_vocab_size = (param.shape[0] * tp_size)
+                param = state_dict[name]
+                padded_vocab_size = param.shape[0] * tp_world_size
                 num_extra_rows = padded_vocab_size - self.config.vocab_size
                 extra_rows = torch.empty(num_extra_rows,
                                          loaded_weight.shape[1])
                 extra_rows = extra_rows.to(loaded_weight)
                 loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
 
-            is_attention_weight = False
-            for weight_name, shard_size, offset in attention_weight_specs:
-                if weight_name not in name:
-                    continue
-                param = state_dict[name.replace(weight_name, "qkv_proj")]
+            if "W_pack" in name:
+                total_num_heads = self.config.num_attention_heads
+                hidden_size = self.config.hidden_size
+                head_size = hidden_size // total_num_heads
+                num_heads = total_num_heads // tp_world_size
+                head_start = tp_rank * num_heads
+                head_end = (tp_rank + 1) * num_heads
 
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[offset:offset + shard_size]
-                assert param_slice.shape == loaded_weight.shape
-
-                param_slice.copy_(loaded_weight)
-                is_attention_weight = True
-                break
-            if is_attention_weight:
-                continue
+                loaded_weight = loaded_weight.view(3, total_num_heads,
+                                                   head_size, hidden_size)
+                loaded_weight = loaded_weight[:, head_start:head_end, :, :]
+                loaded_weight = loaded_weight.reshape(-1, hidden_size)
 
             is_gate_up_weight = False
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
@@ -320,9 +343,8 @@ class LlamaForCausalLM(nn.Module):
                     continue
                 param = state_dict[name.replace(weight_name, "gate_up_proj")]
                 shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
+                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
+                                              (tp_rank + 1)]
                 param_slice = param.data[shard_size * stride_id:shard_size *
                                          (stride_id + 1)]
                 assert param_slice.shape == loaded_weight.shape
@@ -333,7 +355,23 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             param = state_dict[name]
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         self._column_parallel_weights,
-                                         self._row_parallel_weights,
-                                         tensor_model_parallel_rank)
+            load_tensor_parallel_weights(
+                param,
+                loaded_weight,
+                name,
+                self._column_parallel_weights,
+                self._row_parallel_weights,
+                tp_rank,
+            )
+
+
+class BaichuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 13b
+
+    def __init__(self, config):
+        super().__init__(config, "ALIBI")
+
+
+class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 7b
+
+    def __init__(self, config):
+        super().__init__(config, "ROPE")

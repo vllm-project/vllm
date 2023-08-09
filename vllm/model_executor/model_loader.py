@@ -11,7 +11,10 @@ from vllm.model_executor.weight_utils import initialize_dummy_weights
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
+    "BaiChuanForCausalLM": BaiChuanForCausalLM,  # baichuan-7b
+    "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
     "BloomForCausalLM": BloomForCausalLM,
+    "FalconForCausalLM": FalconForCausalLM,
     "GPT2LMHeadModel": GPT2LMHeadModel,
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
     "GPTJForCausalLM": GPTJForCausalLM,
@@ -20,6 +23,8 @@ _MODEL_REGISTRY = {
     "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
+    "QWenLMHeadModel": QWenLMHeadModel,
+    "RWForCausalLM": FalconForCausalLM,
 }
 
 

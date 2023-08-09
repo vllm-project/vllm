@@ -10,7 +10,8 @@ def main(args: argparse.Namespace):
 
     # Test the following prompts.
     test_prompts = [
-        ("A robot may not injure a human being", SamplingParams()),
+        ("A robot may not injure a human being",
+         SamplingParams(temperature=0.0)),
         ("To be or not to be,",
          SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
         ("What is the meaning of life?",
@@ -27,7 +28,7 @@ def main(args: argparse.Namespace):
     # Run the engine by calling `engine.step()` manually.
     request_id = 0
     while True:
-        # To test iteration-level scheduling, we add one request at each step.
+        # To test continuous batching, we add one request at each step.
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
             engine.add_request(str(request_id), prompt, sampling_params)
