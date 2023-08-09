@@ -388,8 +388,7 @@ async def create_completion(raw_request: Request):
     else:
         prompt = request.prompt
 
-    token_ids, error_check_ret = await check_length(request, prompt,
-                                                    engine_model_config)
+    token_ids, error_check_ret = await check_length(request, prompt)
     if error_check_ret is not None:
         return error_check_ret
 
