@@ -397,7 +397,7 @@ async def create_completion(raw_request: Request):
         if isinstance(first_element, int):
             use_token_ids = True
             prompt = request.prompt
-        elif isinstance(first_element, str) or isinstance(first_element, list):
+        elif isinstance(first_element, (str, list)):
             # TODO: handles multiple prompt case in list[list[int]]
             if len(request.prompt) > 1:
                 return create_error_response(
@@ -409,9 +409,13 @@ async def create_completion(raw_request: Request):
         prompt = request.prompt
 
     if use_token_ids:
-        token_ids, error_check_ret = await check_length(request, prompt_ids=prompt)
+        token_ids, error_check_ret = await check_length(
+            request, prompt_ids=prompt
+        )
     else:
-        token_ids, error_check_ret = await check_length(request, prompt=prompt)
+        token_ids, error_check_ret = await check_length(
+            request, prompt=prompt
+        )
     if error_check_ret is not None:
         return error_check_ret
 
@@ -435,7 +439,9 @@ async def create_completion(raw_request: Request):
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
     if use_token_ids:
-        result_generator = engine.generate(None, sampling_params, request_id, prompt_token_ids=prompt)
+        result_generator = engine.generate(
+            None, sampling_params, request_id, prompt_token_ids=prompt
+        )
     else:
         result_generator = engine.generate(prompt, sampling_params, request_id)
 
