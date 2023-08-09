@@ -32,7 +32,6 @@ from torch import nn
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
@@ -77,7 +76,6 @@ class AquilaMLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
-# Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Aquila
 class AquilaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
@@ -90,7 +88,8 @@ class AquilaRMSNorm(nn.Module):
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
         variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * torch.rsqrt(variance + 
+                                                    self.variance_epsilon)
 
         return (self.weight * hidden_states).to(input_dtype)
 
