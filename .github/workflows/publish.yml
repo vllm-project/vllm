@@ -1,0 +1,90 @@
+# This workflow will upload a Python Package to Release asset
+# For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions
+
+name: Create Release
+
+on:
+  push:
+    branches:
+      - release/*
+
+# Needed to create release and upload assets
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Tags and releases the branch
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Extract branch info
+        shell: bash
+        # The tag is the branch name with the prefix removed.
+        # for example: release/v1.0.0 -> v1.0.0
+        run: |
+          release_tag=$(echo "${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" | sed -e 's/.*\///g')
+          echo "release_tag=$release_tag" >> $GITHUB_ENV
+        id: extract_branch
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.release_tag }}
+          release_name: ${{ env.release_tag }}
+
+  wheel:
+    name: Build Wheel
+    runs-on: ${{ matrix.os }}
+    needs: release
+    
+    strategy:
+      fail-fast: false
+      matrix:
+          os: ['ubuntu-20.04']
+          python-version: ['3.8', '3.9', '3.10', '3.11']
+          cuda-version: ['11.8'] # Github runner can't build anything older than 11.8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up Linux Env
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          bash -x .github/workflows/scripts/env.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+            python-version: ${{ matrix.python-version }}
+
+      - name: Install CUDA ${{ matrix.cuda-version }}
+        run: |
+          bash -x .github/workflows/scripts/cuda-install.sh ${{ matrix.cuda-version }} ${{ matrix.os }}
+
+      - name: Install PyTorch-cu${{ matrix.cuda-version }}
+        run: |
+          bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
+
+      - name: Build wheel
+        run: |
+          bash -x .github/workflows/scripts/build.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
+          wheel_name=$(ls dist/*whl | xargs -n 1 basename)
+          echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
+      
+      - name: Upload Release Asset
+        id: upload_release_asset 
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.release.outputs.upload_url }}
+          asset_path: ./dist/${{env.wheel_name}}
+          asset_name: ${{env.wheel_name}}
+          asset_content_type: application/*
