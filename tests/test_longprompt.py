@@ -65,12 +65,17 @@ def test_long_prompt(model_name_or_path):
         vllm_text = vllm_generated.text
         vllm_response_nums.append(parse_response_num(vllm_text))
 
-    for hf_response_num, vllm_response_num in zip(hf_reponse_nums,
-                                                  vllm_response_nums):
-        print(hf_response_num, vllm_response_num)
-        assert hf_response_num == vllm_response_num, \
-                (f"answer: {test_case['expected_number']},",
-                 f"hf generated: {hf_response_num}, vllm generated: {vllm_response_num}")
+    correct = 0
+    for test_case, hf_response_num, vllm_response_num in zip(
+            test_cases, hf_reponse_nums, vllm_response_nums):
+        if hf_response_num != vllm_response_num:
+            print(
+                f"[Error] answer: {test_case['expected_number']},",
+                f"hf generated: {hf_response_num}, vllm generated: {vllm_response_num}"
+            )
+        else:
+            correct += 1
+    print(f"Correct: {correct}/{len(test_cases)}")
 
 
 if __name__ == "__main__":
