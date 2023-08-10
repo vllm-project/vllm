@@ -136,8 +136,7 @@ class ModelConfig:
         if rope_scaling is not None:
             scale_factor = rope_scaling['factor'] if rope_scaling else 1.0
             max_position_embeddings = getattr(self.hf_config,
-                                    'max_position_embeddings',
-                                    None)
+                                              'max_position_embeddings', None)
             assert max_position_embeddings is not None
             max_model_len = max_position_embeddings * scale_factor
         return max_model_len
