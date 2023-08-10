@@ -19,10 +19,12 @@ _MODEL_REGISTRY = {
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
     "GPTJForCausalLM": GPTJForCausalLM,
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
+    "InternLMForCausalLM": InternLMForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
     "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
+    "QWenLMHeadModel": QWenLMHeadModel,
     "RWForCausalLM": FalconForCausalLM,
 }
 
