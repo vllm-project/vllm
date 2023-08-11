@@ -409,7 +409,7 @@ async def create_completion(raw_request: Request):
         prompt = request.prompt
 
     if use_token_ids:
-        token_ids, error_check_ret = await check_length(
+        _, error_check_ret = await check_length(
             request, prompt_ids=prompt
         )
     else:
