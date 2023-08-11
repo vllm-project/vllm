@@ -20,6 +20,7 @@ from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+
 class InternLMMLP(nn.Module):
 
     def __init__(
