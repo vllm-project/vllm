@@ -116,14 +116,13 @@ async def get_gen_prompt(request) -> str:
 
 
 async def check_length(
-        request: Union[ChatCompletionRequest, CompletionRequest],
-        prompt: Optional[str] = None,
-        prompt_ids: Optional[List[int]] = None
+    request: Union[ChatCompletionRequest, CompletionRequest],
+    prompt: Optional[str] = None,
+    prompt_ids: Optional[List[int]] = None
 ) -> Tuple[List[int], Optional[JSONResponse]]:
-    assert (
-        not (prompt is None and prompt_ids is None)
-        and not (prompt is not None and prompt_ids is not None)
-    ), "Either prompt or prompt_ids should be provided."
+    assert (not (prompt is None and prompt_ids is None)
+            and not (prompt is not None and prompt_ids is not None)
+            ), "Either prompt or prompt_ids should be provided."
     if prompt_ids is not None:
         input_ids = prompt_ids
     else:
@@ -409,13 +408,9 @@ async def create_completion(raw_request: Request):
         prompt = request.prompt
 
     if use_token_ids:
-        _, error_check_ret = await check_length(
-            request, prompt_ids=prompt
-        )
+        _, error_check_ret = await check_length(request, prompt_ids=prompt)
     else:
-        token_ids, error_check_ret = await check_length(
-            request, prompt=prompt
-        )
+        token_ids, error_check_ret = await check_length(request, prompt=prompt)
     if error_check_ret is not None:
         return error_check_ret
 
@@ -439,11 +434,13 @@ async def create_completion(raw_request: Request):
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
     if use_token_ids:
-        result_generator = engine.generate(
-            None, sampling_params, request_id, prompt_token_ids=prompt
-        )
+        result_generator = engine.generate(None,
+                                           sampling_params,
+                                           request_id,
+                                           prompt_token_ids=prompt)
     else:
-        result_generator = engine.generate(prompt, sampling_params, request_id)
+        result_generator = engine.generate(prompt, sampling_params, request_id,
+                                           token_ids)
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.
