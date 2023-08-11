@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers  import  LlamaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -19,20 +20,6 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
 from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-from transformers.utils import (HF_MODULES_CACHE,
-                                TRANSFORMERS_DYNAMIC_MODULE_NAME)
-
-path = sys.path.append('/'.join((HF_MODULES_CACHE, TRANSFORMERS_DYNAMIC_MODULE_NAME)))
-
-try:
-    from internlm.configuration_internlm import InternLMConfig
-    from internlm.modeling_internlm import InternLMModel
-except ImportError as e:
-    print(f"InternLM is not ported to transformers' local module cache at {path}."
-          f"Try running `AutoModelForCausalLM.from_pretrained('internlm/internlm-chat-7b')` once "
-          f"to make transformers copy the codes to its hub.")
-    raise e
 
 class InternLMMLP(nn.Module):
 
@@ -121,7 +108,7 @@ class InternLMAttention(nn.Module):
 
 class InternLMDecoderLayer(nn.Module):
 
-    def __init__(self, config: InternLMConfig):
+    def __init__(self, config: LlamaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = InternLMAttention(
@@ -168,7 +155,7 @@ class InternLMDecoderLayer(nn.Module):
 
 class InternLMModel(nn.Module):
 
-    def __init__(self, config: InternLMConfig):
+    def __init__(self, config: LlamaConfig):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
