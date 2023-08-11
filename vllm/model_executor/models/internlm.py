@@ -272,7 +272,6 @@ class InternLMForCausalLM(nn.Module):
                 break
             if is_attention_weight:
                 continue
-            # TODO: current implementation works without TP, bias is not handled
 
             is_gate_up_weight = False
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
