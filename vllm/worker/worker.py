@@ -7,7 +7,7 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
-from vllm.model_executor import get_model, InputMetadata, set_random_seed
+from vllm.model_executor import get_model, get_quant_model_v2, InputMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sampling_params import SamplingParams
@@ -64,7 +64,8 @@ class Worker:
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
-        self.model = get_model(self.model_config)
+        # self.model = get_model(self.model_config)
+        self.model = get_quant_model_v2(self.model_config)
 
     @torch.inference_mode()
     def profile_num_available_blocks(

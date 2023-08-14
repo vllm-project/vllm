@@ -23,8 +23,10 @@ _MODEL_REGISTRY = {
     "GPTJForCausalLM": GPTJForCausalLM,
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "InternLMForCausalLM": InternLMForCausalLM,
-    "LlamaForCausalLM": LlamaForCausalLM,
-    "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    # "LlamaForCausalLM": LlamaForCausalLM,
+    # "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    "LlamaForCausalLM": LlamaQForCausalLM,
+    "LLaMAForCausalLM": LlamaQForCausalLM,  # For decapoda-research/llama-*
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
@@ -100,4 +102,22 @@ def get_model(model_config: ModelConfig) -> nn.Module:
             model.load_weights(model_config.model, model_config.download_dir,
                                model_config.load_format, model_config.revision)
             model = model.cuda()
+    return model.eval()
+
+
+def get_quant_model_v2(model_config: ModelConfig) -> nn.Module:
+    model_class = _get_model_architecture(model_config.hf_config)
+    torch.set_default_dtype(model_config.dtype)
+
+    # Create a model instance.
+    # The weights will be initialized as empty tensors.
+    model = model_class(model_config.hf_config)
+
+    int4_path = "/workdir/code/awq-llama/quant_cache/llama"
+    fp16_path = "/mnt/dolphinfs/hdd_pool/docker/share/1/zhangpeng/zhangpeng/model_weights/llama/13b"
+
+    model.load_mix_weights2(fp16_path, int4_path, model_config.download_dir,
+                           model_config.use_np_weights)
+    model = model.cuda()
+
     return model.eval()
