@@ -407,41 +407,44 @@ class LlamaForCausalLM(nn.Module):
                 extra_rows = extra_rows.to(loaded_weight)
                 loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
 
-            is_attention_weight = False
-            for weight_name, shard_size, offset in attention_weight_specs:
-                if weight_name not in name:
+            is_quantized = self.quant_config is not None and self.quant_config.method is not None
+
+            if not is_quantized:
+                is_attention_weight = False
+                for weight_name, shard_size, offset in attention_weight_specs:
+                    if weight_name not in name:
+                        continue
+                    param = state_dict[name.replace(weight_name, "qkv_proj")]
+
+                    loaded_weight = loaded_weight[
+                        shard_size * tensor_model_parallel_rank:shard_size *
+                        (tensor_model_parallel_rank + 1)]
+                    param_slice = param.data[offset:offset + shard_size]
+                    assert param_slice.shape == loaded_weight.shape
+
+                    param_slice.copy_(loaded_weight)
+                    is_attention_weight = True
+                    break
+                if is_attention_weight:
                     continue
-                param = state_dict[name.replace(weight_name, "qkv_proj")]
 
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[offset:offset + shard_size]
-                assert param_slice.shape == loaded_weight.shape
-
-                param_slice.copy_(loaded_weight)
-                is_attention_weight = True
-                break
-            if is_attention_weight:
-                continue
-
-            is_gate_up_weight = False
-            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
-                if weight_name not in name:
+                is_gate_up_weight = False
+                for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+                    if weight_name not in name:
+                        continue
+                    param = state_dict[name.replace(weight_name, "gate_up_proj")]
+                    shard_size = param.shape[0] // 2
+                    loaded_weight = loaded_weight[
+                        shard_size * tensor_model_parallel_rank:shard_size *
+                        (tensor_model_parallel_rank + 1)]
+                    param_slice = param.data[shard_size * stride_id:shard_size *
+                                             (stride_id + 1)]
+                    assert param_slice.shape == loaded_weight.shape
+                    param_slice.copy_(loaded_weight)
+                    is_gate_up_weight = True
+                    break
+                if is_gate_up_weight:
                     continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
-                shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_gate_up_weight = True
-                break
-            if is_gate_up_weight:
-                continue
 
             param = state_dict[name]
             load_tensor_parallel_weights(param, loaded_weight, name,
