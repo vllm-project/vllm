@@ -3,17 +3,18 @@
 
 import argparse
 import asyncio
-from http import HTTPStatus
 import json
 import time
-from typing import AsyncGenerator, Dict, List, Optional
+from http import HTTPStatus
+from typing import AsyncGenerator, Dict, List, Optional, Tuple, Union
 
 import fastapi
+import uvicorn
 from fastapi import BackgroundTasks, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-import uvicorn
+from packaging import version
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -31,6 +32,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import random_uuid
 
 try:
+    import fastchat
     from fastchat.conversation import Conversation, SeparatorStyle
     from fastchat.model.model_adapter import get_conversation_template
     _fastchat_available = True
@@ -72,10 +74,16 @@ async def get_gen_prompt(request) -> str:
             "fastchat is not installed. Please install fastchat to use "
             "the chat completion and conversation APIs: `$ pip install fschat`"
         )
+    if version.parse(fastchat.__version__) < version.parse("0.2.23"):
+        raise ImportError(
+            f"fastchat version is low. Current version: {fastchat.__version__} "
+            "Please upgrade fastchat to use: `$ pip install -U fschat`")
+
     conv = get_conversation_template(request.model)
     conv = Conversation(
         name=conv.name,
-        system=conv.system,
+        system_template=conv.system_template,
+        system_message=conv.system_message,
         roles=conv.roles,
         messages=list(conv.messages),  # prevent in-place modification
         offset=conv.offset,
@@ -92,7 +100,7 @@ async def get_gen_prompt(request) -> str:
         for message in request.messages:
             msg_role = message["role"]
             if msg_role == "system":
-                conv.system = message["content"]
+                conv.system_message = message["content"]
             elif msg_role == "user":
                 conv.append_message(conv.roles[0], message["content"])
             elif msg_role == "assistant":
@@ -107,12 +115,22 @@ async def get_gen_prompt(request) -> str:
     return prompt
 
 
-async def check_length(request, prompt):
-    input_ids = tokenizer(prompt).input_ids
+async def check_length(
+    request: Union[ChatCompletionRequest, CompletionRequest],
+    prompt: Optional[str] = None,
+    prompt_ids: Optional[List[int]] = None
+) -> Tuple[List[int], Optional[JSONResponse]]:
+    assert (not (prompt is None and prompt_ids is None)
+            and not (prompt is not None and prompt_ids is not None)
+            ), "Either prompt or prompt_ids should be provided."
+    if prompt_ids is not None:
+        input_ids = prompt_ids
+    else:
+        input_ids = tokenizer(prompt).input_ids
     token_num = len(input_ids)
 
     if token_num + request.max_tokens > max_model_len:
-        return create_error_response(
+        return input_ids, create_error_response(
             HTTPStatus.BAD_REQUEST,
             f"This model's maximum context length is {max_model_len} tokens. "
             f"However, you requested {request.max_tokens + token_num} tokens "
@@ -121,7 +139,7 @@ async def check_length(request, prompt):
             f"Please reduce the length of the messages or completion.",
         )
     else:
-        return None
+        return input_ids, None
 
 
 @app.get("/v1/models")
@@ -183,7 +201,7 @@ async def create_chat_completion(raw_request: Request):
                                      "logit_bias is not currently supported")
 
     prompt = await get_gen_prompt(request)
-    error_check_ret = await check_length(request, prompt)
+    token_ids, error_check_ret = await check_length(request, prompt=prompt)
     if error_check_ret is not None:
         return error_check_ret
 
@@ -207,7 +225,8 @@ async def create_chat_completion(raw_request: Request):
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
-    result_generator = engine.generate(prompt, sampling_params, request_id)
+    result_generator = engine.generate(prompt, sampling_params, request_id,
+                                       token_ids)
 
     async def abort_request() -> None:
         await engine.abort(request_id)
@@ -367,17 +386,34 @@ async def create_completion(raw_request: Request):
 
     model_name = request.model
     request_id = f"cmpl-{random_uuid()}"
+
+    use_token_ids = False
     if isinstance(request.prompt, list):
         if len(request.prompt) == 0:
             return create_error_response(HTTPStatus.BAD_REQUEST,
                                          "please provide at least one prompt")
-        if len(request.prompt) > 1:
-            return create_error_response(
-                HTTPStatus.BAD_REQUEST,
-                "multiple prompts in a batch is not currently supported")
-        prompt = request.prompt[0]
+        first_element = request.prompt[0]
+        if isinstance(first_element, int):
+            use_token_ids = True
+            prompt = request.prompt
+        elif isinstance(first_element, (str, list)):
+            # TODO: handles multiple prompt case in list[list[int]]
+            if len(request.prompt) > 1:
+                return create_error_response(
+                    HTTPStatus.BAD_REQUEST,
+                    "multiple prompts in a batch is not currently supported")
+            use_token_ids = not isinstance(first_element, str)
+            prompt = request.prompt[0]
     else:
         prompt = request.prompt
+
+    if use_token_ids:
+        _, error_check_ret = await check_length(request, prompt_ids=prompt)
+    else:
+        token_ids, error_check_ret = await check_length(request, prompt=prompt)
+    if error_check_ret is not None:
+        return error_check_ret
+
     created_time = int(time.time())
     try:
         sampling_params = SamplingParams(
@@ -397,7 +433,14 @@ async def create_completion(raw_request: Request):
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
-    result_generator = engine.generate(prompt, sampling_params, request_id)
+    if use_token_ids:
+        result_generator = engine.generate(None,
+                                           sampling_params,
+                                           request_id,
+                                           prompt_token_ids=prompt)
+    else:
+        result_generator = engine.generate(prompt, sampling_params, request_id,
+                                           token_ids)
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.
