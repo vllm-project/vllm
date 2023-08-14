@@ -3,7 +3,12 @@
 import math
 import torch
 import torch.nn as nn
-import awq_inference_engine  # with CUDA kernels
+
+try:
+    import awq_inference_engine  # with CUDA kernels
+except ImportError as ex:
+    msg = "Unable to import awq_inference_engine: run setup.py to install CUDA kernels"
+    raise ImportError(msg)
 
 
 class ScaledActivation(nn.Module):
