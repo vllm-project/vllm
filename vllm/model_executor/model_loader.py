@@ -40,7 +40,12 @@ def get_model(model_config: ModelConfig, quantization_config: QuantizationConfig
 
     # Create a model instance.
     # The weights will be initialized as empty tensors.
-    model = model_class(model_config.hf_config, quantization_config)
+
+    # TODO: better way to do this
+    if quantization_config is not None:
+        model = model_class(model_config.hf_config, quantization_config)
+    else:
+        model = model_class(model_config.hf_config)
 
     if model_config.use_dummy_weights:
         model = model.cuda()
