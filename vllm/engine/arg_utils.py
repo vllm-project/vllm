@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, QuantisationConfig)
 
 
 @dataclass
@@ -28,6 +28,7 @@ class EngineArgs:
     max_num_batched_tokens: int = 2560
     max_num_seqs: int = 256
     disable_log_stats: bool = False
+    quantisation: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -130,6 +131,13 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+
+        # quantisation settings
+        parser.add_argument('--quantisation',
+                            type=str,
+                            default=None,
+                            choices=['awq', None],
+                            help='Method used to quantise the weights')
         return parser
 
     @classmethod
@@ -158,7 +166,8 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.get_max_model_len())
-        return model_config, cache_config, parallel_config, scheduler_config
+        quantisation_config = QuantisationConfig(self.quantisation) if self.quantisation else None
+        return model_config, cache_config, parallel_config, scheduler_config, quantisation_config
 
 
 @dataclass
