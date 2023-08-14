@@ -288,3 +288,32 @@ def _get_and_verify_dtype(
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "
                 f"{compute_capability[0]}.{compute_capability[1]}.")
     return torch_dtype
+
+
+class QuantisationConfig:
+    """Quantisation settings
+
+    Args:
+        method: The quantisation method to apply
+        bits: How many bits the linear layers are quantised to
+        group_size: What size the weights were quantised in groups of
+    """
+
+    def __init__(
+        self,
+        method: str,
+        bits: int,
+        group_size: int
+    ) -> None:
+        self.method = method
+        self.bits = bits
+        self.group_size = group_size
+
+        self._verify()
+
+    def _verify(self) -> None:
+        allowed_methods = ['awq']
+        if self.method not in allowed_method:
+            raise ValueError(
+                f"Unknown quantisation method ({self.method})"
+                f" must be from choice of {allowed_methods}")
