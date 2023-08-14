@@ -290,13 +290,13 @@ def _get_and_verify_dtype(
     return torch_dtype
 
 
-class QuantisationConfig:
-    """Quantisation settings
+class QuantizationConfig:
+    """Quantization settings
 
     Args:
-        method: The quantisation method to apply
-        bits: How many bits the linear layers are quantised to
-        group_size: What size the weights were quantised in groups of
+        method: The quantization method to apply
+        bits: How many bits the linear layers are quantized to
+        group_size: What size the weights were quantized in groups of
     """
 
     def __init__(
@@ -315,5 +315,5 @@ class QuantisationConfig:
         allowed_methods = ['awq']
         if self.method not in allowed_method:
             raise ValueError(
-                f"Unknown quantisation method ({self.method})"
+                f"Unknown quantization method ({self.method})"
                 f" must be from choice of {allowed_methods}")

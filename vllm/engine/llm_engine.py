@@ -3,7 +3,7 @@ from functools import partial
 from typing import Any, List, Optional, TYPE_CHECKING
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, QuantisationConfig)
+                         SchedulerConfig, QuantizationConfig)
 from vllm.core.scheduler import Scheduler
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
@@ -52,7 +52,7 @@ class LLMEngine:
         stage_devices: The list of devices for each stage. Each stage is a list
             of (rank, node_resource, device) tuples.
         log_stats: Whether to log statistics.
-        quantisation_config: Optional settings related to using quantised layers
+        quantization_config: Optional settings related to using quantized layers
     """
 
     def __init__(
@@ -64,7 +64,7 @@ class LLMEngine:
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
-        quantisation_config: Optional[QuantisationConfig]
+        quantization_config: Optional[QuantizationConfig]
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -77,7 +77,7 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"use_np_weights={model_config.use_np_weights}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
-            f"quantisation_method={getattr(quantisation_config, 'method', None)}, "
+            f"quantization_method={getattr(quantization_config, 'method', None)}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -85,7 +85,7 @@ class LLMEngine:
         self.cache_config = cache_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
-        self.quantisation_config = quantisation_config
+        self.quantization_config = quantization_config
         self.log_stats = log_stats
         self._verify_args()
 
