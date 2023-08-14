@@ -6,7 +6,7 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, QuantizationConfig)
 from vllm.model_executor import get_model, InputMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel, initialize_all_reduce_launcher)
@@ -31,10 +31,12 @@ class Worker:
         scheduler_config: SchedulerConfig,
         rank: Optional[int] = None,
         distributed_init_method: Optional[str] = None,
+        quatization_config: Optional[QuantizationConfig] = None
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.quantization_config = quantization_config
         self.rank = rank
         self.distributed_init_method = distributed_init_method
 
@@ -64,7 +66,7 @@ class Worker:
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
-        self.model = get_model(self.model_config)
+        self.model = get_model(self.model_config, self.quantization_config)
         initialize_all_reduce_launcher(
             self.scheduler_config.max_num_batched_tokens,
             self.model_config.get_hidden_size(),

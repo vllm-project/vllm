@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, QuantizationConfig
 from vllm.model_executor.models import *  # pylint: disable=wildcard-import
 from vllm.model_executor.weight_utils import initialize_dummy_weights
 
@@ -34,13 +34,14 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def get_model(model_config: ModelConfig) -> nn.Module:
+def get_model(model_config: ModelConfig, quantization_config: QuantizationConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
     torch.set_default_dtype(model_config.dtype)
 
     # Create a model instance.
     # The weights will be initialized as empty tensors.
-    model = model_class(model_config.hf_config)
+    model = model_class(model_config.hf_config, quantization_config)
+
     if model_config.use_dummy_weights:
         model = model.cuda()
         # NOTE(woosuk): For accurate performance evaluation, we assign

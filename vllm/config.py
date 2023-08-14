@@ -317,3 +317,10 @@ class QuantizationConfig:
             raise ValueError(
                 f"Unknown quantization method ({self.method})"
                 f" must be from choice of {allowed_methods}")
+
+    def verify_with_parallel_config(self, parallel_config: "ParallelConfig") -> None:
+        tensor_parallel_size = parallel_config.tensor_parallel_size
+
+        if self.method is not None and tensor_parallel_size > 1:
+            raise NotImplementedError(
+                "Quantization does not currently support tensor parallelism")

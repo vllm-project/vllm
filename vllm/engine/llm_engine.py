@@ -167,6 +167,9 @@ class LLMEngine:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
+        if self.quantization_config is not None:
+            self.quantization_config.verify_with_parallel_config(self.parallel_config)
+
     def _init_cache(self) -> None:
         """Profiles the memory usage and initializes the KV cache."""
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
