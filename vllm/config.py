@@ -309,8 +309,8 @@ class QuantizationConfig:
     def __init__(
         self,
         method: str,
-        bits: int,
-        group_size: int
+        bits: Optional[int] = 4,
+        group_size: Optional[int] = 128
     ) -> None:
         self.method = method
         self.bits = bits
@@ -320,7 +320,7 @@ class QuantizationConfig:
 
     def _verify(self) -> None:
         allowed_methods = ['awq']
-        if self.method not in allowed_method:
+        if self.method not in allowed_methods:
             raise ValueError(
                 f"Unknown quantization method ({self.method})"
                 f" must be from choice of {allowed_methods}")

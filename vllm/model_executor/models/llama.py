@@ -175,10 +175,10 @@ class QuantLlamaAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
 
         intermediate_size = self.total_num_heads * self.head_dim
-        self.q_proj = get_quantized_layer(hidden_size, intermediate_size)
-        self.k_proj = get_quantized_layer(hidden_size, intermediate_size)
-        self.v_proj = get_quantized_layer(hidden_size, intermediate_size)
-        self.v_proj = get_quantized_layer(intermediate_size, hidden_size)
+        self.q_proj = get_quantized_layer(hidden_size, intermediate_size, quant_config)
+        self.k_proj = get_quantized_layer(hidden_size, intermediate_size, quant_config)
+        self.v_proj = get_quantized_layer(hidden_size, intermediate_size, quant_config)
+        self.o_proj = get_quantized_layer(intermediate_size, hidden_size, quant_config)
 
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
@@ -224,7 +224,7 @@ class QuantLlamaMLP(nn.Module):
 
     def forward(self, x):
         gate_proj = self.act_fn(self.gate_proj(x))
-        gate_up_proj = gate_proj * up_proj
+        gate_up_proj = gate_proj * self.up_proj(x)
         down_proj = self.down_proj(gate_up_proj)
         return down_proj
 

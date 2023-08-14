@@ -31,7 +31,7 @@ class Worker:
         scheduler_config: SchedulerConfig,
         rank: Optional[int] = None,
         distributed_init_method: Optional[str] = None,
-        quatization_config: Optional[QuantizationConfig] = None
+        quantization_config: Optional[QuantizationConfig] = None
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config

@@ -64,10 +64,10 @@ class LLMEngine:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        quantization_config: Optional[QuantizationConfig],
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
-        quantization_config: Optional[QuantizationConfig]
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -132,6 +132,7 @@ class LLMEngine:
             self.scheduler_config,
             0,
             distributed_init_method,
+            quantization_config=self.quantization_config
         )
         self.workers.append(worker)
         self._run_workers(
@@ -170,6 +171,7 @@ class LLMEngine:
                               scheduler_config,
                               None,
                               None,
+                              self.quantization_config
                           ))
         self._run_workers(
             "init_model",

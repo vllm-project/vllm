@@ -47,7 +47,7 @@ def get_model(model_config: ModelConfig, quantization_config: QuantizationConfig
     # The weights will be initialized as empty tensors.
 
     # TODO: better way to do this
-    if quantization_config is not None:
+    if model_class is LlamaForCausalLM:
         model = model_class(model_config.hf_config, quantization_config)
     else:
         model = model_class(model_config.hf_config)
