@@ -44,6 +44,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.sequence import SequenceOutputs
+from vllm.awq_quantization import qmodule
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
