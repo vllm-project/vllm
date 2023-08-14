@@ -113,7 +113,7 @@ def get_quant_model_v2(model_config: ModelConfig) -> nn.Module:
     # The weights will be initialized as empty tensors.
     model = model_class(model_config.hf_config)
 
-    int4_path = "/workdir/code/awq-llama/quant_cache/llama"
+    int4_path = "/mnt/dolphinfs/hdd_pool/docker/share/1/zhangpeng/quanted/quant_cache/llama"
     fp16_path = "/mnt/dolphinfs/hdd_pool/docker/share/1/zhangpeng/zhangpeng/model_weights/llama/13b"
 
     model.load_mix_weights2(fp16_path, int4_path, model_config.download_dir,
