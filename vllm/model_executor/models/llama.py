@@ -56,18 +56,21 @@ class LlamaMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        quant_config: QuantizationConfig=None
     ):
         super().__init__()
         self.gate_up_proj = ColumnParallelLinear(hidden_size,
                                                  2 * intermediate_size,
                                                  bias=False,
                                                  gather_output=False,
-                                                 perform_initialization=False)
+                                                 perform_initialization=False,
+                                                 quant_config=quant_config)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
                                            input_is_parallel=True,
-                                           perform_initialization=False)
+                                           perform_initialization=False,
+                                           quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -87,6 +90,7 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        quant_config: QuantizationConfig=None
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -109,6 +113,7 @@ class LlamaAttention(nn.Module):
             bias=False,
             gather_output=False,
             perform_initialization=False,
+            quant_config=quant_config
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -116,6 +121,7 @@ class LlamaAttention(nn.Module):
             bias=False,
             input_is_parallel=True,
             perform_initialization=False,
+            quant_config=quant_config
         )
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
@@ -176,10 +182,14 @@ class QuantLlamaAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        self.qkv_proj = get_quantized_layer(
+        self.qkv_proj = ColumnParallelLinear(
             hidden_size,
-            (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim,
-            quant_config
+            (self.total_num_heads + 2 * self.total_num_kv_heads) *
+            self.head_dim,
+            bias=False,
+            gather_output=False,
+            perform_initialization=False,
+            quant_config=quant_config
         )
 
         self.o_proj = get_quantized_layer(
@@ -202,7 +212,7 @@ class QuantLlamaAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        qkv = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
@@ -237,7 +247,7 @@ class QuantLlamaMLP(nn.Module):
 
 class LlamaDecoderLayer(nn.Module):
 
-    def __init__(self, config: LlamaConfig, quant_config: QuantizationConfig):
+    def __init__(self, config: LlamaConfig, quant_config: QuantizationConfig=None):
         super().__init__()
         self.hidden_size = config.hidden_size
 
@@ -356,7 +366,8 @@ class LlamaForCausalLM(nn.Module):
                                             vocab_size,
                                             bias=False,
                                             gather_output=False,
-                                            perform_initialization=False)
+                                            perform_initialization=False,
+                                            quant_config=quant_config)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -459,7 +470,7 @@ class LlamaForCausalLM(nn.Module):
                 for stride_id, (weight_name, shard_size, offset) in enumerate(attention_weight_specs):
                     if weight_name not in name:
                         continue
-                    param = state_dict[name.replace(weight_name, "qkv_proj")]
+                    param = state_dict[name.replace(weight_name, "qkv_proj.linear")]
                 
                     # TODO: this is specific to AWQ (should be more general)
                     if 'qweight' in name or 'qzeros' in name:

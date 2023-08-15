@@ -1,3 +1,4 @@
+
 # Copyright 2023 The vLLM team.
 # Adapted from https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/layers.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
@@ -10,6 +11,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn.init as init
 from torch.nn.parameter import Parameter
+from vllm.awq_quantization import qmodule
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -117,6 +119,16 @@ def _initialize_affine_weight_cpu(weight, output_size, input_size,
         return master_weight
     return None
 
+def _get_quantized_layer(in_features, out_features, quant_config):
+    layer = qmodule.WQLinear(
+        w_bit=quant_config.bits,
+        group_size=quant_config.group_size,
+        in_features=in_features,
+        out_features=out_features,
+        bias=None,
+        dev=torch.cuda.current_device()
+    )
+    return layer
 
 class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
@@ -239,6 +251,7 @@ class ColumnParallelLinear(torch.nn.Module):
                  params_dtype=None,
                  use_cpu_initialization=False,
                  perform_initialization=True,
+                 quant_config=None,
                  ):
         super(ColumnParallelLinear, self).__init__()
 
@@ -250,6 +263,7 @@ class ColumnParallelLinear(torch.nn.Module):
         self.world_size = get_tensor_model_parallel_world_size()
         self.output_size_per_partition = divide(output_size, self.world_size)
         self.skip_bias_add = skip_bias_add
+        self.quant_config = quant_config
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -290,6 +304,11 @@ class ColumnParallelLinear(torch.nn.Module):
                 self.bias.zero_()
         else:
             self.register_parameter('bias', None)
+        
+        if self.quant_config is not None:
+            self.linear = _get_quantized_layer(input_size, output_size, self.quant_config)
+        else:
+            self.linear = F.linear
 
 
     def forward(self, input_):
@@ -305,8 +324,13 @@ class ColumnParallelLinear(torch.nn.Module):
         bias = self.bias if not self.skip_bias_add else None
 
         input_parallel = input_
+
         # Matrix multiply.
-        output_parallel = F.linear(input_parallel, self.weight, bias)
+        if self.quant_config is None:
+            output_parallel = F.linear(input_parallel, self.weight, bias)
+        else:
+            output_parallel = self.linear(input_parallel)
+        
         if self.gather_output:
             # All-gather across the partitions.
             output = gather_from_tensor_model_parallel_region(output_parallel)
@@ -361,6 +385,7 @@ class RowParallelLinear(torch.nn.Module):
                  use_cpu_initialization=False,
                  perform_initialization=True,
                  reduce_results=True,
+                 quant_config=None,
                  ):
         super(RowParallelLinear, self).__init__()
 
@@ -376,6 +401,7 @@ class RowParallelLinear(torch.nn.Module):
         self.world_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = divide(input_size, self.world_size)
         self.skip_bias_add = skip_bias_add
+        self.quant_config = quant_config
 
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
@@ -418,6 +444,11 @@ class RowParallelLinear(torch.nn.Module):
             self.register_parameter('bias', None)
         self.weight_t = self.weight.t()
 
+        if self.quant_config is not None:
+            self.linear = _get_quantized_layer(input_size, output_size, self.quant_config)
+        else:
+            self.linear = F.linear
+
     def forward(self, input_):
         """Forward of RowParallelLinear
 
@@ -433,8 +464,13 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = input_
         else:
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
+            
         # Matrix multiply.
-        output_parallel = F.linear(input_parallel, self.weight)
+        if self.quant_config is None:
+            output_parallel = F.linear(input_parallel, self.weight)
+        else:
+            output_parallel = self.linear(input_parallel)
+
         if self.reduce_results and self.world_size > 1:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
         else:
