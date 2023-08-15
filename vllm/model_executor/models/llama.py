@@ -176,9 +176,17 @@ class QuantLlamaAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        intermediate_size = self.total_num_heads * self.head_dim
-        self.qkv_proj = get_quantized_layer(hidden_size, self.q_size + 2 * self.kv_size, quant_config)
-        self.o_proj = get_quantized_layer(intermediate_size, hidden_size, quant_config)
+        self.qkv_proj = get_quantized_layer(
+            hidden_size,
+            (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim,
+            quant_config
+        )
+
+        self.o_proj = get_quantized_layer(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            quant_config
+        )
 
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
@@ -381,6 +389,7 @@ class LlamaForCausalLM(nn.Module):
         kv_proj_shard_size = (self.config.hidden_size //
                               self.config.num_attention_heads *
                               self.config.num_key_value_heads // tp_size)
+
         attention_weight_specs = [
             # (weight_name, shard_size, offset)
             ("q_proj", q_proj_shard_size, 0),
@@ -407,6 +416,7 @@ class LlamaForCausalLM(nn.Module):
 
             is_quantized = self.quant_config is not None and self.quant_config.method is not None
 
+            # merge linear layers
             if not is_quantized:
                 is_attention_weight = False
                 for weight_name, shard_size, offset in attention_weight_specs:
@@ -444,28 +454,19 @@ class LlamaForCausalLM(nn.Module):
                 if is_gate_up_weight:
                     continue
             else:
+                # TODO: improve this block of code (not DRY, hacky, specific to AWQ)
                 is_attention_weight = False
-                for weight_name, shard_size, offset in attention_weight_specs:
+                for stride_id, (weight_name, shard_size, offset) in enumerate(attention_weight_specs):
                     if weight_name not in name:
                         continue
                     param = state_dict[name.replace(weight_name, "qkv_proj")]
+                
+                    # TODO: this is specific to AWQ (should be more general)
+                    if 'qweight' in name or 'qzeros' in name:
+                        shard_size = int(shard_size // (32 / self.quant_config.bits))
+                        offset = int(offset // (32 / self.quant_config.bits))
 
-                    if 'q_proj' in weight_name:
-                        pos = 0
-                    elif 'k_proj' in weight_name:
-                        pos = 1
-                    else:
-                        assert 'v_proj' in weight_name
-                        pos = 2
-
-                    if 'scale' in name:
-                        size = 5120
-                    else:
-                        size = 640
-
-                    #param_slice = param.data[:, offset:offset + shard_size]
-                    param_slice = param.data[:, (pos * size):((pos+1) * size)]
-                    #print(weight_name, param_slice.shape, loaded_weight.shape, pos, param.data.shape)
+                    param_slice = param.data[:, offset:offset + shard_size]
                     assert param_slice.shape == loaded_weight.shape
 
                     param_slice.copy_(loaded_weight)
@@ -481,8 +482,8 @@ class LlamaForCausalLM(nn.Module):
                     param = state_dict[name.replace(weight_name, "gate_up_proj")]
                     shard_size = param.shape[1] // 2
 
-                    param_slice = param.data[:, shard_size * stride_id:shard_size *
-                                             (stride_id + 1)]
+                    start, end = shard_size * stride_id, shard_size * (stride_id + 1)
+                    param_slice = param.data[:, start:end]
                     assert param_slice.shape == loaded_weight.shape
                     param_slice.copy_(loaded_weight)
                     is_gate_up_weight = True
