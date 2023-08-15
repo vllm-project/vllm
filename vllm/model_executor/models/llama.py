@@ -147,7 +147,7 @@ def get_quantized_layer(in_features, out_features, quant_config):
         in_features=in_features,
         out_features=out_features,
         bias=None,
-        dev=0  ## TODO: fix this without large spike in memory
+        dev=torch.cuda.current_device()
     )
     return layer
 

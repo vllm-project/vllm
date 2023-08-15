@@ -152,11 +152,12 @@ class EngineArgs:
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
         # Initialize the configs.
+        quantization_config = QuantizationConfig(self.quantization) if self.quantization else None
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.use_np_weights,
                                    self.use_dummy_weights, self.dtype,
-                                   self.seed)
+                                   self.seed, quantization_config)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)
@@ -166,8 +167,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.get_max_model_len())
-        quantization_config = QuantizationConfig(self.quantization) if self.quantization else None
-        return model_config, cache_config, parallel_config, scheduler_config, quantization_config
+        return model_config, cache_config, parallel_config, scheduler_config
 
 
 @dataclass

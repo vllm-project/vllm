@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, QuantizationConfig
+from vllm.config import ModelConfig
 from vllm.model_executor.models import *  # pylint: disable=wildcard-import
 from vllm.model_executor.weight_utils import initialize_dummy_weights
 
@@ -39,16 +39,19 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def get_model(model_config: ModelConfig, quantization_config: QuantizationConfig) -> nn.Module:
+def _supports_quantization(model_class):
+    return model_class is LlamaForCausalLM
+
+
+def get_model(model_config: ModelConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
     torch.set_default_dtype(model_config.dtype)
 
     # Create a model instance.
     # The weights will be initialized as empty tensors.
 
-    # TODO: better way to do this
-    if model_class is LlamaForCausalLM:
-        model = model_class(model_config.hf_config, quantization_config)
+    if _supports_quantization(model_class):
+        model = model_class(model_config.hf_config, model_config.quantization_config)
     else:
         model = model_class(model_config.hf_config)
 
@@ -62,4 +65,5 @@ def get_model(model_config: ModelConfig, quantization_config: QuantizationConfig
         model.load_weights(model_config.model, model_config.download_dir,
                            model_config.use_np_weights)
         model = model.cuda()
+
     return model.eval()

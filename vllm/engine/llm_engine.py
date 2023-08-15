@@ -4,7 +4,7 @@ from functools import partial
 from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, QuantizationConfig)
+                         SchedulerConfig)
 from vllm.core.scheduler import Scheduler
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
@@ -55,7 +55,6 @@ class LLMEngine:
         stage_devices: The list of devices for each stage. Each stage is a list
             of (rank, node_resource, device) tuples.
         log_stats: Whether to log statistics.
-        quantization_config: Optional settings related to using quantized layers
     """
 
     def __init__(
@@ -64,7 +63,6 @@ class LLMEngine:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        quantization_config: Optional[QuantizationConfig],
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
@@ -80,7 +78,7 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"use_np_weights={model_config.use_np_weights}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
-            f"quantization_method={getattr(quantization_config, 'method', None)}, "
+            f"quantization_method={model_config.get_quantization_method()}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -88,7 +86,6 @@ class LLMEngine:
         self.cache_config = cache_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
-        self.quantization_config = quantization_config
         self.log_stats = log_stats
         self._verify_args()
 
@@ -132,7 +129,6 @@ class LLMEngine:
             self.scheduler_config,
             0,
             distributed_init_method,
-            quantization_config=self.quantization_config
         )
         self.workers.append(worker)
         self._run_workers(
@@ -171,7 +167,6 @@ class LLMEngine:
                               scheduler_config,
                               None,
                               None,
-                              self.quantization_config
                           ))
         self._run_workers(
             "init_model",
@@ -181,9 +176,6 @@ class LLMEngine:
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
-
-        if self.quantization_config is not None:
-            self.quantization_config.verify_with_parallel_config(self.parallel_config)
 
     def _init_cache(self) -> None:
         """Profiles the memory usage and initializes the KV cache."""
