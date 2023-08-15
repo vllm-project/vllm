@@ -72,7 +72,7 @@ def detokenize_incrementally(
     new_token_id: int,
     skip_special_tokens: bool,
 ) -> Tuple[str, str]:
-    """Detokenizes the new token in conjuction with the previous output tokens.
+    """Detokenizes the new token in conjunction with the previous output tokens.
 
     NOTE: This function does not update prev_output_tokens.
 
