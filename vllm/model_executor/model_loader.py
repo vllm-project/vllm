@@ -39,6 +39,10 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
+def _supports_quantization(model_class):
+    return model_class is LlamaForCausalLM
+
+
 def get_model(model_config: ModelConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
     torch.set_default_dtype(model_config.dtype)
@@ -46,7 +50,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     # Create a model instance.
     # The weights will be initialized as empty tensors.
 
-    if model_config.quantization_config is not None:
+    if _supports_quantization(mmodel_class):
         model = model_class(model_config.hf_config, model_config.quantization_config)
     else:
         model = model_class(model_config.hf_config)
