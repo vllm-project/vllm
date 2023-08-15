@@ -31,6 +31,7 @@ class ModelConfig:
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
         seed: Random seed for reproducibility.
+        quantization_config: Optional quantization settings
     """
 
     def __init__(
@@ -44,6 +45,7 @@ class ModelConfig:
         use_dummy_weights: bool,
         dtype: str,
         seed: int,
+        quantization_config: Optional[QuantizationConfig] = None
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -85,6 +87,9 @@ class ModelConfig:
                 f"Total number of hidden layers ({total_num_hidden_layers}) "
                 "must be divisible by pipeline parallel size "
                 f"({pipeline_parallel_size}).")
+
+        if self.quantization_config and tensor_parellel_size > 1:
+            raise NotImplementedError("Quantization does not currently support tensor parallelism")
 
     def get_hidden_size(self) -> int:
         return self.hf_config.hidden_size
@@ -139,6 +144,13 @@ class ModelConfig:
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
+
+    def get_quantization_method(self):
+        if self.quantization_config is None:
+            method = None
+        else:
+            method = self.quantization_config.method
+        return method
 
 
 class CacheConfig:
@@ -315,7 +327,6 @@ class QuantizationConfig:
         self.method = method
         self.bits = bits
         self.group_size = group_size
-
         self._verify()
 
     def _verify(self) -> None:
@@ -324,10 +335,3 @@ class QuantizationConfig:
             raise ValueError(
                 f"Unknown quantization method ({self.method})"
                 f" must be from choice of {allowed_methods}")
-
-    def verify_with_parallel_config(self, parallel_config: "ParallelConfig") -> None:
-        tensor_parallel_size = parallel_config.tensor_parallel_size
-
-        if self.method is not None and tensor_parallel_size > 1:
-            raise NotImplementedError(
-                "Quantization does not currently support tensor parallelism")
