@@ -235,31 +235,32 @@ def _get_top_p_top_k(
 
 
 def _apply_top_p_top_k(
-    probs: torch.Tensor,
+    logits: torch.Tensor,
     top_ps: List[float],
     top_ks: List[int],
 ) -> torch.Tensor:
-    p = torch.tensor(top_ps, dtype=probs.dtype, device=probs.device)
-    k = torch.tensor(top_ks, dtype=torch.int, device=probs.device)
-    probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
+    p = torch.tensor(top_ps, dtype=logits.dtype, device=logits.device)
+    k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=True)
 
     # Apply top-p.
-    probs_sum = probs_sort.softmax(dim=-1).cumsum(dim=-1)
-    top_p_mask = (probs_sum - probs_sort.softmax(dim=-1)) > p.unsqueeze(dim=1)
-    probs_sort[top_p_mask] = -float("Inf")
+    probs_sort = logits_sort.softmax(dim=-1)
+    probs_sum = probs_sort.cumsum(dim=-1)
+    top_p_mask = (probs_sum - probs_sort) > p.unsqueeze(dim=1)
+    logits_sort[top_p_mask] = -float("inf")
 
     # Apply top-k.
     # Create a mask for the top-k elements.
-    top_k_mask = torch.arange(probs_idx.shape[-1], device=probs_idx.device)
-    top_k_mask = top_k_mask.expand(probs_idx.shape[0], -1)
+    top_k_mask = torch.arange(logits_idx.shape[-1], device=logits_idx.device)
+    top_k_mask = top_k_mask.expand(logits_idx.shape[0], -1)
     top_k_mask = top_k_mask >= k.unsqueeze(dim=1)
-    probs_sort[top_k_mask] = -float("Inf")
+    logits_sort[top_k_mask] = -float("inf")
 
     # Re-sort the probabilities.
-    probs = torch.gather(probs_sort,
-                         dim=-1,
-                         index=torch.argsort(probs_idx, dim=-1))
-    return probs
+    logits = torch.gather(logits_sort,
+                          dim=-1,
+                          index=torch.argsort(logits_idx, dim=-1))
+    return logits
 
 
 def _get_topk_logprobs(
