@@ -12,6 +12,34 @@ logger = init_logger(__name__)
 _GB = 1 << 30
 
 
+class QuantizationConfig:
+    """Quantization settings
+
+    Args:
+        method: The quantization method to apply
+        bits: How many bits the linear layers are quantized to
+        group_size: What size the weights were quantized in groups of
+    """
+
+    def __init__(
+        self,
+        method: str,
+        bits: Optional[int] = 4,
+        group_size: Optional[int] = 128
+    ) -> None:
+        self.method = method
+        self.bits = bits
+        self.group_size = group_size
+        self._verify()
+
+    def _verify(self) -> None:
+        allowed_methods = ['awq']
+        if self.method not in allowed_methods:
+            raise ValueError(
+                f"Unknown quantization method ({self.method})"
+                f" must be from choice of {allowed_methods}")
+
+
 class ModelConfig:
     """Configuration for the model.
 
@@ -55,6 +83,7 @@ class ModelConfig:
         self.use_np_weights = use_np_weights
         self.use_dummy_weights = use_dummy_weights
         self.seed = seed
+        self.quantization_config = quantization_config
 
         self.hf_config = get_config(model, trust_remote_code)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
@@ -88,7 +117,7 @@ class ModelConfig:
                 "must be divisible by pipeline parallel size "
                 f"({pipeline_parallel_size}).")
 
-        if self.quantization_config and tensor_parellel_size > 1:
+        if self.quantization_config and tensor_parallel_size > 1:
             raise NotImplementedError("Quantization does not currently support tensor parallelism")
 
     def get_hidden_size(self) -> int:
@@ -307,31 +336,3 @@ def _get_and_verify_dtype(
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "
                 f"{compute_capability[0]}.{compute_capability[1]}.")
     return torch_dtype
-
-
-class QuantizationConfig:
-    """Quantization settings
-
-    Args:
-        method: The quantization method to apply
-        bits: How many bits the linear layers are quantized to
-        group_size: What size the weights were quantized in groups of
-    """
-
-    def __init__(
-        self,
-        method: str,
-        bits: Optional[int] = 4,
-        group_size: Optional[int] = 128
-    ) -> None:
-        self.method = method
-        self.bits = bits
-        self.group_size = group_size
-        self._verify()
-
-    def _verify(self) -> None:
-        allowed_methods = ['awq']
-        if self.method not in allowed_methods:
-            raise ValueError(
-                f"Unknown quantization method ({self.method})"
-                f" must be from choice of {allowed_methods}")

@@ -50,7 +50,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     # Create a model instance.
     # The weights will be initialized as empty tensors.
 
-    if _supports_quantization(mmodel_class):
+    if _supports_quantization(model_class):
         model = model_class(model_config.hf_config, model_config.quantization_config)
     else:
         model = model_class(model_config.hf_config)
@@ -65,4 +65,5 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         model.load_weights(model_config.model, model_config.download_dir,
                            model_config.use_np_weights)
         model = model.cuda()
+
     return model.eval()
