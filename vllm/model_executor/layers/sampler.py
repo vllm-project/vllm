@@ -78,7 +78,7 @@ class Sampler(nn.Module):
         do_top_k = any(k != self.vocab_size for k in top_ks)
         if do_top_p or do_top_k:
             logits = _apply_top_p_top_k(logits, top_ps, top_ks)
-        
+
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
@@ -301,8 +301,7 @@ def _sample_from_prompt(
         # Random sampling.
         # Sample `best_of` tokens for the prompt.
         num_seqs = sampling_params.best_of
-        next_token_ids = torch.multinomial(prob,
-                                           num_samples=num_seqs)
+        next_token_ids = torch.multinomial(prob, num_samples=num_seqs)
         next_token_ids = next_token_ids.tolist()
     return next_token_ids
 
