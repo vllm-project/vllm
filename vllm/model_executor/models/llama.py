@@ -164,7 +164,7 @@ class QuantLlamaAttention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
-        assert tp_size == 1, 'quantization does not support TP'
+        assert tp_size == 1, "quantization does not support TP"
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -178,7 +178,7 @@ class QuantLlamaAttention(nn.Module):
 
         self.qkv_proj = get_quantized_layer(
             hidden_size,
-            (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim,
+            self.q_size + 2 * self.kv_size,
             quant_config
         )
 
@@ -220,8 +220,17 @@ class QuantLlamaMLP(nn.Module):
         quant_config: QuantizationConfig
     ):
         super().__init__()
-        self.gate_up_proj = get_quantized_layer(hidden_size, 2 * intermediate_size, quant_config)
-        self.down_proj = get_quantized_layer(intermediate_size, hidden_size, quant_config)
+
+        self.gate_up_proj = get_quantized_layer(
+            hidden_size,
+            2 * intermediate_size, quant_config
+        )
+
+        self.down_proj = get_quantized_layer(
+            intermediate_size,
+            hidden_size,
+            quant_config
+        )
 
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -313,9 +322,12 @@ class LlamaModel(nn.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
             vocab_size, config.hidden_size, perform_initialization=False)
+
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config, quant_config) for _ in range(config.num_hidden_layers)
+            LlamaDecoderLayer(config, quant_config)
+            for _ in range(config.num_hidden_layers)
         ])
+
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -414,10 +426,8 @@ class LlamaForCausalLM(nn.Module):
                 extra_rows = extra_rows.to(loaded_weight)
                 loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
 
-            is_quantized = self.quant_config is not None and self.quant_config.method is not None
-
             # merge linear layers
-            if not is_quantized:
+            if self.quant_config is not None:
                 is_attention_weight = False
                 for weight_name, shard_size, offset in attention_weight_specs:
                     if weight_name not in name:
@@ -454,17 +464,21 @@ class LlamaForCausalLM(nn.Module):
                 if is_gate_up_weight:
                     continue
             else:
-                # TODO: improve this block of code (not DRY, hacky, specific to AWQ)
+                # TODO: improve this block of code
                 is_attention_weight = False
-                for stride_id, (weight_name, shard_size, offset) in enumerate(attention_weight_specs):
+                for stride_id, weight_spec in enumerate(attention_weight_specs):
+                    weight_name, shard_size, offset = weight_spec
+
                     if weight_name not in name:
                         continue
+
                     param = state_dict[name.replace(weight_name, "qkv_proj")]
                 
                     # TODO: this is specific to AWQ (should be more general)
-                    if 'qweight' in name or 'qzeros' in name:
-                        shard_size = int(shard_size // (32 / self.quant_config.bits))
-                        offset = int(offset // (32 / self.quant_config.bits))
+                    if "qweight" in name or "qzeros" in name:
+                        adjustment = 32 / self.quant_config.bits
+                        shard_size = int(shard_size // adjustment)
+                        offset = int(offset // adjustment)
 
                     param_slice = param.data[:, offset:offset + shard_size]
                     assert param_slice.shape == loaded_weight.shape
@@ -482,7 +496,9 @@ class LlamaForCausalLM(nn.Module):
                     param = state_dict[name.replace(weight_name, "gate_up_proj")]
                     shard_size = param.shape[1] // 2
 
-                    start, end = shard_size * stride_id, shard_size * (stride_id + 1)
+                    start = shard_size * stride_id
+                    end = shard_size * (stride_id + 1)
+
                     param_slice = param.data[:, start:end]
                     assert param_slice.shape == loaded_weight.shape
                     param_slice.copy_(loaded_weight)
