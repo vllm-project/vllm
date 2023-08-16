@@ -294,6 +294,18 @@ def load_tensor_parallel_weights(
         f"{param.shape} != {loaded_weight.shape}")
     param.data.copy_(loaded_weight)
 
+def load_tensor_parallel_weights2(
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    param_name: str,
+    tensor_model_parallel_rank: int,
+) -> None:
+    assert param.shape == loaded_weight.shape, (
+        f"{param_name} shape mismatch between model and checkpoint: "
+        f"{param.shape} != {loaded_weight.shape}")
+    param.data.copy_(loaded_weight)
+
+
 
 def initialize_dummy_weights(
     model: torch.nn.Module,

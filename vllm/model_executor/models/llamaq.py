@@ -13,7 +13,8 @@ from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 # from vllm.model_executor.layers.temp_sampler import TempSampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
+                                              load_tensor_parallel_weights,
+                                              load_tensor_parallel_weights2)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
@@ -92,14 +93,17 @@ class LlamaQMLP(nn.Module):
         self.w_bit = 4
         self.g_size = 128
 
-        # self.gate_up_proj = WQLinear(self.w_bit, self.g_size, self.in_features, 2 * self.intermediate_size, False, 'cuda')
-        self.gate_proj = WQLinear(self.w_bit, self.g_size, self.in_features, self.intermediate_size, False, 'cuda')
-        self.up_proj = WQLinear(self.w_bit, self.g_size, self.in_features, self.intermediate_size, False, 'cuda')
+        self.gate_up_proj = WQLinear(self.w_bit, self.g_size, self.in_features, 2 * self.intermediate_size, False, 'cuda')
         self.down_proj = WQLinear(self.w_bit, self.g_size, self.intermediate_size, self.out_features, False, 'cuda')
+        self.act_fn = SiluAndMul()
 
 
     def forward(self, x):
-        return self.down_proj(self.custom_LlamaQ_mlp(x))
+        # return self.down_proj(self.custom_LlamaQ_mlp(x))
+        gate_up = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x = self.down_proj(x)
+        return x
     
     def custom_LlamaQ_mlp(self, x):
         out_shape = x.shape[:-1] + (self.intermediate_size, )
@@ -108,7 +112,7 @@ class LlamaQMLP(nn.Module):
         gate_output = awq_inference_engine.gemm_forward_cuda(
             x, self.gate_proj.qweight, self.gate_proj.scales, self.gate_proj.qzeros, 8
         )
-        gate_output = F.silu(gate_output)
+        gate_output = self.act_fn(gate_output)
 
         up_output = awq_inference_engine.gemm_forward_cuda(
             x, self.up_proj.qweight, self.up_proj.scales, self.up_proj.qzeros, 8
@@ -158,19 +162,12 @@ class LlamaQAttention2(nn.Module):
         # print(f"qkv proj size: {self.qkv_proj.shape}, hidden_states size: {hidden_states.shape} ")
         # 这里把qkv_proj和o_proj都变成WQLinear
 
-        out_shape = hidden_states.shape[:-1] + (self.total_num_heads * self.head_dim, )
-        hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
-
-        qkv = awq_inference_engine.gemm_forward_cuda(
-            hidden_states, self.qkv_proj.qweight, self.qkv_proj.scales, self.qkv_proj.qzeros, 8
-        )
+        qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
-        output = awq_inference_engine.gemm_forward_cuda(
-            hidden_states, self.o_proj.qweight, self.o_proj.scales, self.o_proj.qzeros, 8
-        )
+        output = self.o_proj(attn_output)
 
         return output
 
@@ -237,7 +234,7 @@ class LlamaQDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = LlamaQAttention(
+        self.self_attn = LlamaQAttention2(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
         )
@@ -515,11 +512,12 @@ class LlamaQForCausalLM(nn.Module):
                 continue
 
             param = state_dict[name]
-            print(f"fp16 layer name: {name}")
+            # print(f"fp16 layer name: {name}")
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          column_parallel_weights_fp16,
                                          row_parallel_weights_fp16,
                                          tensor_model_parallel_rank)
+        print("****************** load int weight ***********************")
         # load int4
         for name, loaded_weight in hf_model_weights_iterator(
                 q_weight_path, cache_dir, use_np_cache):
@@ -538,14 +536,33 @@ class LlamaQForCausalLM(nn.Module):
             if "model.norm.weight" in name:
                 continue
             
+            is_gate_up_weight = False
+            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+                if weight_name not in name:
+                    continue
+                param = state_dict[name.replace(weight_name, "gate_up_proj")]
+
+                shard_size = param.shape[1] // 2
+                start = shard_size * stride_id
+                end = shard_size * (stride_id + 1)
+                param_slice = param.data[:, start:end]
+
+                print(f"{name} param_slice.shape: {param_slice.shape}, loaded_weight.shape: {loaded_weight.shape}")
+                assert param_slice.shape == loaded_weight.shape
+                param_slice.copy_(loaded_weight)
+                is_gate_up_weight = True
+                break
+            if is_gate_up_weight:
+                continue
+
             param = state_dict[name]
-            print(f"int4 layer name: {name}")
+            # print(f"int4 layer name: {name}")
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          column_parallel_weights_int4,
                                          row_parallel_weights_int4,
                                          tensor_model_parallel_rank)
 
-    def load_mix_weights2(self,
+    def load_int4_weights(self,
                      model_name_or_path: str,
                      q_weight_path: str,
                      cache_dir: Optional[str] = None,
@@ -557,51 +574,37 @@ class LlamaQForCausalLM(nn.Module):
         tensor_model_parallel_rank = 0
         state_dict = self.state_dict()
 
-        # for name, param in state_dict.items():
-        #     print(f"state_dict name: {name}, param shape: {param.shape}")
+        q_proj_shard_size = (self.config.hidden_size // tensor_model_parallel_world_size)
+        kv_proj_shard_size = (self.config.hidden_size //
+                              self.config.num_attention_heads *
+                              self.config.num_key_value_heads // tensor_model_parallel_world_size)
 
-        # load fp16
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache):
-            if "rotary_emb.inv_freq" in name:
-                continue
-            
-            if "mlp" in name:
-                continue
-
-            if "self_attn" in name:
-                continue
-
-            if "input_layernorm" in name or "post_attention_layernorm" in name:
-                continue
-
-            if "embed_tokens" in name or "lm_head" in name:
-                param = state_dict[name]
-                # Consider padding in the vocab size.
-                padded_vocab_size = (param.shape[0] *
-                                     tensor_model_parallel_world_size)
-                num_extra_rows = padded_vocab_size - self.config.vocab_size
-                extra_rows = torch.empty(num_extra_rows,
-                                         loaded_weight.shape[1])
-                extra_rows = extra_rows.to(loaded_weight)
-                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
-
-            param = state_dict[name]
-            print(f"fp16 layer name: {name}")
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         self._column_parallel_weights_fp16,
-                                         self._row_parallel_weights_fp16,
-                                         tensor_model_parallel_rank)
+        print(f"q_proj_shard_size: {q_proj_shard_size}, kv_proj_shard_size: {kv_proj_shard_size}")
+        attention_weight_specs = [
+            # (weight_name, shard_size, offset)
+            ("q_proj", q_proj_shard_size, 0),
+            ("k_proj", kv_proj_shard_size, q_proj_shard_size),
+            ("v_proj", kv_proj_shard_size,
+             q_proj_shard_size + kv_proj_shard_size),
+        ]
         # load int4
         for name, loaded_weight in hf_model_weights_iterator(
                 q_weight_path, cache_dir, use_np_cache):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if "embed_tokens" in name or "lm_head" or "model.norm.weight" in name:
-                continue
+            if "embed_tokens" in name or "lm_head" in name:
+                param = state_dict[name]
+                # Consider padding in the vocab size.
+                padded_vocab_size = (param.shape[0] *           tensor_model_parallel_world_size)
+                num_extra_rows = padded_vocab_size - self.config.vocab_size
+                extra_rows = torch.empty(num_extra_rows,
+                                         loaded_weight.shape[1])
+                extra_rows = extra_rows.to(loaded_weight)
+                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
             
             is_attention_weight = False
+
             for stride_id, att_weight_name in enumerate(
                 ["q_proj", "k_proj", "v_proj"]):
                 if att_weight_name not in name:
@@ -609,6 +612,7 @@ class LlamaQForCausalLM(nn.Module):
                 # print(f"int4 layer name: {name}")
                 # print(f"stride_id: {stride_id}, att_weight_name: {att_weight_name}")
                 param_name = name.replace(att_weight_name, "qkv_proj")
+
                 param = state_dict[param_name]
                 shard_size = param.shape[1] // 3
                 # loaded_weight = loaded_weight[
@@ -616,7 +620,7 @@ class LlamaQForCausalLM(nn.Module):
                 #     (tensor_model_parallel_rank + 1)]
                 param_slice = param.data[:, shard_size * stride_id:shard_size *
                                          (stride_id + 1)]
-                # print(f"*** {param_name}***  param.shape: {param.shape}, param_slice.shape: {param_slice.shape}, loaded_weight.shape: {loaded_weight.shape}")
+                print(f"*** {param_name}***  param.shape: {param.shape}, param_slice.shape: {param_slice.shape}, loaded_weight.shape: {loaded_weight.shape}")
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_attention_weight = True
@@ -624,12 +628,26 @@ class LlamaQForCausalLM(nn.Module):
             if is_attention_weight:
                 continue
 
+            is_gate_up_weight = False
+            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+                if weight_name not in name:
+                    continue
+                param = state_dict[name.replace(weight_name, "gate_up_proj")]
+
+                shard_size = param.shape[1] // 2
+                start = shard_size * stride_id
+                end = shard_size * (stride_id + 1)
+                param_slice = param.data[:, start:end]
+
+                print(f"{name} param_slice.shape: {param_slice.shape}, loaded_weight.shape: {loaded_weight.shape}")
+                assert param_slice.shape == loaded_weight.shape
+                param_slice.copy_(loaded_weight)
+                is_gate_up_weight = True
+                break
+            if is_gate_up_weight:
+                continue
 
             param = state_dict[name]
             print(f"int4 layer name: {name}")
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         self._column_parallel_weights_int4,
-                                         self._row_parallel_weights_int4,
+            load_tensor_parallel_weights2(param, loaded_weight, name,
                                          tensor_model_parallel_rank)
-        
-        # print(f"state dict keys: {state_dict.keys()}")
