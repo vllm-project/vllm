@@ -146,146 +146,24 @@ class LlamaAttention(nn.Module):
         return output
 
 
-def get_quantized_layer(in_features, out_features, quant_config):
-    layer = qmodule.WQLinear(
-        w_bit=quant_config.bits,
-        group_size=quant_config.group_size,
-        in_features=in_features,
-        out_features=out_features,
-        bias=None,
-        dev=torch.cuda.current_device()
-    )
-    return layer
-
-
-class QuantLlamaAttention(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        quant_config: QuantizationConfig
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
-        assert tp_size == 1, "quantization does not support TP"
-        self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        assert self.total_num_kv_heads % tp_size == 0
-        self.num_kv_heads = self.total_num_kv_heads // tp_size
-        self.head_dim = hidden_size // self.total_num_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
-
-        self.qkv_proj = ColumnParallelLinear(
-            hidden_size,
-            (self.total_num_heads + 2 * self.total_num_kv_heads) *
-            self.head_dim,
-            bias=False,
-            gather_output=False,
-            perform_initialization=False,
-            quant_config=quant_config
-        )
-
-        self.o_proj = get_quantized_layer(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            quant_config
-        )
-
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads)
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
-    ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
-        return self.o_proj(attn_output)
-
-
-class QuantLlamaMLP(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-        quant_config: QuantizationConfig
-    ):
-        super().__init__()
-
-        self.gate_up_proj = get_quantized_layer(
-            hidden_size,
-            2 * intermediate_size, quant_config
-        )
-
-        self.down_proj = get_quantized_layer(
-            intermediate_size,
-            hidden_size,
-            quant_config
-        )
-
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
-
-    def forward(self, x):
-        gate_up = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x = self.down_proj(x)
-        return x
-
-
 class LlamaDecoderLayer(nn.Module):
 
     def __init__(self, config: LlamaConfig, quant_config: QuantizationConfig=None):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        use_quantized_layers = quant_config and quant_config.method is not None
-
-        if use_quantized_layers:
-            self.self_attn = QuantLlamaAttention(
-                hidden_size=self.hidden_size,
-                num_heads=config.num_attention_heads,
-                num_kv_heads=config.num_key_value_heads,
-                quant_config=quant_config
-            )
-            self.mlp = QuantLlamaMLP(
-                hidden_size=self.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config
-            )
-        else:
-            self.self_attn = LlamaAttention(
-                hidden_size=self.hidden_size,
-                num_heads=config.num_attention_heads,
-                num_kv_heads=config.num_key_value_heads,
-            )
-            self.mlp = LlamaMLP(
-                hidden_size=self.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-            )
+        self.self_attn = LlamaAttention(
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
+            quant_config=quant_config
+        )
+        self.mlp = LlamaMLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config
+        )
 
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -443,7 +321,7 @@ class LlamaForCausalLM(nn.Module):
             for weight_name, shard_size, offset in attention_weight_specs:
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "qkv_proj")]
+                param = state_dict[name.replace(weight_name, "qkv_proj.linear")]
 
                 if not is_quantized:
                     loaded_weight = loaded_weight[
@@ -470,7 +348,7 @@ class LlamaForCausalLM(nn.Module):
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
+                param = state_dict[name.replace(weight_name, "gate_up_proj.linear")]
 
                 if not is_quantized:
                     shard_size = param.shape[0] // 2
@@ -492,7 +370,7 @@ class LlamaForCausalLM(nn.Module):
             if is_gate_up_weight:
                 continue
 
-            param = state_dict[name]
+            param = state_dict[name.replace('o_proj', 'o_proj.linear').replace('down_proj', 'down_proj.linear')]
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
