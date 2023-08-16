@@ -33,7 +33,7 @@ class QuantizationConfig:
         self._verify()
 
     def _verify(self) -> None:
-        allowed_methods = ['awq']
+        allowed_methods = ["awq"]
         if self.method not in allowed_methods:
             raise ValueError(
                 f"Unknown quantization method ({self.method})"
@@ -118,7 +118,8 @@ class ModelConfig:
                 f"({pipeline_parallel_size}).")
 
         if self.quantization_config and tensor_parallel_size > 1:
-            raise NotImplementedError("Quantization does not currently support tensor parallelism")
+            raise NotImplementedError(
+                "Quantization does not currently support tensor parallelism")
 
     def get_hidden_size(self) -> int:
         return self.hf_config.hidden_size

@@ -152,7 +152,11 @@ class EngineArgs:
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
         # Initialize the configs.
-        quantization_config = QuantizationConfig(self.quantization) if self.quantization else None
+        if self.quantization is not None:
+            quantization_config = QuantizationConfig(self.quantization)
+        else:
+            quantization_config = None
+
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.use_np_weights,

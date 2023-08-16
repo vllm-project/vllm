@@ -51,7 +51,10 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     # The weights will be initialized as empty tensors.
 
     if _supports_quantization(model_class):
-        model = model_class(model_config.hf_config, model_config.quantization_config)
+        model = model_class(
+            model_config.hf_config,
+            model_config.quantization_config
+        )
     else:
         model = model_class(model_config.hf_config)
 
