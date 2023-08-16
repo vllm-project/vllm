@@ -40,7 +40,7 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 
 
 def _supports_quantization(model_class):
-    return model_class is LlamaForCausalLM
+    return model_class is LlamaForCausalLM or model_class is MPTForCausalLM
 
 
 def get_model(model_config: ModelConfig) -> nn.Module:
