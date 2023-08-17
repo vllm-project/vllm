@@ -5,8 +5,8 @@ name: Create Release
 
 on:
   push:
-    branches:
-      - release/*
+    tags:
+      - v*
 
 # Needed to create release and upload assets
 permissions:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   release:
-    # Tags and releases the branch
+    # Retrieve tag and create release
     name: Create Release
     runs-on: ubuntu-latest
     outputs:
@@ -22,12 +22,8 @@ jobs:
     steps:
       - name: Extract branch info
         shell: bash
-        # The tag is the branch name with the prefix removed.
-        # for example: release/v1.0.0 -> v1.0.0
         run: |
-          release_tag=$(echo "${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" | sed -e 's/.*\///g')
-          echo "release_tag=$release_tag" >> $GITHUB_ENV
-        id: extract_branch
+          echo "release_tag=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
 
       - name: Create Release
         id: create_release
@@ -73,13 +69,15 @@ jobs:
           bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
 
       - name: Build wheel
+        shell: bash
         run: |
           bash -x .github/workflows/scripts/build.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
           wheel_name=$(ls dist/*whl | xargs -n 1 basename)
+          asset_name=$(echo $wheel_name | tr "linux" "manylinux1")
           echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
+          echo "asset_name=${asset_name}" >> $GITHUB_ENV
       
       - name: Upload Release Asset
-        id: upload_release_asset 
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
