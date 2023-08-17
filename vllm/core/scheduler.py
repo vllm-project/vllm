@@ -31,7 +31,7 @@ class SchedulerOutputs:
     def __init__(
         self,
         scheduled_seq_groups: List[SequenceGroup],
-        prompt_run: bool,
+        prompt_run: List[bool],
         num_batched_tokens: int,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
@@ -102,15 +102,18 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
-    def _schedule(self) -> SchedulerOutputs:
+    def _schedule(self,join_watting=True) -> SchedulerOutputs:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
-
+        prompt_run:List[bool]=[]
         # Fix the current time.
         now = time.time()
-
+        # watting=[]
+        running: List[SequenceGroup] = []
+        
+        preempted: List[SequenceGroup] = []
         # Join waiting sequences if possible.
         if not self.swapped:
             ignored_seq_groups: List[SequenceGroup] = []
@@ -158,20 +161,23 @@ class Scheduler:
 
                 seq_group = self.waiting.pop(0)
                 self._allocate(seq_group)
-                self.running.append(seq_group)
+                if not join_watting:
+                    self.running.append(seq_group)
                 num_batched_tokens += num_prompt_tokens
-                scheduled.append(seq_group)
-
-            if scheduled:
+                # scheduled.append(seq_group)
+                running.append(seq_group)
+                prompt_run.append(True)
+            if not join_watting and len(running)>0:
                 scheduler_outputs = SchedulerOutputs(
-                    scheduled_seq_groups=scheduled,
-                    prompt_run=True,
+                    scheduled_seq_groups=running,
+                    prompt_run=prompt_run,
                     num_batched_tokens=num_batched_tokens,
                     blocks_to_swap_in=blocks_to_swap_in,
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
                     ignored_seq_groups=ignored_seq_groups,
                 )
+        
                 return scheduler_outputs
 
         # NOTE(woosuk): Preemption happens only when there is no available slot
@@ -181,10 +187,13 @@ class Scheduler:
         self.running = self.policy.sort_by_priority(now, self.running)
 
         # Reserve new token slots for the running sequence groups.
-        running: List[SequenceGroup] = []
-        preempted: List[SequenceGroup] = []
-        while self.running:
-            seq_group = self.running.pop(0)
+       
+        for i in range(len(self.running)):
+        # while self.running:
+            seq_group = self.running[i]
+            # if prompt_run[i]:
+                # running.append(seq_group)
+                # continue
             while not self.block_manager.can_append_slot(seq_group):
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
@@ -201,6 +210,7 @@ class Scheduler:
                 # Append new slots to the sequence group.
                 self._append_slot(seq_group, blocks_to_copy)
                 running.append(seq_group)
+                prompt_run.append(False)
         self.running = running
 
         # Swap in the sequence groups in the SWAPPED state if possible.
@@ -228,14 +238,14 @@ class Scheduler:
             self._swap_in(seq_group, blocks_to_swap_in)
             self._append_slot(seq_group, blocks_to_copy)
             self.running.append(seq_group)
-
+            
         num_batched_tokens = sum(
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
             for seq_group in self.running)
 
         scheduler_outputs = SchedulerOutputs(
             scheduled_seq_groups=self.running,
-            prompt_run=False,
+            prompt_run=prompt_run,
             num_batched_tokens=num_batched_tokens,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
@@ -244,15 +254,15 @@ class Scheduler:
         )
         return scheduler_outputs
 
-    def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
+    def schedule(self,join_watting=True) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
-        scheduler_outputs = self._schedule()
+        scheduler_outputs = self._schedule(join_watting)
 
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        for seq_group in scheduler_outputs.scheduled_seq_groups:
+        for idx,seq_group in enumerate(scheduler_outputs.scheduled_seq_groups):
             seq_data: Dict[int, List[SequenceData]] = {}
             block_tables: Dict[int, List[int]] = {}
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
@@ -262,7 +272,7 @@ class Scheduler:
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
-                is_prompt=scheduler_outputs.prompt_run,
+                is_prompt=scheduler_outputs.prompt_run[idx],
                 seq_data=seq_data,
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,

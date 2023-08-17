@@ -197,7 +197,7 @@ class PagedAttention(nn.Module):
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
             # Prompt run.
-            assert input_metadata.num_generation_tokens == 0
+            # assert input_metadata.num_generation_tokens == 0
             self.set_attn_bias(input_metadata)
             self.multi_query_kv_attention(
                 output[:num_prompt_tokens],
@@ -215,6 +215,7 @@ class PagedAttention(nn.Module):
         # When key_cache and value_cache are not provided, the new key
         # and value vectors will not be cached.
         num_valid_tokens = input_metadata.num_valid_tokens
+
         if (num_valid_tokens > 0 and key_cache is not None
                 and value_cache is not None):
             # The stride is 3 because the key and value are sliced from qkv.
@@ -225,17 +226,17 @@ class PagedAttention(nn.Module):
                 value_cache,
                 input_metadata.slot_mapping,
             )
-
-        if input_metadata.num_generation_tokens > 0:
+        num_generation_tokens=input_metadata.num_generation_tokens
+        if num_generation_tokens > 0:
             # Decoding run.
-            assert input_metadata.num_prompt_tokens == 0
+            # assert input_metadata.num_prompt_tokens == 0
             assert key_cache is not None and value_cache is not None, (
                 "key_cache and value_cache must be provided when "
                 "generating tokens.")
             # Compute the attention op for generation tokens.
             self.single_query_cached_kv_attention(
-                output[num_prompt_tokens:num_valid_tokens],
-                query[num_prompt_tokens:num_valid_tokens], key_cache,
+                output[num_prompt_tokens:num_prompt_tokens+num_generation_tokens],
+                query[num_prompt_tokens:num_prompt_tokens+num_generation_tokens], key_cache,
                 value_cache, input_metadata)
 
         # Reshape the output tensor.

@@ -288,7 +288,7 @@ class LLMEngine:
         """Returns True if there are unfinished requests."""
         return self.scheduler.has_unfinished_seqs()
 
-    def step(self) -> List[RequestOutput]:
+    def step(self,join_watting=True) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
 
         This function performs one decoding iteration of the engine. It first
@@ -297,7 +297,7 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule(join_watting)
         if scheduler_outputs.is_empty():
             if not scheduler_outputs.ignored_seq_groups:
                 # Nothing to do.
