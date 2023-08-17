@@ -27,12 +27,17 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.release_tag }}
-          release_name: ${{ env.release_tag }}
+          tag: ${{ env.release_tag }}
+        # Creates release. Then use gh release view to get the upload url
+        run: |
+          gh release create "$tag" \
+            --repo="$GITHUB_REPOSITORY" \
+            --title="vLLM $tag" \
+            --generate-notes
+          upload_url=$(gh release view "$tag" --json uploadUrl | python -c "import sys, json; print(json.load(sys.stdin)['uploadUrl'])")
+          echo "upload_url=$upload_url" >> "$GITHUB_OUTPUT"
 
   wheel:
     name: Build Wheel
