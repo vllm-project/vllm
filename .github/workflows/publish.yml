@@ -20,6 +20,9 @@ jobs:
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
       - name: Extract branch info
         shell: bash
         run: |
@@ -27,17 +30,13 @@ jobs:
 
       - name: Create Release
         id: create_release
+        uses: "actions/github-script@v6"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ env.release_tag }}
-        # Creates release. Then use gh release view to get the upload url
-        run: |
-          gh release create "$tag" \
-            --repo="$GITHUB_REPOSITORY" \
-            --title="vLLM $tag" \
-            --generate-notes
-          upload_url=$(gh release view "$tag" --json uploadUrl | python -c "import sys, json; print(json.load(sys.stdin)['uploadUrl'])")
-          echo "upload_url=$upload_url" >> "$GITHUB_OUTPUT"
+          RELEASE_TAG: ${{ env.release_tag }}
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+          script: |
+            require('.github/workflows/scripts/create_release.js')(github, context)
 
   wheel:
     name: Build Wheel
