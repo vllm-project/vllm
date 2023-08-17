@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file, save_file, safe_open
 import numpy as np
 import torch
 from tqdm.auto import tqdm
