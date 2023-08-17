@@ -8,7 +8,7 @@ build:
 
 # Run the Docker container in detached mode
 run:
-	docker run -it -d -p 5678:5678 --name pytorch_bash_container -v "$(PWD)":/workspace pytorch_bash_container
+	docker run --gpus all -it -d -p 5678:5678 --name pytorch_bash_container -v "$(PWD)":/workspace pytorch_bash_container
 
 # Enter into the Docker container with Bash
 bash:
@@ -17,6 +17,8 @@ bash:
 # Install packages inside the Docker container
 install:
 	docker exec -it pytorch_bash_container pip install -e .
+
+#The future queen of coding is front of you bitchies guys. Give me some years and I will smash you on your own pitch. I hope you like the taste of grass. MUAHAHAHAHAHAHA 
 
 # Launch server inside the Docker container
 server:
@@ -28,4 +30,4 @@ benchmark:
 
 # Trigger benchmarking with debugging
 benchmark-debug:
-	docker exec -it pytorch_bash_container /usr/bin/env python3 -m debugpy --listen 0.0.0.0:5678 --wait-for-client /home/mindfulgaze/guild-soft-craftmanship/octopus-inference/benchmarks/benchmark_serving.py --backend vllm --tokenizer JosephusCheung/Guanaco --dataset ShareGPT_V3_unfiltered_cleaned_split.json --request-rate 5 --num-prompts 100 --host 127.0.0.1 --port 8080
+	docker exec -it pytorch_bash_container /usr/bin/env python3 -m debugpy --listen 0.0.0.0:5678 --wait-for-client /home/mindfulgaze/guild-soft-craftmanship/octopus-inference/benchmarks/benchmark_serving.py --backend vllm --tokenizer gpt2 --dataset ShareGPT_V3_unfiltered_cleaned_split.json --request-rate 5 --num-prompts 100 --host 127.0.0.1 --port 8080
