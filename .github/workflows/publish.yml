@@ -90,3 +90,9 @@ jobs:
           asset_path: ./dist/${{env.wheel_name}}
           asset_name: ${{env.wheel_name}}
           asset_content_type: application/*
+      
+      - name: Publish package
+        uses: pypa/gh-action-pypi-publish@release/v1.8
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.PYPI_API_TOKEN }}
