@@ -26,6 +26,7 @@ import aiohttp
 import numpy as np
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
+import psycopg2
 from dotenv import load_dotenv
 import os
 
@@ -171,7 +172,7 @@ async def send_request(
                     chunks.append(chunk)
             output = b"".join(chunks).decode("utf-8")
             output = json.loads(output)
-            insert_into_db(output)
+            insert_into_db(json.dumps(output))
             # Re-send the request if it failed.
             if "error" not in output:
                 break
