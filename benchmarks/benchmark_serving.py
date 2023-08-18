@@ -46,19 +46,21 @@ cursor = connection.cursor()
 
 # Define the table name and column name
 table_name = "test"
-column_name = "text"
+column_name1 = "text"
+column_name2 = "type"
 
-# (prompt len, output len, latency)
-REQUEST_LATENCY: List[Tuple[int, int, float]] = []
-
-def insert_into_db(output):
+# Insert data into the database
+def insert_into_db(action, type):
     try:
-        query = f"INSERT INTO {table_name} ({column_name}) VALUES (%s)"
-        cursor.execute(query, (output,))
+        query = f"INSERT INTO {table_name} ({column_name1}, {column_name2}) VALUES (%s, %s)"
+        cursor.execute(query, (action, type))
         connection.commit()
     except Exception as e:
         print("Error inserting data into the database:", e)
         connection.rollback()
+
+# (prompt len, output len, latency)
+REQUEST_LATENCY: List[Tuple[int, int, float]] = []
 
 def sample_requests(
     dataset_path: str,
@@ -162,7 +164,7 @@ async def send_request(
         }
     else:
         raise ValueError(f"Unknown backend: {backend}")
-
+    
     timeout = aiohttp.ClientTimeout(total=3 * 3600)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
@@ -172,7 +174,13 @@ async def send_request(
                     chunks.append(chunk)
             output = b"".join(chunks).decode("utf-8")
             output = json.loads(output)
-            insert_into_db(json.dumps(output))
+
+            prompt_answer_log = {
+                "prompt": pload,
+                "answer": output
+            }
+
+            insert_into_db(json.dumps(prompt_answer_log), "prompt_answer")
             # Re-send the request if it failed.
             if "error" not in output:
                 break
