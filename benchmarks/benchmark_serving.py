@@ -27,6 +27,14 @@ import numpy as np
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+from supabase import create_client, Client
+from dotenv import load_dotenv
+import os
+
+database_url = os.getenv('database_url')
+database_key = os.getenv('database_key')
+supabase: Client = create_client(database_url, database_key)
+
 # (prompt len, output len, latency)
 REQUEST_LATENCY: List[Tuple[int, int, float]] = []
 
@@ -103,7 +111,7 @@ async def send_request(
     prompt_len: int,
     output_len: int,
     best_of: int,
-    use_beam_search: bool,
+    use_beam_search: bool
 ) -> None:
     request_start_time = time.time()
 
@@ -136,7 +144,6 @@ async def send_request(
 
     timeout = aiohttp.ClientTimeout(total=3 * 3600)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        script_dir = os.path.dirname(os.path.realpath(__file__))
         while True:
             async with session.post(api_url, headers=headers, json=pload) as response:
                 chunks = []
@@ -144,14 +151,12 @@ async def send_request(
                     chunks.append(chunk)
             output = b"".join(chunks).decode("utf-8")
             output = json.loads(output)
+            # This is the output I want to insert into bd (table test, column 'text')
 
             # Re-send the request if it failed.
             if "error" not in output:
+                data, count = supabase.table('test').insert({"text": output}).execute()
                 break
-            
-        # Write the output to a file
-        with open(os.path.join(script_dir, 'output.txt'), 'a') as f:
-            f.write(str(output) + '\n')
 
     request_end_time = time.time()
     request_latency = request_end_time - request_start_time
@@ -171,7 +176,7 @@ async def benchmark(
         prompt, prompt_len, output_len = request
         task = asyncio.create_task(send_request(backend, api_url, prompt,
                                                 prompt_len, output_len,
-                                                best_of, use_beam_search))
+                                                best_of, use_beam_search, ))
         tasks.append(task)
     await asyncio.gather(*tasks)
 

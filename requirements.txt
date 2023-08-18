@@ -9,3 +9,4 @@ xformers >= 0.0.19
 fastapi
 uvicorn
 pydantic < 2  # Required for OpenAI server.
+aiohttp

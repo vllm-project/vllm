@@ -1,6 +1,5 @@
-import debugpy
+from vllm import LLM
 
-debugpy.listen(("0.0.0.0", 5678))
-print("Waiting for client to attach...")
-debugpy.wait_for_client()
-print('Hahaa! Its working G, u dont see me on terminal!')
+llm = LLM(model='gpt2')  # Name or path of your model
+output = llm.generate("Hello, my name is")
+print(output)
