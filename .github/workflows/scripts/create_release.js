@@ -1,4 +1,7 @@
-async function run(github, context) {
+// Uses Github's API to create the release and wait for result.
+// We use a JS script since github CLI doesn't provide a way to wait for the release's creation and returns immediately.
+
+module.exports = async (github, context, core) => {
 	try {
 		const response = await github.rest.repos.createRelease({
 			draft: false,
@@ -9,13 +12,9 @@ async function run(github, context) {
 			repo: context.repo.repo,
 			tag_name: process.env.RELEASE_TAG,
 		});
-	
+
 		core.setOutput('upload_url', response.data.upload_url);
 	} catch (error) {
 		core.setFailed(error.message);
 	}
-}
-
-module.exports = (github, context) => {
-	run(github, context)
 }
