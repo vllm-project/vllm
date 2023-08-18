@@ -26,7 +26,7 @@ server:
 
 # Trigger benchmarking
 benchmark:
-	docker exec -it pytorch_bash_container python benchmarks/benchmark_serving.py --backend vllm --tokenizer JosephusCheung/Guanaco --dataset ShareGPT_V3_unfiltered_cleaned_split.json --request-rate 5 --num-prompts 100 --host 127.0.0.1 --port 8080
+	docker exec -it pytorch_bash_container python benchmarks/benchmark_serving.py --backend vllm --tokenizer JosephusCheung/Guanaco --dataset ShareGPT_V3_unfiltered_cleaned_split.json --request-rate 1 --num-prompts 1 --host 127.0.0.1 --port 8080
 
 # Trigger benchmarking with debugging
 benchmark-debug:

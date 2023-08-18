@@ -26,18 +26,38 @@ import aiohttp
 import numpy as np
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
-
-from supabase import create_client, Client
 from dotenv import load_dotenv
 import os
 
-database_url = os.getenv('database_url')
-database_key = os.getenv('database_key')
-supabase: Client = create_client(database_url, database_key)
+load_dotenv()
+
+db_config = {
+    "user": "postgres",
+    "password": os.getenv('db-pwd'),
+    "host": os.getenv('db-host'),
+    "port": os.getenv('db-port'),
+    "database": "postgres",
+}
+
+# Connect to the database
+connection = psycopg2.connect(**db_config)
+cursor = connection.cursor()
+
+# Define the table name and column name
+table_name = "test"
+column_name = "text"
 
 # (prompt len, output len, latency)
 REQUEST_LATENCY: List[Tuple[int, int, float]] = []
 
+def insert_into_db(output):
+    try:
+        query = f"INSERT INTO {table_name} ({column_name}) VALUES (%s)"
+        cursor.execute(query, (output,))
+        connection.commit()
+    except Exception as e:
+        print("Error inserting data into the database:", e)
+        connection.rollback()
 
 def sample_requests(
     dataset_path: str,
@@ -151,11 +171,9 @@ async def send_request(
                     chunks.append(chunk)
             output = b"".join(chunks).decode("utf-8")
             output = json.loads(output)
-            # This is the output I want to insert into bd (table test, column 'text')
-
+            insert_into_db(output)
             # Re-send the request if it failed.
             if "error" not in output:
-                data, count = supabase.table('test').insert({"text": output}).execute()
                 break
 
     request_end_time = time.time()

@@ -1,17 +1,41 @@
-from supabase import create_client, Client
-
 from dotenv import load_dotenv
 import os
-
+import psycopg2
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Get the URL and KEY from environment variables
-database_url = os.getenv('database_url')
-database_key = os.getenv('database_key')
+# Replace [YOUR-PASSWORD] with your actual password
+db_config = {
+    "user": "postgres",
+    "password": os.getenv('db-pwd'),
+    "host": os.getenv('db-host'),
+    "port": os.getenv('db-port'),
+    "database": "postgres",
+}
 
+# Connect to the database
+connection = psycopg2.connect(**db_config)
+cursor = connection.cursor()
 
-supabase: Client = create_client(database_url, database_key)
+# Define the table name and column name
+table_name = "test"
+column_name = "text"
 
-data, count = supabase.table('test').insert({"text": "Denmark"}).execute()
+# Insert data into the database
+def insert_into_db(output):
+    try:
+        query = f"INSERT INTO {table_name} ({column_name}) VALUES (%s)"
+        cursor.execute(query, (output,))
+        connection.commit()
+    except Exception as e:
+        print("Error inserting data into the database:", e)
+        connection.rollback()
+
+# Example usage
+output = "Your output text here"
+insert_into_db(output)
+
+# Close the database connection
+cursor.close()
+connection.close()
