@@ -10,4 +10,5 @@ fastapi
 uvicorn
 pydantic < 2  # Required for OpenAI server.
 aiohttp
-psycopg2
+psycopg2-binary
+python-dotenv

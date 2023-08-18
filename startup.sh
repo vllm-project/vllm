@@ -8,7 +8,3 @@ conda init bash
 conda create -n myenv python=3.8 -y
 
 conda run -n myenv pip install debugpy
-
-conda run -n myenv pip install supabase
-
-conda run -n myenv pip install python-dotenv

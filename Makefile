@@ -22,11 +22,11 @@ install:
 
 # Launch server inside the Docker container
 server:
-	docker exec -it pytorch_bash_container python -m vllm.entrypoints.api_server --model Salesforce/socratic-books-30M --swap-space 16 --disable-log-requests --host 127.0.0.1 --port 8080
+	docker exec -it pytorch_bash_container python -m vllm.entrypoints.api_server --model gpt2 --swap-space 16 --disable-log-requests --host 127.0.0.1 --port 8080
 
 # Trigger benchmarking
 benchmark:
-	docker exec -it pytorch_bash_container python benchmarks/benchmark_serving.py --backend vllm --tokenizer JosephusCheung/Guanaco --dataset ShareGPT_V3_unfiltered_cleaned_split.json --request-rate 1 --num-prompts 1 --host 127.0.0.1 --port 8080
+	docker exec -it pytorch_bash_container python benchmarks/benchmark_serving.py --backend vllm --tokenizer gpt2 --dataset ShareGPT_V3_unfiltered_cleaned_split.json --request-rate 1 --num-prompts 1 --host 127.0.0.1 --port 8080
 
 # Trigger benchmarking with debugging
 benchmark-debug:
