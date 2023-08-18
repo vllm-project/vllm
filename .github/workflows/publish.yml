@@ -36,7 +36,8 @@ jobs:
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
           script: |
-            require('.github/workflows/scripts/create_release.js')(github, context)
+            const script = require('.github/workflows/scripts/create_release.js')
+            await script(github, context, core)
 
   wheel:
     name: Build Wheel
@@ -77,7 +78,7 @@ jobs:
         run: |
           bash -x .github/workflows/scripts/build.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
           wheel_name=$(ls dist/*whl | xargs -n 1 basename)
-          asset_name=$(echo $wheel_name | tr "linux" "manylinux1")
+          asset_name=${wheel_name//"linux"/"manylinux1"}
           echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
           echo "asset_name=${asset_name}" >> $GITHUB_ENV
       

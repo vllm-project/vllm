@@ -50,13 +50,6 @@ sudo    apt-get install -y --no-install-recommends \
         debhelper \
         nfs-common
 
-# Install python and pip
-# sudo add-apt-repository ppa:deadsnakes/ppa
-# sudo apt install "python$python_version" "python$python_version-distutils" "python$python_version-dev"
-# wget https://bootstrap.pypa.io/get-pip.py
-# python$python_version get-pip.py
-# rm get-pip.py
-
 # Remove github bloat files to free up disk space
 sudo rm -rf "/usr/local/share/boost"
 sudo rm -rf "$AGENT_TOOLSDIRECTORY"
