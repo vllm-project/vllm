@@ -78,15 +78,18 @@ def run_vllm(
     )
 
     # Add the requests to the engine.
+    do_sample = False
     for prompt, _, output_len in requests:
         sampling_params = SamplingParams(
             n=n,
-            temperature=0.0 if use_beam_search else 1.0,
+            temperature=(0.0 if not do_sample else 0.1) if use_beam_search else 1.0,
             top_p=1.0,
+            presence_penalty=1.0,
             use_beam_search=use_beam_search,
             ignore_eos=True,
             max_tokens=output_len,
         )
+        do_sample = not do_sample
         # FIXME(woosuk): Do not use internal method.
         llm._add_request(
             prompt=prompt,
