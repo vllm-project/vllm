@@ -1,6 +1,7 @@
 from typing import Dict, List, Optional
 
 from vllm.sequence import SequenceGroup, SequenceStatus
+from vllm.transformers_utils.tokenizer import Detokenizer
 
 
 class CompletionOutput:
@@ -71,7 +72,7 @@ class RequestOutput:
         self.finished = finished
 
     @classmethod
-    def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
+    def from_seq_group(cls, seq_group: SequenceGroup, detokenizer: Detokenizer) -> "RequestOutput":
         # Get the top-n sequences.
         n = seq_group.sampling_params.n
         seqs = seq_group.get_seqs()
@@ -91,7 +92,7 @@ class RequestOutput:
                 # logprobs are not requested.
                 logprobs = {}
             finshed_reason = SequenceStatus.get_finished_reason(seq.status)
-            output = CompletionOutput(seqs.index(seq), seq.output_text,
+            output = CompletionOutput(seqs.index(seq), detokenizer.get_output_text(seq),
                                       seq.get_output_token_ids(),
                                       seq.get_cumulative_logprob(), logprobs,
                                       finshed_reason)

@@ -13,7 +13,8 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               get_tokenizer)
+                                               get_tokenizer,
+                                               Detokenizer)
 from vllm.utils import Counter
 
 if ray:
@@ -92,6 +93,8 @@ class LLMEngine:
             model_config.tokenizer,
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code)
+
+        self.detokenizer = Detokenizer(tokenizer=self.tokenizer)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -260,6 +263,7 @@ class LLMEngine:
             seq_id = next(self.seq_counter)
             seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
             seqs.append(seq)
+            self.detokenizer.add_sequence(seq_id, sampling_params.stop)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, seqs, sampling_params,
@@ -330,7 +334,7 @@ class LLMEngine:
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
         for seq_group in seq_groups + scheduler_outputs.ignored_seq_groups:
-            request_output = RequestOutput.from_seq_group(seq_group)
+            request_output = RequestOutput.from_seq_group(seq_group, self.detokenizer)
             request_outputs.append(request_output)
 
         if self.log_stats:
@@ -406,30 +410,13 @@ class LLMEngine:
         """Decodes the sequence outputs."""
         for seq_group in seq_groups:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                new_token, new_output_text = detokenize_incrementally(
-                    self.tokenizer,
-                    seq.output_tokens,
-                    seq.get_last_token_id(),
-                    skip_special_tokens=True,
-                )
-                if new_token is not None:
-                    seq.output_tokens.append(new_token)
-                    seq.output_text = new_output_text
+                self.detokenizer.detokenize_last_token(seq, seq.get_last_token_id())
 
     def _stop_sequences(self, seq_groups: List[SequenceGroup]) -> None:
         """Stop the finished sequences."""
         for seq_group in seq_groups:
             sampling_params = seq_group.sampling_params
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                # Check if the sequence has generated a stop string.
-                for stop_str in sampling_params.stop:
-                    if seq.output_text.endswith(stop_str):
-                        # Truncate the output text so that the stop string is
-                        # not included in the output.
-                        seq.output_text = seq.output_text[:-len(stop_str)]
-                        seq.stop_string_matched
-                        break
-
                 # Check if the sequence has generated a stop string.
                 if seq.stop_string_matched:
                     self.scheduler.free_seq(
