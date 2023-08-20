@@ -116,8 +116,7 @@ class AsyncLLMEngine:
         if self.log_requests:
             logger.info(f"Received request {request_id}: "
                         f"prompt: {prompt!r}, "
-                        f"sampling params: {sampling_params}, "
-                        f"prompt token ids: {prompt_token_ids}.")
+                        f"sampling params: {sampling_params}")
 
         # Add the request into the vLLM engine's waiting queue.
         if self.engine_use_ray:
