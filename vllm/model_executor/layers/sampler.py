@@ -396,13 +396,26 @@ def _sample(
     gen_probs = probs
     # gen_logprobs = logprobs
 
-    if max_best_of > 1:
-        _, greedy_tensor = torch.topk(gen_probs, max_best_of, dim=-1, sorted=False)
-    else:
-        greedy_tensor = torch.argmax(gen_probs, dim=-1).unsqueeze(1)
-    sampling_tensor = torch.multinomial(gen_probs, num_samples=max_best_of, replacement=False)
-    greedy = greedy_tensor.tolist()
-    sampling = sampling_tensor.tolist()
+    sampling_offsets = input_metadata.sampling_offsets
+    sampling_tensors = torch.tensor_split(gen_probs, sampling_offsets)
+    greedy_tensor = None
+    sampling_tensor = None
+
+    if len(sampling_offsets) < 1 or sampling_offsets[0] > 0:
+        if max_best_of > 1:
+            _, greedy_tensor = torch.topk(sampling_tensors[0], max_best_of, dim=-1, sorted=False)
+        else:
+            greedy_tensor = torch.argmax(sampling_tensors[0], dim=-1).unsqueeze(1)
+    if len(sampling_tensors) > 1:
+        sampling_tensor = torch.multinomial(sampling_tensors[1], num_samples=max_best_of, replacement=False)
+
+    if not sampling_offsets:
+        sampling_offsets.append(0)
+
+    if greedy_tensor is not None:
+        greedy = greedy_tensor.tolist()
+    if sampling_tensor is not None:
+        sampling = sampling_tensor.tolist()
 
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
@@ -412,7 +425,7 @@ def _sample(
             logprob = logprobs[idx]
 
             # Sample the next tokens.
-            next_token_ids = greedy[idx][:sampling_params.best_of] if sampling_params.temperature < _SAMPLING_EPS else sampling[idx][:sampling_params.best_of]
+            next_token_ids = greedy[idx][:sampling_params.best_of] if sampling_params.temperature < _SAMPLING_EPS else sampling[idx-sampling_offsets[0]][:sampling_params.best_of]
             idx += 1
 
             # Get top-k log probabilities for the next tokens.
@@ -432,7 +445,8 @@ def _sample(
 
             # Sample the next tokens.
             parent_seq_ids = seq_ids
-            next_token_ids = greedy[idx:idx + len(seq_ids)] if sampling_params.temperature < _SAMPLING_EPS else sampling[idx:idx + len(seq_ids)]
+            offset_idx = idx - sampling_offsets[0]
+            next_token_ids = greedy[idx:idx + len(seq_ids)] if sampling_params.temperature < _SAMPLING_EPS else sampling[offset_idx:offset_idx + len(seq_ids)]
             next_token_ids = [item for sublist in next_token_ids for item in sublist]
 
             idx += len(seq_ids)

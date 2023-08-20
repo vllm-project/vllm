@@ -1,8 +1,21 @@
 """Sampling parameters for text generation."""
 from typing import List, Optional, Union
+from enum import IntEnum
 
 _SAMPLING_EPS = 1e-5
 
+class SamplingType(IntEnum):
+    GREEDY = 0
+    RANDOM = 1
+    BEAM = 2
+
+    @classmethod
+    def from_sampling_params(cls, sampling_params: "SamplingParams") -> "SamplingType":
+        if sampling_params.use_beam_search:
+            return cls.BEAM
+        if sampling_params.temperature < _SAMPLING_EPS:
+            return cls.GREEDY
+        return cls.RANDOM
 
 class SamplingParams:
     """Sampling parameters for text generation.
@@ -142,3 +155,7 @@ class SamplingParams:
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
                 f"logprobs={self.logprobs})")
+    
+    @property
+    def sampling_type(self) -> SamplingType:
+        return SamplingType.from_sampling_params(self)
