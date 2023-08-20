@@ -141,6 +141,19 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
                 output_tokens.append(seq_data.output_token_ids)
     return output_tokens
 
+@torch.jit.script
+def batched_bincount(
+    x: torch.Tensor, dim: int, max_value: int
+) -> torch.Tensor:
+    target = torch.zeros(x.shape[0], max_value, dtype=x.dtype, device=x.device)
+    values = torch.ones_like(x)
+    target.scatter_add_(dim, x, values)
+    return target
+
+def _pad_to_len(x: List[int], length: int) -> List[int]:
+    if len(x) >= length:
+        return x
+    return x.copy() + [0] * (length - len(x))
 
 def _apply_penalties(
     logits: torch.Tensor,
@@ -152,9 +165,12 @@ def _apply_penalties(
     num_seqs = logits.shape[0]
     # Collect the indices of sequences that have non-zero penalties.
     indices = []
+    max_len = 0
     for i in range(num_seqs):
         if not output_tokens[i]:
             continue
+        if len(output_tokens[i]) > max_len:
+            max_len = len(output_tokens[i])
         p = presence_penalties[i]
         f = frequency_penalties[i]
         if p < _SAMPLING_EPS and f < _SAMPLING_EPS:
@@ -165,27 +181,21 @@ def _apply_penalties(
     if not indices:
         return logits
 
-    bin_counts = []
-    for i in indices:
-        bin_counts.append(np.bincount(output_tokens[i], minlength=vocab_size))
-    bin_counts = np.stack(bin_counts, axis=0)
-    bin_counts = torch.from_numpy(bin_counts).to(dtype=logits.dtype,
-                                                 device=logits.device)
-
-    frequency_penalties = [frequency_penalties[i] for i in indices]
     frequency_penalties = torch.tensor(frequency_penalties,
-                                       dtype=logits.dtype,
-                                       device=logits.device)
-    presence_penalties = [presence_penalties[i] for i in indices]
+                                    dtype=logits.dtype,
+                                    device=logits.device).unsqueeze(dim=1)
     presence_penalties = torch.tensor(presence_penalties,
-                                      dtype=logits.dtype,
-                                      device=logits.device)
+                                    dtype=logits.dtype,
+                                    device=logits.device).unsqueeze(dim=1)
+    output_tokens = [
+        _pad_to_len(x, max_len) for x in output_tokens
+    ]
+    input_ids = torch.tensor(output_tokens,dtype=torch.long,device=logits.device)
+    occurences = batched_bincount(input_ids, 1, logits.shape[1])
+    frequency_penalty = occurences * frequency_penalties
+    presence_penalty = (occurences > 0) * presence_penalties
 
-    # We follow the definition in OpenAI API.
-    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits[indices] -= frequency_penalties.unsqueeze(dim=1) * bin_counts
-    presence_mask = (bin_counts > 0.0).to(dtype=logits.dtype)
-    logits[indices] -= presence_penalties.unsqueeze(dim=1) * presence_mask
+    logits.sub_(frequency_penalty).sub_(presence_penalty)
     return logits
 
 
@@ -376,17 +386,35 @@ def _sample(
 
     # TODO(woosuk): Optimize.
     idx = 0
+    max_best_of = 1
+
+    for i, seq_group in enumerate(input_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+        if i < input_metadata.num_prompts and sampling_params.best_of > max_best_of:
+            max_best_of = sampling_params.best_of
+
+    gen_probs = probs
+    # gen_logprobs = logprobs
+
+    if max_best_of > 1:
+        _, greedy_tensor = torch.topk(gen_probs, max_best_of, dim=-1, sorted=False)
+    else:
+        greedy_tensor = torch.argmax(gen_probs, dim=-1).unsqueeze(1)
+    sampling_tensor = torch.multinomial(gen_probs, num_samples=max_best_of, replacement=False)
+    greedy = greedy_tensor.tolist()
+    sampling = sampling_tensor.tolist()
+
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
         if i < input_metadata.num_prompts:
             # Generate the next tokens for a prompt input.
             assert len(seq_ids) == sampling_params.best_of
-            prob = probs[idx]
             logprob = logprobs[idx]
-            idx += 1
 
             # Sample the next tokens.
-            next_token_ids = _sample_from_prompt(prob, sampling_params)
+            next_token_ids = greedy[idx][:sampling_params.best_of] if sampling_params.temperature < _SAMPLING_EPS else sampling[idx][:sampling_params.best_of]
+            idx += 1
+
             # Get top-k log probabilities for the next tokens.
             next_logprobs = _get_topk_logprobs(logprob,
                                                sampling_params.logprobs)
@@ -400,17 +428,14 @@ def _sample(
                                                       output_logprobs)
         else:
             # Generate the next tokens for generation tokens.
-            prob = probs[idx:idx + len(seq_ids)]
             logprob = logprobs[idx:idx + len(seq_ids)]
-            idx += len(seq_ids)
 
             # Sample the next tokens.
-            seq_logprobs = [
-                input_metadata.seq_data[seq_id].cumulative_logprob
-                for seq_id in seq_ids
-            ]
-            parent_seq_ids, next_token_ids = _sample_from_generation_tokens(
-                seq_ids, prob, logprob, seq_logprobs, sampling_params)
+            parent_seq_ids = seq_ids
+            next_token_ids = greedy[idx:idx + len(seq_ids)] if sampling_params.temperature < _SAMPLING_EPS else sampling[idx:idx + len(seq_ids)]
+            next_token_ids = [item for sublist in next_token_ids for item in sublist]
+
+            idx += len(seq_ids)
 
             # Get top-k log probabilities for the next tokens.
             next_logprobs: Dict[int, Dict[int, float]] = {}
