@@ -422,19 +422,19 @@ class LLMEngine:
             sampling_params = seq_group.sampling_params
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 # Check if the sequence has generated a stop string.
-                stopped = False
                 for stop_str in sampling_params.stop:
                     if seq.output_text.endswith(stop_str):
                         # Truncate the output text so that the stop string is
                         # not included in the output.
                         seq.output_text = seq.output_text[:-len(stop_str)]
-                        self.scheduler.free_seq(
-                            seq, SequenceStatus.FINISHED_STOPPED)
-                        stopped = True
+                        seq.stop_string_matched
                         break
-                if stopped:
-                    continue
 
+                # Check if the sequence has generated a stop string.
+                if seq.stop_string_matched:
+                    self.scheduler.free_seq(
+                        seq, SequenceStatus.FINISHED_STOPPED)
+                    continue
                 # Check if the sequence has reached max_model_len.
                 if seq.get_len() > self.scheduler_config.max_model_len:
                     self.scheduler.free_seq(
