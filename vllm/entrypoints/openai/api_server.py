@@ -279,11 +279,8 @@ async def create_chat_completion(raw_request: Request):
                         response_json = create_stream_response_json(
                             index=i, text=previous_delta)
                         yield f"data: {response_json}\n\n"
-                    else:
+                    elif output.finish_reason is None:
                         delta_text = output.text[prev_len - 1:]
-                previous_delta = delta_text
-                previous_texts[i] = output.text
-                previous_num_tokens[i] = len(output.token_ids)
                 if output.finish_reason is not None:
                     response_json = create_stream_response_json(
                         index=i,
@@ -291,6 +288,10 @@ async def create_chat_completion(raw_request: Request):
                         finish_reason=output.finish_reason,
                     )
                     yield f"data: {response_json}\n\n"
+                else:
+                    previous_delta = delta_text
+                    previous_texts[i] = output.text
+                    previous_num_tokens[i] = len(output.token_ids)
         yield "data: [DONE]\n\n"
 
     # Streaming response
@@ -501,15 +502,12 @@ async def create_completion(raw_request: Request):
                         response_json = create_stream_response_json(
                             index=i, text=previous_delta)
                         yield f"data: {response_json}\n\n"
-                    else:
+                    elif output.finish_reason is None:
                         # cache previous word which is not valid.
                         delta_text = output.text[prev_len - 1:]
-                previous_delta = delta_text
-                previous_texts[i] = output.text
-                previous_num_tokens[i] = len(output.token_ids)
                 if output.finish_reason is not None:
-                    logprobs = (LogProbs()
-                                if request.logprobs is not None else None)
+                    logprobs = LogProbs(
+                    ) if request.logprobs is not None else None
                     response_json = create_stream_response_json(
                         index=i,
                         text=previous_delta,
@@ -517,6 +515,10 @@ async def create_completion(raw_request: Request):
                         finish_reason=output.finish_reason,
                     )
                     yield f"data: {response_json}\n\n"
+                else:
+                    previous_delta = delta_text
+                    previous_texts[i] = output.text
+                    previous_num_tokens[i] = len(output.token_ids)
         yield "data: [DONE]\n\n"
 
     # Streaming response
