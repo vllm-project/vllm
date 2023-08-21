@@ -10,6 +10,7 @@ class ChatGLMConfig(PretrainedConfig):
     model_type = "chatglm"
     attribute_map = {
         "num_hidden_layers": "num_layers",
+        "n_head_kv":"multi_query_group_num",
     }
     def __init__(
         self,

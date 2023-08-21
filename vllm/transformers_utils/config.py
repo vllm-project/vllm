@@ -5,9 +5,10 @@ from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
 _CONFIG_REGISTRY = {
     "mpt": MPTConfig,
     "baichuan": BaiChuanConfig,
-    "chatglm": ChatGLMConfig,
+    "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
+    "chatglm": ChatGLMConfig,
 }
 
 

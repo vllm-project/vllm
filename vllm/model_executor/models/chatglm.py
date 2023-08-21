@@ -133,15 +133,9 @@ class GLMAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            # query_layer = query_layer.contiguous()
-            # head_nums = self.num_attention_heads_per_partition // self.num_multi_query_groups_per_partition
-            # num_tokens = key_layer.shape[0]
-            # key_layer = key_layer.reshape(-1, self.num_multi_query_groups_per_partition, 
-            #                             self.hidden_size_per_attention_head
-            #                             ).unsqueeze(-2).expand(-1,-1,head_nums,-1).contiguous().view(num_tokens,-1)
-            # value_layer = value_layer.reshape(-1, self.num_multi_query_groups_per_partition, 
-            #                                 self.hidden_size_per_attention_head
-            #                                 ).unsqueeze(-2).expand(-1,-1,head_nums,-1).contiguous().view(num_tokens,-1)
+            query_layer = query_layer.contiguous()
+            key_layer = key_layer.contiguous()
+            value_layer = value_layer.contiguous()
         else:
             query_layer, key_layer, value_layer = qkv.chunk(chunks=3, dim=-1)
 

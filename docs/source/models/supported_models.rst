@@ -19,7 +19,7 @@ Alongside each architecture, we include some popular models that use it.
     - :code:`THUDM/chatglm2-6b`.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
-    - :code:`baichuan-inc/Baichuan-7B`, `baichuan-inc/Baichuan-13B-Chat`, etc.
+    - :code:`baichuan-inc/Baichuan-7B`, :code:`baichuan-inc/Baichuan-13B-Chat`, etc.
   * - :code:`BloomForCausalLM`
     - BLOOM, BLOOMZ, BLOOMChat
     - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.

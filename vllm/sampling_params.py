@@ -77,7 +77,7 @@ class SamplingParams:
 
         self._verify_args()
         if self.use_beam_search:
-            self._verity_beam_search()
+            self._verify_beam_search()
         elif self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self._verify_greedy_sampling()
@@ -109,7 +109,7 @@ class SamplingParams:
             raise ValueError(
                 f"logprobs must be non-negative, got {self.logprobs}.")
 
-    def _verity_beam_search(self) -> None:
+    def _verify_beam_search(self) -> None:
         if self.best_of == 1:
             raise ValueError("best_of must be greater than 1 when using beam "
                              f"search. Got {self.best_of}.")
