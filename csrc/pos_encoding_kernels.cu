@@ -58,8 +58,8 @@ __global__ void rotary_embedding_neox_kernel(
     const scalar_t cos = __ldg(cache_ptr + x_index);
     const scalar_t sin = __ldg(cache_ptr + y_index);
 
-    const scalar_t k_x = key[token_head + x_index];
-    const scalar_t k_y = key[token_head + y_index];
+    const scalar_t k_x = key[out_x];
+    const scalar_t k_y = key[out_y];
     key[out_x] = k_x * cos - k_y * sin;
     key[out_y] = k_y * cos + k_x * sin;
   }

@@ -76,6 +76,10 @@ class GLMAttention(nn.Module):
         # Per attention head and per partition values.
         self.hidden_size_per_attention_head = self.projection_size // config.num_attention_heads
         self.num_attention_heads_per_partition = config.num_attention_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        assert config.num_attention_heads % tp_size == 0
+        self.num_attention_heads_per_partition = config.num_attention_heads // tp_size
+
 
         self.multi_query_attention = config.multi_query_attention
         self.qkv_hidden_size = 3 * self.projection_size
@@ -95,11 +99,12 @@ class GLMAttention(nn.Module):
         )
         tp_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % tp_size == 0
-        self.attn = PagedAttentionWithRoPE(config.num_attention_heads // tp_size,
+        self.attn = PagedAttentionWithRoPE(self.num_attention_heads_per_partition,
                                    config.kv_channels ,
                                    scale=config.kv_channels**-0.5,
                                    rotary_dim = rotary_dim // 2,
                                    max_position = config.seq_length,
+                                   num_kv_heads = self.num_multi_query_groups_per_partition,
                                    glm = True)
 
         # Output.
@@ -128,15 +133,15 @@ class GLMAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            query_layer = query_layer.contiguous()
-            head_nums = self.num_attention_heads_per_partition // self.num_multi_query_groups_per_partition
-            num_tokens = key_layer.shape[0]
-            key_layer = key_layer.reshape(-1, self.num_multi_query_groups_per_partition, 
-                                        self.hidden_size_per_attention_head
-                                        ).unsqueeze(-2).expand(-1,-1,head_nums,-1).contiguous().view(num_tokens,-1)
-            value_layer = value_layer.reshape(-1, self.num_multi_query_groups_per_partition, 
-                                            self.hidden_size_per_attention_head
-                                            ).unsqueeze(-2).expand(-1,-1,head_nums,-1).contiguous().view(num_tokens,-1)
+            # query_layer = query_layer.contiguous()
+            # head_nums = self.num_attention_heads_per_partition // self.num_multi_query_groups_per_partition
+            # num_tokens = key_layer.shape[0]
+            # key_layer = key_layer.reshape(-1, self.num_multi_query_groups_per_partition, 
+            #                             self.hidden_size_per_attention_head
+            #                             ).unsqueeze(-2).expand(-1,-1,head_nums,-1).contiguous().view(num_tokens,-1)
+            # value_layer = value_layer.reshape(-1, self.num_multi_query_groups_per_partition, 
+            #                                 self.hidden_size_per_attention_head
+            #                                 ).unsqueeze(-2).expand(-1,-1,head_nums,-1).contiguous().view(num_tokens,-1)
         else:
             query_layer, key_layer, value_layer = qkv.chunk(chunks=3, dim=-1)
 
