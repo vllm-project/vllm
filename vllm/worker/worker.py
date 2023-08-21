@@ -14,6 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData, SequenceGroupMetadata, SequenceOutputs
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory
+from vllm.model_executor.adapters import get_prefix_tuning_encoder
 
 
 class Worker:
@@ -140,6 +141,7 @@ class Worker:
                                         self.parallel_config)
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
+        self.cache_config.cache_engine = self.cache_engine
 
     def _prepare_inputs(
         self,
@@ -182,8 +184,11 @@ class Worker:
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
             for i in range(prompt_len):
-                block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
+                pos = i 
+                if get_prefix_tuning_encoder():
+                    pos += get_prefix_tuning_encoder().num_virtual_tokens
+                block_number = block_table[pos // self.block_size]
+                block_offset = pos % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
@@ -208,6 +213,9 @@ class Worker:
                 context_len = seq_data.get_len()
                 position = context_len - 1
                 input_positions.append(position)
+                if get_prefix_tuning_encoder():
+                    context_len += get_prefix_tuning_encoder().num_virtual_tokens
+                    position = context_len - 1
 
                 block_table = seq_group_metadata.block_tables[seq_id]
                 generation_block_tables.append(block_table)

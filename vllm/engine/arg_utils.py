@@ -13,6 +13,7 @@ class EngineArgs:
     model: str
     tokenizer: Optional[str] = None
     tokenizer_mode: str = 'auto'
+    adapter_model_and_path = None
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     use_np_weights: bool = False
@@ -146,6 +147,7 @@ class EngineArgs:
         # Initialize the configs.
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
+                                   self.adapter_model_and_path,
                                    self.download_dir, self.use_np_weights,
                                    self.use_dummy_weights, self.dtype,
                                    self.seed)

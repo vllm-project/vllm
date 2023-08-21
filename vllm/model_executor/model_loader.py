@@ -56,4 +56,4 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         model.load_weights(model_config.model, model_config.download_dir,
                            model_config.use_np_weights)
         model = model.cuda()
-    return model.eval()
+    return model.eval(),set_adapter_model(model.adaper_model_and_path)

@@ -62,6 +62,7 @@ class OPTAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
+        layer_index: int = 0,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
@@ -85,7 +86,8 @@ class OPTAttention(nn.Module):
                                           perform_initialization=False)
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
-                                   scale=self.scaling)
+                                   scale=self.scaling,
+                                   layer_index = layer_index)
 
     def forward(
         self,
@@ -105,7 +107,9 @@ class OPTAttention(nn.Module):
 
 class OPTDecoderLayer(nn.Module):
 
-    def __init__(self, config: OPTConfig):
+    def __init__(self,
+                 config: OPTConfig,
+                 layer_index:int):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -113,6 +117,7 @@ class OPTDecoderLayer(nn.Module):
             embed_dim=self.embed_dim,
             num_heads=config.num_attention_heads,
             bias=config.enable_bias,
+            layer_index = layer_index,
         )
         self.do_layer_norm_before = config.do_layer_norm_before
         self.activation_fn = get_act_fn(config.activation_function)
@@ -214,7 +219,7 @@ class OPTDecoder(nn.Module):
             self.final_layer_norm = None
 
         self.layers = nn.ModuleList(
-            [OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+            [OPTDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
 
     def forward(
         self,

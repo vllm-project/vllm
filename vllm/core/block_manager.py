@@ -4,6 +4,8 @@ from typing import Dict, List, Optional, Set, Tuple
 from vllm.block import PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+from vllm.config import CacheConfig
+from vllm.model_executor.adapters import get_prefix_tuning_encoder
 
 
 class BlockAllocator:
@@ -59,24 +61,29 @@ class BlockSpaceManager:
 
     def __init__(
         self,
-        block_size: int,
-        num_gpu_blocks: int,
-        num_cpu_blocks: int,
+        cache_config: CacheConfig,
         watermark: float = 0.01,
     ) -> None:
-        self.block_size = block_size
-        self.num_total_gpu_blocks = num_gpu_blocks
-        self.num_total_cpu_blocks = num_cpu_blocks
+        self.block_size = cache_config.block_size
+        self.num_total_gpu_blocks = cache_config.num_gpu_blocks
+        self.num_total_cpu_blocks = cache_config.num_cpu_blocks
         self.watermark = watermark
         assert watermark >= 0.0
 
-        self.watermark_blocks = int(watermark * num_gpu_blocks)
-        self.gpu_allocator = BlockAllocator(Device.GPU, block_size,
-                                            num_gpu_blocks)
-        self.cpu_allocator = BlockAllocator(Device.CPU, block_size,
-                                            num_cpu_blocks)
+        self.watermark_blocks = int(watermark * self.num_gpu_blocks)
+        self.gpu_allocator = BlockAllocator(Device.GPU, self.block_size,
+                                            self.num_gpu_blocks)
+        self.cpu_allocator = BlockAllocator(Device.CPU, self.block_size,
+                                            self.num_cpu_blocks)
         # Mapping: seq_id -> BlockTable.
-        self.block_tables: Dict[int, BlockTable] = {}
+        self.prompt_embedding_table:List[BlockTable] = []
+        if get_prefix_tuning_encoder():
+            self.prompt_embedding_table = get_prefix_tuning_encoder().write_prompt_embedding_into_kvcache(
+                                                                    self.gpu_allocator,
+                                                                    self.cache_config.gpu_cache, 
+                                                                    self.cache_config.block_size
+                                                                    )
+
 
     def can_allocate(self, seq_group: SequenceGroup) -> bool:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -95,7 +102,21 @@ class BlockSpaceManager:
 
         # Allocate new physical token blocks that will store the prompt tokens.
         block_table: BlockTable = []
-        for _ in range(len(seq.logical_token_blocks)):
+        ret = None
+        new_logical_token_blocks = len(seq.logical_token_blocks)
+        if len(self.prompt_table) > 0:
+            for block in self.prompt_table:
+                block.ref_count += seq_group.num_seqs()
+                block_table.append(block)
+            new_logical_token_blocks = (seq.get_len() + get_prefix_tuning_encoder().num_virtual_tokens + seq.block_size -1 ) // seq.block_size - len(self.prompt_table)
+            if get_prefix_tuning_encoder().num_virtual_tokens % seq.block_size != 0:
+                new_block = self.gpu_allocator.allocate()
+                new_block.ref_count = seq_group.num_seqs()
+                before_block = block_table[len(self.prompt_table) -1]
+                block_table[len(self.prompt_table) -1] = new_block
+                ret = before_block.block_number, new_block.block_number
+       
+        for _ in range(new_logical_token_blocks):
             block = self.gpu_allocator.allocate()
             # Set the reference counts of the token blocks.
             block.ref_count = seq_group.num_seqs()
@@ -104,6 +125,7 @@ class BlockSpaceManager:
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs():
             self.block_tables[seq.seq_id] = block_table.copy()
+        return ret
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
@@ -114,10 +136,13 @@ class BlockSpaceManager:
 
     def append_slot(self, seq: Sequence) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
-        logical_blocks = seq.logical_token_blocks
+        num_logical_blocks = len(seq.logical_token_blocks)
+        if len(self.prompt_table) > 0:
+            num_logical_blocks = (seq.get_len() + get_peft_model().num_virtual_tokens + seq.block_size -1 ) // seq.block_size
         block_table = self.block_tables[seq.seq_id]
-
+        block_table = self.block_tables[seq.seq_id]
         if len(block_table) < len(logical_blocks):
+        if len(block_table) < num_logical_blocks:
             # The sequence has a new logical block.
             # Allocate a new physical block.
             block = self.gpu_allocator.allocate()

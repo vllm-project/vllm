@@ -67,11 +67,7 @@ class Scheduler:
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Create the block space manager.
-        self.block_manager = BlockSpaceManager(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=self.cache_config.num_gpu_blocks,
-            num_cpu_blocks=self.cache_config.num_cpu_blocks,
-        )
+        self.block_manager = BlockSpaceManager(cache_config)
 
         # Sequence groups in the WAITING state.
         self.waiting: List[SequenceGroup] = []
@@ -157,7 +153,7 @@ class Scheduler:
                     break
 
                 seq_group = self.waiting.pop(0)
-                self._allocate(seq_group)
+                self._allocate(seq_group, blocks_to_copy)
                 self.running.append(seq_group)
                 num_batched_tokens += num_prompt_tokens
                 scheduled.append(seq_group)
@@ -312,8 +308,17 @@ class Scheduler:
             if not seq_group.is_finished()
         ]
 
-    def _allocate(self, seq_group: SequenceGroup) -> None:
-        self.block_manager.allocate(seq_group)
+    def _allocate(self,
+                  seq_group: SequenceGroup,
+                  blocks_to_copy: Dict[int, List[int]],
+                  ) -> None:
+        ret = self.block_manager.allocate(seq_group)
+        if ret is not None:
+            src_block, dst_block = ret
+            if src_block in blocks_to_copy:
+                blocks_to_copy[src_block].append(dst_block)
+            else:
+                blocks_to_copy[src_block] = [dst_block]
         for seq in seq_group.get_seqs():
             seq.status = SequenceStatus.RUNNING
 

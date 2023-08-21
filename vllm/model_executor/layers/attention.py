@@ -5,12 +5,14 @@ import torch
 import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
+                                         BlockDiagonalCausalFromBottomRightMask,
                                          LowerTriangularMaskWithTensorBias)
 
 from vllm import attention_ops
 from vllm import cache_ops
 from vllm import pos_encoding_ops
 from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor import get_prefix_tuning_encoder
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 
@@ -56,13 +58,15 @@ class PagedAttention(nn.Module):
                  num_heads: int,
                  head_size: int,
                  scale: float,
-                 num_kv_heads: Optional[int] = None) -> None:
+                 num_kv_heads: Optional[int] = None,
+                 layer_index: Optional[int] = None) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
         self.attn_op = xops.fmha.cutlass.FwOp()
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.layer_index = layer_index
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -79,7 +83,13 @@ class PagedAttention(nn.Module):
             # Already set by a previous layer.
             return
         prompt_lens = input_metadata.prompt_lens
-        attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
+        prefix_tuning_encoder = get_prefix_tuning_encoder()
+        if prefix_tuning_encoder:
+            attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
+                                            q_seqlen=prompt_lens,
+                                            kv_seqlen=[l + prefix_tuning_encoder.num_virtual_tokens for l in prompt_lens])
+        else:
+            attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
         input_metadata.attn_bias.append(attn_bias)
 
     def multi_query_kv_attention(
@@ -197,13 +207,17 @@ class PagedAttention(nn.Module):
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
             # Prompt run.
+            if get_prefix_tuning_encoder():
+                new_key, new_vaule = get_prefix_tuning_encoder().cat_prompt_with_key_value(self.layer_index,input_metadata.prompt_lens,key[:num_prompt_tokens],value[:num_prompt_tokens])
+            else:
+                new_key, new_vaule = key[:num_prompt_tokens],value[:num_prompt_tokens]
             assert input_metadata.num_generation_tokens == 0
             self.set_attn_bias(input_metadata)
             self.multi_query_kv_attention(
                 output[:num_prompt_tokens],
                 query[:num_prompt_tokens],
-                key[:num_prompt_tokens],
-                value[:num_prompt_tokens],
+                new_key,
+                new_vaule,
                 input_metadata,
             )
 

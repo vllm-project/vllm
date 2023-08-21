@@ -39,6 +39,7 @@ class ModelConfig:
         tokenizer: str,
         tokenizer_mode: str,
         trust_remote_code: bool,
+        adpater_model_and_path,
         download_dir: Optional[str],
         use_np_weights: bool,
         use_dummy_weights: bool,
@@ -49,6 +50,7 @@ class ModelConfig:
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
+        self.adpater_model_and_path = adpater_model_and_path
         self.download_dir = download_dir
         self.use_np_weights = use_np_weights
         self.use_dummy_weights = use_dummy_weights
@@ -165,6 +167,7 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
+        self.cache_engine = None
 
     def _verify_args(self) -> None:
         if self.gpu_memory_utilization > 1.0:
