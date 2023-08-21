@@ -95,8 +95,9 @@ class LLMEngine:
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code)
 
-        self.detokenizer = ThreadedDetokenizer(tokenizer=self.tokenizer)
+        #self.detokenizer = ThreadedDetokenizer(tokenizer=self.tokenizer)
         #self.detokenizer = DummyDetokenizer(tokenizer=self.tokenizer)
+        self.detokenizer = Detokenizer(tokenizer=self.tokenizer)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.

@@ -1,4 +1,4 @@
-import concurrent.futures
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Tuple, Union, Dict, Optional
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
@@ -207,18 +207,22 @@ class DummyDetokenizer:
 class ThreadedSequenceState:
     def __init__(self, seq_id: int) -> None:
         self.seq_id: int = seq_id
-        self.pending_future: Optional[concurrent.futures.Future] = None
+        self.pending_future: Optional[Future] = None
         self.output_text: str = ""
         self.stop_string_matched = False
 
     def _sync_future(self):
-        if self.pending_future and self.pending_future.done():
+        #if self.pending_future and self.pending_future.done():
+        if self.pending_future:
             self.stop_string_matched, self.output_text = self.pending_future.result()
             self.pending_future = None
 
     def get_output_text(self):
         self._sync_future()
         return self.output_text
+
+    def set_future(self, future: Future):
+        self.pending_future = future
 
     def get_stop_string_matched(self): 
         self._sync_future()
@@ -231,7 +235,7 @@ class ThreadedDetokenizer:
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ) -> None:
         self.delegate_detokenizer = Detokenizer(tokenizer)
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.executor = ThreadPoolExecutor(max_workers=1)
         self.state: Dict[int, ThreadedSequenceState] = dict()
 
     def add_sequence(self, seq_id: int, stop_strings: List[str]) -> None:
@@ -239,15 +243,16 @@ class ThreadedDetokenizer:
         self.executor.submit(self.delegate_detokenizer.add_sequence, seq_id, stop_strings)
 
     def detokenize_last_token(self, seq_id: int, last_token_id: int) -> None:
-        self.state[seq_id].pending_future = self.executor.submit(self.delegate_detokenizer.detokenize_last_token, seq_id, last_token_id)
+        self.state[seq_id].set_future(
+            self.executor.submit(
+                self.delegate_detokenizer.detokenize_last_token, 
+                seq_id, last_token_id))
 
     def get_output_text(self, seq_id: int) -> str:
-        if seq_id in self.state:
-            return self.state[seq_id].get_output_text()
-        return ""
+        return self.state[seq_id].get_output_text()
 
     def free_sequence(self, seq_id: int) -> None:
-        self.state.pop(seq_id)
+        # TODO: actually we need to free the request
         self.executor.submit(self.delegate_detokenizer.free_sequence, seq_id)
 
     def stop_string_matched(self, seq_id: int) -> bool:
