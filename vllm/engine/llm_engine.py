@@ -13,7 +13,9 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.transformers_utils.tokenizer import (get_tokenizer,
-                                               Detokenizer)
+                                               Detokenizer,
+                                               DummyDetokenizer,
+                                               ThreadedDetokenizer)
 from vllm.utils import Counter
 
 if ray:
@@ -93,7 +95,7 @@ class LLMEngine:
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code)
 
-        self.detokenizer = Detokenizer(tokenizer=self.tokenizer)
+        self.detokenizer = ThreadedDetokenizer(tokenizer=self.tokenizer)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
