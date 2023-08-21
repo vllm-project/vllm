@@ -185,8 +185,7 @@ class DummyDetokenizer:
         self, 
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ) -> None:
-        self.tokenizer = tokenizer
-        self.decoding_sequences: Dict[int, SequenceDetokenizeState] = dict()
+        pass
 
     def add_sequence(self, seq_id: int, stop_strings: List[str]) -> None:
         pass
@@ -252,7 +251,7 @@ class ThreadedDetokenizer:
         return self.state[seq_id].get_output_text()
 
     def free_sequence(self, seq_id: int) -> None:
-        # TODO: actually we need to free the request
+        # TODO: we need to free the request
         self.executor.submit(self.delegate_detokenizer.free_sequence, seq_id)
 
     def stop_string_matched(self, seq_id: int) -> bool:
