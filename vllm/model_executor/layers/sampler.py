@@ -1,14 +1,13 @@
 """A layer that samples the next tokens from the model's outputs."""
 from typing import Dict, List, Tuple, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     gather_from_tensor_model_parallel_region)
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceOutputs
 
 _SAMPLING_EPS = 1e-5
@@ -142,7 +141,7 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
     return output_tokens
 
 @torch.jit.script
-def batched_bincount(
+def _batched_bincount(
     x: torch.Tensor, dim: int, max_value: int
 ) -> torch.Tensor:
     target = torch.zeros(x.shape[0], max_value, dtype=x.dtype, device=x.device)
@@ -191,7 +190,7 @@ def _apply_penalties(
         _pad_to_len(x, max_len) for x in output_tokens
     ]
     input_ids = torch.tensor(output_tokens,dtype=torch.long,device=logits.device)
-    occurences = batched_bincount(input_ids, 1, logits.shape[1])
+    occurences = _batched_bincount(input_ids, 1, logits.shape[1])
     frequency_penalty = occurences * frequency_penalties
     presence_penalty = (occurences > 0) * presence_penalties
 
@@ -394,28 +393,25 @@ def _sample(
             max_best_of = sampling_params.best_of
 
     gen_probs = probs
-    # gen_logprobs = logprobs
+    gen_logprobs = logprobs
 
-    sampling_offsets = input_metadata.sampling_offsets
-    sampling_tensors = torch.tensor_split(gen_probs, sampling_offsets)
-    greedy_tensor = None
-    sampling_tensor = None
+    sampling_type_offsets = input_metadata.sampling_offsets
 
-    if len(sampling_offsets) < 1 or sampling_offsets[0] > 0:
+    sampling_tensors = torch.tensor_split(gen_probs, sampling_type_offsets)
+    chosen_tokens_tensor = torch.empty((sum(t.shape[0] for t in sampling_tensors[:2]), max_best_of), dtype=torch.long, device=gen_probs.device)
+    chosen_tokens_tensors = torch.tensor_split(chosen_tokens_tensor, sampling_type_offsets[:2])
+
+    if len(sampling_type_offsets) == 0 or sampling_type_offsets[0] > 0:
         if max_best_of > 1:
-            _, greedy_tensor = torch.topk(sampling_tensors[0], max_best_of, dim=-1, sorted=False)
+            dummy_out = torch.empty_like(sampling_tensors[0])
+            torch.topk(sampling_tensors[0], max_best_of, dim=-1, sorted=False, out=(dummy_out, chosen_tokens_tensors[0]))
         else:
-            greedy_tensor = torch.argmax(sampling_tensors[0], dim=-1).unsqueeze(1)
-    if len(sampling_tensors) > 1:
-        sampling_tensor = torch.multinomial(sampling_tensors[1], num_samples=max_best_of, replacement=False)
+            torch.argmax(sampling_tensors[0], dim=-1, keepdim=True, out=chosen_tokens_tensors[0])
+    if len(sampling_type_offsets)== 1 or (len(sampling_type_offsets) > 1 and sampling_type_offsets[1] > 0):
+        torch.multinomial(sampling_tensors[1], num_samples=max_best_of, replacement=False, out=chosen_tokens_tensors[1])
 
-    if not sampling_offsets:
-        sampling_offsets.append(0)
-
-    if greedy_tensor is not None:
-        greedy = greedy_tensor.tolist()
-    if sampling_tensor is not None:
-        sampling = sampling_tensor.tolist()
+    chosen_logprobs = torch.gather(gen_logprobs, dim=-1, index=chosen_tokens_tensor).tolist()
+    batch_sampled_tokens = chosen_tokens_tensor.tolist()
 
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
@@ -425,31 +421,49 @@ def _sample(
             logprob = logprobs[idx]
 
             # Sample the next tokens.
-            next_token_ids = greedy[idx][:sampling_params.best_of] if sampling_params.temperature < _SAMPLING_EPS else sampling[idx-sampling_offsets[0]][:sampling_params.best_of]
-            idx += 1
+            if sampling_params.sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM):
+                next_token_ids = batch_sampled_tokens[idx][:sampling_params.best_of]
+            else:
+                prob = gen_probs[idx]
+                next_token_ids = _sample_from_prompt(prob, sampling_params)
 
             # Get top-k log probabilities for the next tokens.
             next_logprobs = _get_topk_logprobs(logprob,
                                                sampling_params.logprobs)
 
             # Build the output.
+            j = 0
             for seq_id, next_token_id in zip(seq_ids, next_token_ids):
                 output_logprobs = next_logprobs.copy()
-                output_logprobs[next_token_id] = logprob[next_token_id].item()
+                if sampling_params.sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM):
+                    output_logprobs[next_token_id] = chosen_logprobs[idx][j]
+                else:
+                    output_logprobs[next_token_id] = logprob[next_token_id].item()
                 seq_outputs[seq_id] = SequenceOutputs(seq_id, seq_id,
                                                       next_token_id,
                                                       output_logprobs)
+                j += 1
+
+            idx += 1
         else:
             # Generate the next tokens for generation tokens.
             logprob = logprobs[idx:idx + len(seq_ids)]
 
             # Sample the next tokens.
             parent_seq_ids = seq_ids
-            offset_idx = idx - sampling_offsets[0]
-            next_token_ids = greedy[idx:idx + len(seq_ids)] if sampling_params.temperature < _SAMPLING_EPS else sampling[offset_idx:offset_idx + len(seq_ids)]
-            next_token_ids = [item for sublist in next_token_ids for item in sublist]
 
-            idx += len(seq_ids)
+            if sampling_params.sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM):
+                next_token_ids = batch_sampled_tokens[idx:idx + len(seq_ids)]
+                next_token_ids = [item for sublist in next_token_ids for item in sublist]
+            else:
+                prob = gen_probs[idx]
+                seq_logprobs = [
+                    input_metadata.seq_data[seq_id].cumulative_logprob
+                    for seq_id in seq_ids
+                ]
+                parent_seq_ids, next_token_ids = _sample_from_generation_tokens(
+                    seq_ids, prob, logprob, seq_logprobs, sampling_params)
+
 
             # Get top-k log probabilities for the next tokens.
             next_logprobs: Dict[int, Dict[int, float]] = {}
@@ -462,13 +476,18 @@ def _sample(
                     seq_ids, parent_seq_ids, next_token_ids):
                 j = seq_ids.index(parent_seq_id)
                 output_logprobs = next_logprobs[parent_seq_id].copy()
-                output_logprobs[next_token_id] = logprob[j,
-                                                         next_token_id].item()
+                if sampling_params.sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM):
+                    output_logprobs[next_token_id] = chosen_logprobs[idx+j][0]
+                else:
+                    output_logprobs[next_token_id] = logprob[j,
+                                                            next_token_id].item()
                 seq_outputs[seq_id] = SequenceOutputs(
                     seq_id,
                     parent_seq_id,
                     next_token_id,
                     output_logprobs,
                 )
+
+            idx += len(seq_ids)
 
     return seq_outputs
