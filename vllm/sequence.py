@@ -266,7 +266,6 @@ class SequenceOutputs:
     """The model output associated with a sequence.
 
     Args:
-        seq_id: The ID of the sequence.
         parent_seq_id: The ID of the parent sequence (for forking in beam
             search).
         output_token: The output token ID.
@@ -276,26 +275,22 @@ class SequenceOutputs:
 
     def __init__(
         self,
-        seq_id: int,
         parent_seq_id: int,
         output_token: int,
         logprobs: Dict[int, float],
     ) -> None:
-        self.seq_id = seq_id
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceOutputs(seq_id={self.seq_id}, "
-                f"parent_seq_id={self.parent_seq_id}, "
+        return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
                 f"output_token={self.output_token}), "
                 f"logprobs={self.logprobs}")
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
             return NotImplemented
-        return (self.seq_id == other.seq_id
-                and self.parent_seq_id == other.parent_seq_id
+        return (self.parent_seq_id == other.parent_seq_id
                 and self.output_token == other.output_token
                 and self.logprobs == other.logprobs)

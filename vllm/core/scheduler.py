@@ -6,9 +6,11 @@ from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.block_manager import BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceOutputs,
                            SequenceStatus)
+from vllm.utils import Counter
 
 logger = init_logger(__name__)
 
@@ -72,7 +74,10 @@ class Scheduler:
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
         )
+        # Sequence ID Counter.
+        self.seq_counter = Counter()
 
+        # TODO(zhuohan): Use deque instead of list for better performance.
         # Sequence groups in the WAITING state.
         self.waiting: List[SequenceGroup] = []
         # Sequence groups in the RUNNING state.
@@ -80,7 +85,17 @@ class Scheduler:
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
 
-    def add_seq_group(self, seq_group: SequenceGroup) -> None:
+    def add_seq_group(self, request_id: str, prompt: Optional[str],
+                      prompt_token_ids: List[int],
+                      sampling_params: SamplingParams,
+                      arrival_time: float) -> None:
+        # Create a new sequence group for the new request
+        prompt_seq_id = next(self.seq_counter)
+        prompt_seq = Sequence(prompt_seq_id, prompt, prompt_token_ids,
+                              self.cache_config.block_size)
+        seq_group = SequenceGroup(request_id, [prompt_seq], sampling_params,
+                                  arrival_time)
+
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 
@@ -122,6 +137,9 @@ class Scheduler:
             while self.waiting:
                 seq_group = self.waiting[0]
 
+                assert seq_group.num_seqs() == 1, (
+                    "Waiting sequence group should have only one prompt "
+                    "sequence.")
                 num_prompt_tokens = seq_group.get_seqs()[0].get_len()
                 prompt_limit = min(
                     self.scheduler_config.max_model_len,

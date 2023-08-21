@@ -30,7 +30,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import (PagedAttention,
                                                   PagedAttentionWithALiBi,
                                                   PagedAttentionWithRoPE)
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -397,7 +397,7 @@ class FalconForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.transformer(
             input_ids,
             positions,

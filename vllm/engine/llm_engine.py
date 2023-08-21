@@ -14,7 +14,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
-from vllm.utils import Counter
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -92,7 +91,6 @@ class LLMEngine:
             model_config.tokenizer,
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code)
-        self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -253,20 +251,9 @@ class LLMEngine:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
-        # Create the sequences.
-        block_size = self.cache_config.block_size
-        seqs: List[Sequence] = []
-        for _ in range(sampling_params.best_of):
-            seq_id = next(self.seq_counter)
-            seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
-            seqs.append(seq)
-
-        # Create the sequence group.
-        seq_group = SequenceGroup(request_id, seqs, sampling_params,
-                                  arrival_time)
-
         # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+        self.scheduler.add_seq_group(request_id, prompt, prompt_token_ids,
+                                     sampling_params, arrival_time)
 
     def abort_request(self, request_id: str) -> None:
         """Aborts a request with the given ID.
