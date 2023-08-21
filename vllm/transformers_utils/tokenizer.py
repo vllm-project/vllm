@@ -125,7 +125,7 @@ class SequenceDetokenizeState:
         self.seq_id: int = seq_id
         self.stop_strings: List[str] = stop_strings
         self.output_text: str = ""
-        self.output_tokens; List[str] = []
+        self.output_tokens: List[str] = []
         self.stop_string_matched = False
 
 
@@ -141,8 +141,8 @@ class Detokenizer:
         self.decoding_sequences[seq_id] = SequenceDetokenizeState(seq_id, stop_strings) 
 
     def detokenize_last_token(self, seq_id: int, last_token_id: int) -> None:
-        assert seq_id in self.decoding_sequences
-        state = self.decoding_sequences[self.seq_id]
+        assert seq_id in self.decoding_sequences, f"{self.decoding_sequences.keys()}"
+        state = self.decoding_sequences[seq_id]
 
         new_token, new_output_text = detokenize_incrementally(
             self.tokenizer,
@@ -165,8 +165,9 @@ class Detokenizer:
         state.output_text = new_output_text
 
     def get_output_text(self, seq_id: int) -> str:
-        assert seq_id in self.decoding_sequences
-        return self.decoding_sequences[seq_id].output_text
+        if seq_id in self.decoding_sequences:
+            return self.decoding_sequences[seq_id].output_text
+        return ""
 
     def free_sequence(self, seq_id: int) -> None:
         self.decoding_sequences.pop(seq_id)

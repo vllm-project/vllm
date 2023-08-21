@@ -409,7 +409,7 @@ class LLMEngine:
         """Decodes the sequence outputs."""
         for seq_group in seq_groups:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                self.detokenizer.detokenize_last_token(seq, seq.get_last_token_id())
+                self.detokenizer.detokenize_last_token(seq.seq_id, seq.get_last_token_id())
 
     def _stop_sequences(self, seq_groups: List[SequenceGroup]) -> None:
         """Stop the finished sequences."""
