@@ -6,7 +6,6 @@ from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.block_manager import BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceOutputs,
                            SequenceStatus)

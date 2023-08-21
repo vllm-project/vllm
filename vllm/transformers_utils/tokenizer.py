@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import List, Tuple, Union, Dict
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
