@@ -118,6 +118,9 @@ class LLMEngine:
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
+        self.total_step_time = 0.0
+        self.total_model_execute_time = 0.0
+        self.first_step_time = None
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -296,6 +299,9 @@ class LLMEngine:
         return self.scheduler.has_unfinished_seqs()
 
     def step(self) -> List[RequestOutput]:
+        if self.first_step_time is None:
+            self.first_step_time = time.monotonic()
+        step_start = time.monotonic()
         """Performs one decoding iteration and returns newly generated results.
 
         This function performs one decoding iteration of the engine. It first
@@ -317,6 +323,7 @@ class LLMEngine:
             ]
 
         # Execute the model.
+        model_execute_start = time.monotonic()
         output = self._run_workers(
             "execute_model",
             seq_group_metadata_list=seq_group_metadata_list,
@@ -324,6 +331,7 @@ class LLMEngine:
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
+        self.total_model_execute_time += time.monotonic() - model_execute_start
         # Update the scheduler with the model outputs.
         seq_groups = self.scheduler.update(output)
 
@@ -340,6 +348,7 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group, self.detokenizer)
             request_outputs.append(request_output)
 
+        self.total_step_time += time.monotonic() - step_start
         if self.log_stats:
             # Log the system stats.
             self._log_system_stats(scheduler_outputs.prompt_run,
@@ -406,7 +415,10 @@ class LLMEngine:
                     f"Swapped: {len(self.scheduler.swapped)} reqs, "
                     f"Pending: {len(self.scheduler.waiting)} reqs, "
                     f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
-                    f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
+                    f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%, "
+                    f"total time: {time.monotonic() - self.first_step_time:.1f}, "
+                    f"step time: {self.total_step_time:.1f}, "
+                    f"execute time: {self.total_model_execute_time:.1f}")
         self.last_logging_time = now
 
     def _decode_sequences(self, seq_groups: List[SequenceGroup]) -> None:
