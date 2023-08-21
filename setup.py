@@ -61,7 +61,7 @@ if 90 in compute_capabilities and nvcc_cuda_version < Version("11.8"):
 
 # If no GPU is available, add all supported compute capabilities.
 if not compute_capabilities:
-    compute_capabilities = {70, 75}
+    compute_capabilities = {70, 75, 80}
     if nvcc_cuda_version >= Version("11.1"):
         compute_capabilities.add(86)
     if nvcc_cuda_version >= Version("11.8"):
