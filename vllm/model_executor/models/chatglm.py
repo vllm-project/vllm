@@ -26,10 +26,11 @@ from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+
 def split_tensor_along_last_dim(
-        tensor: torch.Tensor,
-        num_partitions: int,
-        contiguous_split_chunks: bool = False,
+    tensor: torch.Tensor,
+    num_partitions: int,
+    contiguous_split_chunks: bool = False,
 ) -> List[torch.Tensor]:
     """Split a tensor along its last dimension.
 
@@ -53,15 +54,24 @@ def split_tensor_along_last_dim(
 
     return tensor_list
 
+
 class RMSNorm(torch.nn.Module):
-    def __init__(self, normalized_shape, eps=1e-5, device=None, dtype=None, **kwargs):
+
+    def __init__(self,
+                 normalized_shape,
+                 eps=1e-5,
+                 device=None,
+                 dtype=None,
+                 **kwargs):
         super().__init__()
-        self.weight = torch.nn.Parameter(torch.empty(normalized_shape, device=device, dtype=dtype))
+        self.weight = torch.nn.Parameter(
+            torch.empty(normalized_shape, device=device, dtype=dtype))
         self.eps = eps
 
     def forward(self, hidden_states: torch.Tensor):
         input_dtype = hidden_states.dtype
-        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1,
+                                                               keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
         return (self.weight * hidden_states).to(input_dtype)
 
@@ -80,39 +90,38 @@ class GLMAttention(nn.Module):
         assert config.num_attention_heads % tp_size == 0
         self.num_attention_heads_per_partition = config.num_attention_heads // tp_size
 
-
         self.multi_query_attention = config.multi_query_attention
         self.qkv_hidden_size = 3 * self.projection_size
         if self.multi_query_attention:
             self.num_multi_query_groups_per_partition = config.multi_query_group_num
-            self.qkv_hidden_size = (
-                    self.projection_size + 2 * self.hidden_size_per_attention_head * config.multi_query_group_num
-            )
-        self.query_key_value = ColumnParallelLinear(config.hidden_size,
-                                                    self.qkv_hidden_size,
-                                                    bias=config.add_bias_linear or config.add_qkv_bias,
-                                                    gather_output=False,
-                                                    perform_initialization=False
-                                                    )
-        rotary_dim = (
-            config.hidden_size // config.num_attention_heads if config.kv_channels is None else config.kv_channels
-        )
+            self.qkv_hidden_size = (self.projection_size +
+                                    2 * self.hidden_size_per_attention_head *
+                                    config.multi_query_group_num)
+        self.query_key_value = ColumnParallelLinear(
+            config.hidden_size,
+            self.qkv_hidden_size,
+            bias=config.add_bias_linear or config.add_qkv_bias,
+            gather_output=False,
+            perform_initialization=False)
+        rotary_dim = (config.hidden_size // config.num_attention_heads
+                      if config.kv_channels is None else config.kv_channels)
         tp_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % tp_size == 0
-        self.attn = PagedAttentionWithRoPE(self.num_attention_heads_per_partition,
-                                   config.kv_channels ,
-                                   scale=config.kv_channels**-0.5,
-                                   rotary_dim = rotary_dim // 2,
-                                   max_position = config.seq_length,
-                                   num_kv_heads = self.num_multi_query_groups_per_partition,
-                                   glm = True)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_attention_heads_per_partition,
+            config.kv_channels,
+            scale=config.kv_channels**-0.5,
+            rotary_dim=rotary_dim // 2,
+            max_position=config.seq_length,
+            num_kv_heads=self.num_multi_query_groups_per_partition,
+            glm=True)
 
         # Output.
         self.dense = RowParallelLinear(self.projection_size,
-                                config.hidden_size, 
-                                bias=config.add_bias_linear,
-                                input_is_parallel=True,
-                                perform_initialization=False)
+                                       config.hidden_size,
+                                       bias=config.add_bias_linear,
+                                       input_is_parallel=True,
+                                       perform_initialization=False)
 
     def forward(
         self,
@@ -127,9 +136,12 @@ class GLMAttention(nn.Module):
         if self.multi_query_attention:
             (query_layer, key_layer, value_layer) = qkv.split(
                 [
-                    self.num_attention_heads_per_partition * self.hidden_size_per_attention_head,
-                    self.num_multi_query_groups_per_partition * self.hidden_size_per_attention_head,
-                    self.num_multi_query_groups_per_partition * self.hidden_size_per_attention_head,
+                    self.num_attention_heads_per_partition *
+                    self.hidden_size_per_attention_head,
+                    self.num_multi_query_groups_per_partition *
+                    self.hidden_size_per_attention_head,
+                    self.num_multi_query_groups_per_partition *
+                    self.hidden_size_per_attention_head,
                 ],
                 dim=-1,
             )
@@ -140,8 +152,9 @@ class GLMAttention(nn.Module):
             query_layer, key_layer, value_layer = qkv.chunk(chunks=3, dim=-1)
 
         key_cache, value_cache = kv_cache
-        context_layer = self.attn(position_ids, query_layer, key_layer, value_layer, key_cache, value_cache,
-                                input_metadata, cache_event)
+        context_layer = self.attn(position_ids, query_layer, key_layer,
+                                  value_layer, key_cache, value_cache,
+                                  input_metadata, cache_event)
         attn_output, _ = self.dense(context_layer)
         return attn_output
 
@@ -159,13 +172,13 @@ class GLMMLP(nn.Module):
 
         self.add_bias = config.add_bias_linear
 
-        # Project to 4h. If using swiglu double the output width, see https://arxiv.org/pdf/2002.05202.pdf
+        # Project to 4h. If using swiglu double the output width,
+        #  see https://arxiv.org/pdf/2002.05202.pdf
         self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
                                                   config.ffn_hidden_size * 2,
                                                   bias=config.add_bias_linear,
                                                   gather_output=False,
-                                                  perform_initialization=False
-                                                )
+                                                  perform_initialization=False)
 
         def swiglu(x):
             x = torch.chunk(x, 2, dim=-1)
@@ -175,10 +188,10 @@ class GLMMLP(nn.Module):
 
         # Project back to h.
         self.dense_4h_to_h = RowParallelLinear(config.ffn_hidden_size,
-                                config.hidden_size,
-                                bias=config.add_bias_linear,
-                                input_is_parallel=True,
-                                perform_initialization=False)
+                                               config.hidden_size,
+                                               bias=config.add_bias_linear,
+                                               input_is_parallel=True,
+                                               perform_initialization=False)
 
     def forward(self, hidden_states):
         # [s, b, 4hp]
@@ -196,7 +209,10 @@ class GLMBlock(nn.Module):
     output of the same size.
     """
 
-    def __init__(self, config, ):
+    def __init__(
+        self,
+        config,
+    ):
         super(GLMBlock, self).__init__()
         self.apply_residual_connection_post_layernorm = config.apply_residual_connection_post_layernorm
 
@@ -204,7 +220,8 @@ class GLMBlock(nn.Module):
 
         LayerNormFunc = RMSNorm if config.rmsnorm else LayerNorm
         # Layernorm on the input data.
-        self.input_layernorm = LayerNormFunc(config.hidden_size, eps=config.layernorm_epsilon,
+        self.input_layernorm = LayerNormFunc(config.hidden_size,
+                                             eps=config.layernorm_epsilon,
                                              dtype=config.torch_dtype)
 
         # Self attention.
@@ -212,8 +229,10 @@ class GLMBlock(nn.Module):
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
-        self.post_attention_layernorm = LayerNormFunc(config.hidden_size, eps=config.layernorm_epsilon,
-                                                      dtype=config.torch_dtype)
+        self.post_attention_layernorm = LayerNormFunc(
+            config.hidden_size,
+            eps=config.layernorm_epsilon,
+            dtype=config.torch_dtype)
 
         # MLP
         self.mlp = GLMMLP(config)
@@ -260,7 +279,6 @@ class GLMBlock(nn.Module):
         return output
 
 
-
 class GLMTransformer(nn.Module):
     """Transformer class."""
 
@@ -272,22 +290,24 @@ class GLMTransformer(nn.Module):
         self.num_layers = config.num_layers
 
         # Transformer layers.
-        self.layers = nn.ModuleList([GLMBlock(config) for i in range(self.num_layers)])
+        self.layers = nn.ModuleList(
+            [GLMBlock(config) for i in range(self.num_layers)])
 
         if self.post_layer_norm:
             LayerNormFunc = RMSNorm if config.rmsnorm else LayerNorm
             # Final layer norm before output.
-            self.final_layernorm = LayerNormFunc(config.hidden_size, eps=config.layernorm_epsilon,
+            self.final_layernorm = LayerNormFunc(config.hidden_size,
+                                                 eps=config.layernorm_epsilon,
                                                  dtype=config.torch_dtype)
 
     def forward(
-            self, 
-            hidden_states: torch.Tensor,
-            position_ids: torch.Tensor,
-            kv_caches: List[KVCache],
-            input_metadata: InputMetadata,
-            cache_events: Optional[List[torch.cuda.Event]],
-    )->torch.Tensor:
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
+        cache_events: Optional[List[torch.cuda.Event]],
+    ) -> torch.Tensor:
         for i in range(self.num_layers):
             if cache_events is None:
                 cache_event = None
@@ -295,12 +315,12 @@ class GLMTransformer(nn.Module):
                 cache_event = cache_events[i]
             layer = self.layers[i]
             hidden_states = layer(
-                                    hidden_states=hidden_states,
-                                    position_ids=position_ids,
-                                    kv_cache=kv_caches[i],
-                                    input_metadata=input_metadata,
-                                    cache_event=cache_event,
-                                )
+                hidden_states=hidden_states,
+                position_ids=position_ids,
+                kv_cache=kv_caches[i],
+                input_metadata=input_metadata,
+                cache_event=cache_event,
+            )
         # Final layer norm.
         if self.post_layer_norm:
             hidden_states = self.final_layernorm(hidden_states)
@@ -309,43 +329,42 @@ class GLMTransformer(nn.Module):
 
 
 class ChatGLMModel(nn.Module):
+
     def __init__(self, config):
         super().__init__()
 
-        self.embedding = VocabParallelEmbedding(
-                config.padded_vocab_size,
-                config.hidden_size,
-                perform_initialization=False)
+        self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
+                                                config.hidden_size,
+                                                perform_initialization=False)
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
         self.encoder = GLMTransformer(config)
-        
-        self.output_layer = ColumnParallelLinear(config.hidden_size,
-                                            config.padded_vocab_size,
-                                            bias=False,
-                                            gather_output=False,
-                                            perform_initialization=False,
-                                            params_dtype=config.torch_dtype)
+
+        self.output_layer = ColumnParallelLinear(
+            config.hidden_size,
+            config.padded_vocab_size,
+            bias=False,
+            gather_output=False,
+            perform_initialization=False,
+            params_dtype=config.torch_dtype)
 
     def forward(
-            self, 
-            input_ids: torch.Tensor,
-            position_ids: torch.Tensor,
-            kv_caches: List[KVCache],
-            input_metadata: InputMetadata,
-            cache_events: Optional[List[torch.cuda.Event]],
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
+        cache_events: Optional[List[torch.cuda.Event]],
     ):
         inputs_embeds = self.embedding(input_ids)
 
         # Run encoder.
-        hidden_states = self.encoder(
-            hidden_states=inputs_embeds, 
-            position_ids=position_ids,
-            kv_caches=kv_caches, 
-            input_metadata=input_metadata, 
-            cache_events=cache_events
-        )
+        hidden_states = self.encoder(hidden_states=inputs_embeds,
+                                     position_ids=position_ids,
+                                     kv_caches=kv_caches,
+                                     input_metadata=input_metadata,
+                                     cache_events=cache_events)
 
         return hidden_states
 
@@ -372,29 +391,30 @@ class ChatGLMForCausalLM(nn.Module):
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
                                    input_metadata)
         return next_tokens
-        
+
     _column_parallel_weights = [
         "dense_h_to_4h", "query_key_value", "output_layer.weight",
         "embedding.weight"
     ]
-    _row_parallel_weights = ["dense_4h_to_h", "dense.weight",'dense.bias']
+    _row_parallel_weights = ["dense_4h_to_h", "dense.weight", 'dense.bias']
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
-        
+
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, use_np_cache):
+                model_name_or_path, cache_dir, use_np_cache):
             if "word_embeddings" in name:
                 name = name.replace(".word_embeddings", "")
 
             if name in state_dict:
-                load_tensor_parallel_weights(state_dict[name], loaded_weight, name,
-                                        self._column_parallel_weights,
-                                        self._row_parallel_weights,
-                                        tensor_model_parallel_rank)
+                load_tensor_parallel_weights(state_dict[name], loaded_weight,
+                                             name,
+                                             self._column_parallel_weights,
+                                             self._row_parallel_weights,
+                                             tensor_model_parallel_rank)
             else:
                 print("Warning never found tensor's name:", name)
