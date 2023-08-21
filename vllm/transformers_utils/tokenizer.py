@@ -1,5 +1,5 @@
 import concurrent.futures
-from typing import List, Tuple, Union, Dict
+from typing import List, Tuple, Union, Dict, Optional
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
@@ -140,7 +140,7 @@ class Detokenizer:
     def add_sequence(self, seq_id: int, stop_strings: List[str]) -> None:
         self.decoding_sequences[seq_id] = SequenceDetokenizeState(seq_id, stop_strings) 
 
-    def detokenize_last_token(self, seq_id: int, last_token_id: int) -> None:
+    def detokenize_last_token(self, seq_id: int, last_token_id: int) -> Tuple[bool, str]:
         assert seq_id in self.decoding_sequences, f"{self.decoding_sequences.keys()}"
         state = self.decoding_sequences[seq_id]
 
@@ -151,7 +151,8 @@ class Detokenizer:
             skip_special_tokens=True,
         )
         if new_token is None:
-            return
+            return state.stop_string_matched, state.output_text
+
         for stop_str in state.stop_strings:
             if new_output_text.endswith(stop_str):
                 # Truncate the output text so that the stop string is
@@ -163,6 +164,8 @@ class Detokenizer:
 
         state.output_tokens.append(new_token)
         state.output_text = new_output_text
+
+        return state.stop_string_matched, state.output_text
 
     def get_output_text(self, seq_id: int) -> str:
         if seq_id in self.decoding_sequences:
@@ -188,8 +191,8 @@ class DummyDetokenizer:
     def add_sequence(self, seq_id: int, stop_strings: List[str]) -> None:
         pass
 
-    def detokenize_last_token(self, seq_id: int, last_token_id: int) -> None:
-        pass
+    def detokenize_last_token(self, seq_id: int, last_token_id: int) -> Tuple[bool, str]:
+        return False, ""
 
     def get_output_text(self, seq_id: int) -> str:
         return ""
@@ -199,6 +202,27 @@ class DummyDetokenizer:
 
     def stop_string_matched(self, seq_id: int) -> bool:
         return False
+
+
+class ThreadedSequenceState:
+    def __init__(self, seq_id: int) -> None:
+        self.seq_id: int = seq_id
+        self.pending_future: Optional[concurrent.futures.Future] = None
+        self.output_text: str = ""
+        self.stop_string_matched = False
+
+    def _sync_future(self):
+        if self.pending_future and self.pending_future.done():
+            self.stop_string_matched, self.output_text = self.pending_future.result()
+            self.pending_future = None
+
+    def get_output_text(self):
+        self._sync_future()
+        return self.output_text
+
+    def get_stop_string_matched(self): 
+        self._sync_future()
+        return self.stop_string_matched
 
 
 class ThreadedDetokenizer:
@@ -208,18 +232,23 @@ class ThreadedDetokenizer:
     ) -> None:
         self.delegate_detokenizer = Detokenizer(tokenizer)
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.state: Dict[int, ThreadedSequenceState] = dict()
 
     def add_sequence(self, seq_id: int, stop_strings: List[str]) -> None:
+        self.state[seq_id] = ThreadedSequenceState(seq_id)
         self.executor.submit(self.delegate_detokenizer.add_sequence, seq_id, stop_strings)
 
     def detokenize_last_token(self, seq_id: int, last_token_id: int) -> None:
-        self.executor.submit(self.delegate_detokenizer.detokenize_last_token, seq_id, last_token_id)
+        self.state[seq_id].pending_future = self.executor.submit(self.delegate_detokenizer.detokenize_last_token, seq_id, last_token_id)
 
     def get_output_text(self, seq_id: int) -> str:
+        if seq_id in self.state:
+            return self.state[seq_id].get_output_text()
         return ""
 
     def free_sequence(self, seq_id: int) -> None:
+        self.state.pop(seq_id)
         self.executor.submit(self.delegate_detokenizer.free_sequence, seq_id)
 
     def stop_string_matched(self, seq_id: int) -> bool:
-        return False
+        return self.state[seq_id].get_stop_string_matched()
