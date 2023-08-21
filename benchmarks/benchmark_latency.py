@@ -7,7 +7,9 @@ import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
+import os
 
+os.environ["TRANSFORMERS_CACHE"] = '/mnt/local_storage/'
 
 def main(args: argparse.Namespace):
     print(args)
@@ -22,6 +24,7 @@ def main(args: argparse.Namespace):
         max_num_seqs=args.batch_size,
         max_num_batched_tokens=args.batch_size * args.input_len,
         trust_remote_code=args.trust_remote_code,
+        use_dummy_weights=True,
     )
 
     sampling_params = SamplingParams(
