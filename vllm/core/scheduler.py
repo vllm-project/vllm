@@ -6,9 +6,11 @@ from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.block_manager import BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceOutputs,
                            SequenceStatus)
+from vllm.transformers_utils.tokenizer import  Detokenizer
 
 logger = init_logger(__name__)
 
@@ -60,6 +62,7 @@ class Scheduler:
         self,
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
+        detokenizer: Detokenizer,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -72,6 +75,7 @@ class Scheduler:
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
         )
+        self.detokenizer = detokenizer
 
         # Sequence groups in the WAITING state.
         self.waiting: List[SequenceGroup] = []
@@ -94,7 +98,7 @@ class Scheduler:
                         if seq.is_finished():
                             continue
                         self.free_seq(seq, SequenceStatus.FINISHED_ABORTED)
-                    return
+                    return 
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
@@ -300,11 +304,13 @@ class Scheduler:
                 # Append a new token to the sequence.
                 output = seq_outputs[seq.seq_id]
                 seq.append_token_id(output.output_token, output.logprobs)
+                
         return scheduled
 
     def free_seq(self, seq: Sequence, finish_status: SequenceStatus) -> None:
         seq.status = finish_status
         self.block_manager.free(seq)
+        self.detokenizer.free_sequence(seq.seq_id)
 
     def free_finished_seq_groups(self) -> None:
         self.running = [
@@ -330,6 +336,7 @@ class Scheduler:
                     blocks_to_copy[src_block].append(dst_block)
                 else:
                     blocks_to_copy[src_block] = [dst_block]
+
 
     def _preempt(
         self,

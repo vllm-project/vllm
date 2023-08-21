@@ -140,7 +140,7 @@ class Detokenizer:
     def add_sequence(self, seq_id: int, stop_strings: List[str]) -> None:
         self.decoding_sequences[seq_id] = SequenceDetokenizeState(seq_id, stop_strings) 
 
-    def detokenize_last_token(self, seq_id: int, last_token_id: int):
+    def detokenize_last_token(self, seq_id: int, last_token_id: int) -> None:
         assert seq_id in self.decoding_sequences
         state = self.decoding_sequences[self.seq_id]
 
@@ -157,16 +157,20 @@ class Detokenizer:
                 # Truncate the output text so that the stop string is
                 # not included in the output.
                 new_output_text = new_output_text[:-len(stop_str)]
+                # TODO: propogate stop_string_matched state
                 state.stop_string_matched = True
                 break
 
         state.output_tokens.append(new_token)
         state.output_text = new_output_text
 
-    def get_output_text(self, seq_id: int):
+    def get_output_text(self, seq_id: int) -> str:
         assert seq_id in self.decoding_sequences
         return self.decoding_sequences[seq_id].output_text
 
-    def remove_sequence(self, seq_id: int):
-        if seq_id in self.decoding_sequences:
-            del self.decoding_sequences[seq_id]
+    def free_sequence(self, seq_id: int) -> None:
+        self.decoding_sequences.pop(seq_id)
+
+    def stop_string_matched(self, seq_id: int) -> bool:
+        assert seq_id in self.decoding_sequences
+        return self.decoding_sequences[seq_id].stop_string_matched

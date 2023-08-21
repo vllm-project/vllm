@@ -12,8 +12,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
-from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               get_tokenizer,
+from vllm.transformers_utils.tokenizer import (get_tokenizer,
                                                Detokenizer)
 from vllm.utils import Counter
 
@@ -107,7 +106,7 @@ class LLMEngine:
         self._init_cache()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config)
+        self.scheduler = Scheduler(scheduler_config, cache_config, self.detokenizer)
 
         # Logging.
         self.last_logging_time = 0.0
@@ -418,7 +417,7 @@ class LLMEngine:
             sampling_params = seq_group.sampling_params
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 # Check if the sequence has generated a stop string.
-                if seq.stop_string_matched:
+                if self.detokenizer.stop_string_matched(seq.seq_id):
                     self.scheduler.free_seq(
                         seq, SequenceStatus.FINISHED_STOPPED)
                     continue
