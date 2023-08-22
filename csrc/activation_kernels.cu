@@ -92,6 +92,13 @@ __device__ __forceinline__ T gelu_new_kernel(const T& x) {
   return ((T) 0.5) * x * (((T) 1.0) + t);
 }
 
+template<typename T>
+__device__ __forceinline__ T gelu_fast_kernel(const T& x) {
+  const float f = (float) x;
+  const T t = (T) tanhf(((T) (f * 0.79788456f)) * (((T) 1.0) + (T) (0.044715f * f) * x));
+  return ((T) 0.5) * x * (((T) 1.0) + t);
+}
+
 } // namespace vllm
 
 void gelu_new(
@@ -99,4 +106,11 @@ void gelu_new(
   torch::Tensor& input)   // [num_tokens, d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_new_kernel);
+}
+
+void gelu_fast(
+  torch::Tensor& out,     // [num_tokens, d]
+  torch::Tensor& input)   // [num_tokens, d]
+{
+  LAUNCH_ACTIVATION_KERNEL(vllm::gelu_fast_kernel);
 }

@@ -23,7 +23,7 @@ class SiluAndMul(nn.Module):
         return out
 
 
-class GeluNew(nn.Module):
+class NewGELU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         num_tokens = x.shape[0]
@@ -33,10 +33,20 @@ class GeluNew(nn.Module):
         return out
 
 
+class FastGELU(nn.Module):
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        num_tokens = x.shape[0]
+        d = x.shape[1]
+        out = torch.empty(num_tokens, d, dtype=x.dtype, device=x.device)
+        activation_ops.gelu_fast(out, x)
+        return out
+
+
 _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU(),
-    "gelu_fast": nn.GELU(approximate="tanh"),  # Rounding error
-    "gelu_new": GeluNew(),
+    "gelu_fast": FastGELU(),
+    "gelu_new": NewGELU(),
     "gelu_pytorch_tanh": nn.GELU(approximate="tanh"),
     "relu": nn.ReLU(),
 }
