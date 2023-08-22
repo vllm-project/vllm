@@ -366,7 +366,6 @@ async def create_completion(raw_request: Request):
     if error_check_ret is not None:
         return error_check_ret
 
-
     if request.suffix is not None:
         # The language models we currently support do not support suffix.
         return create_error_response(HTTPStatus.BAD_REQUEST,

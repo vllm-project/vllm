@@ -207,7 +207,8 @@ class GPTJForCausalLM(nn.Module):
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_ids, input_metadata, self.lm_head.bias)
+                                   input_ids, input_metadata,
+                                   self.lm_head.bias)
         return next_tokens
 
     _column_parallel_weights = [

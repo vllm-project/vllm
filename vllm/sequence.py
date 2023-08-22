@@ -87,7 +87,8 @@ class SequenceData:
         return self.output_token_ids[-1]
 
     def _output_includes_echo(self) -> bool:
-        return self.prompt_token_ids == self.output_token_ids[:len(self.prompt_token_ids)]
+        return self.prompt_token_ids == self.output_token_ids[:len(
+            self.prompt_token_ids)]
 
     def __repr__(self) -> str:
         return (f"SequenceData("
@@ -161,7 +162,8 @@ class Sequence:
         assert token_id in logprobs
         for echo in echo_logprobs:
             self.output_logprobs.append(echo.logprobs)
-            self.data.append_token_id(echo.output_token, echo.logprobs[echo.output_token])
+            self.data.append_token_id(echo.output_token,
+                                      echo.logprobs[echo.output_token])
         self.echo_logprobs.append(echo_logprobs)
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)

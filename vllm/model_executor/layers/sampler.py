@@ -41,15 +41,17 @@ class Sampler(nn.Module):
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Dict[int, SequenceOutputs]:
-        # Calculate prompt tokens logprobs for the first token generation if echo is enabled
-        echo_logits = _logits(embedding, hidden_states, self.vocab_size, embedding_bias)
+        # Calculate prompt tokens logprobs for the first token generation
+        echo_logits = _logits(embedding, hidden_states, self.vocab_size,
+                              embedding_bias)
         echo = _echo(echo_logits, input_ids, input_metadata)
 
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
 
         # Get the logits for the next tokens.
-        logits = _logits(embedding, hidden_states, self.vocab_size, embedding_bias)
+        logits = _logits(embedding, hidden_states, self.vocab_size,
+                         embedding_bias)
         logits = logits[:, :self.vocab_size]
 
         # Apply presence and frequency penalties.
@@ -412,10 +414,12 @@ def _sample(
             for seq_id, next_token_id in zip(seq_ids, next_token_ids):
                 output_logprobs = next_logprobs.copy()
                 output_logprobs[next_token_id] = logprob[next_token_id].item()
-                seq_outputs[seq_id] = SequenceOutputs(seq_id, seq_id,
+                seq_outputs[seq_id] = SequenceOutputs(seq_id,
+                                                      seq_id,
                                                       next_token_id,
                                                       output_logprobs,
-                                                      echo=echo.get(seq_id, []))
+                                                      echo=echo.get(
+                                                          seq_id, []))
         else:
             # Generate the next tokens for generation tokens.
             prob = probs[idx:idx + len(seq_ids)]
@@ -472,7 +476,8 @@ def _echo(
 
     target_ids_tensor = target_ids.unsqueeze(0)
     echo_logprobs_view = echo_logprobs.view(-1, echo_logprobs.shape[1])
-    target_ids_logprobs = torch.gather(echo_logprobs_view, 1, target_ids_tensor)
+    target_ids_logprobs = torch.gather(echo_logprobs_view, 1,
+                                       target_ids_tensor)
 
     seq_outputs: Dict[int, SequenceOutputs] = {}
     for seq_group in input_metadata.seq_groups:
@@ -487,16 +492,15 @@ def _echo(
                         seq_id,
                         echo_ids[0].item(),
                         {echo_ids[0].item(): 0.0},
-                    )
-                )
-                for index, t_logp in enumerate(target_ids_logprobs[seq_idx], 1):
+                    ))
+                for index, t_logp in enumerate(target_ids_logprobs[seq_idx],
+                                               1):
                     echo_tokens.append(
                         SequenceOutputs(
                             seq_id,
                             seq_id,
                             echo_ids[index].item(),
                             {echo_ids[index].item(): t_logp.item()},
-                        )
-                    )
+                        ))
             seq_outputs[seq_id] = echo_tokens
     return seq_outputs
