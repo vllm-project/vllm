@@ -15,7 +15,7 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.transformers_utils.tokenizer import (get_tokenizer,
                                                Detokenizer,
                                                DummyDetokenizer,
-                                               ThreadedDetokenizer)
+                                               RayDetokenizer)
 from vllm.utils import Counter
 
 if ray:
@@ -95,8 +95,12 @@ class LLMEngine:
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code)
 
-        #self.detokenizer = ThreadedDetokenizer(tokenizer=self.tokenizer)
-        self.detokenizer = DummyDetokenizer(tokenizer=self.tokenizer)
+        self.detokenizer = RayDetokenizer(
+            tokenizer_creator=lambda: get_tokenizer(
+                model_config.tokenizer,
+                tokenizer_mode=model_config.tokenizer_mode,
+                trust_remote_code=model_config.trust_remote_code))
+        #self.detokenizer = DummyDetokenizer(tokenizer=self.tokenizer)
         #self.detokenizer = Detokenizer(tokenizer=self.tokenizer)
         self.seq_counter = Counter()
 
