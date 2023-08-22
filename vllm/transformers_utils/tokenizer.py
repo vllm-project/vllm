@@ -195,7 +195,7 @@ class DummyDetokenizer:
     ) -> None:
         pass
 
-    def add_sequence(self, seq_id: int, stop_strings: List[str]) -> None:
+    def add_sequence(self, request_id: str, seq_id: int, stop_strings: List[str]) -> None:
         pass
 
     def detokenize_last_token(self, seq_id: int, last_token_id: int) -> Tuple[bool, str]:
@@ -204,7 +204,7 @@ class DummyDetokenizer:
     def get_output_text(self, seq_id: int) -> str:
         return ""
 
-    def free_sequence(self, seq_id: int) -> None:
+    def free_request(self, request_id: str) -> None:
         pass
 
     def stop_string_matched(self, seq_id: int) -> bool:
@@ -245,9 +245,11 @@ class ThreadedDetokenizer:
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.state: Dict[int, ThreadedSequenceState] = dict()
 
-    def add_sequence(self, seq_id: int, stop_strings: List[str]) -> None:
+    def add_sequence(self, request_id: str, seq_id: int, stop_strings: List[str]) -> None:
         self.state[seq_id] = ThreadedSequenceState(seq_id)
-        self.executor.submit(self.delegate_detokenizer.add_sequence, seq_id, stop_strings)
+        self.executor.submit(
+            self.delegate_detokenizer.add_sequence, 
+            request_id, seq_id, stop_strings)
 
     def detokenize_last_token(self, seq_id: int, last_token_id: int) -> None:
         self.state[seq_id].set_future(
@@ -258,9 +260,9 @@ class ThreadedDetokenizer:
     def get_output_text(self, seq_id: int) -> str:
         return self.state[seq_id].get_output_text()
 
-    def free_sequence(self, seq_id: int) -> None:
+    def free_request(self, request_id: str) -> None:
         # TODO: we need to free the request
-        self.executor.submit(self.delegate_detokenizer.free_sequence, seq_id)
+        self.executor.submit(self.delegate_detokenizer.free_request, request_id)
 
     def stop_string_matched(self, seq_id: int) -> bool:
         return self.state[seq_id].get_stop_string_matched()
