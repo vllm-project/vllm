@@ -406,6 +406,16 @@ class LLMEngine:
         """Decodes the sequence outputs."""
         for seq_group in seq_groups:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                for echo_logprob in seq.echo_logprobs[-1]:
+                    new_token, new_output_text = detokenize_incrementally(
+                        self.tokenizer,
+                        seq.output_tokens,
+                        echo_logprob.output_token,
+                        skip_special_tokens=True,
+                    )
+                    if new_token is not None:
+                        seq.output_tokens.append(new_token)
+                        seq.output_text = new_output_text
                 new_token, new_output_text = detokenize_incrementally(
                     self.tokenizer,
                     seq.output_tokens,

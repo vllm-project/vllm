@@ -406,7 +406,7 @@ class FalconForCausalLM(nn.Module):
             cache_events,
         )
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata)
+                                   input_ids, input_metadata)
 
         return next_tokens
 

@@ -37,18 +37,19 @@ class Sampler(nn.Module):
         self,
         embedding: torch.Tensor,
         hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Dict[int, SequenceOutputs]:
+        # Calculate prompt tokens logprobs for the first token generation if echo is enabled
+        echo_logits = _logits(embedding, hidden_states, self.vocab_size, embedding_bias)
+        echo = _echo(echo_logits, input_ids, input_metadata)
+
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
 
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
-        if embedding_bias is not None:
-            logits += embedding_bias
-        logits = gather_from_tensor_model_parallel_region(logits)
-        # Remove paddings in vocab (if any).
+        logits = _logits(embedding, hidden_states, self.vocab_size, embedding_bias)
         logits = logits[:, :self.vocab_size]
 
         # Apply presence and frequency penalties.
@@ -86,7 +87,22 @@ class Sampler(nn.Module):
         logprobs = torch.log(probs)
 
         # Sample the next tokens.
-        return _sample(probs, logprobs, input_metadata)
+        return _sample(probs, logprobs, input_metadata, echo)
+
+
+def _logits(
+    embedding: torch.Tensor,
+    hidden_states: torch.Tensor,
+    vocab_size: int,
+    embedding_bias: Optional[torch.Tensor] = None,
+):
+    logits = torch.matmul(hidden_states, embedding.t())
+    if embedding_bias is not None:
+        logits += embedding_bias
+    logits = gather_from_tensor_model_parallel_region(logits)
+    # Remove paddings in vocab (if any).
+    logits = logits[:, :vocab_size]
+    return logits
 
 
 def _prune_hidden_states(
@@ -371,6 +387,7 @@ def _sample(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     input_metadata: InputMetadata,
+    echo=None,
 ) -> Dict[int, SequenceOutputs]:
     seq_outputs: Dict[int, SequenceOutputs] = {}
 
@@ -397,7 +414,8 @@ def _sample(
                 output_logprobs[next_token_id] = logprob[next_token_id].item()
                 seq_outputs[seq_id] = SequenceOutputs(seq_id, seq_id,
                                                       next_token_id,
-                                                      output_logprobs)
+                                                      output_logprobs,
+                                                      echo=echo.get(seq_id, []))
         else:
             # Generate the next tokens for generation tokens.
             prob = probs[idx:idx + len(seq_ids)]
@@ -432,4 +450,53 @@ def _sample(
                     output_logprobs,
                 )
 
+    return seq_outputs
+
+
+def _echo(
+    echo_logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    input_metadata: InputMetadata,
+) -> Dict[int, SequenceOutputs]:
+    # skip echo logprobs after the first token was generated
+    if input_metadata.num_generation_tokens:
+        return {}
+
+    echo_probs = torch.softmax(echo_logits, dim=-1, dtype=torch.float)
+    echo_logprobs = torch.log(echo_probs)
+
+    # remove padding
+    echo_ids = input_ids[:input_metadata.num_valid_tokens]
+    # remove first token (logprobs None)
+    target_ids = echo_ids[1:]
+
+    target_ids_tensor = target_ids.unsqueeze(0)
+    echo_logprobs_view = echo_logprobs.view(-1, echo_logprobs.shape[1])
+    target_ids_logprobs = torch.gather(echo_logprobs_view, 1, target_ids_tensor)
+
+    seq_outputs: Dict[int, SequenceOutputs] = {}
+    for seq_group in input_metadata.seq_groups:
+        seq_ids, sampling_params = seq_group
+        for seq_idx, seq_id in enumerate(seq_ids):
+            echo_tokens = []
+            if sampling_params.echo:
+                # logprobs 0 for first token
+                echo_tokens.append(
+                    SequenceOutputs(
+                        seq_id,
+                        seq_id,
+                        echo_ids[0].item(),
+                        {echo_ids[0].item(): 0.0},
+                    )
+                )
+                for index, t_logp in enumerate(target_ids_logprobs[seq_idx], 1):
+                    echo_tokens.append(
+                        SequenceOutputs(
+                            seq_id,
+                            seq_id,
+                            echo_ids[index].item(),
+                            {echo_ids[index].item(): t_logp.item()},
+                        )
+                    )
+            seq_outputs[seq_id] = echo_tokens
     return seq_outputs

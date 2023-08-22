@@ -67,18 +67,27 @@ class SequenceData:
         self.cumulative_logprob += logprob
 
     def get_len(self) -> int:
+        if self._output_includes_echo():
+            return len(self.output_token_ids)
         return len(self.output_token_ids) + len(self.prompt_token_ids)
 
     def get_output_len(self) -> int:
+        if self._output_includes_echo():
+            return len(self.output_token_ids) - len(self.prompt_token_ids)
         return len(self.output_token_ids)
 
     def get_token_ids(self) -> List[int]:
+        if self._output_includes_echo():
+            return self.output_token_ids
         return self.prompt_token_ids + self.output_token_ids
 
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
+
+    def _output_includes_echo(self) -> bool:
+        return self.prompt_token_ids == self.output_token_ids[:len(self.prompt_token_ids)]
 
     def __repr__(self) -> str:
         return (f"SequenceData("
@@ -113,6 +122,7 @@ class Sequence:
         self.output_logprobs: List[Dict[int, float]] = []
         self.output_tokens: List[str] = []
         self.output_text = ""
+        self.echo_logprobs: List[Dict[int, float]] = []
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
@@ -146,8 +156,13 @@ class Sequence:
         self,
         token_id: int,
         logprobs: Dict[int, float],
+        echo_logprobs: List[Dict[int, float]],
     ) -> None:
         assert token_id in logprobs
+        for echo in echo_logprobs:
+            self.output_logprobs.append(echo.logprobs)
+            self.data.append_token_id(echo.output_token, echo.logprobs[echo.output_token])
+        self.echo_logprobs.append(echo_logprobs)
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id])
@@ -280,11 +295,15 @@ class SequenceOutputs:
         parent_seq_id: int,
         output_token: int,
         logprobs: Dict[int, float],
+        echo=None,
     ) -> None:
+        if echo is None:
+            echo = []
         self.seq_id = seq_id
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
+        self.echo = echo
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(seq_id={self.seq_id}, "

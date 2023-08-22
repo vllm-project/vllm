@@ -221,7 +221,7 @@ class GPT2LMHeadModel(nn.Module):
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   input_metadata)
+                                   input_ids, input_metadata)
         return next_tokens
 
     _column_parallel_weights = ["wte.weight", "c_fc.weight", "c_fc.bias"]

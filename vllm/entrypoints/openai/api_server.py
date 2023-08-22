@@ -355,8 +355,6 @@ async def create_completion(raw_request: Request):
     for the API specification. This API mimics the OpenAI Completion API.
 
     NOTE: Currently we do not support the following features:
-        - echo (since the vLLM engine does not currently support
-          getting the logprobs of prompt tokens)
         - suffix (the language models we currently support do not support
           suffix)
         - logit_bias (to be supported by vLLM engine)
@@ -368,11 +366,6 @@ async def create_completion(raw_request: Request):
     if error_check_ret is not None:
         return error_check_ret
 
-    if request.echo:
-        # We do not support echo since the vLLM engine does not
-        # currently support getting the logprobs of prompt tokens.
-        return create_error_response(HTTPStatus.BAD_REQUEST,
-                                     "echo is not currently supported")
 
     if request.suffix is not None:
         # The language models we currently support do not support suffix.
@@ -429,6 +422,7 @@ async def create_completion(raw_request: Request):
             max_tokens=request.max_tokens,
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
+            echo=request.echo,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))

@@ -238,7 +238,7 @@ class QWenLMHeadModel(nn.Module):
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata)
+                                   input_ids, input_metadata)
         return next_tokens
 
     _column_parallel_weights = ["wte.weight", "lm_head.weight"]
