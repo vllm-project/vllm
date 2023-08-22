@@ -76,7 +76,9 @@ class Sampler(nn.Module):
         do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
         do_top_k = any(k != self.vocab_size for k in top_ks)
         if do_top_p or do_top_k:
-            logits = _apply_top_p_top_k(logits, top_ps, top_ks)
+            p = torch.tensor(top_ps, dtype=logits.dtype, device=logits.device)
+            k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
+            logits = _apply_top_p_top_k(logits, p, k)
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
@@ -244,32 +246,32 @@ def _get_top_p_top_k(
     return top_ps, top_ks
 
 
+@torch.jit.script
 def _apply_top_p_top_k(
     logits: torch.Tensor,
-    top_ps: List[float],
-    top_ks: List[int],
+    top_ps: torch.Tensor,
+    top_ks: torch.Tensor,
 ) -> torch.Tensor:
-    p = torch.tensor(top_ps, dtype=logits.dtype, device=logits.device)
-    k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
     logits_sort, logits_idx = logits.sort(dim=-1, descending=True)
 
     # Apply top-p.
     probs_sort = logits_sort.softmax(dim=-1)
     probs_sum = probs_sort.cumsum(dim=-1)
-    top_p_mask = (probs_sum - probs_sort) > p.unsqueeze(dim=1)
+    top_p_mask = (probs_sum - probs_sort) > top_ps.unsqueeze(dim=1)
     logits_sort[top_p_mask] = -float("inf")
 
     # Apply top-k.
     # Create a mask for the top-k elements.
     top_k_mask = torch.arange(logits_idx.shape[-1], device=logits_idx.device)
     top_k_mask = top_k_mask.expand(logits_idx.shape[0], -1)
-    top_k_mask = top_k_mask >= k.unsqueeze(dim=1)
+    top_k_mask = top_k_mask >= top_ks.unsqueeze(dim=1)
     logits_sort[top_k_mask] = -float("inf")
 
     # Re-sort the probabilities.
-    logits = torch.gather(logits_sort,
-                          dim=-1,
-                          index=torch.argsort(logits_idx, dim=-1))
+    torch.gather(logits_sort,
+                 dim=-1,
+                 index=torch.argsort(logits_idx, dim=-1),
+                 out=logits)
     return logits
 
 
@@ -298,12 +300,12 @@ def _sample_from_prompt(
     prob: torch.Tensor,
     sampling_params: SamplingParams,
 ) -> List[int]:
-    if sampling_params.use_beam_search:
+    if sampling_params.sampling_type == SamplingType.BEAM:
         # Beam search.
         beam_width = sampling_params.best_of
         _, next_token_ids = torch.topk(prob, beam_width)
         next_token_ids = next_token_ids.tolist()
-    elif sampling_params.temperature < _SAMPLING_EPS:
+    elif sampling_params.sampling_type == SamplingType.GREEDY:
         # Greedy sampling.
         assert sampling_params.best_of == 1
         next_token_id = torch.argmax(prob)
@@ -327,7 +329,7 @@ def _sample_from_generation_tokens(
     # NOTE(woosuk): sampling_params.best_of can be greater than
     # len(seq_ids) because some sequences in the group might have
     # been already terminated.
-    if sampling_params.use_beam_search:
+    if sampling_params.sampling_type == SamplingType.BEAM:
         # Beam search.
         # Add cumulative logprobs for the sequences in the group.
         seq_logprobs = torch.tensor(seq_logprobs,
@@ -360,7 +362,7 @@ def _sample_from_generation_tokens(
 
         parent_seq_ids = [beam_outputs[seq_id][0] for seq_id in seq_ids]
         next_token_ids = [beam_outputs[seq_id][1] for seq_id in seq_ids]
-    elif sampling_params.temperature < _SAMPLING_EPS:
+    elif sampling_params.sampling_type == SamplingType.GREEDY:
         # Greedy sampling.
         assert len(seq_ids) == 1
         next_token_id = torch.argmax(probs, dim=-1)
@@ -386,8 +388,10 @@ def _sample(
 
     # TODO(woosuk): Optimize.
     idx = 0
-    max_best_of = 1
 
+    # Find the maximum best_of value to use as a shape for
+    # topk/multinomial tensors.
+    max_best_of = 1
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
         if (i < input_metadata.num_prompts
@@ -398,40 +402,52 @@ def _sample(
     gen_logprobs = logprobs
 
     sampling_type_offsets = input_metadata.sampling_type_offsets
-
+    # Split the probs into multiple tensors, one for each sampling type.
+    # tensor_split will create views of the probs tensor, meaning
+    # there will be no copying involved (this should be very fast).
     sampling_type_tensors = torch.tensor_split(gen_probs,
                                                sampling_type_offsets)
-    chosen_tokens_tensor = torch.empty(
+
+    # Create a tensor to store the tokens sampled by greedy or multinomial
+    # sampling. Note that beam search tokens are not stored here.
+    batch_chosen_tokens_tensor = torch.empty(
         (sum(t.shape[0] for t in sampling_type_tensors[:2]), max_best_of),
         dtype=torch.long,
         device=gen_probs.device)
-    chosen_tokens_tensors = torch.tensor_split(chosen_tokens_tensor,
-                                               sampling_type_offsets[:2])
+    # Because batch_chosen_tokens_tensors are views of
+    # batch_chosen_tokens_tensor, any changes to
+    # batch_chosen_tokens_tensors will be reflected in
+    # batch_chosen_tokens_tensor.
+    batch_chosen_tokens_tensors = torch.tensor_split(
+        batch_chosen_tokens_tensor, sampling_type_offsets[:2])
 
-    if len(sampling_type_offsets) == 0 or sampling_type_offsets[0] > 0:
+    # Do vectorized sampling.
+    if len(sampling_type_tensors) > 0 and sampling_type_tensors[0].numel() > 0:
+        # If we have best_of, use topk.
         if max_best_of > 1:
             dummy_out = torch.empty_like(sampling_type_tensors[0])
             torch.topk(sampling_type_tensors[0],
                        max_best_of,
                        dim=-1,
                        sorted=False,
-                       out=(dummy_out, chosen_tokens_tensors[0]))
+                       out=(dummy_out, batch_chosen_tokens_tensors[0]))
+        # Otherwise, do argmax which is faster
         else:
             torch.argmax(sampling_type_tensors[0],
                          dim=-1,
                          keepdim=True,
-                         out=chosen_tokens_tensors[0])
-    if len(sampling_type_offsets) == 1 or (len(sampling_type_offsets) > 1
-                                           and sampling_type_offsets[1] > 0):
+                         out=batch_chosen_tokens_tensors[0])
+    if len(sampling_type_tensors) > 1 and sampling_type_tensors[1].numel() > 0:
         torch.multinomial(sampling_type_tensors[1],
                           num_samples=max_best_of,
                           replacement=False,
-                          out=chosen_tokens_tensors[1])
+                          out=batch_chosen_tokens_tensors[1])
+    # Everything that is not greedy or multinomial (currently, beam search)
+    # (sampling_type_tensors[2:]) is handled iteratively below.
 
-    chosen_logprobs = torch.gather(gen_logprobs,
-                                   dim=-1,
-                                   index=chosen_tokens_tensor).tolist()
-    batch_sampled_tokens = chosen_tokens_tensor.tolist()
+    batch_chosen_logprobs_list = torch.gather(
+        gen_logprobs, dim=-1, index=batch_chosen_tokens_tensor).tolist()
+    batch_chosen_tokens_list = batch_chosen_tokens_tensor.tolist()
 
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
@@ -443,8 +459,8 @@ def _sample(
             # Sample the next tokens.
             if sampling_params.sampling_type in (SamplingType.GREEDY,
                                                  SamplingType.RANDOM):
-                next_token_ids = batch_sampled_tokens[idx][:sampling_params.
-                                                           best_of]
+                next_token_ids = batch_chosen_tokens_list[idx][:sampling_params
+                                                               .best_of]
             else:
                 prob = gen_probs[idx]
                 next_token_ids = _sample_from_prompt(prob, sampling_params)
@@ -459,7 +475,8 @@ def _sample(
                 output_logprobs = next_logprobs.copy()
                 if sampling_params.sampling_type in (SamplingType.GREEDY,
                                                      SamplingType.RANDOM):
-                    output_logprobs[next_token_id] = chosen_logprobs[idx][j]
+                    output_logprobs[
+                        next_token_id] = batch_chosen_logprobs_list[idx][j]
                 else:
                     output_logprobs[next_token_id] = logprob[
                         next_token_id].item()
@@ -478,7 +495,8 @@ def _sample(
 
             if sampling_params.sampling_type in (SamplingType.GREEDY,
                                                  SamplingType.RANDOM):
-                next_token_ids = batch_sampled_tokens[idx:idx + len(seq_ids)]
+                next_token_ids = batch_chosen_tokens_list[idx:idx +
+                                                          len(seq_ids)]
                 next_token_ids = [
                     item for sublist in next_token_ids for item in sublist
                 ]
@@ -504,8 +522,8 @@ def _sample(
                 output_logprobs = next_logprobs[parent_seq_id].copy()
                 if sampling_params.sampling_type in (SamplingType.GREEDY,
                                                      SamplingType.RANDOM):
-                    output_logprobs[next_token_id] = chosen_logprobs[idx +
-                                                                     j][0]
+                    output_logprobs[
+                        next_token_id] = batch_chosen_logprobs_list[idx + j][0]
                 else:
                     output_logprobs[next_token_id] = logprob[
                         j, next_token_id].item()

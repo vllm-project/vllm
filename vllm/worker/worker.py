@@ -150,12 +150,14 @@ class Worker:
         input_positions: List[int] = []
         slot_mapping: List[int] = []
 
-        # Add prompt tokens.
+        # Sort the sequence groups by sampling type so that we can easily
+        # split the generated logits tensor during sampling.
         seq_group_metadata_list = sorted(
             seq_group_metadata_list,
             key=lambda seq_group_metadata: seq_group_metadata.sampling_params.
             sampling_type)
 
+        # Add prompt tokens.
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
 
@@ -199,17 +201,20 @@ class Worker:
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
 
+        # Store indices where the sampling type changes.
         sampling_type_offsets = []
         last_sampling_type = 0
         cumulative_offset = 0
 
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+        for seq_group_metadata in seq_group_metadata_list:
 
             if seq_group_metadata.is_prompt:
                 if (seq_group_metadata.sampling_params.sampling_type !=
                         last_sampling_type):
-                    sampling_type_offsets.append(i + cumulative_offset)
-                    last_sampling_type = seq_group_metadata.sampling_params.sampling_type
+                    sampling_type_offsets.append(cumulative_offset)
+                    last_sampling_type = (
+                        seq_group_metadata.sampling_params.sampling_type)
+                cumulative_offset += 1
                 continue
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -237,11 +242,13 @@ class Worker:
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
+                cumulative_offset += 1
 
-            cumulative_offset += len(seq_ids) - 1
-            if seq_group_metadata.sampling_params.sampling_type != last_sampling_type:
-                sampling_type_offsets.append(i + cumulative_offset)
-                last_sampling_type = seq_group_metadata.sampling_params.sampling_type
+            if (seq_group_metadata.sampling_params.sampling_type !=
+                    last_sampling_type):
+                sampling_type_offsets.append(cumulative_offset)
+                last_sampling_type = (
+                    seq_group_metadata.sampling_params.sampling_type)
 
         # Optimization: Pad the input length to be a multiple of 8.
         # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
