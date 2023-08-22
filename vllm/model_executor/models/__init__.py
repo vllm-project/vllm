@@ -1,3 +1,4 @@
+from vllm.model_executor.models.aquila import AquilaForCausalLM
 from vllm.model_executor.models.baichuan import (BaiChuanForCausalLM,
                                                  BaichuanForCausalLM)
 from vllm.model_executor.models.bloom import BloomForCausalLM
@@ -13,6 +14,7 @@ from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
 
 __all__ = [
+    "AquilaForCausalLM",
     "BaiChuanForCausalLM",
     "BaichuanForCausalLM",
     "BloomForCausalLM",
