@@ -52,8 +52,8 @@ class GPTBigCodeAttention(nn.Module):
         self.tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
         assert total_num_heads % self.tensor_model_parallel_world_size == 0
-        self.num_heads = (
-            total_num_heads // self.tensor_model_parallel_world_size)
+        self.num_heads = (total_num_heads //
+                          self.tensor_model_parallel_world_size)
         self.head_dim = self.hidden_size // total_num_heads
         self.scale = self.head_dim**-0.5
 
@@ -288,8 +288,8 @@ class GPTBigCodeForCausalLM(nn.Module):
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // total_num_heads
                 total_kv_size = head_size * total_num_kv_heads
-                num_heads = (
-                    total_num_heads // self.tensor_model_parallel_world_size)
+                num_heads = (total_num_heads //
+                             self.tensor_model_parallel_world_size)
                 head_start = tensor_model_parallel_rank * num_heads
                 head_end = (tensor_model_parallel_rank + 1) * num_heads
 
