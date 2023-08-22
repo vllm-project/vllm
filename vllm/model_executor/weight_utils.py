@@ -76,6 +76,8 @@ def hf_model_weights_iterator(
             state = torch.load(bin_file, map_location="cpu")
             for name, param in state.items():
                 yield name, param
+            del state
+            torch.cuda.empty_cache()
 
 
 def load_tensor_parallel_weights(
