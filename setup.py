@@ -55,6 +55,9 @@ if nvcc_cuda_version < Version("11.0"):
 if 86 in compute_capabilities and nvcc_cuda_version < Version("11.1"):
     raise RuntimeError(
         "CUDA 11.1 or higher is required for GPUs with compute capability 8.6.")
+if 89 in compute_capabilities and nvcc_cuda_version < Version("11.8"):
+    raise RuntimeError(
+        "CUDA 11.8 or higher is required for GPUs with compute capability 8.9.")
 if 90 in compute_capabilities and nvcc_cuda_version < Version("11.8"):
     raise RuntimeError(
         "CUDA 11.8 or higher is required for GPUs with compute capability 9.0.")
@@ -65,6 +68,7 @@ if not compute_capabilities:
     if nvcc_cuda_version >= Version("11.1"):
         compute_capabilities.add(86)
     if nvcc_cuda_version >= Version("11.8"):
+        compute_capabilities.add(89)
         compute_capabilities.add(90)
 
 # Add target compute capabilities to NVCC flags.
