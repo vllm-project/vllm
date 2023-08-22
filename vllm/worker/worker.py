@@ -16,8 +16,6 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory
 
 
-
-
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
 
@@ -155,8 +153,8 @@ class Worker:
         # Add prompt tokens.
         seq_group_metadata_list = sorted(
             seq_group_metadata_list,
-            key=lambda seq_group_metadata: seq_group_metadata.sampling_params.sampling_type
-        )
+            key=lambda seq_group_metadata: seq_group_metadata.sampling_params.
+            sampling_type)
 
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
@@ -201,15 +199,16 @@ class Worker:
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
 
-        sampling_offsets = []
+        sampling_type_offsets = []
         last_sampling_type = 0
         cumulative_offset = 0
 
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
 
             if seq_group_metadata.is_prompt:
-                if seq_group_metadata.sampling_params.sampling_type != last_sampling_type:
-                    sampling_offsets.append(i+cumulative_offset)
+                if (seq_group_metadata.sampling_params.sampling_type !=
+                        last_sampling_type):
+                    sampling_type_offsets.append(i + cumulative_offset)
                     last_sampling_type = seq_group_metadata.sampling_params.sampling_type
                 continue
 
@@ -241,7 +240,7 @@ class Worker:
 
             cumulative_offset += len(seq_ids) - 1
             if seq_group_metadata.sampling_params.sampling_type != last_sampling_type:
-                sampling_offsets.append(i+cumulative_offset)
+                sampling_type_offsets.append(i + cumulative_offset)
                 last_sampling_type = seq_group_metadata.sampling_params.sampling_type
 
         # Optimization: Pad the input length to be a multiple of 8.
@@ -272,7 +271,7 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
-            sampling_offsets=sampling_offsets,
+            sampling_type_offsets=sampling_type_offsets,
         )
         return tokens_tensor, positions_tensor, input_metadata
 
