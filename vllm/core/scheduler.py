@@ -66,6 +66,9 @@ class Scheduler:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
 
+        self.prompt_limit = min(self.scheduler_config.max_model_len,
+                                self.scheduler_config.max_num_batched_tokens)
+
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Create the block space manager.
@@ -130,6 +133,11 @@ class Scheduler:
         if not self.swapped:
             ignored_seq_groups: List[SequenceGroup] = []
             scheduled: List[SequenceGroup] = []
+            # The total number of sequences on the fly, including the
+            # requests in the generation phase.
+            num_curr_seqs = sum(
+                seq_group.get_max_num_running_seqs()
+                for seq_group in self.running)
             num_batched_tokens = 0
             # Optimization: We do not sort the waiting queue since the preempted
             # sequence groups are added to the front and the new sequence groups
@@ -141,18 +149,15 @@ class Scheduler:
                     "Waiting sequence group should have only one prompt "
                     "sequence.")
                 num_prompt_tokens = seq_group.get_seqs()[0].get_len()
-                prompt_limit = min(
-                    self.scheduler_config.max_model_len,
-                    self.scheduler_config.max_num_batched_tokens)
-                if num_prompt_tokens > prompt_limit:
+                if num_prompt_tokens > self.prompt_limit:
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
-                        f" and exceeds limit of {prompt_limit}")
+                        f" and exceeds limit of {self.prompt_limit}")
                     for seq in seq_group.get_seqs():
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
                     self.waiting.pop(0)
-                    break
+                    continue
 
                 # If the sequence group cannot be allocated, stop.
                 if not self.block_manager.can_allocate(seq_group):
@@ -165,11 +170,7 @@ class Scheduler:
 
                 # The total number of sequences in the RUNNING state should not
                 # exceed the maximum number of sequences.
-                num_new_seqs = seq_group.num_seqs(
-                    status=SequenceStatus.WAITING)
-                num_curr_seqs = sum(
-                    seq_group.num_seqs(status=SequenceStatus.RUNNING)
-                    for seq_group in self.running)
+                num_new_seqs = seq_group.get_max_num_running_seqs()
                 if (num_curr_seqs + num_new_seqs >
                         self.scheduler_config.max_num_seqs):
                     break
@@ -178,6 +179,7 @@ class Scheduler:
                 self._allocate(seq_group)
                 self.running.append(seq_group)
                 num_batched_tokens += num_prompt_tokens
+                num_curr_seqs += num_new_seqs
                 scheduled.append(seq_group)
 
             if scheduled:
@@ -223,30 +225,33 @@ class Scheduler:
 
         # Swap in the sequence groups in the SWAPPED state if possible.
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
-        while self.swapped and not blocks_to_swap_out:
-            seq_group = self.swapped[0]
-            # If the sequence group has been preempted in this step, stop.
-            if seq_group in preempted:
-                break
-            # If the sequence group cannot be swapped in, stop.
-            if not self.block_manager.can_swap_in(seq_group):
-                break
-
-            # The total number of sequences in the RUNNING state should not
-            # exceed the maximum number of sequences.
-            num_new_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
+        if not preempted:
             num_curr_seqs = sum(
-                seq_group.num_seqs(status=SequenceStatus.RUNNING)
+                seq_group.get_max_num_running_seqs()
                 for seq_group in self.running)
-            if (num_curr_seqs + num_new_seqs >
-                    self.scheduler_config.max_num_seqs):
-                break
 
-            seq_group = self.swapped.pop(0)
-            self._swap_in(seq_group, blocks_to_swap_in)
-            self._append_slot(seq_group, blocks_to_copy)
-            self.running.append(seq_group)
+            while self.swapped:
+                seq_group = self.swapped[0]
+                # If the sequence group cannot be swapped in, stop.
+                if not self.block_manager.can_swap_in(seq_group):
+                    break
 
+                # The total number of sequences in the RUNNING state should not
+                # exceed the maximum number of sequences.
+                num_new_seqs = seq_group.get_max_num_running_seqs()
+                if (num_curr_seqs + num_new_seqs >
+                        self.scheduler_config.max_num_seqs):
+                    break
+
+                seq_group = self.swapped.pop(0)
+                self._swap_in(seq_group, blocks_to_swap_in)
+                self._append_slot(seq_group, blocks_to_copy)
+                num_curr_seqs += num_new_seqs
+                self.running.append(seq_group)
+
+        # Each sequence in the generation phase only takes one token slot.
+        # Therefore, the number of batched tokens is equal to the number of
+        # sequences in the RUNNING state.
         num_batched_tokens = sum(
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
             for seq_group in self.running)
@@ -358,8 +363,8 @@ class Scheduler:
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
         # swapping. However, when the sequence group has multiple sequences
-        # (e.g., beam search), recomputation is not supported. In such a case,
-        # we use swapping instead.
+        # (e.g., beam search), recomputation is not currently supported. In
+        # such a case, we use swapping instead.
         # FIXME(woosuk): This makes our scheduling policy a bit bizarre.
         # As swapped sequences are prioritized over waiting sequences,
         # sequence groups with multiple sequences are implicitly prioritized
@@ -367,8 +372,7 @@ class Scheduler:
         # TODO(woosuk): Support recomputation for sequence groups with multiple
         # sequences. This may require a more sophisticated CUDA kernel.
         if preemption_mode is None:
-            seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-            if len(seqs) == 1:
+            if seq_group.get_max_num_running_seqs() == 1:
                 preemption_mode = PreemptionMode.RECOMPUTE
             else:
                 preemption_mode = PreemptionMode.SWAP
@@ -397,9 +401,6 @@ class Scheduler:
         seq_group: SequenceGroup,
         blocks_to_swap_out: Dict[int, int],
     ) -> None:
-        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-        for seq in seqs:
-            seq.status = SequenceStatus.SWAPPED
         self._swap_out(seq_group, blocks_to_swap_out)
         self.swapped.append(seq_group)
 
