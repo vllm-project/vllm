@@ -136,9 +136,13 @@ class Detokenizer:
     ) -> None:
         self.tokenizer = tokenizer
         self.decoding_sequences: Dict[int, SequenceDetokenizeState] = dict()
+        self.decoding_requests: Dict[str, List[int]] = dict()
 
-    def add_sequence(self, seq_id: int, stop_strings: List[str]) -> None:
+    def add_sequence(self, request_id: str, seq_id: int, stop_strings: List[str]) -> None:
         self.decoding_sequences[seq_id] = SequenceDetokenizeState(seq_id, stop_strings) 
+        if request_id not in self.decoding_requests:
+            self.decoding_requests[request_id] = []
+        self.decoding_requests[request_id].append(seq_id)
 
     def detokenize_last_token(self, seq_id: int, last_token_id: int) -> Tuple[bool, str]:
         assert seq_id in self.decoding_sequences, f"{self.decoding_sequences.keys()}"
@@ -168,12 +172,16 @@ class Detokenizer:
         return state.stop_string_matched, state.output_text
 
     def get_output_text(self, seq_id: int) -> str:
-        if seq_id in self.decoding_sequences:
-            return self.decoding_sequences[seq_id].output_text
-        return ""
+        #if seq_id in self.decoding_sequences:
+        return self.decoding_sequences[seq_id].output_text
+        #return ""
 
-    def free_sequence(self, seq_id: int) -> None:
-        self.decoding_sequences.pop(seq_id)
+    def free_request(self, request_id: str) -> None:
+        if request_id not in self.decoding_requests():
+            return
+        seq_ids = self.decoding_requests.pop(request_id)
+        for seq_id in seq_ids:
+            self.decoding_sequences.pop(seq_id)
 
     def stop_string_matched(self, seq_id: int) -> bool:
         assert seq_id in self.decoding_sequences

@@ -110,7 +110,7 @@ class LLMEngine:
         self._init_cache()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config, self.detokenizer)
+        self.scheduler = Scheduler(scheduler_config, cache_config)
 
         # Logging.
         self.last_logging_time = 0.0
@@ -232,6 +232,11 @@ class LLMEngine:
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
+    def start_record(self) -> None:
+        self.total_step_time = 0.0
+        self.total_model_execute_time = 0.0
+        self.first_step_time = None
+
     def add_request(
         self,
         request_id: str,
@@ -269,7 +274,7 @@ class LLMEngine:
             seq_id = next(self.seq_counter)
             seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
             seqs.append(seq)
-            self.detokenizer.add_sequence(seq_id, sampling_params.stop)
+            self.detokenizer.add_sequence(request_id, seq_id, sampling_params.stop)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, seqs, sampling_params,
@@ -285,6 +290,7 @@ class LLMEngine:
             request_id: The ID of the request to abort.
         """
         self.scheduler.abort_seq_group(request_id)
+        self.detokenizer.free_request(request_id)
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
