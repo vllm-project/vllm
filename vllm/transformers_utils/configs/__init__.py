@@ -7,12 +7,10 @@ from vllm.transformers_utils.configs.qwen import QWenConfig
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
 
-
 __all__ = [
     "MPTConfig",
     "BaiChuanConfig",
     "AquilaConfig",
     "QWenConfig",
     "RWConfig",
-
 ]

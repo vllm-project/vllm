@@ -9,7 +9,6 @@ _CONFIG_REGISTRY = {
     "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-
 }
 
 

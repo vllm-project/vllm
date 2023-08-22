@@ -76,7 +76,9 @@ class AquilaMLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
+
 class AquilaRMSNorm(nn.Module):
+
     def __init__(self, hidden_size, eps=1e-6):
         """
         AquilaRMSNorm is equivalent to T5LayerNorm
@@ -87,13 +89,16 @@ class AquilaRMSNorm(nn.Module):
 
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
-        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1,
+                                                               keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance +
                                                     self.variance_epsilon)
 
         return (self.weight * hidden_states).to(input_dtype)
 
+
 class AquilaAttention(nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
@@ -129,10 +134,12 @@ class AquilaAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           rotary_dim=self.head_dim,)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            rotary_dim=self.head_dim,
+        )
 
     def forward(
         self,
@@ -167,9 +174,9 @@ class AquilaDecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
         )
         self.input_layernorm = AquilaRMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                             eps=config.rms_norm_eps)
         self.post_attention_layernorm = AquilaRMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+                                                      eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -209,7 +216,9 @@ class AquilaModel(nn.Module):
 
         #vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size, perform_initialization=False)
+            config.vocab_size,
+            config.hidden_size,
+            perform_initialization=False)
         self.layers = nn.ModuleList([
             AquilaDecoderLayer(config) for _ in range(config.num_hidden_layers)
         ])
@@ -351,4 +360,3 @@ class AquilaForCausalLM(nn.Module):
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
-

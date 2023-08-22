@@ -22,7 +22,6 @@
 from transformers import PretrainedConfig
 
 
-
 class AquilaConfig(PretrainedConfig):
     model_type = "aquila"
     keys_to_ignore_at_inference = ["past_key_values"]
@@ -62,4 +61,3 @@ class AquilaConfig(PretrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
-
