@@ -69,22 +69,23 @@ class Sampler(nn.Module):
         # Otherwise, we will slice the logits and modify only the non-greedy
         # subset.
         if len(sampling_type_offsets) > 0:
+            non_greedy_offset = sampling_type_offsets[0]
             # Apply temperature scaling.
             temperatures = _get_temperatures(input_metadata)
             assert len(temperatures) == logits.shape[0]
-            temperatures = temperatures[sampling_type_offsets[0]:]
+            temperatures = temperatures[non_greedy_offset:]
             if any(t != 1.0 for t in temperatures):
                 t = torch.tensor(temperatures,
                                  dtype=logits.dtype,
                                  device=logits.device)
                 # Use in-place division to avoid creating a new tensor.
-                logits[sampling_type_offsets[0]:].div_(t.unsqueeze(dim=1))
+                logits[non_greedy_offset:].div_(t.unsqueeze(dim=1))
 
             # Apply top-p and top-k truncation.
             top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
-            top_ps = top_ps[sampling_type_offsets[0]:]
-            top_ks = top_ks[sampling_type_offsets[0]:]
             assert len(top_ps) == len(top_ks) == logits.shape[0]
+            top_ps = top_ps[non_greedy_offset:]
+            top_ks = top_ks[non_greedy_offset:]
             do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
             do_top_k = any(k != self.vocab_size for k in top_ks)
             if do_top_p or do_top_k:
@@ -92,7 +93,7 @@ class Sampler(nn.Module):
                                  dtype=logits.dtype,
                                  device=logits.device)
                 k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
-                _apply_top_p_top_k_in_place(logits[sampling_type_offsets[0]:],
+                _apply_top_p_top_k_in_place(logits[non_greedy_offset:],
                                             p, k)
 
         # We use float32 for probabilities and log probabilities.
