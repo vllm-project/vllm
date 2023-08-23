@@ -88,6 +88,14 @@ attention_extension = CUDAExtension(
 )
 ext_modules.append(attention_extension)
 
+# Quantization kernels.
+quantization_extension = CUDAExtension(
+    name="vllm.quantization_ops",
+    sources=["csrc/quantization.cpp", "csrc/quantization/quantization_kernels.cu"],
+    extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
+)
+ext_modules.append(quantization_extension)
+
 # Positional encoding kernels.
 positional_encoding_extension = CUDAExtension(
     name="vllm.pos_encoding_ops",
