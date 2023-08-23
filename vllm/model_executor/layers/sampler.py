@@ -68,7 +68,7 @@ class Sampler(nn.Module):
         # we can apply temperature & top_p/top_k to), we can return early.
         # Otherwise, we will slice the logits and modify only the non-greedy
         # subset.
-        if len(sampling_type_offsets) > 1:
+        if len(sampling_type_offsets) > 0:
             # Apply temperature scaling.
             temperatures = _get_temperatures(input_metadata)
             assert len(temperatures) == logits.shape[0]
