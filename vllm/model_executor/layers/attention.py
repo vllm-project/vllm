@@ -357,7 +357,7 @@ class PagedAttentionWithALiBi(PagedAttention):
             # be sliced from a tensor whose length is a multiple of 8.
             padded_len = (prompt_len + 7) // 8 * 8
             bias = torch.empty(
-                1,
+                1,  # batch_size
                 self.num_heads,
                 padded_len,
                 padded_len,
