@@ -61,23 +61,16 @@ class GPTBigCodeAttention(nn.Module):
         if self.multi_query:
             self.num_kv_heads = 1
             self.kv_dim = self.head_dim
-            self.c_attn_q = ColumnParallelLinear(self.hidden_size,
-                                                 self.hidden_size,
-                                                 bias=True,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
-            self.c_attn_kv = nn.Linear(self.hidden_size,
-                                       2 * self.kv_dim,
-                                       bias=True)
         else:
             self.num_kv_heads = self.num_heads
             self.kv_dim = self.num_kv_heads * self.head_dim
-            self.c_attn = ColumnParallelLinear(self.hidden_size,
-                                               self.hidden_size +
-                                               2 * self.kv_dim,
-                                               bias=True,
-                                               gather_output=False,
-                                               perform_initialization=False)
+
+        self.c_attn = ColumnParallelLinear(self.hidden_size,
+            self.hidden_size +
+            2 * self.kv_dim * self.tensor_model_parallel_world_size,
+            bias=True,
+            gather_output=False,
+            perform_initialization=False)
 
         self.c_proj = RowParallelLinear(self.hidden_size,
                                         self.hidden_size,
@@ -96,17 +89,12 @@ class GPTBigCodeAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        if self.multi_query:
-            q, _ = self.c_attn_q(hidden_states)
-            kv = self.c_attn_kv(hidden_states)
-            k, v = kv.split([self.kv_dim, self.kv_dim], dim=-1)
-        else:
-            qkv, _ = self.c_attn(hidden_states)
-            q, k, v = qkv.split([
-                self.hidden_size // self.tensor_model_parallel_world_size,
-                self.kv_dim, self.kv_dim
-            ],
-                                dim=-1)
+        qkv, _ = self.c_attn(hidden_states)
+        q, k, v = qkv.split([
+            self.hidden_size // self.tensor_model_parallel_world_size,
+            self.kv_dim, self.kv_dim
+        ],
+                            dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(q, k, v, key_cache, value_cache,
                                 input_metadata, cache_event)
@@ -298,33 +286,15 @@ class GPTBigCodeForCausalLM(nn.Module):
                     loaded_weight, [hidden_size, total_kv_size, total_kv_size],
                     dim=0)
 
+                # For multi-head attention, we split the query/key/value heads.
+                # While for multi-query attention we split the query heads but
+                # replicae the key and value heads.
                 wq = wq[head_size * head_start:head_size * head_end]
                 if not self.config.multi_query:
-                    # Split the heads when using normal multi-head attention
                     wk = wk[head_size * head_start:head_size * head_end]
                     wv = wv[head_size * head_start:head_size * head_end]
-                    loaded_weight = torch.cat([wq, wk, wv], dim=0)
-                else:
-                    # For multi-query attention, we split the query
-                    # but replicate the key and value.
-                    loaded_weight_q = wq
-                    loaded_weight_kv = torch.cat([wk, wv], dim=0)
-                    q_weight_name = name.replace("c_attn", "c_attn_q")
-                    kv_weight_name = name.replace("c_attn", "c_attn_kv")
-                    load_tensor_parallel_weights(state_dict[q_weight_name],
-                                                 loaded_weight_q,
-                                                 q_weight_name,
-                                                 self._column_parallel_weights,
-                                                 self._row_parallel_weights,
-                                                 tensor_model_parallel_rank)
-                    load_tensor_parallel_weights(state_dict[kv_weight_name],
-                                                 loaded_weight_kv,
-                                                 kv_weight_name,
-                                                 self._column_parallel_weights,
-                                                 self._row_parallel_weights,
-                                                 tensor_model_parallel_rank)
-                    continue
-
+                loaded_weight = torch.cat([wq, wk, wv], dim=0)
+                    
             param = state_dict[name]
 
             if name == "transformer.wte.weight":
