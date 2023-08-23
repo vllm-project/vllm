@@ -208,6 +208,9 @@ def _apply_penalties(
                              dtype=torch.long,
                              device=logits.device)
     occurences = _batched_bincount(input_ids, 1, logits.shape[1])
+
+    # We follow the definition in OpenAI API.
+    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
     frequency_penalty = occurences * frequency_penalties
     presence_penalty = (occurences > 0) * presence_penalties
 
