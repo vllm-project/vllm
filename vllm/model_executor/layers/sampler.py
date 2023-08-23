@@ -93,8 +93,7 @@ class Sampler(nn.Module):
                                  dtype=logits.dtype,
                                  device=logits.device)
                 k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
-                _apply_top_p_top_k_in_place(logits[non_greedy_offset:],
-                                            p, k)
+                _apply_top_p_top_k_in_place(logits[non_greedy_offset:], p, k)
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
