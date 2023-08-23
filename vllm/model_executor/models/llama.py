@@ -36,9 +36,9 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (load_tensor_parallel_weights,
-                                              load_padded_tensor_parallel_vocab,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.weight_utils import (
+    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab,
+    hf_model_weights_iterator)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
@@ -267,7 +267,7 @@ class LlamaForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False,
-                     allow_patterns: str = "*.safetensors"):
+                     use_safetensor: bool = True):
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         q_proj_shard_size = (self.config.hidden_size // tp_size)
@@ -284,7 +284,7 @@ class LlamaForCausalLM(nn.Module):
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache, allow_patterns):
+                model_name_or_path, cache_dir, use_np_cache, use_safetensor):
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -313,10 +313,10 @@ class LlamaForCausalLM(nn.Module):
                 param = state_dict[name.replace(weight_name, "gate_up_proj")]
                 shard_size = param.shape[0] // 2
                 loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank
-                    :shard_size * (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id
-                                         :shard_size * (stride_id + 1)]
+                    shard_size * tensor_model_parallel_rank:shard_size *
+                    (tensor_model_parallel_rank + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size *
+                                         (stride_id + 1)]
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_gate_up_weight = True
@@ -331,10 +331,10 @@ class LlamaForCausalLM(nn.Module):
                 # Consider padding in the vocab size.
                 padded_vocab_size = param.shape[0] * tp_size
                 if padded_vocab_size > self.config.vocab_size:
-                    load_padded_tensor_parallel_vocab(param, loaded_weight, name,
-                                                      self._column_parallel_weights,
-                                                      self._row_parallel_weights,
-                                                      tensor_model_parallel_rank)
+                    load_padded_tensor_parallel_vocab(
+                        param, loaded_weight, name,
+                        self._column_parallel_weights,
+                        tensor_model_parallel_rank)
                     continue
 
             load_tensor_parallel_weights(param, loaded_weight, name,
