@@ -13,6 +13,8 @@ from vllm.sequence import SequenceOutputs
 
 _SAMPLING_EPS = 1e-5
 
+# For each sequence group, we generate a list of SequenceOutputs object,
+# each of which contains one possible candidate for the next token.
 SamplerOutput = List[List[SequenceOutputs]]
 
 
@@ -41,7 +43,7 @@ class Sampler(nn.Module):
         hidden_states: torch.Tensor,
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
-    ) -> List[List[SequenceOutputs]]:
+    ) -> SamplerOutput:
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
 
@@ -355,10 +357,8 @@ def _sample(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     input_metadata: InputMetadata,
-) -> List[List[SequenceOutputs]]:
-    # For each sequence group, we generate a list of SequenceOutputs object,
-    # each of which contains one possible candidate for the next token.
-    seq_outputs: List[List[SequenceOutputs]] = []
+) -> SamplerOutput:
+    seq_outputs: SamplerOutput = []
 
     # TODO(woosuk): Optimize.
     idx = 0

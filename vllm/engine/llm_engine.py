@@ -1,5 +1,5 @@
-import time
 import copy
+import time
 from functools import partial
 from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
@@ -9,11 +9,14 @@ from vllm.core.scheduler import Scheduler
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
 from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.sequence import (Sequence, SequenceOutputs, SequenceGroup,
+                           SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
+from vllm.utils import Counter
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -91,6 +94,7 @@ class LLMEngine:
             model_config.tokenizer,
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code)
+        self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -251,9 +255,17 @@ class LLMEngine:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
+        # Create the sequences.
+        block_size = self.cache_config.block_size
+        seq_id = next(self.seq_counter)
+        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
+
+        # Create the sequence group.
+        seq_group = SequenceGroup(request_id, [seq], sampling_params,
+                                  arrival_time)
+
         # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(request_id, prompt, prompt_token_ids,
-                                     sampling_params, arrival_time)
+        self.scheduler.add_seq_group(seq_group)
 
     def abort_request(self, request_id: str) -> None:
         """Aborts a request with the given ID.
@@ -304,13 +316,11 @@ class LLMEngine:
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
-        # Update the scheduler with the model outputs.
-        seq_groups = self.scheduler.update(output)
 
-        # Decode the sequences.
-        self._decode_sequences(seq_groups)
-        # Stop the sequences that meet the stopping criteria.
-        self._stop_sequences(seq_groups)
+        seq_groups = scheduler_outputs.scheduled_seq_groups
+
+        self.process_model_output(seq_groups, output)
+
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
@@ -325,6 +335,61 @@ class LLMEngine:
             self._log_system_stats(scheduler_outputs.prompt_run,
                                    scheduler_outputs.num_batched_tokens)
         return request_outputs
+
+    def process_model_output(self, scheduled_seq_groups: List[SequenceGroup],
+                             output: SamplerOutput):
+        for seq_group, samples in zip(scheduled_seq_groups, output):
+            parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+            parent_children_dict = {
+                parent_seq.seq_id: []
+                for parent_seq in parent_seqs
+            }
+            for sample in samples:
+                parent_children_dict[sample.parent_seq_id].append(sample)
+
+            # List of (child, parent_id)
+            child_seqs: List[Tuple[Sequence, int]] = []
+
+            for parent in parent_seqs:
+                child_samples: List[SequenceOutputs] = parent_children_dict[
+                    parent.seq_id]
+                if len(child_samples) == 0:
+                    # This parent sequence has no children samples.
+                    parent.status = SequenceStatus.FINISHED_ABORTED
+                    self.scheduler.free_seq(parent)
+                    seq_group.remove(parent)
+                    continue
+                # Fork the parent sequence if there are multiple child samples.
+                for child_sample in child_samples[:-1]:
+                    new_child_seq_id = next(self.seq_counter)
+                    child = parent.fork(new_child_seq_id)
+                    child.append_token_id(child_sample.output_token,
+                                          child_sample.logprobs)
+                    child_seqs.append((child, parent))
+                # Continue the parent sequence with the last child sample.
+                last_child_sample = child_samples[-1]
+                parent.append_token_id(last_child_sample.output_token,
+                                       last_child_sample.logprobs)
+                child_seqs.append((parent, parent))
+
+            for seq, _ in child_seqs:
+                self._decode_sequence(seq)
+                self._check_stop(seq, seq_group.sampling_params)
+
+            if seq_group.sampling_params.use_beam_search:
+                raise NotImplementedError
+
+            for seq, parent in child_seqs:
+                if seq is parent:
+                    # This child is inherited from the parent, should already
+                    # be in the seq_group.
+                    if seq.is_finished():
+                        self.scheduler.free_seq(seq)
+                    continue
+                # This child is newly created.
+                seq_group.add(seq)
+                if not seq.is_finished():
+                    self.scheduler.block_manager.fork(parent, seq)
 
     def _log_system_stats(
         self,
@@ -389,55 +454,44 @@ class LLMEngine:
                     f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         self.last_logging_time = now
 
-    def _decode_sequences(self, seq_groups: List[SequenceGroup]) -> None:
-        """Decodes the sequence outputs."""
-        for seq_group in seq_groups:
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                new_token, new_output_text = detokenize_incrementally(
-                    self.tokenizer,
-                    seq.output_tokens,
-                    seq.get_last_token_id(),
-                    skip_special_tokens=True,
-                )
-                if new_token is not None:
-                    seq.output_tokens.append(new_token)
-                    seq.output_text = new_output_text
+    def _decode_sequence(self, seq: Sequence) -> None:
+        """Decodes the sequence."""
+        new_token, new_output_text = detokenize_incrementally(
+            self.tokenizer,
+            seq.output_tokens,
+            seq.get_last_token_id(),
+            skip_special_tokens=True,
+        )
+        if new_token is not None:
+            seq.output_tokens.append(new_token)
+            seq.output_text = new_output_text
 
-    def _stop_sequences(self, seq_groups: List[SequenceGroup]) -> None:
+    def _check_stop(self, seq: Sequence,
+                    sampling_params: SamplingParams) -> None:
         """Stop the finished sequences."""
-        for seq_group in seq_groups:
-            sampling_params = seq_group.sampling_params
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                # Check if the sequence has generated a stop string.
-                stopped = False
-                for stop_str in sampling_params.stop:
-                    if seq.output_text.endswith(stop_str):
-                        # Truncate the output text so that the stop string is
-                        # not included in the output.
-                        seq.output_text = seq.output_text[:-len(stop_str)]
-                        self.scheduler.free_seq(
-                            seq, SequenceStatus.FINISHED_STOPPED)
-                        stopped = True
-                        break
-                if stopped:
-                    continue
+        for stop_str in sampling_params.stop:
+            if seq.output_text.endswith(stop_str):
+                # Truncate the output text so that the stop string is
+                # not included in the output.
+                seq.output_text = seq.output_text[:-len(stop_str)]
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                return
 
-                # Check if the sequence has reached max_model_len.
-                if seq.get_len() > self.scheduler_config.max_model_len:
-                    self.scheduler.free_seq(
-                        seq, SequenceStatus.FINISHED_LENGTH_CAPPED)
-                    continue
-                # Check if the sequence has reached max_tokens.
-                if seq.get_output_len() == sampling_params.max_tokens:
-                    self.scheduler.free_seq(
-                        seq, SequenceStatus.FINISHED_LENGTH_CAPPED)
-                    continue
-                # Check if the sequence has generated the EOS token.
-                if not sampling_params.ignore_eos:
-                    if seq.get_last_token_id() == self.tokenizer.eos_token_id:
-                        self.scheduler.free_seq(
-                            seq, SequenceStatus.FINISHED_STOPPED)
-                        continue
+        # Check if the sequence has reached max_model_len.
+        if seq.get_len() > self.scheduler_config.max_model_len:
+            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            return
+
+        # Check if the sequence has reached max_tokens.
+        if seq.get_output_len() == sampling_params.max_tokens:
+            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            return
+
+        # Check if the sequence has generated the EOS token.
+        if ((not sampling_params.ignore_eos)
+                and seq.get_last_token_id() == self.tokenizer.eos_token_id):
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            return
 
     def _run_workers(
         self,

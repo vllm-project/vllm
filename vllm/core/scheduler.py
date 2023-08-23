@@ -10,7 +10,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceOutputs,
                            SequenceStatus)
-from vllm.utils import Counter
 
 logger = init_logger(__name__)
 
@@ -77,8 +76,6 @@ class Scheduler:
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
         )
-        # Sequence ID Counter.
-        self.seq_counter = Counter()
 
         # TODO(zhuohan): Use deque instead of list for better performance.
         # Sequence groups in the WAITING state.
@@ -88,17 +85,7 @@ class Scheduler:
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
 
-    def add_seq_group(self, request_id: str, prompt: Optional[str],
-                      prompt_token_ids: List[int],
-                      sampling_params: SamplingParams,
-                      arrival_time: float) -> None:
-        # Create a new sequence group for the new request
-        prompt_seq_id = next(self.seq_counter)
-        prompt_seq = Sequence(prompt_seq_id, prompt, prompt_token_ids,
-                              self.cache_config.block_size)
-        seq_group = SequenceGroup(request_id, [prompt_seq], sampling_params,
-                                  arrival_time)
-
+    def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 
@@ -108,10 +95,11 @@ class Scheduler:
                 if seq_group.request_id == request_id:
                     # Remove the sequence group from the state queue.
                     state_queue.remove(seq_group)
-                    for seq in seq_group.seqs:
+                    for seq in seq_group.get_seqs():
                         if seq.is_finished():
                             continue
-                        self.free_seq(seq, SequenceStatus.FINISHED_ABORTED)
+                        seq.status = SequenceStatus.FINISHED_ABORTED
+                        self.free_seq(seq)
                     return
 
     def has_unfinished_seqs(self) -> bool:
@@ -135,9 +123,8 @@ class Scheduler:
             scheduled: List[SequenceGroup] = []
             # The total number of sequences on the fly, including the
             # requests in the generation phase.
-            num_curr_seqs = sum(
-                seq_group.get_max_num_running_seqs()
-                for seq_group in self.running)
+            num_curr_seqs = sum(seq_group.get_max_num_running_seqs()
+                                for seq_group in self.running)
             num_batched_tokens = 0
             # Optimization: We do not sort the waiting queue since the preempted
             # sequence groups are added to the front and the new sequence groups
@@ -226,9 +213,8 @@ class Scheduler:
         # Swap in the sequence groups in the SWAPPED state if possible.
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
         if not preempted:
-            num_curr_seqs = sum(
-                seq_group.get_max_num_running_seqs()
-                for seq_group in self.running)
+            num_curr_seqs = sum(seq_group.get_max_num_running_seqs()
+                                for seq_group in self.running)
 
             while self.swapped:
                 seq_group = self.swapped[0]
@@ -293,40 +279,7 @@ class Scheduler:
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
 
-    def update(
-        self,
-        seq_outputs: Dict[int, SequenceOutputs],
-    ) -> List[SequenceGroup]:
-        scheduled: List[SequenceGroup] = []
-        for seq_group in self.running:
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                if seq.seq_id in seq_outputs:
-                    scheduled.append(seq_group)
-                    break
-
-        # Update the scheduled sequences and free blocks.
-        for seq_group in scheduled:
-            # Process beam search results before processing the new tokens.
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                output = seq_outputs[seq.seq_id]
-                if seq.seq_id != output.parent_seq_id:
-                    # The sequence is a fork of the parent sequence (beam
-                    # search). Free the current sequence.
-                    self.block_manager.free(seq)
-                    # Fork the parent sequence.
-                    parent_seq = seq_group.find(output.parent_seq_id)
-                    parent_seq.fork(seq)
-                    self.block_manager.fork(parent_seq, seq)
-
-            # Process the new tokens.
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                # Append a new token to the sequence.
-                output = seq_outputs[seq.seq_id]
-                seq.append_token_id(output.output_token, output.logprobs)
-        return scheduled
-
-    def free_seq(self, seq: Sequence, finish_status: SequenceStatus) -> None:
-        seq.status = finish_status
+    def free_seq(self, seq: Sequence) -> None:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:

@@ -170,14 +170,16 @@ class Sequence:
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
 
+    def get_beam_search_score(self, length_penalty: float = 1.0) -> float:
+        return self.get_cumulative_logprob() / (self.get_len()**length_penalty)
+
     def is_finished(self) -> bool:
         return SequenceStatus.is_finished(self.status)
 
-    def fork(self, child_seq: "Sequence") -> None:
-        child_seq.logical_token_blocks = copy.deepcopy(
-            self.logical_token_blocks)
-        child_seq.output_logprobs = copy.deepcopy(self.output_logprobs)
-        child_seq.data = copy.deepcopy(self.data)
+    def fork(self, new_seq_id: int) -> "Sequence":
+        new_seq = copy.deepcopy(self)
+        new_seq.seq_id = new_seq_id
+        return new_seq
 
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
@@ -203,7 +205,7 @@ class SequenceGroup:
         arrival_time: float,
     ) -> None:
         self.request_id = request_id
-        self.seqs = seqs
+        self.seqs_dict = {seqs.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
 
@@ -226,21 +228,30 @@ class SequenceGroup:
         status: Optional[SequenceStatus] = None,
     ) -> List[Sequence]:
         if status is None:
-            return self.seqs
+            return self.seqs_dict.values()
         else:
-            return [seq for seq in self.seqs if seq.status == status]
+            return [seq for seq in self.seqs.values() if seq.status == status]
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
 
     def find(self, seq_id: int) -> Sequence:
-        for seq in self.seqs:
-            if seq.seq_id == seq_id:
-                return seq
-        raise ValueError(f"Sequence {seq_id} not found.")
+        if seq_id not in self.seqs_dict:
+            raise ValueError(f"Sequence {seq_id} not found.")
+        return self.seqs_dict[seq_id]
+
+    def add(self, seq: Sequence) -> None:
+        if seq.seq_id in self.seqs_dict:
+            raise ValueError(f"Sequence {seq.seq_id} already exists.")
+        self.seqs_dict[seq.seq_id] = seq
+
+    def remove(self, seq_id: int) -> None:
+        if seq_id not in self.seqs_dict:
+            raise ValueError(f"Sequence {seq_id} not found.")
+        del self.seqs_dict[seq_id]
 
     def is_finished(self) -> bool:
-        return all(seq.is_finished() for seq in self.seqs)
+        return all(seq.is_finished() for seq in self.get_seqs())
 
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
