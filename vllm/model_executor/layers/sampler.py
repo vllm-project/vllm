@@ -143,7 +143,6 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
     return output_tokens
 
 
-@torch.jit.script
 def _batched_bincount(x: torch.Tensor, dim: int,
                       max_value: int) -> torch.Tensor:
     target = torch.zeros(x.shape[0], max_value, dtype=x.dtype, device=x.device)
@@ -246,7 +245,6 @@ def _get_top_p_top_k(
     return top_ps, top_ks
 
 
-@torch.jit.script
 def _apply_top_p_top_k(
     logits: torch.Tensor,
     top_ps: torch.Tensor,
@@ -269,9 +267,9 @@ def _apply_top_p_top_k(
 
     # Re-sort the probabilities.
     torch.gather(logits_sort,
-                 dim=-1,
-                 index=torch.argsort(logits_idx, dim=-1),
-                 out=logits)
+                dim=-1,
+                index=torch.argsort(logits_idx, dim=-1),
+                out=logits)
     return logits
 
 
@@ -378,6 +376,54 @@ def _sample_from_generation_tokens(
         parent_seq_ids = seq_ids
     return parent_seq_ids, next_token_ids
 
+def _batched_sample(gen_probs: torch.Tensor, gen_logprobs: torch.Tensor, sampling_type_offsets: List[int], max_best_of: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Split the probs into multiple tensors, one for each sampling type.
+    # tensor_split will create views of the probs tensor, meaning
+    # there will be no copying involved (this should be very fast).
+    sampling_type_tensors = torch.tensor_split(gen_probs,
+                                            sampling_type_offsets)
+
+    # Create a tensor to store the tokens sampled by greedy or multinomial
+    # sampling. Note that beam search tokens are not stored here.
+    batch_chosen_tokens = torch.empty(
+        (sum(t.shape[0] for t in sampling_type_tensors[:2]), max_best_of),
+        dtype=torch.long,
+        device=gen_probs.device)
+    # Because batch_chosen_tokens_tensors are views of
+    # batch_chosen_tokens_tensor, any changes to
+    # batch_chosen_tokens_tensors will be reflected in
+    # batch_chosen_tokens_tensor.
+    batch_chosen_tokens_tensors = torch.tensor_split(
+        batch_chosen_tokens, sampling_type_offsets[:2])
+
+    # Do vectorized sampling.
+    if len(sampling_type_tensors) > 0 and sampling_type_tensors[0].numel() > 0:
+        # If we have best_of, use topk.
+        if max_best_of > 1:
+            dummy_out = torch.empty_like(sampling_type_tensors[0])
+            torch.topk(sampling_type_tensors[0],
+                    max_best_of,
+                    dim=-1,
+                    sorted=False,
+                    out=(dummy_out,
+                    batch_chosen_tokens_tensors[0]))
+        # Otherwise, do argmax which is faster
+        else:
+            torch.argmax(sampling_type_tensors[0],
+                        dim=-1,
+                        keepdim=True,
+                        out=batch_chosen_tokens_tensors[0])
+    if len(sampling_type_tensors) > 1 and sampling_type_tensors[1].numel() > 0:
+        torch.multinomial(sampling_type_tensors[1],
+                        num_samples=max_best_of,
+                        replacement=False,
+                        out=batch_chosen_tokens_tensors[1])
+    # Everything that is not greedy or multinomial (currently, beam search)
+    # (sampling_type_tensors[2:]) is handled iteratively below.
+
+    batch_chosen_logprobs = torch.gather(
+        gen_logprobs, dim=-1, index=batch_chosen_tokens)
+    return batch_chosen_tokens, batch_chosen_logprobs
 
 def _sample(
     probs: torch.Tensor,
@@ -400,53 +446,11 @@ def _sample(
 
     gen_probs = probs
     gen_logprobs = logprobs
-
     sampling_type_offsets = input_metadata.sampling_type_offsets
-    # Split the probs into multiple tensors, one for each sampling type.
-    # tensor_split will create views of the probs tensor, meaning
-    # there will be no copying involved (this should be very fast).
-    sampling_type_tensors = torch.tensor_split(gen_probs,
-                                               sampling_type_offsets)
 
-    # Create a tensor to store the tokens sampled by greedy or multinomial
-    # sampling. Note that beam search tokens are not stored here.
-    batch_chosen_tokens_tensor = torch.empty(
-        (sum(t.shape[0] for t in sampling_type_tensors[:2]), max_best_of),
-        dtype=torch.long,
-        device=gen_probs.device)
-    # Because batch_chosen_tokens_tensors are views of
-    # batch_chosen_tokens_tensor, any changes to
-    # batch_chosen_tokens_tensors will be reflected in
-    # batch_chosen_tokens_tensor.
-    batch_chosen_tokens_tensors = torch.tensor_split(
-        batch_chosen_tokens_tensor, sampling_type_offsets[:2])
+    batch_chosen_tokens_tensor, batch_chosen_logprobs_tensor = _batched_sample(gen_probs, gen_logprobs, sampling_type_offsets, max_best_of)
 
-    # Do vectorized sampling.
-    if len(sampling_type_tensors) > 0 and sampling_type_tensors[0].numel() > 0:
-        # If we have best_of, use topk.
-        if max_best_of > 1:
-            dummy_out = torch.empty_like(sampling_type_tensors[0])
-            torch.topk(sampling_type_tensors[0],
-                       max_best_of,
-                       dim=-1,
-                       sorted=False,
-                       out=(dummy_out, batch_chosen_tokens_tensors[0]))
-        # Otherwise, do argmax which is faster
-        else:
-            torch.argmax(sampling_type_tensors[0],
-                         dim=-1,
-                         keepdim=True,
-                         out=batch_chosen_tokens_tensors[0])
-    if len(sampling_type_tensors) > 1 and sampling_type_tensors[1].numel() > 0:
-        torch.multinomial(sampling_type_tensors[1],
-                          num_samples=max_best_of,
-                          replacement=False,
-                          out=batch_chosen_tokens_tensors[1])
-    # Everything that is not greedy or multinomial (currently, beam search)
-    # (sampling_type_tensors[2:]) is handled iteratively below.
-
-    batch_chosen_logprobs_list = torch.gather(
-        gen_logprobs, dim=-1, index=batch_chosen_tokens_tensor).tolist()
+    batch_chosen_logprobs_list = batch_chosen_logprobs_tensor.tolist()
     batch_chosen_tokens_list = batch_chosen_tokens_tensor.tolist()
 
     for i, seq_group in enumerate(input_metadata.seq_groups):

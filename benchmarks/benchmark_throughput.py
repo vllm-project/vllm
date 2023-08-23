@@ -79,7 +79,7 @@ def run_vllm(
             n=n,
             temperature=0.0 if use_beam_search else
             (0.0 if not do_sample else 0.1),
-            top_p=1.0,
+            top_p=0.9 if do_sample else 1.0,
             presence_penalty=1.0,
             use_beam_search=use_beam_search,
             ignore_eos=True,
@@ -95,8 +95,11 @@ def run_vllm(
 
     start = time.time()
     # FIXME(woosuk): Do use internal method.
-    llm._run_engine(use_tqdm=True)
+    outputs = llm._run_engine(use_tqdm=True)
     end = time.time()
+    with open("output.txt", "w") as f:
+        for output in outputs:
+            f.write(output.__repr__() + "\n")
     return end - start
 
 
