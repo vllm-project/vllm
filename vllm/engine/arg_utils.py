@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, QuantizationConfig)
+                         SchedulerConfig, WeightQuantizationConfig)
 
 
 @dataclass
@@ -153,7 +153,7 @@ class EngineArgs:
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
         # Initialize the configs.
         if self.quantization is not None:
-            quantization_config = QuantizationConfig(self.quantization)
+            quantization_config = WeightQuantizationConfig(self.quantization)
         else:
             quantization_config = None
 
