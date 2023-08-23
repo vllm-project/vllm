@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.config import QuantizationConfig
+from vllm.config import WeightQuantizationConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttentionWithALiBi
@@ -138,7 +138,7 @@ class MPTMLP(nn.Module):
 
 class MPTBlock(nn.Module):
 
-    def __init__(self, config: MPTConfig, quant_config: QuantizationConfig=None):
+    def __init__(self, config: MPTConfig, quant_config: WeightQuantizationConfig=None):
         super().__init__()
         hidden_size = config.d_model
         self.norm_1 = nn.LayerNorm(hidden_size)
@@ -171,7 +171,7 @@ class MPTBlock(nn.Module):
 
 class MPTModel(nn.Module):
 
-    def __init__(self, config: MPTConfig, quant_config: QuantizationConfig=None):
+    def __init__(self, config: MPTConfig, quant_config: WeightQuantizationConfig=None):
         super().__init__()
         assert config.embedding_fraction == 1.0
         assert config.norm_type == "low_precision_layernorm"
@@ -217,7 +217,7 @@ class MPTModel(nn.Module):
 
 class MPTForCausalLM(nn.Module):
 
-    def __init__(self, config: MPTConfig, quant_config: QuantizationConfig=None):
+    def __init__(self, config: MPTConfig, quant_config: WeightQuantizationConfig=None):
         super().__init__()
         self.config = config
         assert config.tie_word_embeddings

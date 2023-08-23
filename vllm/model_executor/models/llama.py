@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.config import QuantizationConfig
+from vllm.config import WeightQuantizationConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
@@ -44,7 +44,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.sequence import SequenceOutputs
-from vllm.awq_quantization import qmodule
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -56,7 +55,7 @@ class LlamaMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: QuantizationConfig=None
+        quant_config: WeightQuantizationConfig=None
     ):
         super().__init__()
         self.gate_up_proj = ColumnParallelLinear(hidden_size,
@@ -90,7 +89,7 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        quant_config: QuantizationConfig=None
+        quant_config: WeightQuantizationConfig=None
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -148,7 +147,7 @@ class LlamaAttention(nn.Module):
 
 class LlamaDecoderLayer(nn.Module):
 
-    def __init__(self, config: LlamaConfig, quant_config: QuantizationConfig=None):
+    def __init__(self, config: LlamaConfig, quant_config: WeightQuantizationConfig=None):
         super().__init__()
         self.hidden_size = config.hidden_size
 
@@ -200,7 +199,7 @@ class LlamaDecoderLayer(nn.Module):
 
 class LlamaModel(nn.Module):
 
-    def __init__(self, config: LlamaConfig, quant_config: QuantizationConfig):
+    def __init__(self, config: LlamaConfig, quant_config: WeightQuantizationConfig):
         super().__init__()
         self.config = config
         self.quant_config = quant_config

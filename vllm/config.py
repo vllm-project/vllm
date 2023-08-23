@@ -12,32 +12,37 @@ logger = init_logger(__name__)
 _GB = 1 << 30
 
 
-class QuantizationConfig:
-    """Quantization settings
+class WeightQuantizationConfig:
+    """Weight Quantization settings
 
     Args:
         method: The quantization method to apply
-        bits: How many bits the linear layers are quantized to
+        bits: How many bits the linear layer weights are quantized to
         group_size: What size the weights were quantized in groups of
     """
 
     def __init__(
         self,
         method: str,
-        bits: Optional[int] = 4,
+        w_bit: Optional[int] = 4,
         group_size: Optional[int] = 128
     ) -> None:
         self.method = method
-        self.bits = bits
+        self.w_bit = w_bit
         self.group_size = group_size
         self._verify()
 
     def _verify(self) -> None:
         allowed_methods = ["awq"]
+        allowed_bitwidths = [4]
         if self.method not in allowed_methods:
             raise ValueError(
                 f"Unknown quantization method ({self.method})"
                 f" must be from choice of {allowed_methods}")
+        if self.w_bit not in allowed_bitwidths:
+            raise ValueError(
+                f"Invalid w_bit ({self.w_bit})"
+                f" must be from choice of {allowed_bitwidths}")
 
 
 class ModelConfig:
@@ -73,7 +78,7 @@ class ModelConfig:
         use_dummy_weights: bool,
         dtype: str,
         seed: int,
-        quantization_config: Optional[QuantizationConfig] = None
+        quantization_config: Optional[WeightQuantizationConfig] = None
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
