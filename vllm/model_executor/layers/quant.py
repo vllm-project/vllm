@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 
+
 try:
     import awq_inference_engine  # with CUDA kernels
 except ImportError as ex:
@@ -21,7 +22,7 @@ class ScaledActivation(nn.Module):
         return self.act(x) / self.scales.view(1, 1, -1).to(x.device)
 
 
-class WQLinear(nn.Module):
+class AWQLinear(nn.Module):
     def __init__(
             self,
             w_bit,
