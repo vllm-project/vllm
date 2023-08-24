@@ -319,7 +319,7 @@ class LLMEngine:
 
         seq_groups = scheduler_outputs.scheduled_seq_groups
 
-        self.process_model_output(seq_groups, output)
+        self._process_model_output(seq_groups, output)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
@@ -336,10 +336,11 @@ class LLMEngine:
                                    scheduler_outputs.num_batched_tokens)
         return request_outputs
 
-    def process_model_output(self, scheduled_seq_groups: List[SequenceGroup],
+    def _process_model_output(self, scheduled_seq_groups: List[SequenceGroup],
                              output: SamplerOutput) -> None:
         for seq_group, samples in zip(scheduled_seq_groups, output):
             parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+            existing_finished_seqs = seq_group.get_finished_seqs()
             parent_child_dict = {
                 parent_seq.seq_id: []
                 for parent_seq in parent_seqs
@@ -384,14 +385,14 @@ class LLMEngine:
                 # Select the newly finished sequences with the highest scores
                 # to replace existing finished sequences.
                 # Tuple of (seq, parent, is_new)
-                current_finished_seqs = [
+                existing_finished_seqs = [
                     (seq, None, False)
-                    for seq in seq_group.get_finished_seqs()
+                    for seq in existing_finished_seqs
                 ]
                 new_finished_seqs = [(seq, parent, True)
                                      for seq, parent in child_seqs
                                      if seq.is_finished()]
-                all_finished_seqs = current_finished_seqs + new_finished_seqs
+                all_finished_seqs = existing_finished_seqs + new_finished_seqs
                 all_finished_seqs.sort(
                     key=lambda x: x[0].get_beam_search_score(length_penalty),
                     reverse=True)
@@ -401,6 +402,8 @@ class LLMEngine:
                 for seq, parent, is_new in all_finished_seqs[beam_width:]:
                     if is_new:
                         unselected_child_seqs.append((seq, parent))
+                    else:
+                        seq_group.remove(seq.seq_id)
 
                 # select the top beam_width sequences from the running
                 # sequences for the next iteration to continue the beam

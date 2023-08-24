@@ -262,6 +262,7 @@ class SequenceGroup:
 
     def remove(self, seq_id: int) -> None:
         if seq_id not in self.seqs_dict:
+            print("self.seqs_dict", self.seqs_dict)
             raise ValueError(f"Sequence {seq_id} not found.")
         del self.seqs_dict[seq_id]
 
