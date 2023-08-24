@@ -215,7 +215,7 @@ class SequenceGroup:
         arrival_time: float,
     ) -> None:
         self.request_id = request_id
-        self.seqs_dict = {seqs.seq_id: seq for seq in seqs}
+        self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
 
@@ -238,12 +238,14 @@ class SequenceGroup:
         status: Optional[SequenceStatus] = None,
     ) -> List[Sequence]:
         if status is None:
-            return self.seqs_dict.values()
+            return list(self.seqs_dict.values())
         else:
-            return [seq for seq in self.seqs.values() if seq.status == status]
+            return [
+                seq for seq in self.seqs_dict.values() if seq.status == status
+            ]
 
     def get_finished_seqs(self) -> List[Sequence]:
-        return [seq for seq in self.get_seqs() if seq.is_finished()]
+        return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
@@ -269,7 +271,7 @@ class SequenceGroup:
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
                 f"sampling_params={self.sampling_params}, "
-                f"num_seqs={len(self.seqs)})")
+                f"num_seqs={len(self.seqs_dict)})")
 
 
 class SequenceGroupMetadata:
