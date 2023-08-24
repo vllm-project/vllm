@@ -65,7 +65,8 @@ class GPTBigCodeAttention(nn.Module):
             self.num_kv_heads = self.num_heads
             self.kv_dim = self.num_kv_heads * self.head_dim
 
-        self.c_attn = ColumnParallelLinear(self.hidden_size,
+        self.c_attn = ColumnParallelLinear(
+            self.hidden_size,
             self.hidden_size +
             2 * self.kv_dim * self.tensor_model_parallel_world_size,
             bias=True,
@@ -294,7 +295,7 @@ class GPTBigCodeForCausalLM(nn.Module):
                     wk = wk[head_size * head_start:head_size * head_end]
                     wv = wv[head_size * head_start:head_size * head_end]
                 loaded_weight = torch.cat([wq, wk, wv], dim=0)
-                    
+
             param = state_dict[name]
 
             if name == "transformer.wte.weight":
