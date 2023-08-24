@@ -17,8 +17,6 @@ setup(
             sources=[
                 "csrc/pybind.cpp", 
                 "csrc/quantization/gemm_cuda_gen.cu",
-                "csrc/layernorm/layernorm.cu",
-                "csrc/position_embedding/pos_encoding_kernels.cu"
             ],
             extra_compile_args=extra_compile_args,
         ),
