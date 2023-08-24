@@ -15,8 +15,8 @@ setup(
         CUDAExtension(
             name="awq_inference_engine",
             sources=[
-                "csrc/pybind.cpp", 
-                "csrc/quantization/gemm_cuda_gen.cu",
+                "awq_kernels/pybind.cpp", 
+                "awq_kernels/gemm_cuda_gen.cu",
             ],
             extra_compile_args=extra_compile_args,
         ),

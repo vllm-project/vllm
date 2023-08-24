@@ -37,6 +37,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers import quant
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -44,7 +45,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.sequence import SequenceOutputs
-from vllm.awq_quantization import qmodule
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -141,7 +141,7 @@ class LlamaAttention(nn.Module):
 
 
 def get_quantized_layer(in_features, out_features, quant_config):
-    layer = qmodule.WQLinear(
+    layer = quant.AWQLinear(
         w_bit=quant_config.bits,
         group_size=quant_config.group_size,
         in_features=in_features,
