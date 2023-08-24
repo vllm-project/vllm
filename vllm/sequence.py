@@ -69,6 +69,9 @@ class SequenceData:
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
 
+    def get_prompt_len(self) -> int:
+        return len(self.prompt_token_ids)
+
     def get_output_len(self) -> int:
         return len(self.output_token_ids)
 
@@ -155,6 +158,9 @@ class Sequence:
     def get_len(self) -> int:
         return self.data.get_len()
 
+    def get_prompt_len(self) -> int:
+        return self.data.get_prompt_len()
+
     def get_output_len(self) -> int:
         return self.data.get_output_len()
 
@@ -170,8 +176,12 @@ class Sequence:
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
 
-    def get_beam_search_score(self, length_penalty: float = 1.0) -> float:
-        return self.get_cumulative_logprob() / (self.get_len()**length_penalty)
+    def get_beam_search_score(self,
+                              length_penalty: float = 0.0,
+                              seq_len: Optional[int] = None) -> float:
+        if seq_len is None:
+            seq_len = self.get_len()
+        return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
     def is_finished(self) -> bool:
         return SequenceStatus.is_finished(self.status)
@@ -231,6 +241,9 @@ class SequenceGroup:
             return self.seqs_dict.values()
         else:
             return [seq for seq in self.seqs.values() if seq.status == status]
+
+    def get_finished_seqs(self) -> List[Sequence]:
+        return [seq for seq in self.get_seqs() if seq.is_finished()]
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
@@ -315,7 +328,7 @@ class SequenceOutputs:
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
-            return NotImplemented
+            return NotImplementedError()
         return (self.parent_seq_id == other.parent_seq_id
                 and self.output_token == other.output_token
                 and self.logprobs == other.logprobs)
