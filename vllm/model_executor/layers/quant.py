@@ -5,11 +5,10 @@ import torch.nn as nn
 
 
 try:
-    import awq_inference_engine  # with CUDA kernels
+    import awq_inference_engine
+    KERNELS_INSTALLED = True
 except ImportError as ex:
-    raise ImportError(
-        "Unable to import awq_inference_engine: run setup.py"
-        " to install AWQ CUDA kernels")
+    KERNELS_INSTALLED = False
 
 
 class ScaledActivation(nn.Module):
@@ -33,6 +32,11 @@ class AWQLinear(nn.Module):
             dev
         ):
         super().__init__()
+
+        if not KERNELS_INSTALLED:
+            raise ImportError(
+                "Unable to import awq_ext: run setup.py"
+                " to install AWQ CUDA kernels")
 
         if w_bit not in [4]:
             raise NotImplementedError("Only 4-bit are supported for now.")
