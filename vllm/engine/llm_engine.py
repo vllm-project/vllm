@@ -1,7 +1,7 @@
 import copy
 import time
 from functools import partial
-from typing import Any, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, List, Optional, Tuple, TYPE_CHECKING, Union
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -336,156 +336,168 @@ class LLMEngine:
                                    scheduler_outputs.num_batched_tokens)
         return request_outputs
 
-    def _process_model_output(self, scheduled_seq_groups: List[SequenceGroup],
-                             output: SamplerOutput) -> None:
-        for seq_group, samples in zip(scheduled_seq_groups, output):
-            parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-            existing_finished_seqs = seq_group.get_finished_seqs()
-            parent_child_dict = {
-                parent_seq.seq_id: []
-                for parent_seq in parent_seqs
-            }
-            for sample in samples:
-                parent_child_dict[sample.parent_seq_id].append(sample)
-            # List of (child, parent_id)
-            child_seqs: List[Tuple[Sequence, int]] = []
+    def _check_beam_search_early_stopping(
+        self,
+        early_stopping: Union[bool, str],
+        sampling_params: SamplingParams,
+        best_running_seq: Sequence,
+        current_worst_seq: Sequence,
+    ) -> bool:
+        assert sampling_params.use_beam_search
+        length_penalty = sampling_params.length_penalty
+        if early_stopping is True:
+            return True
 
-            for parent in parent_seqs:
-                child_samples: List[SequenceOutputs] = parent_child_dict[
-                    parent.seq_id]
-                if len(child_samples) == 0:
-                    # This parent sequence has no children samples.
-                    parent.status = SequenceStatus.FINISHED_ABORTED
-                    seq_group.remove(parent.seq_id)
-                    self.scheduler.free_seq(parent)
-                    continue
-                # Fork the parent sequence if there are multiple child samples.
-                for child_sample in child_samples[:-1]:
-                    new_child_seq_id = next(self.seq_counter)
-                    child = parent.fork(new_child_seq_id)
-                    child.append_token_id(child_sample.output_token,
-                                          child_sample.logprobs)
-                    child_seqs.append((child, parent))
-                # Continue the parent sequence with the last child sample.
-                last_child_sample = child_samples[-1]
-                parent.append_token_id(last_child_sample.output_token,
-                                       last_child_sample.logprobs)
-                child_seqs.append((parent, parent))
-
-            for seq, _ in child_seqs:
-                self._decode_sequence(seq)
-                self._check_stop(seq, seq_group.sampling_params)
-
-            selected_child_seqs = []
-            unselected_child_seqs = []
-            if seq_group.sampling_params.use_beam_search:
-                beam_width = seq_group.sampling_params.best_of
-                length_penalty = seq_group.sampling_params.length_penalty
-
-                # Select the newly finished sequences with the highest scores
-                # to replace existing finished sequences.
-                # Tuple of (seq, parent, is_new)
-                existing_finished_seqs = [
-                    (seq, None, False)
-                    for seq in existing_finished_seqs
-                ]
-                new_finished_seqs = [(seq, parent, True)
-                                     for seq, parent in child_seqs
-                                     if seq.is_finished()]
-                all_finished_seqs = existing_finished_seqs + new_finished_seqs
-                all_finished_seqs.sort(
-                    key=lambda x: x[0].get_beam_search_score(length_penalty),
-                    reverse=True)
-                for seq, parent, is_new in all_finished_seqs[:beam_width]:
-                    if is_new:
-                        selected_child_seqs.append((seq, parent))
-                for seq, parent, is_new in all_finished_seqs[beam_width:]:
-                    if is_new:
-                        unselected_child_seqs.append((seq, parent))
-                    else:
-                        seq_group.remove(seq.seq_id)
-
-                # select the top beam_width sequences from the running
-                # sequences for the next iteration to continue the beam
-                # search.
-                running_child_seqs = [(seq, parent)
-                                      for seq, parent in child_seqs
-                                      if not seq.is_finished()]
-                running_child_seqs.sort(
-                    key=lambda x: x[0].get_beam_search_score(length_penalty),
-                    reverse=True)
-
-                # Check if we can stop the beam search.
-                early_stopping = seq_group.sampling_params.early_stopping
-                stop_beam_search = False
-                if (len(all_finished_seqs) >= beam_width
-                        and len(running_child_seqs) > 0):
-                    if early_stopping:
-                        stop_beam_search = True
-                    else:
-                        best_running_seq = running_child_seqs[0][0]
-                        current_worst_score = (all_finished_seqs[
-                            beam_width -
-                            1][0].get_beam_search_score(length_penalty))
-                        if early_stopping is False:
-                            highest_attainable_score = (
-                                best_running_seq.get_beam_search_score(
-                                    length_penalty))
-                        else:
-                            assert early_stopping == "never"
-                            if length_penalty > 0.0:
-                                # If length_penalty > 0.0, beam search will
-                                # prefer longer sequences. The highest
-                                # attainable score calculation is based on
-                                # the longest possible sequence length in
-                                # this case.
-                                max_possible_length = max(
-                                    best_running_seq.get_prompt_len() +
-                                    seq_group.sampling_params.max_tokens,
-                                    self.scheduler_config.max_model_len)
-                                highest_attainable_score = (
-                                    best_running_seq.get_beam_search_score(
-                                        length_penalty, max_possible_length))
-                            else:
-                                # Otherwise, beam search will prefer shorter
-                                # sequences. The highest attainable score
-                                # calculation is based on the current
-                                # sequence length.
-                                highest_attainable_score = (
-                                    best_running_seq.get_beam_search_score(
-                                        length_penalty))
-                        stop_beam_search = (current_worst_score >=
-                                            highest_attainable_score)
-
-                if stop_beam_search:
-                    unselected_child_seqs.extend(running_child_seqs)
-                else:
-                    selected_child_seqs.extend(running_child_seqs[:beam_width])
-                    unselected_child_seqs.extend(
-                        running_child_seqs[beam_width:])
-
+        current_worst_score = (
+            current_worst_seq.get_beam_search_score(length_penalty))
+        if early_stopping is False:
+            highest_attainable_score = (
+                best_running_seq.get_beam_search_score(length_penalty))
+        else:
+            assert early_stopping == "never"
+            if length_penalty > 0.0:
+                # If length_penalty > 0.0, beam search will prefer longer
+                # sequences. The highest attainable score calculation is
+                # based on the longest possible sequence length in this case.
+                max_possible_length = max(
+                    best_running_seq.get_prompt_len() +
+                    sampling_params.max_tokens,
+                    self.scheduler_config.max_model_len)
+                highest_attainable_score = (
+                    best_running_seq.get_beam_search_score(
+                        length_penalty, max_possible_length))
             else:
-                # Non-beam search decoding. Keep all child sequences.
-                selected_child_seqs = child_seqs
+                # Otherwise, beam search will prefer shorter sequences. The
+                # highest attainable score calculation is based on the current
+                # sequence length.
+                highest_attainable_score = (
+                    best_running_seq.get_beam_search_score(length_penalty))
+        return current_worst_score >= highest_attainable_score
 
-            for seq, parent in selected_child_seqs:
-                if seq is parent:
-                    # This child is inherited from the parent, should already
-                    # be in the seq_group.
-                    if seq.is_finished():
-                        self.scheduler.free_seq(seq)
+    def _process_sequence_group_samples(
+            self, seq_group: SequenceGroup,
+            samples: List[SequenceOutputs]) -> None:
+        parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        existing_finished_seqs = seq_group.get_finished_seqs()
+        parent_child_dict = {
+            parent_seq.seq_id: []
+            for parent_seq in parent_seqs
+        }
+        for sample in samples:
+            parent_child_dict[sample.parent_seq_id].append(sample)
+        # List of (child, parent_id)
+        child_seqs: List[Tuple[Sequence, int]] = []
+
+        for parent in parent_seqs:
+            child_samples: List[SequenceOutputs] = parent_child_dict[
+                parent.seq_id]
+            if len(child_samples) == 0:
+                # This parent sequence has no children samples.
+                parent.status = SequenceStatus.FINISHED_ABORTED
+                seq_group.remove(parent.seq_id)
+                self.scheduler.free_seq(parent)
+                continue
+            # Fork the parent sequence if there are multiple child samples.
+            for child_sample in child_samples[:-1]:
+                new_child_seq_id = next(self.seq_counter)
+                child = parent.fork(new_child_seq_id)
+                child.append_token_id(child_sample.output_token,
+                                      child_sample.logprobs)
+                child_seqs.append((child, parent))
+            # Continue the parent sequence with the last child sample.
+            last_child_sample = child_samples[-1]
+            parent.append_token_id(last_child_sample.output_token,
+                                   last_child_sample.logprobs)
+            child_seqs.append((parent, parent))
+
+        for seq, _ in child_seqs:
+            self._decode_sequence(seq)
+            self._check_stop(seq, seq_group.sampling_params)
+
+        selected_child_seqs = []
+        unselected_child_seqs = []
+        if seq_group.sampling_params.use_beam_search:
+            beam_width = seq_group.sampling_params.best_of
+            length_penalty = seq_group.sampling_params.length_penalty
+
+            # Select the newly finished sequences with the highest scores
+            # to replace existing finished sequences.
+            # Tuple of (seq, parent, is_new)
+            existing_finished_seqs = [(seq, None, False)
+                                      for seq in existing_finished_seqs]
+            new_finished_seqs = [(seq, parent, True)
+                                 for seq, parent in child_seqs
+                                 if seq.is_finished()]
+            all_finished_seqs = existing_finished_seqs + new_finished_seqs
+            all_finished_seqs.sort(
+                key=lambda x: x[0].get_beam_search_score(length_penalty),
+                reverse=True)
+            for seq, parent, is_new in all_finished_seqs[:beam_width]:
+                if is_new:
+                    selected_child_seqs.append((seq, parent))
+            for seq, parent, is_new in all_finished_seqs[beam_width:]:
+                if is_new:
+                    unselected_child_seqs.append((seq, parent))
                 else:
-                    # This child is newly created.
-                    seq_group.add(seq)
-                    if not seq.is_finished():
-                        self.scheduler.fork_seq(parent, seq)
-
-            for seq, parent in unselected_child_seqs:
-                if seq is parent:
-                    # Remove the parent sequence if it is not selected for next
-                    # iteration
                     seq_group.remove(seq.seq_id)
+
+            # select the top beam_width sequences from the running
+            # sequences for the next iteration to continue the beam
+            # search.
+            running_child_seqs = [(seq, parent) for seq, parent in child_seqs
+                                  if not seq.is_finished()]
+            running_child_seqs.sort(
+                key=lambda x: x[0].get_beam_search_score(length_penalty),
+                reverse=True)
+
+            # Check if we can stop the beam search.
+            if len(running_child_seqs) == 0:
+                # No running sequences, stop the beam search.
+                stop_beam_search = True
+            elif len(all_finished_seqs) < beam_width:
+                # Not enough finished sequences, continue the beam search.
+                stop_beam_search = False
+            else:
+                best_running_seq = running_child_seqs[0][0]
+                current_worst_seq = all_finished_seqs[beam_width - 1][0]
+                stop_beam_search = self._check_beam_search_early_stopping(
+                    seq_group.sampling_params.early_stopping,
+                    seq_group.sampling_params, best_running_seq,
+                    current_worst_seq)
+
+            if stop_beam_search:
+                unselected_child_seqs.extend(running_child_seqs)
+            else:
+                selected_child_seqs.extend(running_child_seqs[:beam_width])
+                unselected_child_seqs.extend(running_child_seqs[beam_width:])
+
+        else:
+            # Non-beam search decoding. Keep all child sequences.
+            selected_child_seqs = child_seqs
+
+        for seq, parent in selected_child_seqs:
+            if seq is parent:
+                # This child is inherited from the parent, should already
+                # be in the seq_group.
+                if seq.is_finished():
                     self.scheduler.free_seq(seq)
+            else:
+                # This child is newly created.
+                seq_group.add(seq)
+                if not seq.is_finished():
+                    self.scheduler.fork_seq(parent, seq)
+
+        for seq, parent in unselected_child_seqs:
+            if seq is parent:
+                # Remove the parent sequence if it is not selected for next
+                # iteration
+                seq_group.remove(seq.seq_id)
+                self.scheduler.free_seq(seq)
+
+    def _process_model_output(self, scheduled_seq_groups: List[SequenceGroup],
+                              output: SamplerOutput) -> None:
+        for seq_group, samples in zip(scheduled_seq_groups, output):
+            self._process_sequence_group_samples(seq_group, samples)
 
     def _log_system_stats(
         self,
