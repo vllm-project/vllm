@@ -201,11 +201,13 @@ class SequenceGroup:
         seqs: List[Sequence],
         sampling_params: SamplingParams,
         arrival_time: float,
+        timeout_sec: float = 15.0,
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
+        self.timeout_sec = timeout_sec
 
     def get_seqs(
         self,
@@ -224,6 +226,9 @@ class SequenceGroup:
             if seq.seq_id == seq_id:
                 return seq
         raise ValueError(f"Sequence {seq_id} not found.")
+
+    def is_timeout(self) -> bool:
+        return (time.time() - self.arrival_time) - self.timeout_sec
 
     def is_finished(self) -> bool:
         return all(seq.is_finished() for seq in self.seqs)
