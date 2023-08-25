@@ -61,7 +61,7 @@ class PagedAttention(nn.Module):
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
-        self.attn_op = xops.fmha.cutlass.FwOp()
+        self.attn_op = xops.fmha.flash.FwOp()
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
         assert self.num_heads % self.num_kv_heads == 0
