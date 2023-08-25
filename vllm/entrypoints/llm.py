@@ -121,13 +121,17 @@ class LLM:
             num_requests = len(prompts)
         else:
             num_requests = len(prompt_token_ids)
+        position_ids = kwargs.pop("position_ids", None)
+        attention_mask = kwargs.pop("attention_mask", None)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
+            pos_ids = position_ids[i] if position_ids is not None else None
+            attn_mask = attention_mask[i] if attention_mask is not None else None
             if prompt_token_ids is None:
                 token_ids = None
             else:
                 token_ids = prompt_token_ids[i]
-            self._add_request(prompt, sampling_params, token_ids, **kwargs)
+            self._add_request(prompt, sampling_params, token_ids, position_ids=pos_ids, attention_mask=attn_mask, **kwargs)
         return self._run_engine(use_tqdm)
 
     def _add_request(

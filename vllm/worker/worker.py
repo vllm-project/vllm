@@ -1,6 +1,6 @@
 """A GPU worker class."""
 import os
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed
@@ -147,9 +147,11 @@ class Worker:
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[int] = []
-        input_positions: List[int] = []
+        input_positions: List[Any] = []
         slot_mapping: List[int] = []
         block_position_encoding = False
+        block_input_position_ids = []
+        block_block_position_ids = []
         # Add prompt tokens.
         prompt_lens: List[int] = []
         custom_attention_masks: List[torch.Tensor] = []
@@ -181,7 +183,10 @@ class Worker:
                 input_positions.extend(range(len(prompt_tokens)))
             else:
                 if block_position_encoding:
-                    input_positions.extend([position_ids[0][:prompt_len], position_ids[1][:prompt_len]])
+                    # generate input_positions as a 2D list (GLM)
+                    block_input_position_ids.extend(position_ids[0][:prompt_len])
+                    block_block_position_ids.extend(position_ids[1][:prompt_len])
+                    input_positions = [block_input_position_ids, block_block_position_ids]
                 else:
                     input_positions.extend(position_ids[:prompt_len])
             
