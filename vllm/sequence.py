@@ -65,6 +65,9 @@ class SequenceData:
         self.position_ids: Union[List[int], List[List[int]]] = kwargs.get("position_ids", [])
         self.block_position_encoding = kwargs.get("block_position_encoding", False)
         
+        # attention_mask:
+        self.attention_mask = kwargs.get("attention_mask", None)
+        
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
 

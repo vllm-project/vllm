@@ -152,6 +152,7 @@ class Worker:
         block_position_encoding = False
         # Add prompt tokens.
         prompt_lens: List[int] = []
+        custom_attention_masks: List[torch.Tensor] = []
         for seq_group_metadata in seq_group_metadata_list:
             if not seq_group_metadata.is_prompt:
                 continue
@@ -167,7 +168,8 @@ class Worker:
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
-
+            if seq_data.attention_mask is not None:
+                custom_attention_masks.append(seq_data.attention_mask[:prompt_len, :prompt_len])
             input_tokens.extend(prompt_tokens)
             
             # get custom position IDs
@@ -272,6 +274,7 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
+            custom_attention_masks=custom_attention_masks,
         )
         return tokens_tensor, positions_tensor, input_metadata
 

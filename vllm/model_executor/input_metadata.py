@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import torch
 from xformers.ops import AttentionBias
@@ -29,6 +29,7 @@ class InputMetadata:
         context_lens: torch.Tensor,
         max_context_len: int,
         block_tables: torch.Tensor,
+        **kwargs,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
@@ -50,7 +51,9 @@ class InputMetadata:
         assert context_lens.shape[0] == self.num_generation_tokens
 
         # Set during the execution of the first attention op.
-        self.attn_bias: List[AttentionBias] = []
+        self.attn_bias: List[Union[AttentionBias,torch.Tensor]] = []
+        self.custom_attention_masks = kwargs.get('custom_attention_masks', [])
+        
 
     def __repr__(self) -> str:
         # Print only useful metadata.
