@@ -126,8 +126,6 @@ class AsyncLLMEngine:
         for stream in self.request_streams.values():
             if stream.finished:
                 finished_requests.add(stream.request_id)
-        if finished_requests:
-            print(finished_requests)
 
         await self._engine_abort(finished_requests)
         for request_id in finished_requests:
