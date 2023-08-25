@@ -135,7 +135,8 @@ class LLMEngine:
             get_all_outputs=True,
         )
 
-    def _init_workers_ray(self, placement_group: "PlacementGroup"):
+    def _init_workers_ray(self, placement_group: "PlacementGroup",
+                          **ray_remote_kwargs):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
@@ -150,6 +151,7 @@ class LLMEngine:
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
+                **ray_remote_kwargs,
             )(RayWorker).remote()
             self.workers.append(worker)
 
