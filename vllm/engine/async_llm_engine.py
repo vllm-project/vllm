@@ -15,8 +15,8 @@ logger = init_logger(__name__)
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds
 
 
-class Stream:
-    """A stream of outputs for a request that can be
+class AsyncStream:
+    """A stream of RequestOutputs for a request that can be
     iterated over asynchronously."""
 
     def __init__(self, request_id: str) -> None:
@@ -95,7 +95,7 @@ class AsyncLLMEngine:
             engine_class = ray.remote(num_gpus=1)(LLMEngine).remote
         self.engine = engine_class(*args, **kwargs)
         # Request id -> stream.
-        self.request_streams: Dict[str, Stream] = {}
+        self.request_streams: Dict[str, AsyncStream] = {}
         self.background_loop = None
         if not inline:
             # Start the background loop.
@@ -149,14 +149,14 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
-    ) -> Stream:
+    ) -> AsyncStream:
         if self.log_requests:
             logger.info(f"Received request {request_id}: "
                         f"prompt: {prompt!r}, "
                         f"sampling params: {sampling_params}, "
                         f"prompt token ids: {prompt_token_ids}.")
 
-        stream = Stream(request_id)
+        stream = AsyncStream(request_id)
         self.request_streams[request_id] = stream
 
         # Add the request into the vLLM engine's waiting queue.
