@@ -388,11 +388,14 @@ class LLMEngine:
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 
+        # Process the child samples for each parent sequence
         for parent in parent_seqs:
             child_samples: List[SequenceOutputs] = parent_child_dict[
                 parent.seq_id]
             if len(child_samples) == 0:
-                # This parent sequence has no children samples.
+                # This parent sequence has no children samples. Remove
+                # the parent sequence from the sequence group since it will
+                # not be used in the future iterations.
                 parent.status = SequenceStatus.FINISHED_ABORTED
                 seq_group.remove(parent.seq_id)
                 self.scheduler.free_seq(parent)
@@ -404,10 +407,9 @@ class LLMEngine:
                 child.append_token_id(child_sample.output_token,
                                       child_sample.logprobs)
                 child_seqs.append((child, parent))
-            # Continue the parent sequence with the last child sample.
+            # Continue the parent sequence for the last child sample.
             # We reuse the parent sequence here to reduce redundant memory
-            # copies, especially when we are using non-beam search sampling
-            # methods.
+            # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
             parent.append_token_id(last_child_sample.output_token,
                                    last_child_sample.logprobs)
@@ -417,6 +419,7 @@ class LLMEngine:
             self._decode_sequence(seq)
             self._check_stop(seq, seq_group.sampling_params)
 
+        # Select the child sequences to keep in the sequence group.
         selected_child_seqs = []
         unselected_child_seqs = []
         if seq_group.sampling_params.use_beam_search:
@@ -461,6 +464,7 @@ class LLMEngine:
                 # Not enough finished sequences, continue the beam search.
                 stop_beam_search = False
             else:
+                # Check the early stopping criteria
                 best_running_seq = running_child_seqs[0][0]
                 current_worst_seq = all_finished_seqs[beam_width - 1][0]
                 stop_beam_search = self._check_beam_search_early_stopping(
@@ -570,7 +574,7 @@ class LLMEngine:
         self.last_logging_time = now
 
     def _decode_sequence(self, seq: Sequence) -> None:
-        """Decodes the sequence."""
+        """Decodes the new token for a sequence."""
         new_token, new_output_text = detokenize_incrementally(
             self.tokenizer,
             seq.output_tokens,
