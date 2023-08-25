@@ -385,8 +385,8 @@ class LLMEngine:
         }
         for sample in samples:
             parent_child_dict[sample.parent_seq_id].append(sample)
-        # List of (child, parent_id)
-        child_seqs: List[Tuple[Sequence, int]] = []
+        # List of (child, parent)
+        child_seqs: List[Tuple[Sequence, Sequence]] = []
 
         for parent in parent_seqs:
             child_samples: List[SequenceOutputs] = parent_child_dict[
@@ -405,6 +405,9 @@ class LLMEngine:
                                       child_sample.logprobs)
                 child_seqs.append((child, parent))
             # Continue the parent sequence with the last child sample.
+            # We reuse the parent sequence here to reduce redundant memory
+            # copies, especially when we are using non-beam search sampling
+            # methods.
             last_child_sample = child_samples[-1]
             parent.append_token_id(last_child_sample.output_token,
                                    last_child_sample.logprobs)
@@ -475,18 +478,22 @@ class LLMEngine:
             # Non-beam search decoding. Keep all child sequences.
             selected_child_seqs = child_seqs
 
+        # For newly created child sequences, add them to the sequence group
+        # and fork them in block manager if they are not finished.
         for seq, parent in selected_child_seqs:
-            if seq is parent:
-                # This child is inherited from the parent, should already
-                # be in the seq_group.
-                if seq.is_finished():
-                    self.scheduler.free_seq(seq)
-            else:
-                # This child is newly created.
+            if seq is not parent:
                 seq_group.add(seq)
                 if not seq.is_finished():
                     self.scheduler.fork_seq(parent, seq)
 
+        # Free the finished and selected parent sequences' memory in block
+        # manager. Keep them in the sequence group as candidate output.
+        for seq, parent in selected_child_seqs:
+            if seq is parent and seq.is_finished():
+                self.scheduler.free_seq(seq)
+
+        # Remove the unselected parent sequences from the sequence group and
+        # free their memory in block manager.
         for seq, parent in unselected_child_seqs:
             if seq is parent:
                 # Remove the parent sequence if it is not selected for next
