@@ -1,6 +1,7 @@
 """Sequence and its related classes."""
 import copy
 import enum
+import time
 from typing import Dict, List, Optional, Union
 
 from vllm.block import LogicalTokenBlock
@@ -201,7 +202,7 @@ class SequenceGroup:
         seqs: List[Sequence],
         sampling_params: SamplingParams,
         arrival_time: float,
-        timeout_sec: float = 15.0,
+        timeout_sec: float = 20.0,
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs

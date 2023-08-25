@@ -138,6 +138,9 @@ class Scheduler:
 
                 # If the sequence group cannot be allocated, stop.
                 if not self.block_manager.can_allocate(seq_group):
+                    if seq_group.is_timeout():
+                        print(f"Can not allocate memory. Will abort request: {seq_group.request_id}.")
+                        self.abort_seq_group(seq_group.request_id)
                     break
 
                 # If the number of batched tokens exceeds the limit, stop.
