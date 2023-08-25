@@ -21,7 +21,7 @@ class Sampler(nn.Module):
     1. Discard the hidden states that are not used for sampling (i.e., all
         tokens except the final one in each prompt).
     2. Compute the logits for the next tokens.
-    3. Apply presence and frequency penalties.
+    3. Apply presence, frequency and repetition penalties.
     4. Apply temperature scaling.
     5. Apply top-p and top-k truncation.
     6. Sample the next tokens.
@@ -54,12 +54,14 @@ class Sampler(nn.Module):
         # Apply presence and frequency penalties.
         output_tokens = _get_output_tokens(input_metadata)
         assert len(output_tokens) == logits.shape[0]
-        presence_penalties, frequency_penalties = _get_penalties(
-            input_metadata)
+        presence_penalties, frequency_penalties, repetition_penalties = \
+            _get_penalties(input_metadata)
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
-        logits = _apply_penalties(logits, output_tokens, presence_penalties,
-                                  frequency_penalties, self.vocab_size)
+        assert len(repetition_penalties) == logits.shape[0]
+        logits = _apply_penalties(input_metadata, logits, output_tokens,
+                                  presence_penalties, frequency_penalties,
+                                  repetition_penalties, self.vocab_size)
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(input_metadata)
@@ -108,19 +110,23 @@ def _get_penalties(
     # Collect the presence and frequency penalties.
     presence_penalties: List[float] = []
     frequency_penalties: List[float] = []
+    repetition_penalties: List[float] = []
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
         p = sampling_params.presence_penalty
         f = sampling_params.frequency_penalty
+        r = sampling_params.repetition_penalty
         if i < input_metadata.num_prompts:
             # A prompt input.
             presence_penalties.append(p)
             frequency_penalties.append(f)
+            repetition_penalties.append(r)
         else:
             # A generation token.
             presence_penalties += [p] * len(seq_ids)
             frequency_penalties += [f] * len(seq_ids)
-    return presence_penalties, frequency_penalties
+            repetition_penalties += [r] * len(seq_ids)
+    return presence_penalties, frequency_penalties, repetition_penalties
 
 
 def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
@@ -143,10 +149,12 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
 
 
 def _apply_penalties(
+    input_metadata: InputMetadata,
     logits: torch.Tensor,
     output_tokens: List[List[int]],
     presence_penalties: List[float],
     frequency_penalties: List[float],
+    repetition_penalties: List[float],
     vocab_size: int,
 ) -> torch.Tensor:
     num_seqs = logits.shape[0]
@@ -162,30 +170,61 @@ def _apply_penalties(
         indices.append(i)
 
     # Return early if all sequences have zero penalties.
-    if not indices:
-        return logits
+    if indices:
+        bin_counts = []
+        for i in indices:
+            bin_counts.append(
+                np.bincount(output_tokens[i], minlength=vocab_size))
+        bin_counts = np.stack(bin_counts, axis=0)
+        bin_counts = torch.from_numpy(bin_counts).to(dtype=logits.dtype,
+                                                     device=logits.device)
 
-    bin_counts = []
-    for i in indices:
-        bin_counts.append(np.bincount(output_tokens[i], minlength=vocab_size))
-    bin_counts = np.stack(bin_counts, axis=0)
-    bin_counts = torch.from_numpy(bin_counts).to(dtype=logits.dtype,
-                                                 device=logits.device)
+        frequency_penalties = [frequency_penalties[i] for i in indices]
+        frequency_penalties = torch.tensor(frequency_penalties,
+                                           dtype=logits.dtype,
+                                           device=logits.device)
+        presence_penalties = [presence_penalties[i] for i in indices]
+        presence_penalties = torch.tensor(presence_penalties,
+                                          dtype=logits.dtype,
+                                          device=logits.device)
+        # We follow the definition in OpenAI API.
+        # Refer to
+        # https://platform.openai.com/docs/api-reference/parameter-details
+        logits[indices] -= frequency_penalties.unsqueeze(dim=1) * bin_counts
+        presence_mask = (bin_counts > 0.0).to(dtype=logits.dtype)
+        logits[indices] -= presence_penalties.unsqueeze(dim=1) * presence_mask
+    else:
+        # repetition penalty aligned with huggingface transformers
+        for i, seq_group in enumerate(input_metadata.seq_groups):
+            r = repetition_penalties[i]
+            if r == 1.0:
+                continue
+            seq_ids, _ = seq_group
+            if i < input_metadata.num_prompts:
+                # A prompt input.
+                # NOTE: While the prompt input usually has no output tokens,
+                # it may have output tokens in the case of recomputation.
+                seq_id = seq_ids[0]
+                seq_data = input_metadata.seq_data[seq_id]
+                token_ids = seq_data.get_token_ids()
+                token_ids = torch.tensor(token_ids,
+                                         dtype=torch.int64,
+                                         device=logits.device)
+                score = torch.gather(logits[i], 0, token_ids)
+                score = torch.where(score < 0, score * r, score / r)
+                logits[i].scatter_(0, token_ids, score)
+            else:
+                # A generation token.
+                for seq_id in seq_ids:
+                    seq_data = input_metadata.seq_data[seq_id]
+                    token_ids = seq_data.get_token_ids()
+                    token_ids = torch.tensor(token_ids,
+                                             dtype=torch.int64,
+                                             device=logits.device)
+                    score = torch.gather(logits[i], 0, token_ids)
+                    score = torch.where(score < 0, score * r, score / r)
+                    logits[i].scatter_(0, token_ids, score)
 
-    frequency_penalties = [frequency_penalties[i] for i in indices]
-    frequency_penalties = torch.tensor(frequency_penalties,
-                                       dtype=logits.dtype,
-                                       device=logits.device)
-    presence_penalties = [presence_penalties[i] for i in indices]
-    presence_penalties = torch.tensor(presence_penalties,
-                                      dtype=logits.dtype,
-                                      device=logits.device)
-
-    # We follow the definition in OpenAI API.
-    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits[indices] -= frequency_penalties.unsqueeze(dim=1) * bin_counts
-    presence_mask = (bin_counts > 0.0).to(dtype=logits.dtype)
-    logits[indices] -= presence_penalties.unsqueeze(dim=1) * presence_mask
     return logits
 
 
