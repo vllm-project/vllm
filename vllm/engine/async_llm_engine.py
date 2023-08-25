@@ -89,13 +89,8 @@ class AsyncLLMEngine:
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
-        if not self.engine_use_ray:
-            engine_class = self._engine_class
-        elif self.worker_use_ray:
-            engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
-        else:
-            engine_class = ray.remote(num_gpus=1)(self._engine_class).remote
-        self.engine = engine_class(*args, **kwargs)
+        self.engine = self._init_engine(*args, **kwargs)
+
         # Request id -> stream.
         self.request_streams: Dict[str, AsyncStream] = {}
         self.background_loop = None
@@ -104,6 +99,15 @@ class AsyncLLMEngine:
             self.background_loop = asyncio.get_event_loop().create_task(
                 self.run_engine_loop())
             self.background_loop.add_done_callback(_raise_exception_on_finish)
+
+    def _init_engine(self, *args, **kwargs) -> LLMEngine:
+        if not self.engine_use_ray:
+            engine_class = self._engine_class
+        elif self.worker_use_ray:
+            engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
+        else:
+            engine_class = ray.remote(num_gpus=1)(self._engine_class).remote
+        return engine_class(*args, **kwargs)
 
     async def engine_step(self):
         """Kick the engine to process the waiting requests."""
