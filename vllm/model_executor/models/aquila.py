@@ -29,11 +29,9 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
@@ -43,11 +41,12 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.sequence import SequenceOutputs
+from vllm.transformers_utils.configs.aquila import AquilaConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class LlamaMLP(nn.Module):
+class AquilaMLP(nn.Module):
 
     def __init__(
         self,
@@ -78,14 +77,33 @@ class LlamaMLP(nn.Module):
         return x
 
 
-class LlamaAttention(nn.Module):
+class AquilaRMSNorm(nn.Module):
+
+    def __init__(self, hidden_size, eps=1e-6):
+        """
+        AquilaRMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1,
+                                                               keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance +
+                                                    self.variance_epsilon)
+
+        return (self.weight * hidden_states).to(input_dtype)
+
+
+class AquilaAttention(nn.Module):
 
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -100,7 +118,6 @@ class LlamaAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
 
         self.qkv_proj = ColumnParallelLinear(
             hidden_size,
@@ -117,12 +134,12 @@ class LlamaAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           base=self.rope_theta,
-                                           rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            rotary_dim=self.head_dim,
+        )
 
     def forward(
         self,
@@ -141,28 +158,25 @@ class LlamaAttention(nn.Module):
         return output
 
 
-class LlamaDecoderLayer(nn.Module):
+class AquilaDecoderLayer(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: AquilaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
-        # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 10000)
-        self.self_attn = LlamaAttention(
+        self.self_attn = AquilaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
+            num_kv_heads=config.num_attention_heads,
         )
-        self.mlp = LlamaMLP(
+        self.mlp = AquilaMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = AquilaRMSNorm(config.hidden_size,
+                                             eps=config.rms_norm_eps)
+        self.post_attention_layernorm = AquilaRMSNorm(config.hidden_size,
+                                                      eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -192,21 +206,23 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states
 
 
-class LlamaModel(nn.Module):
+class AquilaModel(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: AquilaConfig):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        vocab_size = ((config.vocab_size + 63) // 64) * 64
+        #vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
-            vocab_size, config.hidden_size, perform_initialization=False)
+            config.vocab_size,
+            config.hidden_size,
+            perform_initialization=False)
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)
+            AquilaDecoderLayer(config) for _ in range(config.num_hidden_layers)
         ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = AquilaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -231,15 +247,16 @@ class LlamaModel(nn.Module):
                 cache_event,
             )
         hidden_states = self.norm(hidden_states)
+
         return hidden_states
 
 
-class LlamaForCausalLM(nn.Module):
+class AquilaForCausalLM(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.model = LlamaModel(config)
+        self.model = AquilaModel(config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ColumnParallelLinear(config.hidden_size,
                                             vocab_size,
@@ -277,7 +294,7 @@ class LlamaForCausalLM(nn.Module):
         q_proj_shard_size = (self.config.hidden_size // tp_size)
         kv_proj_shard_size = (self.config.hidden_size //
                               self.config.num_attention_heads *
-                              self.config.num_key_value_heads // tp_size)
+                              self.config.num_attention_heads // tp_size)
         attention_weight_specs = [
             # (weight_name, shard_size, offset)
             ("q_proj", q_proj_shard_size, 0),
