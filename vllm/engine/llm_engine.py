@@ -150,7 +150,7 @@ class LLMEngine:
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
-            )(RayWorker).remote()
+            )(RayWorker).remote(self.model_config.trust_remote_code)
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
