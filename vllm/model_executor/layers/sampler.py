@@ -435,7 +435,7 @@ def _batched_sample(gen_probs: torch.Tensor, gen_logprobs: torch.Tensor,
     if len(sampling_type_tensors) > 1 and sampling_type_tensors[1].numel() > 0:
         torch.multinomial(sampling_type_tensors[1],
                           num_samples=max_best_of,
-                          replacement=False,
+                          replacement=True,
                           out=batch_chosen_tokens_tensors[1])
     # Everything that is not greedy or multinomial (currently, beam search)
     # (sampling_type_tensors[2:]) is handled iteratively below.
