@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Dict, List, Optional, Iterable
+from typing import Dict, List, Optional, Iterable, Type
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -77,6 +77,8 @@ class AsyncLLMEngine:
         *args, *kwargs: Arguments for LLMEngine.
     """
 
+    _engine_class: Type[LLMEngine] = LLMEngine
+
     def __init__(self,
                  worker_use_ray: bool,
                  engine_use_ray: bool,
@@ -88,11 +90,11 @@ class AsyncLLMEngine:
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
         if not self.engine_use_ray:
-            engine_class = LLMEngine
+            engine_class = self._engine_class
         elif self.worker_use_ray:
-            engine_class = ray.remote(num_cpus=0)(LLMEngine).remote
+            engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
         else:
-            engine_class = ray.remote(num_gpus=1)(LLMEngine).remote
+            engine_class = ray.remote(num_gpus=1)(self._engine_class).remote
         self.engine = engine_class(*args, **kwargs)
         # Request id -> stream.
         self.request_streams: Dict[str, AsyncStream] = {}
