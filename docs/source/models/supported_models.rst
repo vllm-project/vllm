@@ -26,6 +26,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`FalconForCausalLM`
     - Falcon
     - :code:`tiiuae/falcon-7b``, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
+  * - :code:`GLMModel`
+    - GLM
+    - :code:`THUDM/glm-10b-chinese`
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.

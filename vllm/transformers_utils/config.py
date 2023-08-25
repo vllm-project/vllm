@@ -7,6 +7,7 @@ _CONFIG_REGISTRY = {
     "baichuan": BaiChuanConfig,
     "aquila": AquilaConfig,
     "qwen": QWenConfig,
+    "glm": GLMConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
 }
