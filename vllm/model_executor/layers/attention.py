@@ -259,18 +259,13 @@ class PagedAttentionWithRoPE(PagedAttention):
         super().__init__(num_heads, head_size, scale, num_kv_heads)
 
         # Create the cos and sin cache.
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
-        t = torch.arange(max_position).float()
-        freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
+        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim))
+        t = torch.arange(max_position, dtype=torch.float32)
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
 
-        # FIXME(woosuk): This assumes that we configure the default dtype when
-        # initializing the model.
-        # TODO(woosuk): Make it more robust.
-        torch_dtype = torch.get_default_dtype()
-        cache = cache.to(torch_dtype)
         # Embedding size: [max_position, rotary_dim]
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
