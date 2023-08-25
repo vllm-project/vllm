@@ -295,6 +295,11 @@ def _sample_from_prompt(
     if sampling_params.use_beam_search:
         # Beam search.
         beam_width = sampling_params.best_of
+        # Sample 2 * beam_width candidates to make sure that with high
+        # probability we can get `beam_width` candidates in addition to
+        # the finished sequences for the next iteration. See
+        # https://github.com/tensorflow/tensor2tensor/blob/bafdc1b67730430d38d6ab802cbd51f9d053ba2e/tensor2tensor/utils/beam_search.py#L557-L563
+        # for details.
         _, next_token_ids = torch.topk(prob, 2 * beam_width)
         next_token_ids = next_token_ids.tolist()
     elif sampling_params.temperature < _SAMPLING_EPS:
