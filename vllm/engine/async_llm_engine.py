@@ -82,12 +82,13 @@ class AsyncLLMEngine:
             self.request_events[request_id].set()
 
     async def generate(
-            self,
-            prompt: Optional[str],
-            sampling_params: SamplingParams,
-            request_id: str,
-            prompt_token_ids: Optional[List[int]] = None,
-            **kwargs,) -> RequestOutput:
+        self,
+        prompt: Optional[str],
+        sampling_params: SamplingParams,
+        request_id: str,
+        prompt_token_ids: Optional[List[int]] = None,
+        **kwargs,
+    ) -> RequestOutput:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the

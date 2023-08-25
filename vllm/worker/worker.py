@@ -171,12 +171,13 @@ class Worker:
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             if seq_data.attention_mask is not None:
-                custom_attention_masks.append(seq_data.attention_mask[:prompt_len, :prompt_len])
+                custom_attention_masks.append(
+                    seq_data.attention_mask[:prompt_len, :prompt_len])
             input_tokens.extend(prompt_tokens)
-            
+
             # get custom position IDs
             position_ids, block_position_encoding = seq_data.get_position_ids()
-            
+
             if not position_ids:
                 # NOTE(woosuk): Here we assume that the first token in the prompt
                 # is always the first token in the sequence.
@@ -184,12 +185,15 @@ class Worker:
             else:
                 if block_position_encoding:
                     # generate input_positions as a 2D list (GLM)
-                    block_input_position_ids.extend(position_ids[0][:prompt_len])
-                    block_block_position_ids.extend(position_ids[1][:prompt_len])
-                    input_positions = [block_input_position_ids, block_block_position_ids]
+                    block_input_position_ids.extend(
+                        position_ids[0][:prompt_len])
+                    block_block_position_ids.extend(
+                        position_ids[1][:prompt_len])
+                    input_positions = [
+                        block_input_position_ids, block_block_position_ids
+                    ]
                 else:
                     input_positions.extend(position_ids[:prompt_len])
-            
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -225,13 +229,15 @@ class Worker:
 
                 context_len = seq_data.get_len()
                 position = context_len - 1
-                
-                position_ids, block_position_encoding = seq_data.get_position_ids()
+
+                position_ids, block_position_encoding = seq_data.get_position_ids(
+                )
                 if not position_ids:
                     input_positions.append(position)
                 else:
                     if block_position_encoding:
-                        input_positions.append([[position_ids[0][position]], [position_ids[1][position]]])
+                        input_positions.append([[position_ids[0][position]],
+                                                [position_ids[1][position]]])
                     else:
                         input_positions.append(position_ids[position])
 
@@ -252,7 +258,9 @@ class Worker:
         # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
         input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
         if block_position_encoding:
-            input_positions = _pad_to_alignment(input_positions, multiple_of=8, is_2d=True)
+            input_positions = _pad_to_alignment(input_positions,
+                                                multiple_of=8,
+                                                is_2d=True)
         else:
             input_positions = _pad_to_alignment(input_positions, multiple_of=8)
 
@@ -361,14 +369,16 @@ def _init_distributed_environment(
                               parallel_config.pipeline_parallel_size)
 
 
-def _pad_to_alignment(x: List[int], multiple_of: int, is_2d=False) -> List[int]:
+def _pad_to_alignment(x: List[int],
+                      multiple_of: int,
+                      is_2d=False) -> List[int]:
     if not is_2d:
         return x + [0] * ((-len(x)) % multiple_of)
     else:
         ret = []
         for _x in x:
             if isinstance(_x, list) and isinstance(_x[0], list):
-                pad_element = [[[0]]* len(_x)]
+                pad_element = [[[0]] * len(_x)]
                 return x + pad_element * ((-len(x)) % multiple_of)
             else:
                 ret.append(_x + [0] * ((-len(_x)) % multiple_of))

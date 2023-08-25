@@ -55,7 +55,8 @@ class ModelConfig:
         self.seed = seed
 
         self.hf_config = get_config(model, trust_remote_code)
-        self.skip_special_tokens = self.hf_config.skip_special_tokens if hasattr(self.hf_config, "skip_special_tokens") else True
+        self.skip_special_tokens = self.hf_config.skip_special_tokens if hasattr(
+            self.hf_config, "skip_special_tokens") else True
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self._verify_tokenizer_mode()
 

@@ -51,9 +51,8 @@ class InputMetadata:
         assert context_lens.shape[0] == self.num_generation_tokens
 
         # Set during the execution of the first attention op.
-        self.attn_bias: List[Union[AttentionBias,torch.Tensor]] = []
+        self.attn_bias: List[Union[AttentionBias, torch.Tensor]] = []
         self.custom_attention_masks = kwargs.get('custom_attention_masks', [])
-        
 
     def __repr__(self) -> str:
         # Print only useful metadata.

@@ -54,20 +54,18 @@ class SequenceData:
         cumulative_logprob: The cumulative log probability of the output.
     """
 
-    def __init__(
-        self,
-        prompt_token_ids: List[int],
-        **kwargs
-    ) -> None:
+    def __init__(self, prompt_token_ids: List[int], **kwargs) -> None:
         self.prompt_token_ids = prompt_token_ids
-        
+
         # position_ids: The position IDs of the prompt, it can be 2D for some model architectures (e.g. GLM)
-        self.position_ids: Union[List[int], List[List[int]]] = kwargs.get("position_ids", [])
-        self.block_position_encoding = kwargs.get("block_position_encoding", False)
-        
+        self.position_ids: Union[List[int], List[List[int]]] = kwargs.get(
+            "position_ids", [])
+        self.block_position_encoding = kwargs.get("block_position_encoding",
+                                                  False)
+
         # attention_mask:
         self.attention_mask = kwargs.get("attention_mask", None)
-        
+
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
 
@@ -83,7 +81,7 @@ class SequenceData:
 
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
-    
+
     def get_position_ids(self) -> Tuple[List, bool]:
         if self.position_ids:
             return self.position_ids, self.block_position_encoding

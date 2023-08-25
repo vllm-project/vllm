@@ -259,7 +259,8 @@ class LLMEngine:
         seqs: List[Sequence] = []
         for _ in range(sampling_params.best_of):
             seq_id = next(self.seq_counter)
-            seq = Sequence(seq_id, prompt, prompt_token_ids, block_size, **kwargs)
+            seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
+                           **kwargs)
             seqs.append(seq)
 
         # Create the sequence group.
@@ -448,7 +449,10 @@ class LLMEngine:
                     continue
                 # Check if the sequence has generated the EOS token.
                 if not sampling_params.ignore_eos:
-                    if seq.get_last_token_id() == self.tokenizer.eop_token_id if hasattr(self.tokenizer, "eop_token_id") else self.tokenizer.eos_token_id:
+                    if seq.get_last_token_id(
+                    ) == self.tokenizer.eop_token_id if hasattr(
+                            self.tokenizer,
+                            "eop_token_id") else self.tokenizer.eos_token_id:
                         self.scheduler.free_seq(
                             seq, SequenceStatus.FINISHED_STOPPED)
                         continue

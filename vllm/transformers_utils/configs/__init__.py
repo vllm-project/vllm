@@ -10,10 +10,6 @@ from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.qwen import QWenConfig
 
 __all__ = [
-    "MPTConfig",
-    "BaiChuanConfig",
-    "AquilaConfig",
-    "QWenConfig",
-    "RWConfig",
+    "MPTConfig", "BaiChuanConfig", "AquilaConfig", "QWenConfig", "RWConfig",
     "GLMConfig"
 ]

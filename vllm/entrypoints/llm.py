@@ -126,21 +126,23 @@ class LLM:
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             pos_ids = position_ids[i] if position_ids is not None else None
-            attn_mask = attention_mask[i] if attention_mask is not None else None
+            attn_mask = attention_mask[
+                i] if attention_mask is not None else None
             if prompt_token_ids is None:
                 token_ids = None
             else:
                 token_ids = prompt_token_ids[i]
-            self._add_request(prompt, sampling_params, token_ids, position_ids=pos_ids, attention_mask=attn_mask, **kwargs)
+            self._add_request(prompt,
+                              sampling_params,
+                              token_ids,
+                              position_ids=pos_ids,
+                              attention_mask=attn_mask,
+                              **kwargs)
         return self._run_engine(use_tqdm)
 
-    def _add_request(
-        self,
-        prompt: Optional[str],
-        sampling_params: SamplingParams,
-        prompt_token_ids: Optional[List[int]],
-        **kwargs
-    ) -> None:
+    def _add_request(self, prompt: Optional[str],
+                     sampling_params: SamplingParams,
+                     prompt_token_ids: Optional[List[int]], **kwargs) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id, prompt, sampling_params,
                                     prompt_token_ids, **kwargs)

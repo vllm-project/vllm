@@ -75,16 +75,19 @@ class PagedAttention(nn.Module):
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
 
-    def set_attn_bias(self, input_metadata: InputMetadata, dtype=torch.float32) -> None:
+    def set_attn_bias(self,
+                      input_metadata: InputMetadata,
+                      dtype=torch.float32) -> None:
         if input_metadata.attn_bias:
             # Already set by a previous layer.
             return
         prompt_lens = input_metadata.prompt_lens
         if input_metadata.custom_attention_masks:
-            attn_mask = torch.block_diag(*input_metadata.custom_attention_masks)       
+            attn_mask = torch.block_diag(
+                *input_metadata.custom_attention_masks)
             pad_len = -attn_mask.stride(-2) % 8
-            attn_mask = F.pad(attn_mask, (0,pad_len,0,pad_len))
-            attn_mask = attn_mask.repeat(1,self.head_size,1,1)
+            attn_mask = F.pad(attn_mask, (0, pad_len, 0, pad_len))
+            attn_mask = attn_mask.repeat(1, self.head_size, 1, 1)
             attn_bias = torch.finfo(dtype).min * (1.0 - attn_mask).cuda()
             if pad_len != 0:
                 attn_bias = attn_bias[..., :-pad_len, :-pad_len]

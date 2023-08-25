@@ -42,7 +42,9 @@ from vllm.transformers_utils.configs.glm import GLMConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+
 class GLMAttention(nn.Module):
+
     def __init__(self, config: GLMConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -54,7 +56,8 @@ class GLMAttention(nn.Module):
         self.head_dim = self.hidden_size // total_num_heads
         self.scale = self.head_dim**-0.5
 
-        self.multi_query_attention = config.multi_query_attention if hasattr(config, "multi_query_attention") else False
+        self.multi_query_attention = config.multi_query_attention if hasattr(
+            config, "multi_query_attention") else False
         if self.multi_query_attention:
             self.num_kv_heads = config.multi_query_group_num
             self.kv_dim = self.head_dim
@@ -69,17 +72,18 @@ class GLMAttention(nn.Module):
         else:
             self.num_kv_heads = self.num_heads
             self.kv_dim = self.num_kv_heads * self.head_dim
-            self.query_key_value = ColumnParallelLinear(self.hidden_size,
-                                               3 * self.hidden_size,
-                                               bias=True,
-                                               gather_output=False,
-                                               perform_initialization=False)
+            self.query_key_value = ColumnParallelLinear(
+                self.hidden_size,
+                3 * self.hidden_size,
+                bias=True,
+                gather_output=False,
+                perform_initialization=False)
 
         self.dense = RowParallelLinear(self.hidden_size,
-                                        self.hidden_size,
-                                        bias=True,
-                                        input_is_parallel=True,
-                                        perform_initialization=False)
+                                       self.hidden_size,
+                                       bias=True,
+                                       input_is_parallel=True,
+                                       perform_initialization=False)
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    scale=self.scale,
@@ -95,11 +99,15 @@ class GLMAttention(nn.Module):
         if self.multi_query_attention:
             q, _ = self.c_attn_q(hidden_states)
             kv = self.c_attn_kv(hidden_states)
-            k, v = kv.split([self.num_kv_heads * self.kv_dim, self.num_kv_heads * self.kv_dim], dim=-1)
+            k, v = kv.split([
+                self.num_kv_heads * self.kv_dim,
+                self.num_kv_heads * self.kv_dim
+            ],
+                            dim=-1)
         else:
             qkv, _ = self.query_key_value(hidden_states)
-            q, k, v = qkv.split([self.hidden_size, self.hidden_size, self.hidden_size],
-                                dim=-1)
+            q, k, v = qkv.split(
+                [self.hidden_size, self.hidden_size, self.hidden_size], dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(q, k, v, key_cache, value_cache,
                                 input_metadata, cache_event)
@@ -117,15 +125,15 @@ class GLMMLP(nn.Module):
         super().__init__()
         hidden_size = config.hidden_size
         self.dense_h_to_4h = ColumnParallelLinear(hidden_size,
-                                         intermediate_size,
-                                         bias=True,
-                                         gather_output=False,
-                                         perform_initialization=False)
+                                                  intermediate_size,
+                                                  bias=True,
+                                                  gather_output=False,
+                                                  perform_initialization=False)
         self.dense_4h_to_h = RowParallelLinear(intermediate_size,
-                                        hidden_size,
-                                        bias=True,
-                                        input_is_parallel=True,
-                                        perform_initialization=False)
+                                               hidden_size,
+                                               bias=True,
+                                               input_is_parallel=True,
+                                               perform_initialization=False)
         self.act = get_act_fn("gelu")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -134,12 +142,13 @@ class GLMMLP(nn.Module):
         hidden_states, _ = self.dense_4h_to_h(hidden_states)
         return hidden_states
 
+
 class GLMBlock(nn.Module):
 
     def __init__(self, config: GLMConfig):
         super().__init__()
         hidden_size = config.hidden_size
-        inner_dim =  4 * hidden_size
+        inner_dim = 4 * hidden_size
 
         self.input_layernorm = nn.LayerNorm(hidden_size, eps=1.0e-5)
         self.attention = GLMAttention(config)
@@ -171,6 +180,7 @@ class GLMBlock(nn.Module):
         hidden_states = residual + feed_forward_hidden_states
         return hidden_states
 
+
 class GLMModel(nn.Module):
 
     def __init__(self, config: GLMConfig):
@@ -185,14 +195,16 @@ class GLMModel(nn.Module):
         # layer across 2, 4, 8, or more GPUs.
         # vocab_size = ((config.vocab_size + 63) // 64) * 64
         vocab_size = config.vocab_size
-        self.word_embeddings = VocabParallelEmbedding(vocab_size, self.embed_dim)
+        self.word_embeddings = VocabParallelEmbedding(vocab_size,
+                                                      self.embed_dim)
         if config.block_position_encoding:
             self.position_embeddings = nn.Embedding(
                 config.max_sequence_length + 1, self.embed_dim)
             self.block_position_embeddings = nn.Embedding(
                 config.max_sequence_length + 1, self.embed_dim)
         else:
-            self.position_embeddings = nn.Embedding(config.max_sequence_length, self.embed_dim)
+            self.position_embeddings = nn.Embedding(config.max_sequence_length,
+                                                    self.embed_dim)
         self.layers = nn.ModuleList(
             [GLMBlock(config) for _ in range(config.num_hidden_layers)])
         self.final_layernorm = nn.LayerNorm(self.embed_dim, eps=1.0e-5)
@@ -208,14 +220,17 @@ class GLMModel(nn.Module):
         inputs_embeds = self.word_embeddings(input_ids)
         is_not_warmup = position_ids.ndim > 1
         if self.block_position_encoding and is_not_warmup:
-            position_ids = position_ids.permute(*range(position_ids.dim() - 2), -1, -2)
-            position_ids, block_position_ids = position_ids[...,0], position_ids[...,1]
+            position_ids = position_ids.permute(*range(position_ids.dim() - 2),
+                                                -1, -2)
+            position_ids, block_position_ids = position_ids[
+                ..., 0], position_ids[..., 1]
             position_ids = position_ids.view(-1)
             block_position_ids = block_position_ids.view(-1)
         position_embeds = self.position_embeddings(position_ids)
         hidden_states = inputs_embeds + position_embeds
         if self.block_position_encoding and is_not_warmup:
-            block_position_embeddings = self.block_position_embeddings(block_position_ids)
+            block_position_embeddings = self.block_position_embeddings(
+                block_position_ids)
             hidden_states = hidden_states + block_position_embeddings
 
         for i in range(len(self.layers)):
@@ -250,7 +265,7 @@ class GLMForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
-        
+
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.word_embeddings, hidden_states,
