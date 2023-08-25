@@ -14,9 +14,11 @@ logger = init_logger(__name__)
 
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds
 
+
 class Stream:
     """A stream of outputs for a request that can be
     iterated over asynchronously."""
+
     def __init__(self, request_id: str) -> None:
         self.request_id = request_id
         self._queue = asyncio.Queue()
@@ -44,14 +46,14 @@ class Stream:
             raise StopAsyncIteration
         return result
 
-def _raise_exception_on_finish(
-    task: asyncio.Task,
-) -> None:
+
+def _raise_exception_on_finish(task: asyncio.Task, ) -> None:
     try:
         task.result()
     except Exception as e:
         raise RuntimeError("Task finished unexpectedly.") from e
     raise RuntimeError("Task finished unexpectedly.")
+
 
 class AsyncLLMEngine:
     """An asynchronous wrapper for LLMEngine.
@@ -97,7 +99,8 @@ class AsyncLLMEngine:
         self.background_loop = None
         if not inline:
             # Start the background loop.
-            self.background_loop = asyncio.get_event_loop().create_task(self.run_engine_loop())
+            self.background_loop = asyncio.get_event_loop().create_task(
+                self.run_engine_loop())
             self.background_loop.add_done_callback(_raise_exception_on_finish)
 
     async def engine_step(self):
@@ -121,12 +124,14 @@ class AsyncLLMEngine:
         for stream in self.request_streams.values():
             if stream.finished:
                 finished_requests.add(stream.request_id)
+        if finished_requests:
+            print(finished_requests)
 
-        await self.engine_abort(finished_requests)
+        await self._engine_abort(finished_requests)
         for request_id in finished_requests:
             del self.request_streams[request_id]
 
-    async def engine_abort(self, request_ids: Iterable[str]):
+    async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
             await self.engine.abort_request.remote(request_ids)
         else:
@@ -199,10 +204,10 @@ class AsyncLLMEngine:
         arrival_time = time.time()
 
         stream = await self.add_request(request_id,
-                                prompt,
-                                sampling_params,
-                                prompt_token_ids=prompt_token_ids,
-                                arrival_time=arrival_time)
+                                        prompt,
+                                        sampling_params,
+                                        prompt_token_ids=prompt_token_ids,
+                                        arrival_time=arrival_time)
 
         try:
             async for request_output in stream:
@@ -232,7 +237,8 @@ class AsyncLLMEngine:
         Args:
             request_id: The unique id of the request.
         """
-        if request_id not in self.request_streams or self.request_streams[request_id].finished:
+        if request_id not in self.request_streams or self.request_streams[
+                request_id].finished:
             # The request has already finished or been aborted.
             return
 

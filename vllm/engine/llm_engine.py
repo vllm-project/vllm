@@ -288,7 +288,10 @@ class LLMEngine:
         """Returns True if there are unfinished requests."""
         return self.scheduler.has_unfinished_seqs()
 
-    def _schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, Optional[List[RequestOutput]]]:
+    def _schedule(
+        self
+    ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs,
+               Optional[List[RequestOutput]]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         if scheduler_outputs.is_empty():
             if not scheduler_outputs.ignored_seq_groups:
@@ -302,7 +305,9 @@ class LLMEngine:
             ]
         return seq_group_metadata_list, scheduler_outputs, None
 
-    def _process_worker_outputs(self, output, scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+    def _process_worker_outputs(
+            self, output,
+            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         # Update the scheduler with the model outputs.
         seq_groups = self.scheduler.update(output)
 
@@ -335,7 +340,8 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs, early_return = self._schedule()
+        (seq_group_metadata_list, scheduler_outputs,
+         early_return) = self._schedule()
         if early_return is not None:
             return early_return
 
@@ -359,7 +365,8 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs, early_return = self._schedule()
+        (seq_group_metadata_list, scheduler_outputs,
+         early_return) = self._schedule()
         if early_return is not None:
             return early_return
 
