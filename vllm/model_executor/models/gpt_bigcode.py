@@ -49,10 +49,11 @@ class GPTBigCodeAttention(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         total_num_heads = config.num_attention_heads
-        tensor_model_parallel_world_size = (
+        self.tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
-        assert total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = total_num_heads // tensor_model_parallel_world_size
+        assert total_num_heads % self.tensor_model_parallel_world_size == 0
+        self.num_heads = (total_num_heads //
+                          self.tensor_model_parallel_world_size)
         self.head_dim = self.hidden_size // total_num_heads
         self.scale = self.head_dim**-0.5
 
@@ -101,7 +102,10 @@ class GPTBigCodeAttention(nn.Module):
             k, v = kv.split([self.kv_dim, self.kv_dim], dim=-1)
         else:
             qkv, _ = self.c_attn(hidden_states)
-            q, k, v = qkv.split([self.hidden_size, self.kv_dim, self.kv_dim],
+            q, k, v = qkv.split([
+                self.hidden_size // self.tensor_model_parallel_world_size,
+                self.kv_dim, self.kv_dim
+            ],
                                 dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(q, k, v, key_cache, value_cache,
