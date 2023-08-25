@@ -25,7 +25,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -42,7 +42,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 

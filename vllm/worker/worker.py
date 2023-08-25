@@ -12,7 +12,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SequenceData, SequenceGroupMetadata, SequenceOutputs
+from vllm.sequence import SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory
 

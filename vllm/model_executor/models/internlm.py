@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -16,7 +16,6 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding)
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
-from vllm.sequence import SequenceOutputs
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
