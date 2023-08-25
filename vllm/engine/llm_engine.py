@@ -411,7 +411,7 @@ class LLMEngine:
                     self.tokenizer,
                     seq.output_tokens,
                     seq.get_last_token_id(),
-                    skip_special_tokens=True,
+                    skip_special_tokens=self.model_config.skip_special_tokens,
                 )
                 if new_token is not None:
                     seq.output_tokens.append(new_token)
@@ -448,7 +448,7 @@ class LLMEngine:
                     continue
                 # Check if the sequence has generated the EOS token.
                 if not sampling_params.ignore_eos:
-                    if seq.get_last_token_id() == self.tokenizer.eos_token_id:
+                    if seq.get_last_token_id() == self.tokenizer.eop_token_id if hasattr(self.tokenizer, "eop_token_id") else self.tokenizer.eos_token_id:
                         self.scheduler.free_seq(
                             seq, SequenceStatus.FINISHED_STOPPED)
                         continue
