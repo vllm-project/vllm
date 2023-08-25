@@ -179,8 +179,8 @@ class Worker:
             position_ids, block_position_encoding = seq_data.get_position_ids()
 
             if not position_ids:
-                # NOTE(woosuk): Here we assume that the first token in the prompt
-                # is always the first token in the sequence.
+                # NOTE(woosuk): Here we assume that the first token in the
+                # prompt is always the first token in the sequence.
                 input_positions.extend(range(len(prompt_tokens)))
             else:
                 if block_position_encoding:
@@ -230,8 +230,8 @@ class Worker:
                 context_len = seq_data.get_len()
                 position = context_len - 1
 
-                position_ids, block_position_encoding = seq_data.get_position_ids(
-                )
+                position_ids, block_position_encoding = \
+                    seq_data.get_position_ids()
                 if not position_ids:
                     input_positions.append(position)
                 else:
@@ -376,12 +376,12 @@ def _pad_to_alignment(x: List[int],
         return x + [0] * ((-len(x)) % multiple_of)
     else:
         ret = []
-        for _x in x:
-            if isinstance(_x, list) and isinstance(_x[0], list):
-                pad_element = [[[0]] * len(_x)]
+        for x_ in x:
+            if isinstance(x_, list) and isinstance(x_[0], list):
+                pad_element = [[[0]] * len(x_)]
                 return x + pad_element * ((-len(x)) % multiple_of)
             else:
-                ret.append(_x + [0] * ((-len(_x)) % multiple_of))
+                ret.append(x_ + [0] * ((-len(x_)) % multiple_of))
         return ret
 
 

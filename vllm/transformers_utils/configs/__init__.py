@@ -7,7 +7,6 @@ from vllm.transformers_utils.configs.qwen import QWenConfig
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.glm import GLMConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
-from vllm.transformers_utils.configs.qwen import QWenConfig
 
 __all__ = [
     "MPTConfig", "BaiChuanConfig", "AquilaConfig", "QWenConfig", "RWConfig",

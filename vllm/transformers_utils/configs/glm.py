@@ -8,7 +8,8 @@ from transformers.configuration_utils import PretrainedConfig
 class GLMConfig(PretrainedConfig):
     model_type = "glm"
 
-    # A dict that maps model specific attribute names to the standardized naming of attributes.
+    # A dict that maps model specific attribute names
+    # to the standardized naming of attributes.
     attribute_map = {
         "num_hidden_layers": "num_layers",
     }
@@ -51,7 +52,8 @@ class GLMConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.layer_norm_epsilon = layer_norm_epsilon
         self.rmsnorm = rmsnorm
-        self.apply_residual_connection_post_layernorm = apply_residual_connection_post_layernorm
+        self.apply_residual_connection_post_layernorm = \
+            apply_residual_connection_post_layernorm
         self.post_layer_norm = post_layer_norm
         self.add_bias_linear = add_bias_linear
         self.add_qkv_bias = add_qkv_bias

@@ -57,7 +57,8 @@ class SequenceData:
     def __init__(self, prompt_token_ids: List[int], **kwargs) -> None:
         self.prompt_token_ids = prompt_token_ids
 
-        # position_ids: The position IDs of the prompt, it can be 2D for some model architectures (e.g. GLM)
+        # position_ids: The position IDs of the prompt,
+        # it can be 2D for some model architectures (e.g. GLM)
         self.position_ids: Union[List[int], List[List[int]]] = kwargs.get(
             "position_ids", [])
         self.block_position_encoding = kwargs.get("block_position_encoding",
