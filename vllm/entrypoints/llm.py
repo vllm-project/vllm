@@ -82,6 +82,7 @@ class LLM:
         sampling_params: Optional[SamplingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
+        **kwargs,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -126,7 +127,7 @@ class LLM:
                 token_ids = None
             else:
                 token_ids = prompt_token_ids[i]
-            self._add_request(prompt, sampling_params, token_ids)
+            self._add_request(prompt, sampling_params, token_ids, **kwargs)
         return self._run_engine(use_tqdm)
 
     def _add_request(
@@ -134,10 +135,11 @@ class LLM:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]],
+        **kwargs
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id, prompt, sampling_params,
-                                    prompt_token_ids)
+                                    prompt_token_ids, **kwargs)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.

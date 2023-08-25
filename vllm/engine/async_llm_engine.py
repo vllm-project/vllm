@@ -86,7 +86,8 @@ class AsyncLLMEngine:
             prompt: Optional[str],
             sampling_params: SamplingParams,
             request_id: str,
-            prompt_token_ids: Optional[List[int]] = None) -> RequestOutput:
+            prompt_token_ids: Optional[List[int]] = None,
+            **kwargs,) -> RequestOutput:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -126,13 +127,15 @@ class AsyncLLMEngine:
                 prompt,
                 sampling_params,
                 prompt_token_ids=prompt_token_ids,
-                arrival_time=arrival_time)
+                arrival_time=arrival_time,
+                **kwargs)
         else:
             self.engine.add_request(request_id,
                                     prompt,
                                     sampling_params,
                                     prompt_token_ids=prompt_token_ids,
-                                    arrival_time=arrival_time)
+                                    arrival_time=arrival_time,
+                                    **kwargs)
 
         # The vLLM engine does not have a background loop that keeps
         # processing incoming requests. Therefore, we need to keep kicking

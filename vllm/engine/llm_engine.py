@@ -230,6 +230,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        **kwargs,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -258,7 +259,7 @@ class LLMEngine:
         seqs: List[Sequence] = []
         for _ in range(sampling_params.best_of):
             seq_id = next(self.seq_counter)
-            seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
+            seq = Sequence(seq_id, prompt, prompt_token_ids, block_size, **kwargs)
             seqs.append(seq)
 
         # Create the sequence group.

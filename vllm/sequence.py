@@ -1,7 +1,7 @@
 """Sequence and its related classes."""
 import copy
 import enum
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
@@ -57,8 +57,14 @@ class SequenceData:
     def __init__(
         self,
         prompt_token_ids: List[int],
+        **kwargs
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
+        
+        # position_ids: The position IDs of the prompt, it can be 2D for some model architectures (e.g. GLM)
+        self.position_ids: Union[List[int], List[List[int]]] = kwargs.get("position_ids", [])
+        self.block_position_encoding = kwargs.get("block_position_encoding", False)
+        
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
 
@@ -74,6 +80,11 @@ class SequenceData:
 
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
+    
+    def get_position_ids(self) -> Tuple[List, bool]:
+        if self.position_ids:
+            return self.position_ids, self.block_position_encoding
+        return [], False
 
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
@@ -104,12 +115,13 @@ class Sequence:
         prompt: str,
         prompt_token_ids: List[int],
         block_size: int,
+        **kwargs,
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
         self.block_size = block_size
 
-        self.data = SequenceData(prompt_token_ids)
+        self.data = SequenceData(prompt_token_ids, **kwargs)
         self.output_logprobs: List[Dict[int, float]] = []
         self.output_tokens: List[str] = []
         self.output_text = ""

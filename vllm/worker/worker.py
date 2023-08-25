@@ -149,7 +149,7 @@ class Worker:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
-
+        block_position_encoding = False
         # Add prompt tokens.
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
@@ -169,9 +169,20 @@ class Worker:
             prompt_lens.append(prompt_len)
 
             input_tokens.extend(prompt_tokens)
-            # NOTE(woosuk): Here we assume that the first token in the prompt
-            # is always the first token in the sequence.
-            input_positions.extend(range(len(prompt_tokens)))
+            
+            # get custom position IDs
+            position_ids, block_position_encoding = seq_data.get_position_ids()
+            
+            if not position_ids:
+                # NOTE(woosuk): Here we assume that the first token in the prompt
+                # is always the first token in the sequence.
+                input_positions.extend(range(len(prompt_tokens)))
+            else:
+                if block_position_encoding:
+                    input_positions.extend([position_ids[0][:prompt_len], position_ids[1][:prompt_len]])
+                else:
+                    input_positions.extend(position_ids[:prompt_len])
+            
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -207,7 +218,15 @@ class Worker:
 
                 context_len = seq_data.get_len()
                 position = context_len - 1
-                input_positions.append(position)
+                
+                position_ids, block_position_encoding = seq_data.get_position_ids()
+                if not position_ids:
+                    input_positions.append(position)
+                else:
+                    if block_position_encoding:
+                        input_positions.append([[position_ids[0][position]], [position_ids[1][position]]])
+                    else:
+                        input_positions.append(position_ids[position])
 
                 block_table = seq_group_metadata.block_tables[seq_id]
                 generation_block_tables.append(block_table)
@@ -225,7 +244,10 @@ class Worker:
         # Optimization: Pad the input length to be a multiple of 8.
         # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
         input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
-        input_positions = _pad_to_alignment(input_positions, multiple_of=8)
+        if block_position_encoding:
+            input_positions = _pad_to_alignment(input_positions, multiple_of=8, is_2d=True)
+        else:
+            input_positions = _pad_to_alignment(input_positions, multiple_of=8)
 
         # Convert to tensors.
         tokens_tensor = torch.cuda.LongTensor(input_tokens)
@@ -331,8 +353,18 @@ def _init_distributed_environment(
                               parallel_config.pipeline_parallel_size)
 
 
-def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
-    return x + [0] * ((-len(x)) % multiple_of)
+def _pad_to_alignment(x: List[int], multiple_of: int, is_2d=False) -> List[int]:
+    if not is_2d:
+        return x + [0] * ((-len(x)) % multiple_of)
+    else:
+        ret = []
+        for _x in x:
+            if isinstance(_x, list) and isinstance(_x[0], list):
+                pad_element = [[[0]]* len(_x)]
+                return x + pad_element * ((-len(x)) % multiple_of)
+            else:
+                ret.append(_x + [0] * ((-len(_x)) % multiple_of))
+        return ret
 
 
 def _pad_to_max(x: List[int], max_len: int) -> List[int]:
