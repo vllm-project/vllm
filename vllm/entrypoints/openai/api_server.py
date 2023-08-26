@@ -577,7 +577,7 @@ if __name__ == "__main__":
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser.add_argument("--host",
                         type=str,
-                        default="localhost",
+                        default="0.0.0.0",
                         help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument("--allow-credentials",
