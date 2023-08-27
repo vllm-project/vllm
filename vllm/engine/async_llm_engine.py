@@ -170,13 +170,13 @@ class AsyncLLMEngine:
                 if self.log_requests:
                     logger.info(f"Finished request {request_id}.")
 
-                del self.request_outputs[request_id]
-                del self.request_events[request_id]
                 # Kick the engine if the engine is not running. This is to
                 # prevent that there are still requests in engine's waiting
                 # queue to be executed.
                 if not self.is_engine_running:
-                    await self.engine_step()
+                    await self.engine_step(request_id)
+                del self.request_outputs[request_id]
+                del self.request_events[request_id]
                 break
 
     async def abort(self, request_id: str) -> None:
