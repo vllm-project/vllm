@@ -71,6 +71,8 @@ class Sampler(nn.Module):
             # Use in-place division to avoid creating a new tensor.
             logits.div_(t.unsqueeze(dim=1))
 
+            assert not any(torch.any(torch.isinf(logits), 1))
+
         # Apply top-p and top-k truncation.
         top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
         assert len(top_ps) == len(top_ks) == logits.shape[0]
