@@ -78,10 +78,35 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        gate_up = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
+        x = self.down_proj(x)
         return x
+    
+    def trans_int8(self):
+        int8_gate_up = Linear8bitLt(
+            self.gate_up_proj.in_features,
+            self.gate_up_proj.out_features,
+            self.gate_up_proj.bias is not None,
+            has_fp16_weights=False,
+            threshold=6.0,
+        )
+        int8_gate_up.weight = bnb.nn.Int8Params(
+            self.gate_up_proj.weight.data.clone(), requires_grad=False, has_fp16_weights=False
+            ).to(self.gate_up_proj.weight.dtype)
+        self.gate_up_proj = int8_gate_up
+
+        int8_down = Linear8bitLt(
+            self.down_proj.in_features,
+            self.down_proj.out_features,
+            self.down_proj.bias is not None,
+            has_fp16_weights=False,
+            threshold=6.0,
+        )
+        int8_down.weight = bnb.nn.Int8Params(
+            self.down_proj.weight.data.clone(), requires_grad=False, has_fp16_weights=False
+            ).to(self.down_proj.weight.dtype)
+        self.down_proj = int8_down
 
 
 class LlamaAttention(nn.Module):
@@ -96,7 +121,8 @@ class LlamaAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        # tp_size = get_tensor_model_parallel_world_size()
+        tp_size = 1
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -141,13 +167,38 @@ class LlamaAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
-        output, _ = self.o_proj(attn_output)
+        output = self.o_proj(attn_output)
         return output
+    
+    def trans_int8(self):
+        int8_qkv = Linear8bitLt(
+            self.qkv_proj.in_features,
+            self.qkv_proj.out_features,
+            self.qkv_proj.bias is not None,
+            has_fp16_weights=False,
+            threshold=6.0,
+        )
+        int8_qkv.weight = bnb.nn.Int8Params(
+            self.qkv_proj.weight.data.clone(), requires_grad=False, has_fp16_weights=False
+            ).to(self.qkv_proj.weight.dtype)
+        self.qkv_proj = int8_qkv
+
+        int8_o = Linear8bitLt(
+            self.o_proj.in_features,
+            self.o_proj.out_features,
+            self.o_proj.bias is not None,
+            has_fp16_weights=False,
+            threshold=6.0,
+        )
+        int8_o.weight = bnb.nn.Int8Params(
+            self.o_proj.weight.data.clone(), requires_grad=False, has_fp16_weights=False
+            ).to(self.o_proj.weight.dtype)
+        self.o_proj = int8_o
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -326,6 +377,9 @@ class LlamaForCausalLM(nn.Module):
         ]
         state_dict = self.state_dict()
 
+        # for name, param in state_dict.items():
+        #     print(f"state_dict name: {name}, param shape: {param.shape}")
+
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
@@ -398,3 +452,10 @@ class LlamaForCausalLM(nn.Module):
                                          column_parallel_weights,
                                          row_parallel_weights,
                                          tensor_model_parallel_rank)
+
+        for i in range(len(self.model.layers)):
+            layer = self.model.layers[i]
+            layer.mlp.trans_int8()
+            layer.self_attn.trans_int8()
+
+        print(self.model)
