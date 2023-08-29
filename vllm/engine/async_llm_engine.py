@@ -13,6 +13,7 @@ from vllm.sampling_params import SamplingParams
 logger = init_logger(__name__)
 
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds
+TIMEOUT_REQ = 25  # seconds
 
 
 class AsyncLLMEngine:
@@ -149,6 +150,10 @@ class AsyncLLMEngine:
                 except RuntimeError as e:
                     await self.abort(request_id)
                     raise e
+
+            if (time.time() - arrival_time) > TIMEOUT_REQ:
+                await self.abort(request_id)
+                raise RuntimeError(f"Request {request_id} timed out.")
 
             # Wait for new output. The group_event will be set in engine_step
             # when there is new output available for the sequence group.
