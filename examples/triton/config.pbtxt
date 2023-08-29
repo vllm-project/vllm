@@ -1,0 +1,35 @@
+name: "vicuna_13b_13"    
+backend: "python"
+max_batch_size: 0
+
+model_transaction_policy {
+  decoupled: True
+}
+
+input [
+  {
+    name: "prompt"
+    data_type: TYPE_STRING  
+    dims: [ -1 ]
+  },
+  {
+    name: "max_tokens"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  }
+]
+
+output [
+  {
+    name: "response"
+    data_type: TYPE_STRING  
+    dims: [ -1 ]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_CPU
+  }
+]
