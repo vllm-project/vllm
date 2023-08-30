@@ -264,8 +264,7 @@ class LlamaForCausalLM(nn.Module):
         return next_tokens
 
     _column_parallel_weights = [
-        "embed_tokens.weight", "lm_head.weight", "qkv_proj.weight",
-        "gate_proj.weight", "up_proj.weight"
+        "qkv_proj.weight", "gate_proj.weight", "up_proj.weight"
     ]
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
@@ -333,15 +332,9 @@ class LlamaForCausalLM(nn.Module):
             param = state_dict[name]
 
             if "embed_tokens" in name or "lm_head" in name:
-                param = state_dict[name]
-                # Consider padding in the vocab size.
-                padded_vocab_size = param.shape[0] * tp_size
-                if padded_vocab_size > self.config.vocab_size:
-                    load_padded_tensor_parallel_vocab(
-                        param, loaded_weight, name,
-                        self._column_parallel_weights,
-                        tensor_model_parallel_rank)
-                    continue
+                load_padded_tensor_parallel_vocab(param, loaded_weight,
+                                                  tensor_model_parallel_rank)
+                continue
 
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
