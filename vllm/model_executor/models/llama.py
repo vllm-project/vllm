@@ -107,6 +107,25 @@ class LlamaMLP(nn.Module):
             self.down_proj.weight.data.clone(), requires_grad=False, has_fp16_weights=False
             ).to(self.down_proj.weight.dtype)
         self.down_proj = int8_down
+    
+    def trans_fp4(self):
+        int8_gate_up = LinearFP4(
+            self.gate_up_proj.in_features,
+            self.gate_up_proj.out_features,
+            self.gate_up_proj.bias is not None
+        )
+        int8_gate_up.weight = bnb.nn.Params4bit(
+            self.gate_up_proj.weight.data.clone(), requires_grad=False).to(self.gate_up_proj.weight.dtype)
+        self.gate_up_proj = int8_gate_up
+
+        int8_down = LinearFP4(
+            self.down_proj.in_features,
+            self.down_proj.out_features,
+            self.down_proj.bias is not None
+        )
+        int8_down.weight = bnb.nn.Params4bit(
+            self.down_proj.weight.data.clone(), requires_grad=False).to(self.down_proj.weight.dtype)
+        self.down_proj = int8_down
 
 
 class LlamaAttention(nn.Module):
@@ -200,6 +219,24 @@ class LlamaAttention(nn.Module):
             ).to(self.o_proj.weight.dtype)
         self.o_proj = int8_o
 
+    def trans_fp4(self):
+        int8_qkv = LinearFP4(
+            self.qkv_proj.in_features,
+            self.qkv_proj.out_features,
+            self.qkv_proj.bias is not None
+        )
+        int8_qkv.weight = bnb.nn.Params4bit(
+            self.qkv_proj.weight.data.clone(), requires_grad=False).to(self.qkv_proj.weight.dtype)
+        self.qkv_proj = int8_qkv
+
+        int8_o = LinearFP4(
+            self.o_proj.in_features,
+            self.o_proj.out_features,
+            self.o_proj.bias is not None
+        )
+        int8_o.weight = bnb.nn.Params4bit(
+            self.o_proj.weight.data.clone(), requires_grad=False).to(self.o_proj.weight.dtype)
+        self.o_proj = int8_o
 
 class LlamaDecoderLayer(nn.Module):
 
