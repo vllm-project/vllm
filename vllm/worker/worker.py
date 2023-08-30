@@ -337,3 +337,216 @@ def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
 
 def _pad_to_max(x: List[int], max_len: int) -> List[int]:
     return x + [0] * (max_len - len(x))
+
+class SpSWorker(Worker):
+    def __init__(
+        self,
+        draft_model_config: ModelConfig,
+        target_model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        rank: Optional[int] = None,
+        distributed_init_method: Optional[str] = None,
+    ) -> None:
+        self.draft_model_config = draft_model_config
+        self.target_model_config = target_model_config
+
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        self.rank = rank
+        self.distributed_init_method = distributed_init_method
+
+        # Uninitialized cache engine. Will be initialized by
+        # self.init_cache_engine().
+        self.cache_config = None
+        self.block_size = None
+        self.cache_engine = None
+        self.cache_events = None
+        self.gpu_cache = None
+
+    # TODO: Small 및 Large 둘 다 돌려보기
+    def init_model(self):
+        # This env var set by Ray causes exceptions with graph building.
+        os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+        # Env vars will be set by Ray.
+        self.rank = self.rank if self.rank is not None else int(
+            os.getenv("RANK", "-1"))
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        self.device = torch.device(f"cuda:{local_rank}")
+        if self.rank < 0:
+            raise ValueError("Invalid or unspecified rank.")
+        torch.cuda.set_device(self.device)
+
+        # Initialize the distributed environment.
+        _init_distributed_environment(self.parallel_config, self.rank,
+                                      self.distributed_init_method)
+
+        # Initialize the model.
+        set_random_seed(self.draft_model_config.seed)
+        self.model = get_model(self.draft_model_config)
+        set_random_seed(self.target_model_config.seed)
+        self.model = get_model(self.target_model_config)
+
+    # TODO: Small, Large 둘 다 돌릴 때 가정해서 수정
+    @torch.inference_mode()
+    def profile_num_available_blocks(
+        self,
+        block_size: int,
+        gpu_memory_utilization: float,
+        cpu_swap_space: int,
+    ) -> Tuple[int, int]:
+        # Profile the memory usage of the model and get the maximum number of
+        # cache blocks that can be allocated with the remaining free memory.
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+        # Profile memory usage with max_num_sequences sequences and the total
+        # number of tokens equal to max_num_batched_tokens.
+
+        # Enable top-k sampling to reflect the accurate memory usage.
+        vocab_size = self.model.config.vocab_size
+        sampling_params = SamplingParams(top_p=0.99, top_k=vocab_size - 1)
+        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        seqs = []
+        for group_id in range(max_num_seqs):
+            seq_len = (max_num_batched_tokens // max_num_seqs +
+                       (group_id < max_num_batched_tokens % max_num_seqs))
+            seq_data = SequenceData([0] * seq_len)
+            seq = SequenceGroupMetadata(
+                request_id=str(group_id),
+                is_prompt=True,
+                seq_data={group_id: seq_data},
+                sampling_params=sampling_params,
+                block_tables=None,
+            )
+            seqs.append(seq)
+
+        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+            seqs)
+
+        # Execute the model. 
+        # Both draft and target will be run
+        num_layers = self.draft_model_config.get_num_layers(self.parallel_config)
+        self.draft_model(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=[(None, None)] * num_layers,
+            input_metadata=input_metadata,
+            cache_events=None,
+        )
+
+        num_layers = self.target_model_config.get_num_layers(self.parallel_config)
+        self.target_model(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=[(None, None)] * num_layers,
+            input_metadata=input_metadata,
+            cache_events=None,
+        )
+
+
+        # Calculate the number of blocks that can be allocated with the
+        # profiled peak memory.
+        torch.cuda.synchronize()
+        peak_memory = torch.cuda.max_memory_allocated()
+        total_gpu_memory = get_gpu_memory()
+        cache_block_size = CacheEngine.get_cache_block_size(
+            block_size, self.draft_model_config, self.parallel_config)
+        num_gpu_blocks = int(
+            (total_gpu_memory * gpu_memory_utilization - peak_memory) //
+            cache_block_size)
+        num_cpu_blocks = int(cpu_swap_space // cache_block_size)
+        num_gpu_blocks = max(num_gpu_blocks, 0)
+        num_cpu_blocks = max(num_cpu_blocks, 0)
+        torch.cuda.empty_cache()
+
+        # Reset the seed to ensure that the random state is not affected by
+        # the model initialization and profiling.
+        set_random_seed(self.draft_model_config.seed)
+        set_random_seed(self.target_model_config.seed)
+
+        return num_gpu_blocks, num_cpu_blocks
+
+    # TODO: Draft 모델만 기존의 방식을 활용하게 함.
+    # TODO: 이러면 Large Model Execution을 위한 command들 필요
+    @torch.inference_mode()
+    def execute_draft_model(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> Dict[int, SequenceOutputs]:
+        # Issue cache operations.
+        issued_cache_op = False
+        if blocks_to_swap_in:
+            self.cache_engine.swap_in(blocks_to_swap_in)
+            issued_cache_op = True
+        if blocks_to_swap_out:
+            self.cache_engine.swap_out(blocks_to_swap_out)
+            issued_cache_op = True
+        if blocks_to_copy:
+            self.cache_engine.copy(blocks_to_copy)
+            issued_cache_op = True
+
+        if issued_cache_op:
+            cache_events = self.cache_events
+        else:
+            cache_events = None
+
+        # If there is no input, we don't need to execute the model.
+        if not seq_group_metadata_list:
+            if cache_events is not None:
+                for event in cache_events:
+                    event.wait()
+            return {}
+
+        # Prepare input tensors.
+        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+            seq_group_metadata_list)
+
+        # Execute the model.
+        output = self.draft_model(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=self.gpu_cache,
+            input_metadata=input_metadata,
+            cache_events=cache_events,
+        )
+        return output
+
+    # NOTE: We expect all elements to be prompt!
+    @torch.inference_mode()
+    def execute_target_model(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata], # TODO: Cache this outside
+    ) -> Dict[int, SequenceOutputs]:
+        # Issue cache operations.
+
+        # If there is no input, we don't need to execute the model.
+        if not seq_group_metadata_list:
+            return {}
+
+        for seq in seq_group_metadata_list:
+            if not seq.is_prompt:
+                raise Exception("All inputs expected to be prompt-like!")
+
+        # Check if all inputs are prompts
+
+        # Prepare input tensors.
+        # For now, naive implementation states
+        # TODO: 
+        # Call prepare_inputs outside, and maintain a consistant tensor 
+        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+            seq_group_metadata_list)
+
+        # Execute the model.
+        output = self.target_model(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=self.gpu_cache,
+            input_metadata=input_metadata,
+            cache_events=None,
+        )
+        return output
