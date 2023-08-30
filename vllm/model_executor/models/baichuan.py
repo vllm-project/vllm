@@ -32,10 +32,12 @@ from vllm.sequence import SequenceOutputs
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, PagedAttentionWithALiBi
+from vllm.model_executor.layers.attention import (PagedAttentionWithRoPE,
+                                                  PagedAttentionWithALiBi)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
+from vllm.model_executor.weight_utils import (
+    hf_model_weights_iterator, load_padded_tensor_parallel_vocab,
+    load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
@@ -295,10 +297,7 @@ class BaiChuanBaseForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = [
-        "embed_tokens.weight",
-        "lm_head.weight",
-    ]
+    _column_parallel_weights = []
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
     def load_weights(self,
@@ -313,16 +312,6 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, use_np_cache):
             if "rotary_emb.inv_freq" in name:
                 continue
-
-            if "embed_tokens" in name or "lm_head" in name:
-                # Consider padding in the vocab size.
-                param = state_dict[name]
-                padded_vocab_size = param.shape[0] * tp_world_size
-                num_extra_rows = padded_vocab_size - self.config.vocab_size
-                extra_rows = torch.empty(num_extra_rows,
-                                         loaded_weight.shape[1])
-                extra_rows = extra_rows.to(loaded_weight)
-                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
 
             if "W_pack" in name:
                 total_num_heads = self.config.num_attention_heads
@@ -355,6 +344,12 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 continue
 
             param = state_dict[name]
+
+            if "embed_tokens" in name or "lm_head" in name:
+                load_padded_tensor_parallel_vocab(param, loaded_weight,
+                                                  tp_rank)
+                continue
+
             load_tensor_parallel_weights(
                 param,
                 loaded_weight,
