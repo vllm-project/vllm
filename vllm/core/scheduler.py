@@ -64,6 +64,9 @@ class Scheduler:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
 
+        self.prompt_limit = min(self.scheduler_config.max_model_len,
+                                self.scheduler_config.max_num_batched_tokens)
+
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Create the block space manager.
@@ -123,18 +126,15 @@ class Scheduler:
                 seq_group = self.waiting[0]
 
                 num_prompt_tokens = seq_group.get_seqs()[0].get_len()
-                prompt_limit = min(
-                    self.scheduler_config.max_model_len,
-                    self.scheduler_config.max_num_batched_tokens)
-                if num_prompt_tokens > prompt_limit:
+                if num_prompt_tokens > self.prompt_limit:
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
-                        f" and exceeds limit of {prompt_limit}")
+                        f" and exceeds limit of {self.prompt_limit}")
                     for seq in seq_group.get_seqs():
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
                     self.waiting.pop(0)
-                    break
+                    continue
 
                 # If the sequence group cannot be allocated, stop.
                 if not self.block_manager.can_allocate(seq_group):
@@ -379,9 +379,6 @@ class Scheduler:
         seq_group: SequenceGroup,
         blocks_to_swap_out: Dict[int, int],
     ) -> None:
-        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-        for seq in seqs:
-            seq.status = SequenceStatus.SWAPPED
         self._swap_out(seq_group, blocks_to_swap_out)
         self.swapped.append(seq_group)
 

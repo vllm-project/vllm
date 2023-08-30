@@ -32,8 +32,9 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
+from vllm.model_executor.weight_utils import (
+    hf_model_weights_iterator, load_padded_tensor_parallel_vocab,
+    load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
@@ -252,13 +253,15 @@ class GPTBigCodeForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["wte.weight", "c_fc.weight", "c_fc.bias"]
+    _column_parallel_weights = ["c_fc.weight", "c_fc.bias"]
     _row_parallel_weights = ["c_proj.weight"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      use_np_cache: bool = False):
+        tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
@@ -288,8 +291,7 @@ class GPTBigCodeForCausalLM(nn.Module):
                 hidden_size = self.config.hidden_size
                 head_size = hidden_size // total_num_heads
                 total_kv_size = head_size * total_num_kv_heads
-                num_heads = (total_num_heads //
-                             self.tensor_model_parallel_world_size)
+                num_heads = total_num_heads // tensor_model_parallel_world_size
                 head_start = tensor_model_parallel_rank * num_heads
                 head_end = (tensor_model_parallel_rank + 1) * num_heads
 
@@ -327,14 +329,9 @@ class GPTBigCodeForCausalLM(nn.Module):
             param = state_dict[name]
 
             if name == "transformer.wte.weight":
-                # Consider padding in the vocab size.
-                padded_vocab_size = param.shape[
-                    0] * self.tensor_model_parallel_world_size
-                num_extra_rows = padded_vocab_size - self.config.vocab_size
-                extra_rows = torch.empty(num_extra_rows,
-                                         loaded_weight.shape[1])
-                extra_rows = extra_rows.to(loaded_weight)
-                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
+                load_padded_tensor_parallel_vocab(param, loaded_weight,
+                                                  tensor_model_parallel_rank)
+                continue
 
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
