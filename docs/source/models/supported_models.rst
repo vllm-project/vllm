@@ -15,7 +15,7 @@ Alongside each architecture, we include some popular models that use it.
     - Models
     - Example HuggingFace Models
   * - :code:`AquilaForCausalLM`
-    - Aqualia
+    - Aquila
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
