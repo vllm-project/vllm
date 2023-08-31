@@ -1,17 +1,18 @@
-import time
 import copy
+import time
 from functools import partial
-from typing import Any, List, Optional, Tuple, Union, Iterable, TYPE_CHECKING
-import asyncio
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
+
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
+from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import Sequence, SequenceGroup, SequenceStatus, SequenceGroupMetadata
+from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupMetadata,
+                           SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
@@ -116,7 +117,8 @@ class LLMEngine:
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import \
+            Worker  # pylint: disable=import-outside-toplevel
 
         assert self.parallel_config.world_size == 1, (
             "Ray is required if parallel_config.world_size > 1.")
@@ -139,7 +141,8 @@ class LLMEngine:
                           **ray_remote_kwargs):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import \
+            Worker  # pylint: disable=import-outside-toplevel
 
         self.workers: List[Worker] = []
         for bundle in placement_group.bundle_specs:
@@ -296,11 +299,6 @@ class LLMEngine:
                Optional[List[RequestOutput]]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         if scheduler_outputs.is_empty():
-            if not scheduler_outputs.ignored_seq_groups:
-                # Nothing to do.
-                return seq_group_metadata_list, scheduler_outputs, []
-            # If there are ignored seq groups, we need to return them as the
-            # request outputs.
             return seq_group_metadata_list, scheduler_outputs, [
                 RequestOutput.from_seq_group(seq_group)
                 for seq_group in scheduler_outputs.ignored_seq_groups
@@ -331,32 +329,6 @@ class LLMEngine:
             self._log_system_stats(scheduler_outputs.prompt_run,
                                    scheduler_outputs.num_batched_tokens)
         return request_outputs
-
-    async def step_async(self) -> List[RequestOutput]:
-        """Performs one decoding iteration and returns newly generated results.
-        The workers are ran asynchronously if possible.
-
-        This function performs one decoding iteration of the engine. It first
-        schedules the sequences to be executed in the next iteration and the
-        token blocks to be swapped in/out/copy. Then, it executes the model
-        and updates the scheduler with the model outputs. Finally, it decodes
-        the sequences and returns the newly generated results.
-        """
-        (seq_group_metadata_list, scheduler_outputs,
-         early_return) = self._schedule()
-        if early_return is not None:
-            return early_return
-
-        # Execute the model.
-        output = await self._run_workers_async(
-            "execute_model",
-            seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
-            blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
-            blocks_to_copy=scheduler_outputs.blocks_to_copy,
-        )
-
-        return self._process_worker_outputs(output, scheduler_outputs)
 
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
@@ -516,36 +488,6 @@ class LLMEngine:
 
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)
-
-        if get_all_outputs:
-            return all_outputs
-
-        # Make sure all workers have the same results.
-        output = all_outputs[0]
-        for other_output in all_outputs[1:]:
-            assert output == other_output
-        return output
-
-    async def _run_workers_async(
-        self,
-        method: str,
-        *args,
-        get_all_outputs: bool = False,
-        **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers."""
-        all_outputs = []
-        for worker in self.workers:
-            if self.parallel_config.worker_use_ray:
-                executor = partial(worker.execute_method.remote, method)
-            else:
-                executor = getattr(worker, method)
-
-            output = executor(*args, **kwargs)
-            all_outputs.append(output)
-
-        if self.parallel_config.worker_use_ray:
-            all_outputs = await asyncio.gather(*all_outputs)
 
         if get_all_outputs:
             return all_outputs

@@ -1,6 +1,6 @@
 import enum
 import time
-from typing import Dict, List, Optional, Tuple, Union, Iterable
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.block_manager import BlockSpaceManager

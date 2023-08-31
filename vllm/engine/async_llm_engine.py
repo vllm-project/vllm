@@ -1,6 +1,7 @@
 import asyncio
 import time
-from typing import Dict, List, Optional, Iterable, Type
+from functools import partial
+from typing import Any, Dict, Iterable, List, Optional, Set, Type
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -11,8 +12,6 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
-
-TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds
 
 
 class AsyncStream:
@@ -47,12 +46,72 @@ class AsyncStream:
         return result
 
 
-def _raise_exception_on_finish(task: asyncio.Task, ) -> None:
+def _raise_exception_on_finish(task: asyncio.Task) -> None:
     try:
         task.result()
     except Exception as e:
         raise RuntimeError("Task finished unexpectedly.") from e
     raise RuntimeError("Task finished unexpectedly.")
+
+
+class _AsyncLLMEngine(LLMEngine):
+    """Extension of LLMEngine to add async methods."""
+
+    async def step_async(self) -> List[RequestOutput]:
+        """Performs one decoding iteration and returns newly generated results.
+        The workers are ran asynchronously if possible.
+
+        This function performs one decoding iteration of the engine. It first
+        schedules the sequences to be executed in the next iteration and the
+        token blocks to be swapped in/out/copy. Then, it executes the model
+        and updates the scheduler with the model outputs. Finally, it decodes
+        the sequences and returns the newly generated results.
+        """
+        (seq_group_metadata_list, scheduler_outputs,
+         early_return) = self._schedule()
+        if early_return is not None:
+            return early_return
+
+        # Execute the model.
+        output = await self._run_workers_async(
+            "execute_model",
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+            blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+            blocks_to_copy=scheduler_outputs.blocks_to_copy,
+        )
+
+        return self._process_worker_outputs(output, scheduler_outputs)
+
+    async def _run_workers_async(
+        self,
+        method: str,
+        *args,
+        get_all_outputs: bool = False,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers."""
+        all_outputs = []
+        for worker in self.workers:
+            if self.parallel_config.worker_use_ray:
+                executor = partial(worker.execute_method.remote, method)
+            else:
+                executor = getattr(worker, method)
+
+            output = executor(*args, **kwargs)
+            all_outputs.append(output)
+
+        if self.parallel_config.worker_use_ray:
+            all_outputs = await asyncio.gather(*all_outputs)
+
+        if get_all_outputs:
+            return all_outputs
+
+        # Make sure all workers have the same results.
+        output = all_outputs[0]
+        for other_output in all_outputs[1:]:
+            assert output == other_output
+        return output
 
 
 class AsyncLLMEngine:
@@ -77,7 +136,7 @@ class AsyncLLMEngine:
         *args, *kwargs: Arguments for LLMEngine.
     """
 
-    _engine_class: Type[LLMEngine] = LLMEngine
+    _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
 
     def __init__(self,
                  worker_use_ray: bool,
@@ -93,6 +152,7 @@ class AsyncLLMEngine:
 
         # Request id -> stream.
         self.request_streams: Dict[str, AsyncStream] = {}
+        self.finished_requests: Set[str] = set()
         self.background_loop = None
         if not inline:
             # Start the background loop.
@@ -124,16 +184,12 @@ class AsyncLLMEngine:
                 if self.log_requests:
                     logger.info(f"Finished request {request_id}.")
                 self.request_streams[request_id].finish()
+                self.finished_requests.add(request_id)
 
-        # Clean up aborted and finished requests.
-        finished_requests = set()
-        for stream in self.request_streams.values():
-            if stream.finished:
-                finished_requests.add(stream.request_id)
-
-        await self._engine_abort(finished_requests)
-        for request_id in finished_requests:
+        await self._engine_abort(self.finished_requests)
+        for request_id in self.finished_requests:
             del self.request_streams[request_id]
+        self.finished_requests.clear()
 
     async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
@@ -250,6 +306,7 @@ class AsyncLLMEngine:
             logger.info(f"Aborted request {request_id}.")
 
         self.request_streams[request_id].finish()
+        self.finished_requests.add(request_id)
 
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
