@@ -95,13 +95,37 @@ def _test_model(
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
 
-# def test_opt() -> None:
-#     _test_model(model="facebook/opt-125m")
+def test_opt() -> None:
+    _test_model(model="facebook/opt-125m")
 
 
 def test_gpt2() -> None:
     _test_model(model="gpt2")
 
 
-# def test_llama() -> None:
-#     _test_model(model="huggyllama/llama-7b")
+def test_gpt_bigcode() -> None:
+    _test_model(model="bigcode/tiny_starcoder_py")
+
+
+def test_gpt_j() -> None:
+    _test_model(model="EleutherAI/gpt-j-6b")
+
+
+def test_gpt_neox() -> None:
+    _test_model(model="EleutherAI/pythia-70m")
+
+
+def test_bloom() -> None:
+    _test_model(model="bigscience/bloom-560m")
+
+
+def test_mpt() -> None:
+    _test_model(model="mosaicml/mpt-7b")
+
+
+def test_falcon() -> None:
+    _test_model(model="tiiuae/falcon-7b")
+
+
+def test_llama() -> None:
+    _test_model(model="meta-llama/Llama-2-7b-hf")
