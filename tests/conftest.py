@@ -70,7 +70,6 @@ class HfRunner:
             )[0]
             output_ids = output_ids[0].cpu().tolist()
             outputs.append((output_ids, output_str))
-        torch.cuda.memory.empty_cache()
         return outputs
 
     def generate_greedy(
@@ -103,13 +102,11 @@ class VllmRunner:
             swap_space=0,
         )
 
-    def generate_greedy(
+    def generate(
         self,
         prompts: List[str],
-        max_tokens: int,
+        sampling_params: SamplingParams,
     ) -> List[Tuple[List[int], str]]:
-        sampling_params = SamplingParams(
-            temperature=0.0, max_tokens=max_tokens)
         req_outputs = self.model.generate(
             prompts, sampling_params=sampling_params)
         outputs = []
@@ -119,8 +116,15 @@ class VllmRunner:
             output_str = req_output.outputs[0].text
             output_ids = req_output.outputs[0].token_ids
             outputs.append((prompt_ids + output_ids, prompt_str + output_str))
-        torch.cuda.memory.empty_cache()
         return outputs
+
+    def generate_greedy(
+        self,
+        prompts: List[str],
+        max_tokens: int,
+    ) -> List[Tuple[List[int], str]]:
+        greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+        return self.generate(prompts, greedy_params)
 
 
 @pytest.fixture
