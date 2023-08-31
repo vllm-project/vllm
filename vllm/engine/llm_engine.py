@@ -6,12 +6,12 @@ from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import EngineArgs, SpSEngineArgs
 from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.sequence import Sequence, SequenceGroup, SequenceStatus, SequenceGroupMetadata
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _LOGGING_INTERVAL_SEC = 5
+
 
 class LLMEngine:
     """An LLM engine that receives requests and generates texts.
@@ -484,6 +485,7 @@ class LLMEngine:
 
 
 class SpSLLMEngine(LLMEngine):
+
     def __init__(
         self,
         draft_model_config: ModelConfig,
@@ -495,6 +497,11 @@ class SpSLLMEngine(LLMEngine):
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
+        """
+        SpS 가능하게끔 SpS엔진을 개조했습니다.
+        draft model과 target model 모두 tensor-parallel로 돌리는 naive한 접근입니다
+
+        """
         logger.info(
             "Initializing an SpSLLM engine with config: "
             f"draft model={draft_model_config.model!r}, "
@@ -532,7 +539,7 @@ class SpSLLMEngine(LLMEngine):
             draft_model_config.tokenizer,
             tokenizer_mode=draft_model_config.tokenizer_mode,
             trust_remote_code=draft_model_config.trust_remote_code)
-        
+
         self.target_tokenizer = get_tokenizer(
             target_model_config.tokenizer,
             tokenizer_mode=target_model_config.tokenizer_mode,
@@ -550,6 +557,7 @@ class SpSLLMEngine(LLMEngine):
         self._init_cache()
 
         # Create the scheduler.
+        # NOTE: Do we need target scheduler?
         self.scheduler = Scheduler(scheduler_config, cache_config)
 
         # Logging.
@@ -559,19 +567,18 @@ class SpSLLMEngine(LLMEngine):
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
 
-
-        
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import SpSWorker  # pylint: disable=import-outside-toplevel
 
         assert self.parallel_config.world_size == 1, (
             "Ray is required if parallel_config.world_size > 1.")
 
-        self.workers: List[Worker] = []
-        worker = Worker(
-            self.model_config,
+        self.workers: List[SpSWorker] = []
+        worker = SpSWorker(
+            self.draft_model_config,
+            self.target_model_config,
             self.parallel_config,
             self.scheduler_config,
             0,
@@ -586,9 +593,9 @@ class SpSLLMEngine(LLMEngine):
     def _init_workers_ray(self, placement_group: "PlacementGroup"):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import SpSWorker  # pylint: disable=import-outside-toplevel
 
-        self.workers: List[Worker] = []
+        self.workers: List[SpSWorker] = []
         for bundle in placement_group.bundle_specs:
             if not bundle.get("GPU", 0):
                 continue
@@ -602,14 +609,18 @@ class SpSLLMEngine(LLMEngine):
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
+        # NOTE: We now have two models!
         init_torch_dist_process_group(self.workers, backend="nccl")
-        model_config = copy.deepcopy(self.model_config)
+        draft_model_config = copy.deepcopy(self.draft_model_config)
+        target_model_config = copy.deepcopy(self.target_model_config)
+
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
         self._run_workers("init_worker",
                           get_all_outputs=True,
-                          worker_init_fn=lambda: Worker(
-                              model_config,
+                          worker_init_fn=lambda: SpSWorker(
+                              draft_model_config,
+                              target_model_config,
                               parallel_config,
                               scheduler_config,
                               None,
@@ -621,7 +632,10 @@ class SpSLLMEngine(LLMEngine):
         )
 
     def _verify_args(self) -> None:
-        self.model_config.verify_with_parallel_config(self.parallel_config)
+        self.draft_model_config.verify_with_parallel_config(
+            self.parallel_config)
+        self.target_model_config.verify_with_parallel_config(
+            self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
     def _init_cache(self) -> None:
@@ -655,12 +669,14 @@ class SpSLLMEngine(LLMEngine):
         # Initialize the cache.
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
 
+    # TODO: Make SpSEngineArgs that specifies two models!
     @classmethod
-    def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
+    def from_engine_args(cls, engine_args: SpSEngineArgs) -> "SpSLLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
-        parallel_config = engine_configs[2]
+        parallel_config = engine_configs[
+            3]  # draft-model target-model cache parallel
         # Initialize the cluster.
         distributed_init_method, placement_group = initialize_cluster(
             parallel_config)
@@ -685,6 +701,12 @@ class SpSLLMEngine(LLMEngine):
         scheduler as `engine.step()` is called. The exact scheduling policy is
         determined by the scheduler.
 
+        ** Changes for SpS **
+
+        -> I think not..
+        -> SpS algorithm will be handled in Scheduler Level!
+        -> aka. SpSScheduler
+
         Args:
             request_id: The unique ID of the request.
             prompt: The prompt string. Can be None if prompt_token_ids is
@@ -699,7 +721,7 @@ class SpSLLMEngine(LLMEngine):
             arrival_time = time.time()
         if prompt_token_ids is None:
             assert prompt is not None
-            prompt_token_ids = self.tokenizer.encode(prompt)
+            prompt_token_ids = self.draft_tokenizer.encode(prompt)
 
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -744,6 +766,14 @@ class SpSLLMEngine(LLMEngine):
         token blocks to be swapped in/out/copy. Then, it executes the model
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
+
+        ** Changes for SpS **
+        -> Large body of SpS algorithm should run here
+        -> small_model should be run step-wise.
+        -> If sequence generated K times, Large model should be run
+
+        Notes:
+
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         if scheduler_outputs.is_empty():
@@ -759,21 +789,44 @@ class SpSLLMEngine(LLMEngine):
 
         # Execute the model.
         output = self._run_workers(
-            "execute_model",
+            "execute_draft_model",
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
+
+        # Scenarios for SpS
         # Update the scheduler with the model outputs.
         seq_groups = self.scheduler.update(output)
 
         # Decode the sequences.
-        self._decode_sequences(seq_groups)
+        self._decode_sequences(seq_groups)  # No Change!
         # Stop the sequences that meet the stopping criteria.
-        self._stop_sequences(seq_groups)
+        # NOTE: <EOS> 혹은 K개 생성을 해서 Stopping Criteria에 남았을 수 있다!!
+        self._stop_sequences(seq_groups)  # No Change
+
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
+
+        ## SPS Sequence Here ##
+
+        # For each stopped sequence,
+
+        # self.K = window_size
+        # Sequence마다 Prev_position 넣을 필요 있다!
+
+        # Conditions
+        # a. Tokens with <EOS> + All 검증 : Output으로 통과!
+        # b. Tokens with <EOS> | K : 검증 일고리즘 돌리기
+
+        # 검증 알고리즘
+        # 1. 검증으로 K' 구하기 : + Sample and exit
+        # 2. sequence length = K' 업데이트
+        # 3. Sequence 총 길이를 K'로 자르기
+        # 4. add_request 처럼 다시 scheduler에 넣기
+
+        #######################
 
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
@@ -850,12 +903,29 @@ class SpSLLMEngine(LLMEngine):
                     f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         self.last_logging_time = now
 
+    def _sps_verify_seqs(self,
+                         seq_group_metadata_list: List[SequenceGroupMetadata],
+                         seq_groups: List[SequenceGroup]) -> None:
+        """
+        Verification runs here!
+        Large model is run parallely for models.
+        """
+        for seq_group in seq_groups:
+            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                pass
+
+        output = self._run_workers(
+            "execute_target_model",
+            seq_group_metadata_list=seq_group_metadata_list,
+        )
+
+    # NOTE: Nothing to change
     def _decode_sequences(self, seq_groups: List[SequenceGroup]) -> None:
         """Decodes the sequence outputs."""
         for seq_group in seq_groups:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 new_token, new_output_text = detokenize_incrementally(
-                    self.tokenizer,
+                    self.draft_tokenizer,
                     seq.output_tokens,
                     seq.get_last_token_id(),
                     skip_special_tokens=True,
@@ -930,4 +1000,3 @@ class SpSLLMEngine(LLMEngine):
             assert output == other_output
 
         return output
-

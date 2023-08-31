@@ -185,6 +185,19 @@ class Sequence:
                 f"num_blocks={len(self.logical_token_blocks)})")
 
 
+class SqSSequence(Sequence):
+
+    def __init__(
+        self,
+        seq_id: int,
+        prompt: str,
+        prompt_token_ids: List[int],
+        block_size: int,
+    ) -> None:
+        super().__init__(seq_id, prompt, prompt_token_ids, block_size)
+        self.verified_tokens = len(prompt)
+
+
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 

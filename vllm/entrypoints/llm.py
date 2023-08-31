@@ -3,8 +3,8 @@ from typing import List, Optional, Union
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.arg_utils import EngineArgs, SpSEngineArgs
+from vllm.engine.llm_engine import LLMEngine, SpSLLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
@@ -160,3 +160,34 @@ class LLM:
         # its previous requests.
         outputs = sorted(outputs, key=lambda x: int(x.request_id))
         return outputs
+
+
+class SpSLLM(LLM):
+
+    def __init__(
+        self,
+        draft_model: str,
+        target_model: str,
+        tokenizer: Optional[str] = None,
+        tokenizer_mode: str = "auto",
+        trust_remote_code: bool = False,
+        tensor_parallel_size: int = 1,
+        dtype: str = "auto",
+        seed: int = 0,
+        **kwargs,
+    ) -> None:
+        if "disable_log_stats" not in kwargs:
+            kwargs["disable_log_stats"] = True
+        engine_args = SpSEngineArgs(
+            draft_model=draft_model,
+            target_model=target_model,
+            tokenizer=tokenizer,
+            tokenizer_mode=tokenizer_mode,
+            trust_remote_code=trust_remote_code,
+            tensor_parallel_size=tensor_parallel_size,
+            dtype=dtype,
+            seed=seed,
+            **kwargs,
+        )
+        self.llm_engine = SpSLLMEngine.from_engine_args(engine_args)
+        self.request_counter = Counter()

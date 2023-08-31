@@ -338,7 +338,9 @@ def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
 def _pad_to_max(x: List[int], max_len: int) -> List[int]:
     return x + [0] * (max_len - len(x))
 
+
 class SpSWorker(Worker):
+
     def __init__(
         self,
         draft_model_config: ModelConfig,
@@ -383,9 +385,9 @@ class SpSWorker(Worker):
 
         # Initialize the model.
         set_random_seed(self.draft_model_config.seed)
-        self.model = get_model(self.draft_model_config)
+        self.draft_model = get_model(self.draft_model_config)
         set_random_seed(self.target_model_config.seed)
-        self.model = get_model(self.target_model_config)
+        self.target_model = get_model(self.target_model_config)
 
     # TODO: Small, Large 둘 다 돌릴 때 가정해서 수정
     @torch.inference_mode()
@@ -404,7 +406,7 @@ class SpSWorker(Worker):
         # number of tokens equal to max_num_batched_tokens.
 
         # Enable top-k sampling to reflect the accurate memory usage.
-        vocab_size = self.model.config.vocab_size
+        vocab_size = self.target_model.config.vocab_size
         sampling_params = SamplingParams(top_p=0.99, top_k=vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
@@ -425,9 +427,10 @@ class SpSWorker(Worker):
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seqs)
 
-        # Execute the model. 
+        # Execute the model.
         # Both draft and target will be run
-        num_layers = self.draft_model_config.get_num_layers(self.parallel_config)
+        num_layers = self.draft_model_config.get_num_layers(
+            self.parallel_config)
         self.draft_model(
             input_ids=input_tokens,
             positions=input_positions,
@@ -436,7 +439,8 @@ class SpSWorker(Worker):
             cache_events=None,
         )
 
-        num_layers = self.target_model_config.get_num_layers(self.parallel_config)
+        num_layers = self.target_model_config.get_num_layers(
+            self.parallel_config)
         self.target_model(
             input_ids=input_tokens,
             positions=input_positions,
@@ -444,7 +448,6 @@ class SpSWorker(Worker):
             input_metadata=input_metadata,
             cache_events=None,
         )
-
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -516,11 +519,21 @@ class SpSWorker(Worker):
         )
         return output
 
+    def init_cache_engine(self, cache_config: CacheConfig) -> None:
+        self.cache_config = cache_config
+        self.block_size = cache_config.block_size
+        self.cache_engine = CacheEngine(self.cache_config,
+                                        self.target_model_config,
+                                        self.parallel_config)
+        self.cache_events = self.cache_engine.events
+        self.gpu_cache = self.cache_engine.gpu_cache
+
     # NOTE: We expect all elements to be prompt!
     @torch.inference_mode()
     def execute_target_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata], # TODO: Cache this outside
+            self,
+            seq_group_metadata_list: List[
+                SequenceGroupMetadata],  # TODO: Cache this outside
     ) -> Dict[int, SequenceOutputs]:
         # Issue cache operations.
 
@@ -536,12 +549,17 @@ class SpSWorker(Worker):
 
         # Prepare input tensors.
         # For now, naive implementation states
-        # TODO: 
-        # Call prepare_inputs outside, and maintain a consistant tensor 
+        # TODO:
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
 
+        # TODO: seq_group_metadata_list 에서 정지된 Token들을 받아와
+        # TODO: Token Re-Use 기법 필요해
+
         # Execute the model.
+
+        # NOTE: Prompt마다 [:N], [:N+1] .. [:N+K] 이런 방식으로 output 생성을 해야함
+
         output = self.target_model(
             input_ids=input_tokens,
             positions=input_positions,
