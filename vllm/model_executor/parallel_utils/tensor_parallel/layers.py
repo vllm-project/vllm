@@ -284,16 +284,16 @@ class ColumnParallelLinear(torch.nn.Module):
             self.register_parameter('scales', None)
         else:
             # Quantized parameters.
-            pack_factor = 32 // self.quant_config.w_bit
+            self.quant_config.pack_factor = 32 // self.quant_config.w_bit
             assert self.input_size % self.quant_config.w_bit == 0
-            assert self.output_size % pack_factor == 0
+            assert self.output_size % self.quant_config.pack_factor == 0
             self.qweight = Parameter(torch.empty(
                 self.input_size,
-                self.output_size_per_partition // pack_factor,
+                self.output_size_per_partition // self.quant_config.pack_factor,
                 device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
             self.qzeros = Parameter(torch.empty(
                 self.input_size // self.quant_config.group_size,
-                self.output_size_per_partition // pack_factor,
+                self.output_size_per_partition // self.quant_config.pack_factor,
                 device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
             self.scales = Parameter(torch.empty(
                 self.input_size // self.quant_config.group_size,
@@ -437,16 +437,15 @@ class RowParallelLinear(torch.nn.Module):
         else:
             # Quantized parameters.
             # TODO(julian-q) add initialization?
-            pack_factor = 32 // self.quant_config.w_bit
             assert self.input_size % self.quant_config.w_bit == 0
-            assert self.output_size % pack_factor == 0
+            assert self.output_size % self.quant_config.pack_factor == 0
             self.qweight = Parameter(torch.empty(
                 self.input_size,
-                self.output_size // pack_factor,
+                self.output_size // self.quant_config.pack_factor,
                 device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
             self.qzeros = Parameter(torch.empty(
                 self.input_size // self.quant_config.group_size,
-                self.output_size // pack_factor,
+                self.output_size // self.quant_config.pack_factor,
                 device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
             self.scales = Parameter(torch.empty(
                 self.input_size // self.quant_config.group_size,
