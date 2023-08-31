@@ -12,8 +12,7 @@ import torch.nn.functional as F
 import torch.nn.init as init
 from torch.nn.parameter import Parameter
 
-from vllm import quantization_ops
-
+from vllm.model_executor.functional import awq_linear
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -120,18 +119,6 @@ def _initialize_affine_weight_cpu(weight, output_size, input_size,
         return master_weight
     return None
 
-def _get_quantized_linear(input_size, output_size, quant_config, scales, qzeros):
-    def linear(input, qweight, bias=None):
-        out_shape = [input.shape[-2], output_size]
-        out = quantization_ops.gemm_forward_cuda(
-            input.reshape(-1, input.shape[-1]),
-            qweight,
-            scales,
-            qzeros,
-            32 // quant_config.w_bit)
-        out = out + bias if bias is not None else out
-        return out.reshape(out_shape)
-    return linear
 
 class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
@@ -295,7 +282,6 @@ class ColumnParallelLinear(torch.nn.Module):
             self.register_parameter('qweight', None)
             self.register_parameter('qzeros', None)
             self.register_parameter('scales', None)
-            self.linear = F.linear
         else:
             # Quantized parameters.
             assert self.input_size % self.quant_config.w_bit == 0
@@ -313,12 +299,6 @@ class ColumnParallelLinear(torch.nn.Module):
                 self.output_size,
                 device=torch.cuda.current_device(), dtype=params_dtype), requires_grad=False)
             self.register_parameter('weight', None)
-            self.linear = _get_quantized_linear(
-                self.input_size,
-                self.output_size,
-                self.quant_config,
-                self.scales,
-                self.qzeros)
 
         if bias:
             if use_cpu_initialization:
@@ -352,10 +332,10 @@ class ColumnParallelLinear(torch.nn.Module):
         input_parallel = input_
 
         # Matrix multiply.
-        if self.quant_config is not None:
-            output_parallel = self.linear(input_parallel, self.qweight, bias)
+        if self.quant_config and self.quant_config.method == "awq":
+            output_parallel = awq_linear(input_parallel, self.qweight, self.scales, self.qzeros, bias, w_bit=self.quant_config.w_bit)
         else:
-            output_parallel = self.linear(input_parallel, self.weight, bias)
+            output_parallel = F.linear(input_parallel, self.weight, bias)
 
         if self.gather_output:
             # All-gather across the partitions.
@@ -453,7 +433,6 @@ class RowParallelLinear(torch.nn.Module):
             self.register_parameter('qweight', None)
             self.register_parameter('qzeros', None)
             self.register_parameter('scales', None)
-            self.linear = F.linear
         else:
             # Quantized parameters.
             # TODO(julian-q) add initialization?
@@ -472,12 +451,6 @@ class RowParallelLinear(torch.nn.Module):
                 self.output_size,
                 device=torch.cuda.current_device(), dtype=params_dtype), requires_grad=False)
             self.register_parameter('weight', None)
-            self.linear = _get_quantized_linear(
-                self.input_size,
-                self.output_size,
-                self.quant_config,
-                self.scales,
-                self.qzeros)
 
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
@@ -515,10 +488,10 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
 
         # Matrix multiply.
-        if self.quant_config is not None:
-            output_parallel = self.linear(input_parallel, self.qweight)
+        if self.quant_config and self.quant_config.method == "awq":
+            output_parallel = awq_linear(input_parallel, self.qweight, self.scales, self.qzeros, w_bit=self.quant_config.w_bit)
         else:
-            output_parallel = self.linear(input_parallel, self.weight)
+            output_parallel = F.linear(input_parallel, self.weight)
 
         if self.reduce_results and self.world_size > 1:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
