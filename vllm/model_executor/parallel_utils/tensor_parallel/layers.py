@@ -122,7 +122,7 @@ def _initialize_affine_weight_cpu(weight, output_size, input_size,
 
 def _get_quantized_linear(input_size, output_size, quant_config, scales, qzeros):
     def linear(input, qweight, bias=None):
-        out_shape = [input_size, output_size]
+        out_shape = [input.shape[-2], output_size]
         out = quantization_ops.gemm_forward_cuda(
             input.reshape(-1, input.shape[-1]),
             qweight,
@@ -352,7 +352,10 @@ class ColumnParallelLinear(torch.nn.Module):
         input_parallel = input_
 
         # Matrix multiply.
-        output_parallel = self.linear(input_parallel, self.weight, bias)
+        if self.quant_config is not None:
+            output_parallel = self.linear(input_parallel, self.qweight, bias)
+        else:
+            output_parallel = self.linear(input_parallel, self.weight, bias)
 
         if self.gather_output:
             # All-gather across the partitions.
@@ -512,7 +515,10 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
 
         # Matrix multiply.
-        output_parallel = self.linear(input_parallel, self.weight)
+        if self.quant_config is not None:
+            output_parallel = self.linear(input_parallel, self.qweight)
+        else:
+            output_parallel = self.linear(input_parallel, self.weight)
 
         if self.reduce_results and self.world_size > 1:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)

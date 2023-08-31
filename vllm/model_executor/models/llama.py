@@ -255,8 +255,7 @@ class LlamaForCausalLM(nn.Module):
                                             vocab_size,
                                             bias=False,
                                             gather_output=False,
-                                            perform_initialization=False,
-                                            quant_config=quant_config)
+                                            perform_initialization=False)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -320,7 +319,7 @@ class LlamaForCausalLM(nn.Module):
             for weight_name, shard_size, offset in attention_weight_specs:
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "qkv_proj.linear")]
+                param = state_dict[name.replace(weight_name, "qkv_proj")]
 
                 if not is_quantized:
                     loaded_weight = loaded_weight[
@@ -330,9 +329,9 @@ class LlamaForCausalLM(nn.Module):
                 else:
                     # TODO: this is specific to AWQ
                     if "qweight" in name or "qzeros" in name:
-                        adjustment = 32 / self.quant_config.bits
-                        shard_size = int(shard_size // adjustment)
-                        offset = int(offset // adjustment)
+                        adjustment = 32 // self.quant_config.w_bit
+                        shard_size = shard_size // adjustment
+                        offset = offset // adjustment
                     param_slice = param.data[:, offset:offset + shard_size]
 
                 assert param_slice.shape == loaded_weight.shape
@@ -347,7 +346,7 @@ class LlamaForCausalLM(nn.Module):
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj.linear")]
+                param = state_dict[name.replace(weight_name, "gate_up_proj")]
 
                 if not is_quantized:
                     shard_size = param.shape[0] // 2
@@ -369,7 +368,7 @@ class LlamaForCausalLM(nn.Module):
             if is_gate_up_weight:
                 continue
 
-            param = state_dict[name.replace('o_proj', 'o_proj.linear').replace('down_proj', 'down_proj.linear')]
+            param = state_dict[name]
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
