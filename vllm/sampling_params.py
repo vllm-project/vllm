@@ -102,6 +102,15 @@ class SamplingParams:
         if self.repetition_penalty <= 0.0:
             raise ValueError("repetition_penalty must be a strictly positive "
                              f"float, got {self.repetition_penalty}.")
+        if self.repetition_penalty != 1.0 and (
+                abs(self.frequency_penalty) > _SAMPLING_EPS
+                or abs(self.presence_penalty) > _SAMPLING_EPS):
+            raise ValueError(
+                f"repetition_penalty cannot be used with "
+                f"frequency_penalty and presence_penalty."
+                f"got repetition_penalty={self.repetition_penalty}, "
+                f"frequency_penalty={self.frequency_penalty}, "
+                f"presence_penalty={self.presence_penalty}")
         if self.temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negative, got {self.temperature}.")
