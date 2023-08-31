@@ -1,4 +1,3 @@
-
 from typing import List, Optional, Tuple
 
 import pytest
