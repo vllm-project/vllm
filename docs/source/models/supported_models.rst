@@ -15,7 +15,7 @@ Alongside each architecture, we include some popular models that use it.
     - Models
     - Example HuggingFace Models
   * - :code:`AquilaForCausalLM`
-    - Aqualia
+    - Aquila
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
@@ -43,14 +43,14 @@ Alongside each architecture, we include some popular models that use it.
     - :code:`internlm/internlm-7b`, :code:`internlm/internlm-chat-7b`, etc.
   * - :code:`LlamaForCausalLM`
     - LLaMA, LLaMA-2, Vicuna, Alpaca, Koala, Guanaco
-    - :code:`meta-llama/Llama-2-13b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, :code:`JosephusCheung/Guanaco`, etc.
+    - :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, etc.
   * - :code:`MPTForCausalLM`
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.
-  * - :code:`OPTForCausalLM`
+  * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
 
