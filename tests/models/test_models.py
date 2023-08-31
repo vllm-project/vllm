@@ -11,7 +11,7 @@ def _test_model(
     test_prompts,
     model: str,
     tokenizer: Optional[str] = None,
-    max_tokens: int = 32,
+    max_tokens: int = 128,
 ) -> None:
     hf_model = hf_runner(model, tokenizer)
     hf_outputs = hf_model.generate_greedy(test_prompts, max_tokens)
