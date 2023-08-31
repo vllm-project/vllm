@@ -162,7 +162,7 @@ class Scheduler:
                 num_batched_tokens += num_prompt_tokens
                 scheduled.append(seq_group)
 
-            if scheduled:
+            if scheduled or ignored_seq_groups:
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
