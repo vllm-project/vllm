@@ -10,17 +10,27 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
+from vllm.config import WeightQuantizationConfig
+
 
 class Disabledtqdm(tqdm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, disable=True)
 
+def is_transposed_or_packed(param_name, quant_config):
+    if quant_config and quant_config.method == "awq":
+        transposed = any([tag in param_name for tag in ["qweight", "scales", "qzeros"]])
+        packed = any([tag in param_name for tag in ["qweight", "qzeros"]])
+    else:
+        transposed = packed = False
+    return transposed, packed
 
 def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
     use_np_cache: bool = False,
+    quant_config: Optional[WeightQuantizationConfig] = None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     # Prepare file lock directory to prevent multiple processes from
     # downloading the same model weights at the same time.
@@ -70,12 +80,19 @@ def hf_model_weights_iterator(
             param_path = os.path.join(np_folder, name)
             with open(param_path, "rb") as f:
                 param = np.load(f)
-            yield name, torch.from_numpy(param)
+            param = torch.from_numpy(param)
+            transposed, packed = is_transposed_or_packed(name, quant_config)
+            if transposed:
+                param = param.T
+            yield name, param, transposed, packed
     else:
         for bin_file in hf_bin_files:
             state = torch.load(bin_file, map_location="cpu")
             for name, param in state.items():
-                yield name, param
+                transposed, packed = is_transposed_or_packed(name, quant_config)
+                if transposed:
+                    param = param.T
+                yield name, param, transposed, packed
 
 
 def load_tensor_parallel_weights(
@@ -105,6 +122,11 @@ def load_tensor_parallel_weights(
         f"{param.shape} != {loaded_weight.shape}")
     param.data.copy_(loaded_weight)
 
+def get_param(state_dict, key, transposed=False):
+    param = state_dict[key]
+    if transposed:
+        return param.T
+    return param
 
 def initialize_dummy_weights(
     model: torch.nn.Module,

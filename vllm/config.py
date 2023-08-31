@@ -30,6 +30,10 @@ class WeightQuantizationConfig:
         self.method = method
         self.w_bit = w_bit
         self.group_size = group_size
+        if method == "awq":
+            self.pack_factor = 32 // w_bit
+        else:
+            self.pack_factor = 1
         self._verify()
 
     def _verify(self) -> None:
