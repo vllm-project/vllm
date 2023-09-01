@@ -318,7 +318,6 @@ class LLMEngine:
         )
 
         seq_groups = scheduler_outputs.scheduled_seq_groups
-
         self._process_model_output(seq_groups, output)
 
         # Free the finished sequence groups.

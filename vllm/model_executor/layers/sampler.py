@@ -299,7 +299,8 @@ def _sample_from_prompt(
         # probability we can get `beam_width` candidates in addition to
         # the finished sequences for the next iteration. See
         # https://github.com/tensorflow/tensor2tensor/blob/bafdc1b67730430d38d6ab802cbd51f9d053ba2e/tensor2tensor/utils/beam_search.py#L557-L563
-        # for details.
+        # for details. See also HF reference:
+        # https://github.com/huggingface/transformers/blob/a4dd53d88e4852f023332d284ff07a01afcd5681/src/transformers/generation/utils.py#L3063-L3065
         _, next_token_ids = torch.topk(prob, 2 * beam_width)
         next_token_ids = next_token_ids.tolist()
     elif sampling_params.temperature < _SAMPLING_EPS:
@@ -370,7 +371,7 @@ def _sample(
     # TODO(woosuk): Optimize.
     idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
-        seq_group_outputs = []
+        seq_group_outputs: List[SequenceOutputs] = []
         seq_ids, sampling_params = seq_group
         if i < input_metadata.num_prompts:
             # Generate the next tokens for a prompt input.

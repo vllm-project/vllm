@@ -32,7 +32,6 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
-
 from vllm.transformers_utils.configs.qwen import QWenConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
