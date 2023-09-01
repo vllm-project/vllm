@@ -275,9 +275,20 @@ class LlamaForCausalLM(nn.Module):
 
     _column_parallel_weights = [
         "embed_tokens.weight", "lm_head.weight", "qkv_proj.weight",
-        "gate_proj.weight", "up_proj.weight"
+        "gate_proj.weight", "up_proj.weight",
+        "embed_tokens.qweight", "lm_head.qweight", "qkv_proj.qweight",
+        "gate_proj.qweight", "up_proj.qweight"
+        "embed_tokens.qzeros", "lm_head.qzeros", "qkv_proj.qzeros",
+        "gate_proj.qzeros", "up_proj.qzeros"
+        "embed_tokens.scales", "lm_head.scales", "qkv_proj.scales",
+        "gate_proj.scales", "up_proj.scales"
     ]
-    _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
+    _row_parallel_weights = [
+        "o_proj.weight", "down_proj.weight",
+        "o_proj.qweight", "down_proj.qweight",
+        "o_proj.qzeros", "down_proj.qzeros",
+        "o_proj.scales", "down_proj.scales",
+    ]
 
     def load_weights(self,
                      model_name_or_path: str,

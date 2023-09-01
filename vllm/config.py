@@ -126,10 +126,6 @@ class ModelConfig:
                 "must be divisible by pipeline parallel size "
                 f"({pipeline_parallel_size}).")
 
-        if self.quantization_config and tensor_parallel_size > 1:
-            raise NotImplementedError(
-                "Quantization does not currently support tensor parallelism")
-
     def get_hidden_size(self) -> int:
         return self.hf_config.hidden_size
 

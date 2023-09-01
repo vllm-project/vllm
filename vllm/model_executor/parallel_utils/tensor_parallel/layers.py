@@ -284,9 +284,8 @@ class ColumnParallelLinear(torch.nn.Module):
             self.register_parameter('scales', None)
         else:
             # Quantized parameters.
-            self.quant_config.pack_factor = 32 // self.quant_config.w_bit
             assert self.input_size % self.quant_config.w_bit == 0
-            assert self.output_size % self.quant_config.pack_factor == 0
+            assert self.output_size_per_partition % self.quant_config.pack_factor == 0
             self.qweight = Parameter(torch.empty(
                 self.input_size,
                 self.output_size_per_partition // self.quant_config.pack_factor,
@@ -297,7 +296,7 @@ class ColumnParallelLinear(torch.nn.Module):
                 device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
             self.scales = Parameter(torch.empty(
                 self.input_size // self.quant_config.group_size,
-                self.output_size,
+                self.output_size_per_partition,
                 device=torch.cuda.current_device(), dtype=params_dtype), requires_grad=False)
             self.register_parameter('weight', None)
 
@@ -417,38 +416,38 @@ class RowParallelLinear(torch.nn.Module):
             # Initialize weight.
             if use_cpu_initialization:
                 self.weight = Parameter(torch.empty(self.output_size,
-                                                    self.input_size,
+                                                    self.input_size_per_partition,
                                                     dtype=params_dtype))
                 if perform_initialization:
                     self.master_weight = _initialize_affine_weight_cpu(
                         self.weight, self.output_size, self.input_size,
-                        self.output_size, 0, init_method,
+                        self.input_size_per_partition, 1, init_method,
                         stride=stride, return_master_weight=keep_master_weight_for_test)
             else:
                 self.weight = Parameter(torch.empty(
-                    self.output_size, self.input_size,
+                    self.output_size, self.input_size_per_partition,
                     device=torch.cuda.current_device(), dtype=params_dtype))
                 if perform_initialization:
                     _initialize_affine_weight_gpu(self.weight, init_method,
-                                                  partition_dim=0, stride=stride)
+                                                  partition_dim=1, stride=stride)
             self.register_parameter('qweight', None)
             self.register_parameter('qzeros', None)
             self.register_parameter('scales', None)
         else:
             # Quantized parameters.
             # TODO(julian-q) add initialization?
-            assert self.input_size % self.quant_config.w_bit == 0
+            assert self.input_size_per_partition % self.quant_config.w_bit == 0
             assert self.output_size % self.quant_config.pack_factor == 0
             self.qweight = Parameter(torch.empty(
-                self.input_size,
+                self.input_size_per_partition,
                 self.output_size // self.quant_config.pack_factor,
                 device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
             self.qzeros = Parameter(torch.empty(
-                self.input_size // self.quant_config.group_size,
+                self.input_size_per_partition // self.quant_config.group_size,
                 self.output_size // self.quant_config.pack_factor,
                 device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
             self.scales = Parameter(torch.empty(
-                self.input_size // self.quant_config.group_size,
+                self.input_size_per_partition // self.quant_config.group_size,
                 self.output_size,
                 device=torch.cuda.current_device(), dtype=params_dtype), requires_grad=False)
             self.register_parameter('weight', None)
