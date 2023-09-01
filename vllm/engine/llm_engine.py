@@ -348,11 +348,13 @@ class LLMEngine:
         if early_stopping is True:
             return True
 
-        current_worst_score = (
-            current_worst_seq.get_beam_search_score(length_penalty))
+        current_worst_score = (current_worst_seq.get_beam_search_score(
+            length_penalty=length_penalty,
+            eos_token_id=self.tokenizer.eos_token_id))
         if early_stopping is False:
-            highest_attainable_score = (
-                best_running_seq.get_beam_search_score(length_penalty))
+            highest_attainable_score = (best_running_seq.get_beam_search_score(
+                length_penalty=length_penalty,
+                eos_token_id=self.tokenizer.eos_token_id))
         else:
             assert early_stopping == "never"
             if length_penalty > 0.0:
@@ -365,13 +367,17 @@ class LLMEngine:
                     self.scheduler_config.max_model_len)
                 highest_attainable_score = (
                     best_running_seq.get_beam_search_score(
-                        length_penalty, max_possible_length))
+                        length_penalty=length_penalty,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                        seq_len=max_possible_length))
             else:
                 # Otherwise, beam search will prefer shorter sequences. The
                 # highest attainable score calculation is based on the current
                 # sequence length.
                 highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(length_penalty))
+                    best_running_seq.get_beam_search_score(
+                        length_penalty=length_penalty,
+                        eos_token_id=self.tokenizer.eos_token_id))
         return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_samples(
@@ -435,9 +441,10 @@ class LLMEngine:
                                  for seq, parent in child_seqs
                                  if seq.is_finished()]
             all_finished_seqs = existing_finished_seqs + new_finished_seqs
-            all_finished_seqs.sort(
-                key=lambda x: x[0].get_beam_search_score(length_penalty),
-                reverse=True)
+            all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
+                length_penalty=length_penalty,
+                eos_token_id=self.tokenizer.eos_token_id),
+                                   reverse=True)
             for seq, parent, is_new in all_finished_seqs[:beam_width]:
                 if is_new:
                     selected_child_seqs.append((seq, parent))
@@ -452,9 +459,10 @@ class LLMEngine:
             # search.
             running_child_seqs = [(seq, parent) for seq, parent in child_seqs
                                   if not seq.is_finished()]
-            running_child_seqs.sort(
-                key=lambda x: x[0].get_beam_search_score(length_penalty),
-                reverse=True)
+            running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
+                length_penalty=length_penalty,
+                eos_token_id=self.tokenizer.eos_token_id),
+                                    reverse=True)
 
             # Check if we can stop the beam search.
             if len(running_child_seqs) == 0:

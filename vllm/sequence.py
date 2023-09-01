@@ -178,9 +178,21 @@ class Sequence:
 
     def get_beam_search_score(self,
                               length_penalty: float = 0.0,
-                              seq_len: Optional[int] = None) -> float:
+                              seq_len: Optional[int] = None,
+                              eos_token_id: Optional[int] = None) -> float:
+        """Calculate the beam search score with length penalty.
+
+        Adapted from
+
+        https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
+        """
         if seq_len is None:
             seq_len = self.get_len()
+            # Note: HF implementation does not count the EOS token
+            # towards the length, we align with that here for testing.
+            if (eos_token_id is not None
+                    and self.get_last_token_id() == eos_token_id):
+                seq_len -= 1
         return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
     def is_finished(self) -> bool:
