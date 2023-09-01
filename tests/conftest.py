@@ -27,7 +27,7 @@ def example_prompts() -> List[str]:
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
-    "float32": torch.float,
+    "float": torch.float,
 }
 
 
