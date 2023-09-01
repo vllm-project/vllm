@@ -60,15 +60,23 @@ class Sampler(nn.Module):
         logits = _apply_penalties(logits, output_tokens, presence_penalties,
                                   frequency_penalties)
 
-        # The requests & logits are sorted by sampling type.
-        # Greedy requests are first.
-        sampling_type_offsets = input_metadata.sampling_type_offsets
+        # Sort logits by sampling type.
+        sampling_type_indices = input_metadata.sampling_type_indices
+        sampling_type_indices_values, sampling_type_indices_index = (
+            sampling_type_indices.sort())
+        # We use the bincount+cumsum to compute the offsets.
+        sampling_type_offsets = torch.bincount(sampling_type_indices_values,
+                                               minlength=3).cumsum(0)[:-1]
+        # The logit_to_id_map lets us reverse the sort we did above when we match
+        # outputs to sequences.
+        logit_to_id_map = sampling_type_indices_index.argsort()
+        logits = logits[sampling_type_indices_index]
 
         # If there are only greedy requests (and therefore, no requests
         # we can apply temperature & top_p/top_k to), we can return early.
         # Otherwise, we will slice the logits and modify only the non-greedy
         # subset.
-        if len(sampling_type_offsets) > 0:
+        if sampling_type_indices.max() > 0:
             non_greedy_offset = sampling_type_offsets[0]
             # Apply temperature scaling.
             temperatures = _get_temperatures(input_metadata)
@@ -102,7 +110,8 @@ class Sampler(nn.Module):
         logprobs = torch.log(probs)
 
         # Sample the next tokens.
-        return _sample(probs, logprobs, input_metadata)
+        return _sample(probs, logprobs, input_metadata, sampling_type_offsets,
+                       logit_to_id_map)
 
 
 def _prune_hidden_states(
@@ -397,7 +406,7 @@ def _sample_from_generation_tokens(
 
 
 def _batched_sample(gen_probs: torch.Tensor, gen_logprobs: torch.Tensor,
-                    sampling_type_offsets: List[int],
+                    sampling_type_offsets: torch.Tensor,
                     max_best_of: int) -> Tuple[torch.Tensor, torch.Tensor]:
     # Split the probs into multiple tensors, one for each sampling type.
     # tensor_split will create views of the probs tensor, meaning
@@ -452,6 +461,8 @@ def _sample(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     input_metadata: InputMetadata,
+    sampling_type_offsets: torch.Tensor,
+    logit_to_id_map: torch.Tensor,
 ) -> Dict[int, SequenceOutputs]:
     seq_outputs: Dict[int, SequenceOutputs] = {}
 
@@ -469,10 +480,13 @@ def _sample(
 
     gen_probs = probs
     gen_logprobs = logprobs
-    sampling_type_offsets = input_metadata.sampling_type_offsets
 
     batch_chosen_tokens_tensor, batch_chosen_logprobs_tensor = _batched_sample(
         gen_probs, gen_logprobs, sampling_type_offsets, max_best_of)
+
+    batch_chosen_logprobs_tensor = batch_chosen_logprobs_tensor[
+        logit_to_id_map]
+    batch_chosen_tokens_tensor = batch_chosen_tokens_tensor[logit_to_id_map]
 
     batch_chosen_logprobs_list = batch_chosen_logprobs_tensor.tolist()
     batch_chosen_tokens_list = batch_chosen_tokens_tensor.tolist()

@@ -150,12 +150,13 @@ class Worker:
         input_positions: List[int] = []
         slot_mapping: List[int] = []
 
-        # Sort the sequence groups by sampling type so that we can easily
-        # split the generated logits tensor during sampling.
-        seq_group_metadata_list = sorted(
-            seq_group_metadata_list,
-            key=lambda seq_group_metadata: seq_group_metadata.sampling_params.
-            sampling_type)
+        # Get the map of index -> sampling type
+        sampling_type_indices = torch.tensor([
+            seq_group_metadata.sampling_params.sampling_type
+            for seq_group_metadata in seq_group_metadata_list
+        ],
+                                             dtype=torch.long,
+                                             device="cpu")
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -201,20 +202,9 @@ class Worker:
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
 
-        # Store indices where the sampling type changes.
-        sampling_type_offsets = []
-        last_sampling_type = 0
-        cumulative_offset = 0
-
         for seq_group_metadata in seq_group_metadata_list:
 
             if seq_group_metadata.is_prompt:
-                if (seq_group_metadata.sampling_params.sampling_type !=
-                        last_sampling_type):
-                    sampling_type_offsets.append(cumulative_offset)
-                    last_sampling_type = (
-                        seq_group_metadata.sampling_params.sampling_type)
-                cumulative_offset += 1
                 continue
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -242,13 +232,6 @@ class Worker:
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
-                cumulative_offset += 1
-
-            if (seq_group_metadata.sampling_params.sampling_type !=
-                    last_sampling_type):
-                sampling_type_offsets.append(cumulative_offset)
-                last_sampling_type = (
-                    seq_group_metadata.sampling_params.sampling_type)
 
         # Optimization: Pad the input length to be a multiple of 8.
         # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
@@ -278,7 +261,7 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
-            sampling_type_offsets=sampling_type_offsets,
+            sampling_type_indices=sampling_type_indices,
         )
         return tokens_tensor, positions_tensor, input_metadata
 
