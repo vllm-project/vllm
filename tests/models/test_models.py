@@ -2,8 +2,6 @@
 
 Run `pytest tests/models/test_models.py --forked`.
 """
-from typing import Optional
-
 import pytest
 
 MODELS = [
@@ -20,19 +18,19 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("max_tokens", [128])
 def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
     model: str,
-    tokenizer: Optional[str] = None,
-    max_tokens: int = 128,
+    max_tokens: int,
 ) -> None:
-    hf_model = hf_runner(model, tokenizer)
+    hf_model = hf_runner(model)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, tokenizer)
+    vllm_model = vllm_runner(model)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
