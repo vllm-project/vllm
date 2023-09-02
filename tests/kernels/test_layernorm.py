@@ -1,16 +1,20 @@
+import pytest
 import torch
 import torch.nn as nn
 
 from vllm import layernorm_ops
+
+DTYPES = [torch.half, torch.bfloat16, torch.float]
+HIDDEN_SIZES = [67, 768, 2048, 5120, 8192]  # Arbitrary values for testing
+NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
+SEEDS = [0]
 
 
 class RefRMSNorm(nn.Module):
 
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
-        weight = torch.empty(hidden_size)
-        weight.uniform_(-1e-3, 1e-3)
-        self.weight = nn.Parameter(weight)
+        self.weight = nn.Parameter(torch.randn(hidden_size))
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
@@ -18,19 +22,26 @@ class RefRMSNorm(nn.Module):
                                                                keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance +
                                                     self.variance_epsilon)
-        if self.weight.dtype in [torch.half, torch.float16, torch.bfloat16]:
+        if self.weight.dtype in [torch.half, torch.bfloat16]:
             hidden_states = hidden_states.to(self.weight.dtype)
         return self.weight * hidden_states
 
 
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def run_rms_norm(
+def test_rms_norm(
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
+    seed: int,
 ) -> None:
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device='cuda')
-    ref = RefRMSNorm(hidden_size).to(dtype).cuda()
+    ref = RefRMSNorm(hidden_size).cuda().to(dtype)
 
     out = torch.empty_like(x)
     layernorm_ops.rms_norm(
@@ -41,16 +52,3 @@ def run_rms_norm(
     )
     ref_out = ref(x)
     assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-5)
-
-
-def test_rms_norm() -> None:
-    for dtype in [torch.half, torch.bfloat16, torch.float]:
-        for num_tokens in [7, 128, 2048]:
-            for hidden_size in [13, 64, 1024, 5120]:
-                print(f'Testing RMS kernel with dtype={dtype}, num_tokens='
-                      f'{num_tokens}, hidden_size={hidden_size}')
-                run_rms_norm(
-                    num_tokens=num_tokens,
-                    hidden_size=hidden_size,
-                    dtype=dtype,
-                )
