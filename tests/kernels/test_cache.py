@@ -1,5 +1,4 @@
 import random
-from typing import List, Tuple
 
 import pytest
 import torch
@@ -17,37 +16,6 @@ NUM_MAPPINGS = [32, 256]  # Arbitrary values for testing
 SEEDS = [0]
 
 
-def create_kv_caches(
-    num_blocks: int,
-    block_size: int,
-    num_layers: int,
-    num_heads: int,
-    head_size: int,
-    dtype: torch.dtype,
-    seed: int,
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-
-    x = 16 // torch.tensor([], dtype=dtype).element_size()
-    key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
-    key_caches = []
-    for _ in range(num_layers):
-        key_cache = torch.randn(size=key_cache_shape,
-                                dtype=dtype,
-                                device='cuda')
-        key_caches.append(key_cache)
-
-    value_cache_shape = (num_blocks, num_heads, head_size, block_size)
-    value_caches = []
-    for _ in range(num_layers):
-        value_cache = torch.randn(size=value_cache_shape,
-                                  dtype=dtype,
-                                  device='cuda')
-        value_caches.append(value_cache)
-    return key_caches, value_caches
-
-
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
 @pytest.mark.parametrize("num_layers", NUM_LAYERS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -58,6 +26,7 @@ def create_kv_caches(
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_copy_blocks(
+    kv_cache_factory,
     num_mappings: int,
     num_layers: int,
     num_heads: int,
@@ -67,6 +36,7 @@ def test_copy_blocks(
     dtype: torch.dtype,
     seed: int,
 ) -> None:
+    random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
@@ -84,7 +54,7 @@ def test_copy_blocks(
         block_mapping[src] = [dst1, dst2]
 
     # Create the KV caches.
-    key_caches, value_caches = create_kv_caches(num_blocks, block_size,
+    key_caches, value_caches = kv_cache_factory(num_blocks, block_size,
                                                 num_layers, num_heads,
                                                 head_size, dtype, seed)
 
@@ -124,6 +94,7 @@ def test_copy_blocks(
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_reshape_and_cache(
+    kv_cache_factory,
     num_tokens: int,
     num_heads: int,
     head_size: int,
@@ -132,6 +103,7 @@ def test_reshape_and_cache(
     dtype: torch.dtype,
     seed: int,
 ) -> None:
+    random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
@@ -149,7 +121,7 @@ def test_reshape_and_cache(
     _, key, value = qkv.unbind(dim=1)
 
     # Create the KV caches.
-    key_caches, value_caches = create_kv_caches(num_blocks, block_size, 1,
+    key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
                                                 num_heads, head_size, dtype,
                                                 seed)
     key_cache, value_cache = key_caches[0], value_caches[0]
