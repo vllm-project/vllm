@@ -11,7 +11,7 @@ from vllm import attention_ops
 MAX_SEQ_LEN = 8192
 NUM_BLOCKS = 128  # Arbitrary values for testing
 
-DTYPES = [torch.float]
+DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
@@ -27,12 +27,11 @@ def ref_masked_attention(
     scale: float,
     attn_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    query = query
-    attn = torch.einsum("qhd,khd->hqk", query, key)
-    attn = scale * attn
+    attn = scale * torch.einsum("qhd,khd->hqk", query, key)
     if attn_mask is not None:
-        attn = attn + attn_mask
+        attn = attn.to(attn_mask.dtype) + attn_mask
     attn = torch.softmax(attn, dim=-1)
+    attn = attn.to(value.dtype)
     out = torch.einsum("hqk,khd->qhd", attn, value)
     return out
 
@@ -80,7 +79,7 @@ def ref_single_query_cached_kv_attention(
 
         alibi_bias = None
         if alibi_slopes is not None:
-            alibi_bias = torch.arange(
+            alibi_bias = - context_len + torch.arange(
                 context_len, dtype=torch.float, device="cuda")
             alibi_bias = alibi_bias.view(1, 1, -1) * alibi_slopes.view(-1, 1, 1)
 
@@ -112,7 +111,7 @@ def test_single_query_cached_kv_attention(
     torch.cuda.manual_seed(seed)
 
     num_query_heads, num_kv_heads = num_heads
-    query = torch.empty(num_seqs,
+    query = torch.randn(num_seqs,
                         num_query_heads,
                         head_size,
                         dtype=dtype,
@@ -184,7 +183,7 @@ def test_single_query_cached_kv_attention(
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
     # outputs. Thus, we use a relaxed tolerance for the test.
-    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-5)
 
 
 def ref_multi_query_kv_attention(
