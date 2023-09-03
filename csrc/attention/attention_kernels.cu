@@ -276,7 +276,7 @@ __global__ void single_query_cached_kv_attention_kernel(
           for (int j = 0; j < V_VEC_SIZE; j++) {
             v_vec_arr[j] = token_idx + j < context_len ? v_ptr[offset + j] : zero_value;
           }
-          V_vec v_vec = *reinterpret_cast<const V_vec*>(v_vec_arr);
+          v_vec = *reinterpret_cast<const V_vec*>(v_vec_arr);
         }
         accs[i] += dot(logits_vec, v_vec);
       }
