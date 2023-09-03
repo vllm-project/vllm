@@ -72,3 +72,16 @@ Documentation
 
    models/supported_models
    models/adding_model
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer doc
+
+   dev/engine
+
+Indices and tables
+==================
+
+* :ref:`genindex`
+* :ref:`modindex`
+* :ref:`search`
