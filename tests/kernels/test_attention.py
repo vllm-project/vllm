@@ -17,7 +17,7 @@ NUM_PREFILL_SEQS = [1, 3, 7]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
-USE_ALIBI = [False, True]
+USE_ALIBI = [False]  # TODO(woosuk): Add USE_ALIBI=True
 SEEDS = [0]
 
 
