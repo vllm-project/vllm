@@ -267,7 +267,7 @@ inline __device__ Float8_ to_float(Float8_ u) {
 
 // Zero-out a variable.
 inline __device__ void zero(float& dst) {
-  dst = float(0.f);
+  dst = 0.f;
 }
 
 } // namespace vllm
