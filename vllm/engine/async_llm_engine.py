@@ -415,6 +415,18 @@ class AsyncLLMEngine:
         Yields:
             The output `RequestOutput` objects from the LLMEngine for the
             request.
+        
+        Details:
+            - Create an event to notify us that there is new request to the engine.
+            - Add the request into the engine's waiting queue via :meth:`~vllm.engine.llm_engine.LLMEngine.add_request`.
+            - Create a loop that keeps processing 
+               If the engine is not running, kick it off with :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step` 
+               Else, Wait for new output via :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.request_event.wait`.
+               If timed out, continue.
+               
+               Upon receiving a new result, decode and yield.
+
+               If the request is finished, release and reset necessary resources. 
         """
         # Preprocess the request.
         # This should not be used for logging, as it is monotonic time.
