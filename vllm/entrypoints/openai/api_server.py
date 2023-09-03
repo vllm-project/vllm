@@ -274,13 +274,17 @@ async def create_chat_completion(raw_request: Request):
                 i = output.index
                 prev_len = len(previous_texts[i])
                 delta_text = output.text[prev_len:]
-                if prev_len != 0:
-                    if len(output.text) > prev_len:
+                output_len = len(output.text)
+                # skip first word
+                if prev_len != 0 and output.finish_reason is None:
+                    # valid word
+                    if output_len > prev_len and "�" not in previous_delta:
                         response_json = create_stream_response_json(
                             index=i, text=previous_delta)
                         yield f"data: {response_json}\n\n"
-                    elif output.finish_reason is None:
-                        delta_text = output.text[prev_len - 1:]
+                    elif output_len != prev_len:
+                        # prev_len - (prev_len - output_len + 1)
+                        delta_text = output.text[output_len - 1:]
                 if output.finish_reason is not None:
                     response_json = create_stream_response_json(
                         index=i,
@@ -495,16 +499,16 @@ async def create_completion(raw_request: Request):
                         output.logprobs[previous_num_tokens[i]:], prev_len)
                 else:
                     logprobs = None
-                # skip first word
-                if prev_len != 0:
+                output_len = len(output.text)
+                if prev_len != 0 and output.finish_reason is None:
                     # valid word
-                    if len(output.text) > prev_len:
+                    if output_len > prev_len and "�" not in previous_delta:
                         response_json = create_stream_response_json(
                             index=i, text=previous_delta)
                         yield f"data: {response_json}\n\n"
-                    elif output.finish_reason is None:
-                        # cache previous word which is not valid.
-                        delta_text = output.text[prev_len - 1:]
+                    elif output_len != prev_len:
+                        # prev_len - (prev_len - output_len + 1)
+                        delta_text = output.text[output_len - 1:]
                 if output.finish_reason is not None:
                     logprobs = LogProbs(
                     ) if request.logprobs is not None else None
