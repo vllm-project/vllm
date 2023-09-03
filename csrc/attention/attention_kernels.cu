@@ -262,21 +262,14 @@ __global__ void single_query_cached_kv_attention_kernel(
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
       if (row_idx < HEAD_SIZE) {
         const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
-        V_vec v_vec;
-        if (token_idx + V_VEC_SIZE <= context_len) {
-          // Common case: the V_VEC does not contain the tokens that are out of the context.
-          // We can compute the dot product without any special handling.
-          v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
-        } else {
-          // When the V_VEC contains the tokens that are out of the context, we should
-          // explicitly skip the computation for those tokens since they may contain NaNs.
-          // See https://github.com/vllm-project/vllm/issues/641#issuecomment-1682544472
-          scalar_t v_vec_arr[V_VEC_SIZE];
+        V_vec v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
+        // When the V_VEC contains the tokens that are out of the context, we
+        // should explicitly zero out those tokens since they may contain NaNs.
+        // See https://github.com/vllm-project/vllm/issues/641#issuecomment-1682544472
+        scalar_t* v_vec_ptr = reinterpret_cast<scalar_t*>(&v_vec);
 #pragma unroll
-          for (int j = 0; j < V_VEC_SIZE; j++) {
-            v_vec_arr[j] = token_idx + j < context_len ? v_ptr[offset + j] : zero_value;
-          }
-          v_vec = *reinterpret_cast<const V_vec*>(v_vec_arr);
+        for (int j = 0; j <= V_VEC_SIZE; j++) {
+          v_vec_ptr[j] = token_idx + j < context_len ? v_vec_ptr[j] : zero_value;
         }
         accs[i] += dot(logits_vec, v_vec);
       }
