@@ -13,6 +13,7 @@ NUM_BLOCKS = 128  # Arbitrary values for testing
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
+NUM_PREFILL_SEQS = [1, 3, 7]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
@@ -27,12 +28,11 @@ def ref_masked_attention(
     scale: float,
     attn_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    attn = scale * torch.einsum("qhd,khd->hqk", query, key)
+    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
     if attn_mask is not None:
-        attn = attn.to(attn_mask.dtype) + attn_mask
-    attn = torch.softmax(attn, dim=-1)
-    attn = attn.to(value.dtype)
-    out = torch.einsum("hqk,khd->qhd", attn, value)
+        attn_weights = attn_weights + attn_mask.float()
+    attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
+    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
     return out
 
 
@@ -73,15 +73,18 @@ def ref_single_query_cached_kv_attention(
             v = value_cache[block_number, :, :, block_offset]
             values.append(v)
         keys = torch.stack(keys, dim=0)
-        keys = torch.repeat_interleave(keys, num_queries_per_kv, dim=1)
         values = torch.stack(values, dim=0)
-        values = torch.repeat_interleave(values, num_queries_per_kv, dim=1)
+        if num_queries_per_kv > 1:
+            # Handle MQA and GQA
+            keys = torch.repeat_interleave(keys, num_queries_per_kv, dim=1)
+            values = torch.repeat_interleave(values, num_queries_per_kv, dim=1)
 
         alibi_bias = None
         if alibi_slopes is not None:
-            alibi_bias = - context_len + torch.arange(
-                context_len, dtype=torch.float, device="cuda")
-            alibi_bias = alibi_bias.view(1, 1, -1) * alibi_slopes.view(-1, 1, 1)
+            # Create the ALiBi bias used in the paged attention kernel.
+            position_ids = torch.arange(context_len, device="cuda").int()
+            alibi_bias = (context_len - position_ids).float()
+            alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(1, 1, -1)
 
         out = ref_masked_attention(q, keys, values, scale, alibi_bias)
         out = out.view(num_query_heads, head_size)
@@ -110,19 +113,20 @@ def test_single_query_cached_kv_attention(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
+    scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
-    query = torch.randn(num_seqs,
+    query = torch.empty(num_seqs,
                         num_query_heads,
                         head_size,
                         dtype=dtype,
                         device="cuda")
+    query.uniform_(-scale, scale)
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_mapping = torch.repeat_interleave(
         torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"),
                      num_queries_per_kv)
-    scale = float(1.0 / (head_size**0.5))
     alibi_slopes = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads,
@@ -183,7 +187,7 @@ def test_single_query_cached_kv_attention(
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
     # outputs. Thus, we use a relaxed tolerance for the test.
-    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-5)
+    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
 def ref_multi_query_kv_attention(
@@ -191,11 +195,9 @@ def ref_multi_query_kv_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    scale: float,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    head_size = query.shape[-1]
-    scale = 1.0 / (head_size**0.5)
-
     num_seqs = len(cu_seq_lens) - 1
     ref_outputs = []
     for i in range(num_seqs):
@@ -207,7 +209,7 @@ def ref_multi_query_kv_attention(
         attn_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=dtype),
                                diagonal=1)
         attn_mask = attn_mask * torch.finfo(dtype).min
-        attn_mask = attn_mask.to(dtype=dtype, device='cuda')
+        attn_mask = attn_mask.to(dtype=dtype, device="cuda")
 
         ref_output = ref_masked_attention(
             query[start_idx:end_idx],
@@ -221,26 +223,42 @@ def ref_multi_query_kv_attention(
     return ref_output
 
 
+@pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def run_multi_query_kv_attention(
+def test_multi_query_kv_attention(
     num_seqs: int,
-    num_heads: int,
+    num_heads: Tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
+    seed: int,
 ) -> None:
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
     seq_lens = random.sample(range(1, MAX_SEQ_LEN), num_seqs)
     num_tokens = sum(seq_lens)
 
     scale = float(1.0 / (head_size**0.5))
+    num_query_heads, num_kv_heads = num_heads
     qkv = torch.empty(num_tokens,
-                      3,
-                      num_heads,
+                      num_query_heads + 2 * num_kv_heads,
                       head_size,
                       dtype=dtype,
-                      device='cuda')
-    qkv.uniform_(-1e-3, 1e-3)
-    query, key, value = qkv.unbind(dim=1)
+                      device="cuda")
+    qkv.uniform_(-scale, scale)
+    query, key, value = qkv.split(
+        [num_query_heads, num_kv_heads, num_kv_heads], dim=1)
 
+    num_queries_per_kv = num_query_heads // num_kv_heads
+    if num_queries_per_kv > 1:
+        # Handle MQA and GQA
+        key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
+        value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
     attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
     output = xops.memory_efficient_attention_forward(
         query.unsqueeze(0),
@@ -260,6 +278,7 @@ def run_multi_query_kv_attention(
         query,
         key,
         value,
+        scale,
         dtype,
     )
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
