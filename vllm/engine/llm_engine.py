@@ -242,7 +242,7 @@ class LLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
     ) -> None:
-        """Add a request to the engine's request pool.
+        r"""Add a request to the engine's request pool.
 
         The request is added to the request pool and will be processed by the
         scheduler as `engine.step()` is called. The exact scheduling policy is
@@ -257,6 +257,13 @@ class LLMEngine:
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+
+        Details:
+            - Set arrival_time to the current time if it is None.
+            - Set prompt_token_ids to the encoded prompt if it is None.
+            - Create `best_of` number of :class:`~vllm.Sequence` objects.
+            - Create a :class:`~vllm.SequenceGroup` object from the list of :class:`~vllm.Sequence`.
+            - Add the :class:`~vllm.SequenceGroup` object to the scheduler.
         """
         if arrival_time is None:
             arrival_time = time.monotonic()
@@ -281,6 +288,9 @@ class LLMEngine:
 
         Args:
             request_id: The ID(s) of the request to abort.
+
+        Details:
+            - Refer to the :meth:`~vllm.core.scheduler.Scheduler.abort_seq_group`.
         """
         self.scheduler.abort_seq_group(request_id)
 
