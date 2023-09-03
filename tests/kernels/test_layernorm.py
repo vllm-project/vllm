@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 import torch.nn as nn
@@ -14,7 +16,9 @@ class RefRMSNorm(nn.Module):
 
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
-        self.weight = nn.Parameter(torch.randn(hidden_size))
+        weight = torch.empty(hidden_size)
+        weight.uniform_(-math.sqrt(hidden_size), math.sqrt(hidden_size))
+        self.weight = nn.Parameter(weight)
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
@@ -40,7 +44,7 @@ def test_rms_norm(
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device='cuda')
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
     ref = RefRMSNorm(hidden_size).cuda().to(dtype)
 
     out = torch.empty_like(x)
