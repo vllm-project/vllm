@@ -246,6 +246,8 @@ __global__ void single_query_cached_kv_attention_kernel(
     accs[i] = 0.f;
   }
 
+  scalar_t zero_value;
+  zero(zero_value);
   for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
     const int physical_block_number = block_table[block_idx];
     const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
@@ -272,7 +274,7 @@ __global__ void single_query_cached_kv_attention_kernel(
           scalar_t v_vec_arr[V_VEC_SIZE];
 #pragma unroll
           for (int j = 0; j < V_VEC_SIZE; j++) {
-            v_vec_arr[j] = token_idx + j < context_len ? v_ptr[offset + j] : 0.f;
+            v_vec_arr[j] = token_idx + j < context_len ? v_ptr[offset + j] : zero_value;
           }
           V_vec v_vec = *reinterpret_cast<const V_vec*>(v_vec_arr);
         }

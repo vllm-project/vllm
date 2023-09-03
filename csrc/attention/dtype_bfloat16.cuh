@@ -420,4 +420,9 @@ inline __device__ void from_float(bf16_8_t& dst, Float8_ src) {
 #endif
 }
 
+// Zero-out a variable.
+inline __device__ void zero(__nv_bfloat16& dst) {
+  from_float(dst, 0.f);
+}
+
 } // namespace vllm
