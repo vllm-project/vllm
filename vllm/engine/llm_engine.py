@@ -264,6 +264,17 @@ class LLMEngine:
             - Create `best_of` number of :class:`~vllm.Sequence` objects.
             - Create a :class:`~vllm.SequenceGroup` object from the list of :class:`~vllm.Sequence`.
             - Add the :class:`~vllm.SequenceGroup` object to the scheduler.
+
+        Example::
+            >>> # initialize engine
+            >>> engine = LLMEngine.from_engine_args(engine_args)
+            >>> # set request arguments
+            >>> example_prompt = "Who is the president of the United States?"
+            >>> sampling_params = SamplingParams(temperature=0.0)
+            >>> request_id = 0
+            >>> # add the request to the engine
+            >>> engine.add_request(str(request_id), example_prompt, SamplingParams(temperature=0.0))
+            >>> # continue the request processing
         """
         if arrival_time is None:
             arrival_time = time.monotonic()
@@ -291,6 +302,12 @@ class LLMEngine:
 
         Details:
             - Refer to the :meth:`~vllm.core.scheduler.Scheduler.abort_seq_group`.
+
+        Example::
+            >>> # initialize engine and add a request with request_id
+            >>> request_id = str(0)
+            >>> # abort the request
+            >>> engine.abort_request(request_id)
         """
         self.scheduler.abort_seq_group(request_id)
 
@@ -557,6 +574,26 @@ class LLMEngine:
         token blocks to be swapped in/out/copy. Then, it executes the model
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
+
+        Example::
+            >>> # Please see the example/ folder for more detailed examples.
+            >>> # initialize engine and request arguments
+            >>> engine = LLMEngine.from_engine_args(engine_args)
+            >>> example_inputs = [(0, "Who is the president of the United States?", SamplingParams(temperature=0.0))]
+            >>> # Start the engine with an event loop
+            >>> while True:
+            >>>     if example_inputs:
+            >>>         request_id, example_prompt, sampling_params = example_inputs.pop(0)
+            >>>         engine.add_request(str(request_id), example_prompt, sampling_params)
+            >>>
+            >>>     # continue the request processing
+            >>>     request_outputs = engine.step()
+            >>>     for request_output in request_outputs:
+            >>>         if request_output.finished:
+            >>>             # return or show the request output
+            >>>
+            >>>     if not (engine.has_unfinished_requests() or example_inputs):
+            >>>         break
         """
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
         if scheduler_outputs.is_empty():
