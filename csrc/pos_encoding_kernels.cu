@@ -1,6 +1,8 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
+#include "dispatch_utils.h"
+
 namespace vllm {
 
 template<typename scalar_t>
@@ -83,9 +85,7 @@ void rotary_embedding_neox(
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * rot_dim / 2, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-    at::ScalarType::Half,
-    at::ScalarType::BFloat16,
+  VLLM_DISPATCH_FLOATING_TYPES(
     query.scalar_type(),
     "rotary_embedding_neox",
     [&] {

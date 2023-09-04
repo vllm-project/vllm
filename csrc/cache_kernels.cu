@@ -1,6 +1,8 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
+#include "dispatch_utils.h"
+
 #include <algorithm>
 #include <cassert>
 #include <map>
@@ -125,9 +127,7 @@ void copy_blocks(
   dim3 grid(num_layers, num_pairs);
   dim3 block(std::min(1024, numel_per_block));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-    at::ScalarType::Half,
-    at::ScalarType::BFloat16,
+  VLLM_DISPATCH_FLOATING_TYPES(
     key_caches[0].scalar_type(), "copy_blocks_kernel", ([&] {
       vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
         key_cache_ptrs_tensor.data_ptr<int64_t>(),
@@ -202,9 +202,7 @@ void reshape_and_cache(
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-    at::ScalarType::Half,
-    at::ScalarType::BFloat16,
+  VLLM_DISPATCH_FLOATING_TYPES(
     key.scalar_type(),
     "reshape_and_cache_kernel",
     [&] {
@@ -364,9 +362,7 @@ void gather_cached_kv(
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-    at::ScalarType::Half,
-    at::ScalarType::BFloat16,
+  VLLM_DISPATCH_FLOATING_TYPES(
     key.scalar_type(),
     "gather_cached_kv_kernel_optimized",
     [&] {
