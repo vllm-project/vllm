@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torch.nn.init as init
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.functional import awq_linear
+from vllm.model_executor.layers.quantized_linear import awq_linear
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -333,7 +333,7 @@ class ColumnParallelLinear(torch.nn.Module):
 
         # Matrix multiply.
         if self.quant_config and self.quant_config.method == "awq":
-            output_parallel = awq_linear(input_parallel, self.qweight, self.scales, self.qzeros, bias, w_bit=self.quant_config.w_bit)
+            output_parallel = awq_linear(input_parallel, self.qweight, self.scales, self.qzeros, bias, pack_factor=self.quant_config.pack_factor)
         else:
             output_parallel = F.linear(input_parallel, self.weight, bias)
 
@@ -435,7 +435,6 @@ class RowParallelLinear(torch.nn.Module):
             self.register_parameter('scales', None)
         else:
             # Quantized parameters.
-            # TODO(julian-q) add initialization?
             assert self.input_size_per_partition % self.quant_config.w_bit == 0
             assert self.output_size % self.quant_config.pack_factor == 0
             self.qweight = Parameter(torch.empty(
@@ -489,7 +488,7 @@ class RowParallelLinear(torch.nn.Module):
 
         # Matrix multiply.
         if self.quant_config and self.quant_config.method == "awq":
-            output_parallel = awq_linear(input_parallel, self.qweight, self.scales, self.qzeros, w_bit=self.quant_config.w_bit)
+            output_parallel = awq_linear(input_parallel, self.qweight, self.scales, self.qzeros, pack_factor=self.quant_config.pack_factor)
         else:
             output_parallel = F.linear(input_parallel, self.weight)
 
