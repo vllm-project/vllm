@@ -19,15 +19,25 @@ class Disabledtqdm(tqdm):
         super().__init__(*args, **kwargs, disable=True)
 
 
-def is_transposed_or_packed(param_name, quant_config):
+def is_transposed(param_name, quant_config: Optional[WeightQuantizationConfig] == None):
+    """Returns True if the parameter tensor given by state_dict[param_name] is transposed
+    relative to torch.nn.Linear.weight. Otherwise, returns False.
+    """
     if quant_config and quant_config.method == "awq":
-        transposed = any(tag in param_name
+        return any(tag in param_name
                          for tag in ["qweight", "scales", "qzeros"])
-        packed = any(tag in param_name for tag in ["qweight", "qzeros"])
-    else:
-        transposed = False
-        packed = False
-    return transposed, packed
+    return False
+
+
+def is_packed(param_name, quant_config: Optional[WeightQuantizationConfig] == None):
+    """Returns True if each element of state_dict[param_name] contains more than one parameter.
+    For example, with AWQ quantization, each INT32 element corresponds to 8 INT4 weights.
+    Otherwise, returns False.
+    """
+    if quant_config and quant_config.method == "awq":
+        return any(tag in param_name for tag in ["qweight", "qzeros"])
+    return False
+
 
 
 def hf_model_weights_iterator(
@@ -85,7 +95,8 @@ def hf_model_weights_iterator(
             with open(param_path, "rb") as f:
                 param = np.load(f)
             param = torch.from_numpy(param)
-            transposed, packed = is_transposed_or_packed(name, quant_config)
+            transposed = is_transposed(name, quant_config=quant_config)
+            packed = is_packed(name, quant_config=quant_config)
             if transposed:
                 param = param.T
             yield name, param, transposed, packed
@@ -93,8 +104,8 @@ def hf_model_weights_iterator(
         for bin_file in hf_bin_files:
             state = torch.load(bin_file, map_location="cpu")
             for name, param in state.items():
-                transposed, packed = is_transposed_or_packed(
-                    name, quant_config)
+                transposed = is_transposed(name, quant_config=quant_config)
+                packed = is_packed(name, quant_config=quant_config)
                 if transposed:
                     param = param.T
                 yield name, param, transposed, packed
