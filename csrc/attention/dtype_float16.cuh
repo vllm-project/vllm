@@ -390,11 +390,6 @@ inline __device__ float sum(uint4 v) {
   return sum(c);
 }
 
-// Zero-out a vector.
-inline __device__ void zero(uint16_t& dst) {
-  dst = uint16_t(0);
-}
-
 // From float32 to float16.
 inline __device__ void from_float(uint16_t& dst, float src) {
   dst = float_to_half(src);
@@ -439,6 +434,11 @@ inline __device__ Float8_ to_float(uint4 u) {
   tmp.z = half2_to_float2(u.z);
   tmp.w = half2_to_float2(u.w);
   return tmp;
+}
+
+// Zero-out a variable.
+inline __device__ void zero(uint16_t& dst) {
+  dst = uint16_t(0);
 }
 
 } // namespace vllm
