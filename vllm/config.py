@@ -11,6 +11,9 @@ logger = init_logger(__name__)
 
 _GB = 1 << 30
 
+_ALLOWED_QUANTIZATION_METHODS = ["awq"]
+_ALLOWED_QUANTIZATION_BITWIDTHS = 0
+
 
 class WeightQuantizationConfig:
     """Weight Quantization settings
@@ -28,21 +31,16 @@ class WeightQuantizationConfig:
         self.method = method
         self.w_bit = w_bit
         self.group_size = group_size
-        if method == "awq":
-            self.pack_factor = 32 // w_bit
-        else:
-            self.pack_factor = 1
+        self.pack_factor = 32 // w_bit
         self._verify()
 
     def _verify(self) -> None:
-        allowed_methods = ["awq"]
-        allowed_bitwidths = [4]
-        if self.method not in allowed_methods:
+        if self.method not in _ALLOWED_QUANTIZATION_METHODS:
             raise ValueError(f"Unknown quantization method ({self.method})"
-                             f" must be from choice of {allowed_methods}")
-        if self.w_bit not in allowed_bitwidths:
+                             f" must be from choice of {_ALLOWED_QUANTIZATION_METHODS}")
+        if self.w_bit not in _ALLOWED_QUANTIZATION_BITWIDTHS:
             raise ValueError(f"Invalid w_bit ({self.w_bit})"
-                             f" must be from choice of {allowed_bitwidths}")
+                             f" must be from choice of {_ALLOWED_QUANTIZATION_BITWIDTHS}")
 
 
 class ModelConfig:
