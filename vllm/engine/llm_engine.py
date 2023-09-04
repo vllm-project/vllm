@@ -1,19 +1,19 @@
 import copy
 import time
 from functools import partial
-from typing import Any, List, Optional, Tuple, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
-from vllm.core.scheduler import Scheduler
+from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
+from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (Sequence, SequenceOutputs, SequenceGroup,
-                           SequenceStatus)
+from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupMetadata,
+                           SequenceOutputs, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
@@ -137,7 +137,8 @@ class LLMEngine:
             get_all_outputs=True,
         )
 
-    def _init_workers_ray(self, placement_group: "PlacementGroup"):
+    def _init_workers_ray(self, placement_group: "PlacementGroup",
+                          **ray_remote_kwargs):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
@@ -152,6 +153,7 @@ class LLMEngine:
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
+                **ray_remote_kwargs,
             )(RayWorker).remote()
             self.workers.append(worker)
 
@@ -267,11 +269,11 @@ class LLMEngine:
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
 
-    def abort_request(self, request_id: str) -> None:
-        """Aborts a request with the given ID.
+    def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
+        """Aborts a request(s) with the given ID.
 
         Args:
-            request_id: The ID of the request to abort.
+            request_id: The ID(s) of the request to abort.
         """
         self.scheduler.abort_seq_group(request_id)
 
@@ -287,53 +289,17 @@ class LLMEngine:
         """Returns True if there are unfinished requests."""
         return self.scheduler.has_unfinished_seqs()
 
-    def step(self) -> List[RequestOutput]:
-        """Performs one decoding iteration and returns newly generated results.
-
-        This function performs one decoding iteration of the engine. It first
-        schedules the sequences to be executed in the next iteration and the
-        token blocks to be swapped in/out/copy. Then, it executes the model
-        and updates the scheduler with the model outputs. Finally, it decodes
-        the sequences and returns the newly generated results.
-        """
+    def _schedule(
+        self
+    ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs,
+               Optional[List[RequestOutput]]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         if scheduler_outputs.is_empty():
-            if not scheduler_outputs.ignored_seq_groups:
-                # Nothing to do.
-                return []
-            # If there are ignored seq groups, we need to return them as the
-            # request outputs.
-            return [
+            return seq_group_metadata_list, scheduler_outputs, [
                 RequestOutput.from_seq_group(seq_group)
                 for seq_group in scheduler_outputs.ignored_seq_groups
             ]
-
-        # Execute the model.
-        output = self._run_workers(
-            "execute_model",
-            seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
-            blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
-            blocks_to_copy=scheduler_outputs.blocks_to_copy,
-        )
-
-        seq_groups = scheduler_outputs.scheduled_seq_groups
-        self._process_model_output(seq_groups, output)
-
-        # Free the finished sequence groups.
-        self.scheduler.free_finished_seq_groups()
-
-        # Create the outputs.
-        request_outputs: List[RequestOutput] = []
-        for seq_group in seq_groups + scheduler_outputs.ignored_seq_groups:
-            request_output = RequestOutput.from_seq_group(seq_group)
-            request_outputs.append(request_output)
-
-        if self.log_stats:
-            # Log the system stats.
-            self._log_system_stats(scheduler_outputs.prompt_run,
-                                   scheduler_outputs.num_batched_tokens)
-        return request_outputs
+        return seq_group_metadata_list, scheduler_outputs, None
 
     def _check_beam_search_early_stopping(
         self,
@@ -512,10 +478,54 @@ class LLMEngine:
                 seq_group.remove(seq.seq_id)
                 self.scheduler.free_seq(seq)
 
-    def _process_model_output(self, scheduled_seq_groups: List[SequenceGroup],
-                              output: SamplerOutput) -> None:
+    def _process_model_outputs(
+            self, output: SamplerOutput,
+            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+        # Update the scheduled sequence groups with the model outputs.
+        scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
         for seq_group, samples in zip(scheduled_seq_groups, output):
             self._process_sequence_group_samples(seq_group, samples)
+
+        # Free the finished sequence groups.
+        self.scheduler.free_finished_seq_groups()
+
+        # Create the outputs.
+        request_outputs: List[RequestOutput] = []
+        for seq_group in (scheduled_seq_groups +
+                          scheduler_outputs.ignored_seq_groups):
+            request_output = RequestOutput.from_seq_group(seq_group)
+            request_outputs.append(request_output)
+
+        if self.log_stats:
+            # Log the system stats.
+            self._log_system_stats(scheduler_outputs.prompt_run,
+                                   scheduler_outputs.num_batched_tokens)
+        return request_outputs
+
+    def step(self) -> List[RequestOutput]:
+        """Performs one decoding iteration and returns newly generated results.
+
+        This function performs one decoding iteration of the engine. It first
+        schedules the sequences to be executed in the next iteration and the
+        token blocks to be swapped in/out/copy. Then, it executes the model
+        and updates the scheduler with the model outputs. Finally, it decodes
+        the sequences and returns the newly generated results.
+        """
+        (seq_group_metadata_list, scheduler_outputs,
+         early_return) = self._schedule()
+        if early_return is not None:
+            return early_return
+
+        # Execute the model.
+        output = self._run_workers(
+            "execute_model",
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+            blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+            blocks_to_copy=scheduler_outputs.blocks_to_copy,
+        )
+
+        return self._process_model_outputs(output, scheduler_outputs)
 
     def _log_system_stats(
         self,

@@ -104,7 +104,8 @@ def _prune_hidden_states(
         start_idx += prompt_len
     last_token_indicies.extend(
         range(start_idx, start_idx + input_metadata.num_generation_tokens))
-    return hidden_states[last_token_indicies]
+    return hidden_states.index_select(
+        0, torch.tensor(last_token_indicies, device=hidden_states.device))
 
 
 def _get_penalties(
@@ -161,7 +162,7 @@ def _apply_penalties(
             continue
         p = presence_penalties[i]
         f = frequency_penalties[i]
-        if p < _SAMPLING_EPS and f < _SAMPLING_EPS:
+        if abs(p) < _SAMPLING_EPS and abs(f) < _SAMPLING_EPS:
             continue
         indices.append(i)
 

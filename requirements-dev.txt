@@ -10,3 +10,4 @@ types-setuptools
 
 # testing
 pytest
+pytest-forked
