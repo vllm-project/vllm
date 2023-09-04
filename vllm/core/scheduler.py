@@ -1,6 +1,6 @@
 import enum
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.block_manager import BlockSpaceManager
@@ -87,17 +87,22 @@ class Scheduler:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 
-    def abort_seq_group(self, request_id: str) -> None:
+    def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
+        if isinstance(request_id, str):
+            request_id = (request_id, )
+        request_ids = set(request_id)
         for state_queue in [self.waiting, self.running, self.swapped]:
             for seq_group in state_queue:
-                if seq_group.request_id == request_id:
+                if seq_group.request_id in request_ids:
                     # Remove the sequence group from the state queue.
                     state_queue.remove(seq_group)
                     for seq in seq_group.seqs:
                         if seq.is_finished():
                             continue
                         self.free_seq(seq, SequenceStatus.FINISHED_ABORTED)
-                    return
+                    request_ids.remove(seq_group.request_id)
+                    if not request_ids:
+                        return
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
