@@ -91,9 +91,11 @@ class SamplingParams:
         self._verify_args()
         if self.use_beam_search:
             self._verify_beam_search()
-        elif self.temperature < _SAMPLING_EPS:
-            # Zero temperature means greedy sampling.
-            self._verify_greedy_sampling()
+        else:
+            self._verify_non_beam_search()
+            if self.temperature < _SAMPLING_EPS:
+                # Zero temperature means greedy sampling.
+                self._verify_greedy_sampling()
 
     def _verify_args(self) -> None:
         if self.n < 1:
@@ -115,10 +117,6 @@ class SamplingParams:
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, "
                              f"got {self.top_k}.")
-        if self.early_stopping not in [True, False, "never"]:
-            raise ValueError(
-                f"early_stopping must be True, False, or 'never', "
-                f"got {self.early_stopping}.")
         if self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
@@ -136,6 +134,20 @@ class SamplingParams:
             raise ValueError("top_p must be 1 when using beam search.")
         if self.top_k != -1:
             raise ValueError("top_k must be -1 when using beam search.")
+        if self.early_stopping not in [True, False, "never"]:
+            raise ValueError(
+                f"early_stopping must be True, False, or 'never', "
+                f"got {self.early_stopping}.")
+
+    def _verify_non_beam_search(self) -> None:
+        if self.early_stopping is not False:
+            raise ValueError("early_stopping is not effective and must be "
+                             "False when not using beam search.")
+        if (self.length_penalty < 1.0 - _SAMPLING_EPS
+                or self.length_penalty > 1.0 + _SAMPLING_EPS):
+            raise ValueError(
+                "length_penalty is not effective and must be the "
+                "default value of 1.0 when not using beam search.")
 
     def _verify_greedy_sampling(self) -> None:
         if self.best_of > 1:
