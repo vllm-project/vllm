@@ -426,7 +426,33 @@ class AsyncLLMEngine:
                
                Upon receiving a new result, decode and yield.
 
-               If the request is finished, release and reset necessary resources. 
+               If the request is finished, release and reset necessary resources.
+
+        Example::
+            >>> # Please refer to the code in entrypoints/api_server.py for a complete example.
+            >>> # initialize the engine and the example input
+            >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
+            >>> example_input = {
+            >>>     "prompt": "Who is the president of the United States?",
+            >>>     "stream": False, # assume the non-streaming case
+            >>>     "temperature": 0.0,
+            >>>     "request_id": 0,
+            >>> }
+            >>>
+            >>> # start the generation
+            >>> results_generator = engine.generate(example_input["prompt"], SamplingParams(temperature=example_input["temperature"]), example_input["request_id"])
+            >>>
+            >>> # get the results
+            >>> final_output = None
+            >>> async for request_output in results_generator:
+            >>>     if await request.is_disconnected():
+            >>>         await engine.abort(request_id) # Abort the request if the client disconnects.
+            >>>         # Return or raise an error
+            >>>         ...
+            >>>     final_output = request_output
+            >>>
+            >>> # Process and return the final output
+            >>> ...
         """
         # Preprocess the request.
         # This should not be used for logging, as it is monotonic time.
@@ -455,6 +481,9 @@ class AsyncLLMEngine:
 
         Args:
             request_id: The unique id of the request.
+
+        Example::
+            Please see the example in :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.generate`.
         """
         if not self.is_running:
             raise AsyncEngineDeadError(
