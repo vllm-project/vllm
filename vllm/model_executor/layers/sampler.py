@@ -9,13 +9,9 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     gather_from_tensor_model_parallel_region)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SequenceOutputs
+from vllm.sequence import SamplerOutput, SequenceOutputs
 
 _SAMPLING_EPS = 1e-5
-
-# For each sequence group, we generate a list of SequenceOutputs object,
-# each of which contains one possible candidate for the next token.
-SamplerOutput = List[List[SequenceOutputs]]
 
 
 class Sampler(nn.Module):

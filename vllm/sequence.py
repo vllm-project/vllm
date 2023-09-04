@@ -346,3 +346,8 @@ class SequenceOutputs:
         return (self.parent_seq_id == other.parent_seq_id
                 and self.output_token == other.output_token
                 and self.logprobs == other.logprobs)
+
+
+# For each sequence group, we generate a list of SequenceOutputs object,
+# each of which contains one possible candidate for the next token.
+SamplerOutput = List[List[SequenceOutputs]]

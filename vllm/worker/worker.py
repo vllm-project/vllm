@@ -10,9 +10,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.model_executor import get_model, InputMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SequenceData, SequenceGroupMetadata
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory
 

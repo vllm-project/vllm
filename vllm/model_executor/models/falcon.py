@@ -30,7 +30,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import (PagedAttention,
                                                   PagedAttentionWithALiBi,
                                                   PagedAttentionWithRoPE)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -38,6 +38,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear,
     reduce_from_tensor_model_parallel_region)
+from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
