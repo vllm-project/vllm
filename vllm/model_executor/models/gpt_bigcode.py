@@ -203,7 +203,7 @@ class GPTBigCodeModel(nn.Module):
         # layer across 2, 4, 8, or more GPUs.
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.wte = VocabParallelEmbedding(vocab_size, self.embed_dim)
-        self.wpe = nn.Embedding(config.n_positions, self.embed_dim)
+        self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList(
             [GPTBigCodeBlock(config) for _ in range(config.num_hidden_layers)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
