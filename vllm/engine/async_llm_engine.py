@@ -1,7 +1,7 @@
 import asyncio
 import time
 from functools import partial
-from typing import Any, Dict, Iterable, List, Optional, Set, Type
+from typing import Any, Dict, Iterable, List, Optional, Set, Type, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -143,7 +143,7 @@ class AsyncLLMEngine:
                  engine_use_ray: bool,
                  *args,
                  log_requests: bool = True,
-                 inline: bool = False,
+                 start_engine_loop: bool = False,
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
@@ -154,13 +154,19 @@ class AsyncLLMEngine:
         self.request_streams: Dict[str, AsyncStream] = {}
         self.finished_requests: Set[str] = set()
         self.background_loop = None
-        if not inline:
-            # Start the background loop.
-            self.background_loop = asyncio.get_event_loop().create_task(
-                self.run_engine_loop())
-            self.background_loop.add_done_callback(_raise_exception_on_finish)
+        if start_engine_loop:
+            self._start_background_loop()
 
-    def _init_engine(self, *args, **kwargs) -> LLMEngine:
+    def _start_background_loop(self) -> None:
+        """Start the background loop."""
+        if self.background_loop is not None:
+            raise RuntimeError("Background loop is already running.")
+        self.background_loop = asyncio.get_event_loop().create_task(
+            self.run_engine_loop())
+        self.background_loop.add_done_callback(_raise_exception_on_finish)
+
+    def _init_engine(self, *args,
+                     **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
         if not self.engine_use_ray:
             engine_class = self._engine_class
         elif self.worker_use_ray:
