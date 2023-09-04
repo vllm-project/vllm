@@ -163,7 +163,7 @@ class AsyncLLMEngine:
 
     def start_background_loop(self) -> None:
         """Start the background loop."""
-        if self.background_loop is not None:
+        if self.is_running:
             raise RuntimeError("Background loop is already running.")
         self.background_loop = asyncio.get_event_loop().create_task(
             self.run_engine_loop())
