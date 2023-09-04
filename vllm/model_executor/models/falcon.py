@@ -450,7 +450,7 @@ class FalconForCausalLM(nn.Module):
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         state_dict = self.state_dict()
 
-        for name, loaded_weight in hf_model_weights_iterator(
+        for name, loaded_weight, _, _ in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, use_np_cache):
             if "query_key_value" in name:
                 loaded_weight_size = loaded_weight.size()
