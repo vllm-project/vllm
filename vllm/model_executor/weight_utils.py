@@ -18,13 +18,17 @@ class Disabledtqdm(tqdm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, disable=True)
 
+
 def is_transposed_or_packed(param_name, quant_config):
     if quant_config and quant_config.method == "awq":
-        transposed = any([tag in param_name for tag in ["qweight", "scales", "qzeros"]])
-        packed = any([tag in param_name for tag in ["qweight", "qzeros"]])
+        transposed = any(tag in param_name
+                         for tag in ["qweight", "scales", "qzeros"])
+        packed = any(tag in param_name for tag in ["qweight", "qzeros"])
     else:
-        transposed = packed = False
+        transposed = False
+        packed = False
     return transposed, packed
+
 
 def hf_model_weights_iterator(
     model_name_or_path: str,
@@ -89,7 +93,8 @@ def hf_model_weights_iterator(
         for bin_file in hf_bin_files:
             state = torch.load(bin_file, map_location="cpu")
             for name, param in state.items():
-                transposed, packed = is_transposed_or_packed(name, quant_config)
+                transposed, packed = is_transposed_or_packed(
+                    name, quant_config)
                 if transposed:
                     param = param.T
                 yield name, param, transposed, packed
@@ -122,11 +127,13 @@ def load_tensor_parallel_weights(
         f"{param.shape} != {loaded_weight.shape}")
     param.data.copy_(loaded_weight)
 
+
 def get_param(state_dict, key, transposed=False):
     param = state_dict[key]
     if transposed:
         return param.T
     return param
+
 
 def initialize_dummy_weights(
     model: torch.nn.Module,

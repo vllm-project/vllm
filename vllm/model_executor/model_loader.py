@@ -28,6 +28,11 @@ _MODEL_REGISTRY = {
     "RWForCausalLM": FalconForCausalLM,
 }
 
+_MODEL_CLASSES_SUPPORT_QUANTIZATION = [
+    LlamaForCausalLM,
+    MPTForCausalLM,
+]
+
 
 def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
@@ -40,7 +45,7 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 
 
 def _supports_quantization(model_class):
-    return model_class is LlamaForCausalLM or model_class is MPTForCausalLM
+    return model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION
 
 
 def get_model(model_config: ModelConfig) -> nn.Module:
@@ -51,10 +56,8 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     # The weights will be initialized as empty tensors.
 
     if _supports_quantization(model_class):
-        model = model_class(
-            model_config.hf_config,
-            model_config.quantization_config
-        )
+        model = model_class(model_config.hf_config,
+                            model_config.quantization_config)
     else:
         model = model_class(model_config.hf_config)
 
