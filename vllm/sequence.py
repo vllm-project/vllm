@@ -235,14 +235,17 @@ class SequenceGroup:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
         if self.sampling_params.use_beam_search:
-            # For beam search, there will always be `best_of` sequences running
+            # For beam search, maximally there will always be `best_of` beam
+            # candidates running in the future.
             return self.sampling_params.best_of
         else:
             if self.sampling_params.best_of > self.num_seqs():
-                # At prompt stage, potentially there will be `best_of`
-                # sequences running in the future
+                # At prompt stage, the sequence group is not yet filled up
+                # and only have one sequence running. However, in the
+                # generation stage, we will have `best_of` sequences running.
                 return self.sampling_params.best_of
-            # At sampling stages, return the number of actual sequences running
+            # At sampling stages, return the number of actual sequences
+            # running.
             return self.num_seqs(status=SequenceStatus.RUNNING)
 
     def get_seqs(
