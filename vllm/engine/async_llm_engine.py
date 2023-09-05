@@ -155,11 +155,15 @@ class AsyncLLMEngine:
         self.finished_requests: Set[str] = set()
         self.background_loop = None
         if start_engine_loop:
-            self._start_background_loop()
+            self.start_background_loop()
 
-    def _start_background_loop(self) -> None:
+    @property
+    def is_running(self) -> bool:
+        return self.background_loop is not None
+
+    def start_background_loop(self) -> None:
         """Start the background loop."""
-        if self.background_loop is not None:
+        if self.is_running:
             raise RuntimeError("Background loop is already running.")
         self.background_loop = asyncio.get_event_loop().create_task(
             self.run_engine_loop())
@@ -323,7 +327,8 @@ class AsyncLLMEngine:
 
     @classmethod
     def from_engine_args(cls,
-                         engine_args: AsyncEngineArgs) -> "AsyncLLMEngine":
+                         engine_args: AsyncEngineArgs,
+                         start_engine_loop: bool = False) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
@@ -338,5 +343,6 @@ class AsyncLLMEngine:
                      distributed_init_method,
                      placement_group,
                      log_requests=not engine_args.disable_log_requests,
-                     log_stats=not engine_args.disable_log_stats)
+                     log_stats=not engine_args.disable_log_stats,
+                     start_engine_loop=start_engine_loop)
         return engine
