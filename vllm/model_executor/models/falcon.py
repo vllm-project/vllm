@@ -19,7 +19,7 @@
 """PyTorch Falcon model."""
 
 import math
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -38,7 +38,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear,
     reduce_from_tensor_model_parallel_region)
-from vllm.sequence import SequenceOutputs
+from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -397,7 +397,7 @@ class FalconForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.transformer(
             input_ids,
             positions,
