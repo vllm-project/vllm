@@ -420,4 +420,14 @@ inline __device__ void from_float(bf16_8_t& dst, Float8_ src) {
 #endif
 }
 
+// Zero-out a variable.
+inline __device__ void zero(__nv_bfloat16& dst) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  assert(false);
+#else
+  // Same as CUDART_ZERO_BF16 introduced in CUDA 12.2.
+  dst = __ushort_as_bfloat16((unsigned short)0x0000U);
+#endif
+}
+
 } // namespace vllm
