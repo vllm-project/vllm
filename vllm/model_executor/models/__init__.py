@@ -12,20 +12,12 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.mpt import MPTForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
+from vllm.model_executor.models.xverse import XverseForCausalLM
 
 __all__ = [
-    "AquilaForCausalLM",
-    "BaiChuanForCausalLM",
-    "BaichuanForCausalLM",
-    "BloomForCausalLM",
-    "FalconForCausalLM",
-    "GPT2LMHeadModel",
-    "GPTBigCodeForCausalLM",
-    "GPTJForCausalLM",
-    "GPTNeoXForCausalLM",
-    "InternLMForCausalLM",
-    "LlamaForCausalLM",
-    "MPTForCausalLM",
-    "OPTForCausalLM",
-    "QWenLMHeadModel",
+    "AquilaForCausalLM", "BaiChuanForCausalLM", "BaichuanForCausalLM",
+    "BloomForCausalLM", "FalconForCausalLM", "GPT2LMHeadModel",
+    "GPTBigCodeForCausalLM", "GPTJForCausalLM", "GPTNeoXForCausalLM",
+    "InternLMForCausalLM", "LlamaForCausalLM", "MPTForCausalLM",
+    "OPTForCausalLM", "QWenLMHeadModel", "XverseForCausalLM"
 ]

@@ -53,6 +53,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
+  * - :code:`XverseForCausalLM`
+    - Xverse
+    - :code:`xverse/XVERSE-13B`, :code:`xverse/XVERSE-13B-Chat`, etc.
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
