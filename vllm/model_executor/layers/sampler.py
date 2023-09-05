@@ -49,6 +49,7 @@ class Sampler(nn.Module):
         logits = gather_from_tensor_model_parallel_region(logits)
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.vocab_size]
+        return logits
 
     def forward(
         self,
@@ -86,7 +87,7 @@ class Sampler(nn.Module):
         # we can apply temperature & top_p/top_k to), we can return early.
         # Otherwise, we will slice the logits and modify only the non-greedy
         # subset.
-        if sampling_type_indices.max() > 0:
+        if sampling_type_indices.max() > SamplingType.GREEDY:
             non_greedy_offset = sampling_type_offsets[0]
             # Apply temperature scaling.
             temperatures = _get_temperatures(input_metadata)
@@ -496,6 +497,7 @@ def _sample(
         if i < input_metadata.num_prompts:
             # Generate the next tokens for a prompt input.
             assert len(seq_ids) == 1, "Prompt input should have only one seq."
+            parent_seq_id = seq_ids[0]
             logprob = logprobs[idx]
 
             # Sample the next tokens.
