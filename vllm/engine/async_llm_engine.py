@@ -81,7 +81,7 @@ class _AsyncLLMEngine(LLMEngine):
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
 
-        return self._process_worker_outputs(output, scheduler_outputs)
+        return self._process_model_outputs(output, scheduler_outputs)
 
     async def _run_workers_async(
         self,
