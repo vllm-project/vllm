@@ -8,7 +8,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -32,7 +32,7 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.sequence import SequenceOutputs
+from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.qwen import QWenConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -235,7 +235,7 @@ class QWenLMHeadModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,

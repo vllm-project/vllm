@@ -67,8 +67,8 @@ class HfRunner:
                 output_ids,
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
-            )[0]
-            output_ids = output_ids[0].cpu().tolist()
+            )
+            output_ids = output_ids.cpu().tolist()
             outputs.append((output_ids, output_str))
         return outputs
 
@@ -77,8 +77,34 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
     ) -> List[Tuple[List[int], str]]:
-        return self.generate(prompts, do_sample=False,
-                             max_new_tokens=max_tokens)
+        outputs = self.generate(prompts,
+                                do_sample=False,
+                                max_new_tokens=max_tokens)
+        for i in range(len(outputs)):
+            output_ids, output_str = outputs[i]
+            outputs[i] = (output_ids[0], output_str[0])
+        return outputs
+
+    def generate_beam_search(
+        self,
+        prompts: List[str],
+        beam_width: int,
+        max_tokens: int,
+    ) -> List[Tuple[List[int], str]]:
+        outputs = self.generate(prompts,
+                                do_sample=False,
+                                max_new_tokens=max_tokens,
+                                num_beams=beam_width,
+                                num_return_sequences=beam_width)
+        for i in range(len(outputs)):
+            output_ids, output_str = outputs[i]
+            for j in range(len(output_ids)):
+                output_ids[j] = [
+                    x for x in output_ids[j]
+                    if x != self.tokenizer.pad_token_id
+                ]
+            outputs[i] = (output_ids, output_str)
+        return outputs
 
 
 @pytest.fixture
@@ -107,15 +133,20 @@ class VllmRunner:
         prompts: List[str],
         sampling_params: SamplingParams,
     ) -> List[Tuple[List[int], str]]:
-        req_outputs = self.model.generate(
-            prompts, sampling_params=sampling_params)
+        req_outputs = self.model.generate(prompts,
+                                          sampling_params=sampling_params)
         outputs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
             prompt_ids = req_output.prompt_token_ids
-            output_str = req_output.outputs[0].text
-            output_ids = req_output.outputs[0].token_ids
-            outputs.append((prompt_ids + output_ids, prompt_str + output_str))
+            req_sample_output_ids = []
+            req_sample_output_strs = []
+            for sample in req_output.outputs:
+                output_str = sample.text
+                output_ids = sample.token_ids
+                req_sample_output_ids.append(prompt_ids + output_ids)
+                req_sample_output_strs.append(prompt_str + output_str)
+            outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
     def generate_greedy(
@@ -124,7 +155,22 @@ class VllmRunner:
         max_tokens: int,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-        return self.generate(prompts, greedy_params)
+        outputs = self.generate(prompts, greedy_params)
+        return [(output_ids[0], output_str[0]) for output_ids, output_str in
+                outputs]
+
+    def generate_beam_search(
+        self,
+        prompts: List[str],
+        beam_width: int,
+        max_tokens: int,
+    ) -> List[Tuple[List[int], str]]:
+        beam_search_params = SamplingParams(n=beam_width,
+                                            use_beam_search=True,
+                                            temperature=0.0,
+                                            max_tokens=max_tokens)
+        outputs = self.generate(prompts, beam_search_params)
+        return outputs
 
 
 @pytest.fixture
