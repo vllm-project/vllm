@@ -78,8 +78,8 @@ class Sampler(nn.Module):
         # We use the bincount+cumsum to compute the offsets.
         sampling_type_offsets = torch.bincount(sampling_type_indices_values,
                                                minlength=3).cumsum(0)[:-1]
-        # The logit_to_id_map lets us reverse the sort we did above when we match
-        # outputs to sequences.
+        # The logit_to_id_map lets us reverse the sort we did above when we
+        # match outputs to sequences.
         logit_to_id_map = sampling_type_indices_index.argsort()
         logits = logits[sampling_type_indices_index]
 
