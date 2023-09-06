@@ -114,8 +114,10 @@ class RequestOutput:
                 # NOTE: We need to take care of this case because the sequence
                 # always has the logprobs of the sampled tokens even if the
                 # logprobs are not requested.
-                logprobs = []
-                top_logprobs = []
+                logprobs = None
+                top_logprobs = None
+            elif seq_group.sampling_params.logprobs == 0:
+                top_logprobs = None
             finshed_reason = SequenceStatus.get_finished_reason(seq.status)
             output = CompletionOutput(
                 index=seqs.index(seq),
