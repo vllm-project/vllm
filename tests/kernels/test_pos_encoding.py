@@ -22,17 +22,6 @@ def rotate_neox(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rope_neox(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    q_embed = (q * cos) + (rotate_neox(q) * sin)
-    k_embed = (k * cos) + (rotate_neox(k) * sin)
-    return q_embed, k_embed
-
-
 def rotate_gptj(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., ::2]
     x2 = x[..., 1::2]
@@ -40,14 +29,16 @@ def rotate_gptj(x: torch.Tensor) -> torch.Tensor:
     return x.flatten(-2)
 
 
-def apply_rope_gptj(
+def apply_rope(
     q: torch.Tensor,
     k: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
+    is_neox_style: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    q_embed = (q * cos) + (rotate_gptj(q) * sin)
-    k_embed = (k * cos) + (rotate_gptj(k) * sin)
+    rotate_fn = rotate_neox if is_neox_style else rotate_gptj
+    q_embed = (q * cos) + (rotate_fn(q) * sin)
+    k_embed = (k * cos) + (rotate_fn(k) * sin)
     return q_embed, k_embed
 
 
@@ -95,10 +86,8 @@ class RefRotaryEmbedding(nn.Module):
         cos = F.embedding(positions, self.cos_cached)
         sin = F.embedding(positions, self.sin_cached)
 
-        if self.is_neox_style:
-            query_rot, key_rot = apply_rope_neox(query_rot, key_rot, cos, sin)
-        else:
-            query_rot, key_rot = apply_rope_gptj(query_rot, key_rot, cos, sin)
+        query_rot, key_rot = apply_rope(query_rot, key_rot, cos, sin,
+                                        self.is_neox_style)
         query_rot = query_rot.transpose(0, 1).contiguous()
         key_rot = key_rot.transpose(0, 1).contiguous()
 
@@ -133,15 +122,15 @@ def test_rotary_embedding(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    positions = torch.randint(0, max_position, (num_tokens, ), device='cuda')
+    positions = torch.randint(0, max_position, (num_tokens, ), device="cuda")
     query = torch.randn(num_tokens,
                         num_heads * head_size,
                         dtype=dtype,
-                        device='cuda')
+                        device="cuda")
     key = torch.randn(num_tokens,
                       num_heads * head_size,
                       dtype=dtype,
-                      device='cuda')
+                      device="cuda")
 
     # Create the rotary embedding.
     inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
@@ -170,7 +159,7 @@ def test_rotary_embedding(
         is_neox_style=is_neox_style,
         max_position_embeddings=max_position,
         base=base,
-    ).to(dtype=dtype, device='cuda')
+    ).to(dtype=dtype, device="cuda")
     ref_query, ref_key = ref_rotary_embedding(
         positions,
         query.view(num_tokens, num_heads, head_size),
