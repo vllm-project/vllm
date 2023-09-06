@@ -163,19 +163,19 @@ class Sampler(nn.Module):
                 zip(input_metadata.prompt_lens, seq_data)):
             num_log_probs = input_metadata.seq_groups[i][1].logprobs
             assert num_log_probs is not None
-            top_log_porbs = torch.topk(log_probs[start_idx:start_idx +
-                                                 prompt_len],
-                                       k=num_log_probs,
-                                       dim=-1)
-            seq_datum.prompt_top_logprobs = [
-                dict(zip(x, y)) for x, y in zip(top_log_porbs.indices.tolist(),
-                                                top_log_porbs.values.tolist())
-            ]
+            if num_log_probs > 0:
+                top_log_porbs = torch.topk(log_probs[start_idx:start_idx +
+                                                     prompt_len],
+                                           k=num_log_probs,
+                                           dim=-1)
+                seq_datum.prompt_top_logprobs = [
+                    dict(zip(x, y))
+                    for x, y in zip(top_log_porbs.indices.tolist(),
+                                    top_log_porbs.values.tolist())
+                ]
             seq_datum.prompt_logprobs = selected_log_probs[
                 start_idx:start_idx + prompt_len]
             start_idx += prompt_len
-
-            assert len(seq_datum.prompt_top_logprobs) == prompt_len
 
 
 def _prune_hidden_states(

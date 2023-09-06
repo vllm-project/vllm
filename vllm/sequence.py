@@ -213,8 +213,8 @@ class Sequence:
             seq_len = self.get_len()
             # Note: HF implementation does not count the EOS token
             # towards the length, we align with that here for testing.
-            if eos_token_id is not None and self.get_last_token_id(
-            ) == eos_token_id:
+            if (eos_token_id is not None
+                    and self.get_last_token_id() == eos_token_id):
                 seq_len -= 1
         return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
@@ -281,8 +281,7 @@ class SequenceGroup:
         # Randomly pick a seq since all of their prompts should be the same
         seq = next(iter(self.seqs_dict.values()))
         if (self.sampling_params.echo
-                and self.sampling_params.logprobs is not None
-                and self.sampling_params.logprobs > 0):
+                and self.sampling_params.logprobs is not None):
             return seq.data.prompt_logprobs
         else:
             return None

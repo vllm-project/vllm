@@ -99,13 +99,17 @@ class RequestOutput:
             cumulative_logprob = seq.get_cumulative_logprob()
             if echo:
                 if seq_group.sampling_params.logprobs is not None:
+                    if seq_group.sampling_params.logprobs > 0:
+                        top_logprobs = (seq_group.prompt_top_logprobs +
+                                        top_logprobs)
+                    else:
+                        top_logprobs = None
                     logprobs = seq_group.prompt_logprobs + logprobs
-                    top_logprobs = seq_group.prompt_top_logprobs + top_logprobs
                 output_text = seq.prompt + output_text
                 output_token_ids = seq.data.prompt_token_ids + output_token_ids
                 if seq_group.sampling_params.logprobs is not None:
-                    cumulative_logprob = sum(
-                        seq.data.prompt_logprobs) + cumulative_logprob
+                    cumulative_logprob = (sum(seq.data.prompt_logprobs) +
+                                          cumulative_logprob)
             if seq_group.sampling_params.logprobs is None:
                 # NOTE: We need to take care of this case because the sequence
                 # always has the logprobs of the sampled tokens even if the

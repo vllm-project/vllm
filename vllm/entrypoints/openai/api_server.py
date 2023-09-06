@@ -156,14 +156,16 @@ async def show_available_models():
 def create_logprobs(
     token_ids: List[int],
     token_logprobs: List[float],
-    top_logprobs: List[Dict[int, float]],
+    top_logprobs: Optional[List[Dict[int, float]]] = None,
     initial_text_offset: int = 0,
 ) -> LogProbs:
     """Create OpenAI-style logprobs."""
     logprobs = LogProbs()
     last_token_len = 0
-    for token_id, token_logprob, t_logprobs in zip(token_ids, token_logprobs,
-                                                   top_logprobs):
+    if top_logprobs:
+        logprobs.top_logprobs = []
+    for i, (token_id,
+            token_logprob) in enumerate(zip(token_ids, token_logprobs)):
         token = tokenizer.convert_ids_to_tokens(token_id)
         logprobs.tokens.append(token)
         logprobs.token_logprobs.append(token_logprob)
@@ -174,10 +176,11 @@ def create_logprobs(
                                         last_token_len)
         last_token_len = len(token)
 
-        logprobs.top_logprobs.append({
-            tokenizer.convert_ids_to_tokens(i): p
-            for i, p in t_logprobs.items()
-        })
+        if top_logprobs:
+            logprobs.top_logprobs.append({
+                tokenizer.convert_ids_to_tokens(i): p
+                for i, p in top_logprobs[i].items()
+            })
     return logprobs
 
 
@@ -497,7 +500,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                         token_logprobs=output.
                         logprobs[previous_num_tokens[i]:],
                         top_logprobs=output.
-                        top_logprobs[previous_num_tokens[i]:],
+                        top_logprobs[previous_num_tokens[i]:]
+                        if request.logprobs > 0 else None,
                         initial_text_offset=len(previous_texts[i]),
                     )
                 else:
