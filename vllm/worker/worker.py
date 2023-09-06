@@ -12,8 +12,8 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory
+from vllm.worker.cache_engine import CacheEngine
 
 
 class Worker:
@@ -149,6 +149,7 @@ class Worker:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
+        use_echo: List[bool] = []
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -186,6 +187,9 @@ class Worker:
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
+
+            # Whether to use echo for prompts.
+            use_echo.append(seq_group_metadata.sampling_params.echo)
 
         # Add generation tokens.
         max_context_len = 0
@@ -250,6 +254,7 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
+            echo=use_echo,
         )
         return tokens_tensor, positions_tensor, input_metadata
 

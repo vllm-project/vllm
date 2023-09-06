@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import torch
 from xformers.ops import AttentionBias
@@ -18,6 +18,7 @@ class InputMetadata:
         context_lens: the length of attention context for each generation token.
         max_context_len: The maximum context length.
         block_tables: The block tables. (Seq id -> list of physical block)
+        echo: Whether to echo the prompt tokens. Defaults to False.
     """
 
     def __init__(
@@ -29,6 +30,7 @@ class InputMetadata:
         context_lens: torch.Tensor,
         max_context_len: int,
         block_tables: torch.Tensor,
+        echo: Optional[List[bool]] = None
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
@@ -37,6 +39,7 @@ class InputMetadata:
         self.context_lens = context_lens
         self.max_context_len = max_context_len
         self.block_tables = block_tables
+        self.echo = echo if echo is not None else [False] * len(seq_groups)
 
         self.num_prompts = len(prompt_lens)
         self.num_prompt_tokens = sum(prompt_lens)

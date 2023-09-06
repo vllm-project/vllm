@@ -67,6 +67,7 @@ class SamplingParams:
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
+        echo: bool = False
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -87,6 +88,7 @@ class SamplingParams:
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs
+        self.echo = echo
 
         self._verify_args()
         if self.use_beam_search:
@@ -172,4 +174,5 @@ class SamplingParams:
                 f"stop={self.stop}, "
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
-                f"logprobs={self.logprobs})")
+                f"logprobs={self.logprobs}), "
+                f"use_echo={self.echo}")

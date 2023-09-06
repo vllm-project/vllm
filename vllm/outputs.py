@@ -23,7 +23,8 @@ class CompletionOutput:
         text: str,
         token_ids: List[int],
         cumulative_logprob: float,
-        logprobs: Optional[List[Dict[int, float]]],
+        logprobs: Optional[List[float]] = (None,)
+        top_logprobs: Optional[List[Dict[int, float]]] = (None,)
         finish_reason: Optional[str] = None,
     ) -> None:
         self.index = index
@@ -31,6 +32,7 @@ class CompletionOutput:
         self.token_ids = token_ids
         self.cumulative_logprob = cumulative_logprob
         self.logprobs = logprobs
+        self.top_logprobs = top_logprobs
         self.finish_reason = finish_reason
 
     def finished(self) -> bool:
@@ -77,34 +79,59 @@ class RequestOutput:
         seqs = seq_group.get_seqs()
         if seq_group.sampling_params.use_beam_search:
             sorting_key = lambda seq: seq.get_beam_search_score(
-                seq_group.sampling_params.length_penalty)
+                seq_group.sampling_params.length_penalty
+            )
         else:
             sorting_key = lambda seq: seq.get_cumulative_logprob()
         sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
         top_n_seqs = sorted_seqs[:n]
 
         # Create the outputs.
+        echo = seq_group.sampling_params.echo
         outputs: List[CompletionOutput] = []
         for seq in top_n_seqs:
-            logprobs = seq.output_logprobs
+            logprobs = [seq.output_logprobs[i][x] for i, x in enumerate(seq.data.output_token_ids)]
+            top_logprobs = seq.output_logprobs
+            output_text = seq.output_text
+            output_token_ids = seq.get_output_token_ids()
+            cumulative_logprob = seq.get_cumulative_logprob()
+            if echo:
+                if seq_group.sampling_params.logprobs is not None:
+                    logprobs = seq_group.prompt_logprobs + logprobs
+                    top_logprobs = seq_group.prompt_top_logprobs + top_logprobs
+                output_text = seq.prompt + output_text
+                output_token_ids = seq.data.prompt_token_ids + output_token_ids
+                if seq_group.sampling_params.logprobs is not None:
+                    cumulative_logprob = sum(seq.data.prompt_logprobs) + cumulative_logprob
             if seq_group.sampling_params.logprobs is None:
                 # NOTE: We need to take care of this case because the sequence
                 # always has the logprobs of the sampled tokens even if the
                 # logprobs are not requested.
-                logprobs = {}
+                logprobs = []
+                top_logprobs = []
             finshed_reason = SequenceStatus.get_finished_reason(seq.status)
-            output = CompletionOutput(seqs.index(seq), seq.output_text,
-                                      seq.get_output_token_ids(),
-                                      seq.get_cumulative_logprob(), logprobs,
-                                      finshed_reason)
+            output = CompletionOutput(
+                index=seqs.index(seq),
+                text=output_text,
+                token_ids=output_token_ids,
+                cumulative_logprob=cumulative_logprob,
+                logprobs=logprobs,
+                top_logprobs=top_logprobs,
+                finish_reason=finshed_reason,
+            )
             outputs.append(output)
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = top_n_seqs[0].prompt
         prompt_token_ids = top_n_seqs[0].data.prompt_token_ids
         finished = seq_group.is_finished()
-        return cls(seq_group.request_id, prompt, prompt_token_ids, outputs,
-                   finished)
+        return cls(
+            seq_group.request_id,
+            prompt,
+            prompt_token_ids,
+            outputs,
+            finished,
+        )
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "

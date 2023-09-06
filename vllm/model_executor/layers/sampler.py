@@ -33,6 +33,20 @@ class Sampler(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size
 
+    def _logits_forward(
+        self,
+        embedding: torch.Tensor,
+        hidden_states: torch.Tensor,
+        embedding_bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        logits = torch.matmul(hidden_states, embedding.t())
+        if embedding_bias is not None:
+            logits += embedding_bias
+        logits = gather_from_tensor_model_parallel_region(logits)
+        # Remove paddings in vocab (if any).
+        logits = logits[:, : self.vocab_size]
+        return logits
+
     def forward(
         self,
         embedding: torch.Tensor,
@@ -40,34 +54,44 @@ class Sampler(nn.Module):
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
+        # Decide whether to perform `echo`
+        if (
+            input_metadata.echo is not None
+            and any(input_metadata.echo)
+            and any([x.logprobs is not None for _, x in input_metadata.seq_groups])
+        ):
+            self._process_echo(
+                embedding=embedding,
+                hidden_states=hidden_states,
+                input_metadata=input_metadata,
+                embedding_bias=embedding_bias,
+            )
+
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
 
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
-        if embedding_bias is not None:
-            logits += embedding_bias
-        logits = gather_from_tensor_model_parallel_region(logits)
-        # Remove paddings in vocab (if any).
-        logits = logits[:, :self.vocab_size]
+        logits = self._logits_forward(embedding, hidden_states, embedding_bias)
 
         # Apply presence and frequency penalties.
         output_tokens = _get_output_tokens(input_metadata)
         assert len(output_tokens) == logits.shape[0]
-        presence_penalties, frequency_penalties = _get_penalties(
-            input_metadata)
+        presence_penalties, frequency_penalties = _get_penalties(input_metadata)
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
-        logits = _apply_penalties(logits, output_tokens, presence_penalties,
-                                  frequency_penalties, self.vocab_size)
+        logits = _apply_penalties(
+            logits,
+            output_tokens,
+            presence_penalties,
+            frequency_penalties,
+            self.vocab_size,
+        )
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(input_metadata)
         assert len(temperatures) == logits.shape[0]
         if any(t != 1.0 for t in temperatures):
-            t = torch.tensor(temperatures,
-                             dtype=logits.dtype,
-                             device=logits.device)
+            t = torch.tensor(temperatures, dtype=logits.dtype, device=logits.device)
             # Use in-place division to avoid creating a new tensor.
             logits.div_(t.unsqueeze(dim=1))
 
@@ -83,10 +107,77 @@ class Sampler(nn.Module):
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities (before applying top-p and top-k).
-        logprobs = torch.log(probs)
+        # Re-compute to ensure numerical stability.
+        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
         return _sample(probs, logprobs, input_metadata)
+
+    def _process_echo(
+        self,
+        embedding: torch.Tensor,
+        hidden_states: torch.Tensor,
+        input_metadata: InputMetadata,
+        embedding_bias: Optional[torch.Tensor] = None,
+    ):
+        """This method has side effects on `input_metadata`."""
+        prompt_index_list: List[int] = []
+        seq_data = []
+        prompt_id_list: List[int] = []
+        start_idx = 0
+        for prompt_len, seq_group in zip(
+            input_metadata.prompt_lens, input_metadata.seq_groups
+        ):
+            prompt_index_list.extend(list(range(start_idx, start_idx + prompt_len)))
+            start_idx += prompt_len
+
+            # Pick the first seq_id
+            seq_datum = input_metadata.seq_data[seq_group[0][0]]
+            seq_data.append(seq_datum)
+            prompt_id_list.extend(seq_datum.prompt_token_ids)
+
+        if len(seq_data) == 0:
+            return
+
+        prompt_indices = torch.tensor(
+            prompt_index_list,
+            dtype=torch.long,
+            device=embedding.device,
+        )
+        selected_hidden_states = hidden_states[prompt_indices]
+
+        prompt_ids = torch.tensor(
+            prompt_id_list, dtype=torch.long, device=embedding.device
+        )
+
+        # Compute the logits for the prompt tokens.
+        log_probs = self._logits_forward(
+            embedding, selected_hidden_states, embedding_bias
+        ).log_softmax(dim=-1)
+        # Log probs used in the prompt
+        selected_log_probs = log_probs.gather(
+            dim=-1, index=prompt_ids.unsqueeze(dim=-1)
+        ).squeeze(-1).tolist()
+
+        start_idx = 0
+        for i, (prompt_len, seq_datum) in enumerate(
+            zip(input_metadata.prompt_lens, seq_data)
+        ):
+            num_log_probs = input_metadata.seq_groups[i][1].logprobs
+            assert num_log_probs is not None
+            top_log_porbs = torch.topk(
+                log_probs[start_idx: start_idx + prompt_len], k=num_log_probs, dim=-1
+            )
+            seq_datum.prompt_top_logprobs = [
+                {i: j for i, j in zip(x, y)}
+                for x, y in zip(
+                    top_log_porbs.indices.tolist(), top_log_porbs.values.tolist()
+                )
+            ]
+            seq_datum.prompt_logprobs = selected_log_probs[start_idx: start_idx + prompt_len]
+            start_idx += prompt_len
+
+            assert len(seq_datum.prompt_top_logprobs) == prompt_len
 
 
 def _prune_hidden_states(

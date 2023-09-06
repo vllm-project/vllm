@@ -153,27 +153,28 @@ async def show_available_models():
     return ModelList(data=model_cards)
 
 
-def create_logprobs(token_ids: List[int],
-                    id_logprobs: List[Dict[int, float]],
-                    initial_text_offset: int = 0) -> LogProbs:
+def create_logprobs(
+    token_ids: List[int],
+    token_logprobs: List[float],
+    top_logprobs: List[Dict[int, float]],
+    initial_text_offset: int = 0,
+) -> LogProbs:
     """Create OpenAI-style logprobs."""
     logprobs = LogProbs()
     last_token_len = 0
-    for token_id, id_logprob in zip(token_ids, id_logprobs):
+    for token_id, token_logprob, t_logprobs in zip(token_ids, token_logprobs, top_logprobs):
         token = tokenizer.convert_ids_to_tokens(token_id)
         logprobs.tokens.append(token)
-        logprobs.token_logprobs.append(id_logprob[token_id])
+        logprobs.token_logprobs.append(token_logprob)
         if len(logprobs.text_offset) == 0:
             logprobs.text_offset.append(initial_text_offset)
         else:
-            logprobs.text_offset.append(logprobs.text_offset[-1] +
-                                        last_token_len)
+            logprobs.text_offset.append(logprobs.text_offset[-1] + last_token_len)
         last_token_len = len(token)
 
-        logprobs.top_logprobs.append({
-            tokenizer.convert_ids_to_tokens(i): p
-            for i, p in id_logprob.items()
-        })
+        logprobs.top_logprobs.append(
+            {tokenizer.convert_ids_to_tokens(i): p for i, p in t_logprobs.items()}
+        )
     return logprobs
 
 
@@ -373,11 +374,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     if error_check_ret is not None:
         return error_check_ret
 
-    if request.echo:
-        # We do not support echo since the vLLM engine does not
-        # currently support getting the logprobs of prompt tokens.
-        return create_error_response(HTTPStatus.BAD_REQUEST,
-                                     "echo is not currently supported")
+    # OpenAI API supports echoing the prompt when max_tokens is 0.
+    echo_self = request.echo and request.max_tokens == 0
 
     if request.suffix is not None:
         # The language models we currently support do not support suffix.
@@ -431,9 +429,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             top_k=request.top_k,
             stop=request.stop,
             ignore_eos=request.ignore_eos,
-            max_tokens=request.max_tokens,
+            max_tokens=request.max_tokens if not echo_self else 1,
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
+            echo=request.echo,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -481,16 +480,21 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     async def completion_stream_generator() -> AsyncGenerator[str, None]:
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
+        echo_self_ends = [False] * request.n
         async for res in result_generator:
             res: RequestOutput
             for output in res.outputs:
                 i = output.index
+                if echo_self and echo_self_ends[i]:
+                    continue
                 delta_text = output.text[len(previous_texts[i]):]
                 if request.logprobs is not None:
                     logprobs = create_logprobs(
-                        output.token_ids[previous_num_tokens[i]:],
-                        output.logprobs[previous_num_tokens[i]:],
-                        len(previous_texts[i]))
+                        token_ids=output.token_ids[previous_num_tokens[i]:],
+                        token_logprobs=output.logprobs[previous_num_tokens[i]:],
+                        top_logprobs=output.top_logprobs[previous_num_tokens[i]:],
+                        initial_text_offset=len(previous_texts[i]),
+                    )
                 else:
                     logprobs = None
                 previous_texts[i] = output.text
@@ -501,6 +505,9 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                     logprobs=logprobs,
                 )
                 yield f"data: {response_json}\n\n"
+                echo_self_ends[i] = echo_self and len(previous_texts[i]) == len(res.prompt_token_ids)
+                if echo_self and echo_self_ends[i]:
+                    output.finish_reason = "length"
                 if output.finish_reason is not None:
                     logprobs = (LogProbs()
                                 if request.logprobs is not None else None)
@@ -531,16 +538,28 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             return create_error_response(HTTPStatus.BAD_REQUEST,
                                          "Client disconnected")
         final_res = res
+
     assert final_res is not None
     choices = []
     for output in final_res.outputs:
         if request.logprobs is not None:
-            logprobs = create_logprobs(output.token_ids, output.logprobs)
+            token_ids = output.token_ids if not echo_self else output.token_ids[:-1]
+            token_logprobs = output.logprobs if not echo_self else output.logprobs[:-1]
+            top_logprobs = output.top_logprobs if not echo_self else output.top_logprobs[:-1]
+            logprobs = create_logprobs(
+                token_ids=token_ids,
+                token_logprobs=token_logprobs,
+                top_logprobs=top_logprobs
+            )
         else:
             logprobs = None
+        if echo_self:
+            output_text = tokenizer.decode(output.token_ids[:-1], skip_special_tokens=True)
+        else:
+            output_text = output.text
         choice_data = CompletionResponseChoice(
             index=output.index,
-            text=output.text,
+            text=output_text,
             logprobs=logprobs,
             finish_reason=output.finish_reason,
         )

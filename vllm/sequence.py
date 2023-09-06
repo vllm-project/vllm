@@ -9,6 +9,7 @@ from vllm.sampling_params import SamplingParams
 
 class SequenceStatus(enum.Enum):
     """Status of a sequence."""
+
     WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()
@@ -52,6 +53,8 @@ class SequenceData:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
+        prompt_logprobs: The log probabilities of the prompt tokens.
+        prompt_top_logprobs: The log probabilities of the top probability tokens in the prompt.
     """
 
     def __init__(
@@ -61,6 +64,9 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
+
+        self.prompt_logprobs: Optional[List[float]] = None
+        self.prompt_top_logprobs: Optional[List[Dict[int, float]]] = None
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
@@ -83,11 +89,27 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
+    def __copy__(self) -> "SequenceData":
+        """Deepcopy everything except for `prompt_token_logprobs`."""
+        keys = self.__dict__.keys()
+        new_seq_data = SequenceData(prompt_token_ids=[])
+        for key in keys:
+            if key == "prompt_top_logprobs":
+                setattr(new_seq_data, key, self.prompt_top_logprobs)
+            elif key == "prompt_logprobs":
+                setattr(new_seq_data, key, self.prompt_logprobs)
+            else:
+                setattr(new_seq_data, key, copy.deepcopy(getattr(self, key)))
+        return new_seq_data
+
     def __repr__(self) -> str:
-        return (f"SequenceData("
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"output_token_ids={self.output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob})")
+        return (
+            f"SequenceData("
+            f"prompt_token_ids={self.prompt_token_ids}, "
+            f"output_token_ids={self.output_token_ids}, "
+            f"cumulative_logprob={self.cumulative_logprob},"
+            f"prompt_logprobs={self.prompt_logprobs})"
+        )
 
 
 class Sequence:
@@ -141,8 +163,7 @@ class Sequence:
                 last_block = self.logical_token_blocks[-1]
 
             num_empty_slots = last_block.get_num_empty_slots()
-            last_block.append_tokens(token_ids[cursor:cursor +
-                                               num_empty_slots])
+            last_block.append_tokens(token_ids[cursor : cursor + num_empty_slots])
             cursor += num_empty_slots
 
     def append_token_id(
@@ -176,10 +197,12 @@ class Sequence:
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
 
-    def get_beam_search_score(self,
-                              length_penalty: float = 0.0,
-                              seq_len: Optional[int] = None,
-                              eos_token_id: Optional[int] = None) -> float:
+    def get_beam_search_score(
+        self,
+        length_penalty: float = 0.0,
+        seq_len: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+    ) -> float:
         """Calculate the beam search score with length penalty.
 
         Adapted from
@@ -190,8 +213,7 @@ class Sequence:
             seq_len = self.get_len()
             # Note: HF implementation does not count the EOS token
             # towards the length, we align with that here for testing.
-            if (eos_token_id is not None
-                    and self.get_last_token_id() == eos_token_id):
+            if eos_token_id is not None and self.get_last_token_id() == eos_token_id:
                 seq_len -= 1
         return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
@@ -199,14 +221,24 @@ class Sequence:
         return SequenceStatus.is_finished(self.status)
 
     def fork(self, new_seq_id: int) -> "Sequence":
-        new_seq = copy.deepcopy(self)
-        new_seq.seq_id = new_seq_id
+        keys = self.__dict__.keys()
+        new_seq = Sequence(seq_id=-1, prompt="", prompt_token_ids=[], block_size=-1)
+        for key in keys:
+            if key == "data":  # We don't want to copy prompt log_probs
+                new_value = copy.copy(getattr(self, key))
+            elif key == "seq_id":
+                new_value = new_seq_id
+            else:
+                new_value = copy.deepcopy(getattr(self, key))
+            setattr(new_seq, key, new_value)
         return new_seq
 
     def __repr__(self) -> str:
-        return (f"Sequence(seq_id={self.seq_id}, "
-                f"status={self.status.name}, "
-                f"num_blocks={len(self.logical_token_blocks)})")
+        return (
+            f"Sequence(seq_id={self.seq_id}, "
+            f"status={self.status.name}, "
+            f"num_blocks={len(self.logical_token_blocks)})"
+        )
 
 
 class SequenceGroup:
@@ -230,6 +262,32 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
+
+    @property
+    def prompt_top_logprobs(self) -> Optional[List[Dict[int, float]]]:
+        # Randomly pick a seq since all of their prompts should be the same
+        seq = next(iter(self.seqs_dict.values()))
+        if (
+            self.sampling_params.echo
+            and self.sampling_params.logprobs is not None
+            and self.sampling_params.logprobs > 0
+        ):
+            return seq.data.prompt_top_logprobs
+        else:
+            return None
+
+    @property
+    def prompt_logprobs(self) -> Optional[List[float]]:
+        # Randomly pick a seq since all of their prompts should be the same
+        seq = next(iter(self.seqs_dict.values()))
+        if (
+            self.sampling_params.echo
+            and self.sampling_params.logprobs is not None
+            and self.sampling_params.logprobs > 0
+        ):
+            return seq.data.prompt_logprobs
+        else:
+            return None
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
@@ -255,9 +313,7 @@ class SequenceGroup:
         if status is None:
             return list(self.seqs_dict.values())
         else:
-            return [
-                seq for seq in self.seqs_dict.values() if seq.status == status
-            ]
+            return [seq for seq in self.seqs_dict.values() if seq.status == status]
 
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
@@ -284,9 +340,11 @@ class SequenceGroup:
         return all(seq.is_finished() for seq in self.get_seqs())
 
     def __repr__(self) -> str:
-        return (f"SequenceGroup(request_id={self.request_id}, "
-                f"sampling_params={self.sampling_params}, "
-                f"num_seqs={len(self.seqs_dict)})")
+        return (
+            f"SequenceGroup(request_id={self.request_id}, "
+            f"sampling_params={self.sampling_params}, "
+            f"num_seqs={len(self.seqs_dict)})"
+        )
 
 
 class SequenceGroupMetadata:
@@ -339,16 +397,20 @@ class SequenceOutputs:
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
-                f"output_token={self.output_token}), "
-                f"logprobs={self.logprobs}")
+        return (
+            f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
+            f"output_token={self.output_token}), "
+            f"logprobs={self.logprobs})"
+        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
-            return NotImplementedError()
-        return (self.parent_seq_id == other.parent_seq_id
-                and self.output_token == other.output_token
-                and self.logprobs == other.logprobs)
+            raise NotImplementedError
+        return (
+            self.parent_seq_id == other.parent_seq_id
+            and self.output_token == other.output_token
+            and self.logprobs == other.logprobs
+        )
 
 
 # For each sequence group, we generate a list of SequenceOutputs object,
