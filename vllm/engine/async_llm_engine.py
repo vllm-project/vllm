@@ -14,6 +14,10 @@ from vllm.sampling_params import SamplingParams
 logger = init_logger(__name__)
 
 
+class AsyncEngineDeadError(RuntimeError):
+    pass
+
+
 def _raise_exception_on_finish(task: asyncio.Task) -> None:
     msg = ("Task finished unexpectedly. This should never happen! "
            "Please open an issue on Github.")
@@ -22,8 +26,9 @@ def _raise_exception_on_finish(task: asyncio.Task) -> None:
     except asyncio.CancelledError:
         return
     except Exception as e:
-        raise RuntimeError(msg) from e
-    raise RuntimeError(msg)
+        raise AsyncEngineDeadError(
+            msg + "  See stack trace above for the actual cause.") from e
+    raise AsyncEngineDeadError(msg)
 
 
 class AsyncStream:
@@ -237,7 +242,8 @@ class AsyncLLMEngine:
 
     @property
     def is_running(self) -> bool:
-        return self.background_loop is not None
+        return (self.background_loop is not None
+                and not self.background_loop.done())
 
     def start_background_loop(self) -> None:
         """Start the background loop."""
@@ -271,7 +277,8 @@ class AsyncLLMEngine:
             else:
                 self.engine.add_request(**new_request)
 
-        await self._engine_abort(finished_requests)
+        if finished_requests:
+            await self._engine_abort(finished_requests)
 
         if self.engine_use_ray:
             request_outputs = await self.engine.step.remote()
@@ -307,6 +314,13 @@ class AsyncLLMEngine:
                         f"prompt: {prompt!r}, "
                         f"sampling params: {sampling_params}, "
                         f"prompt token ids: {prompt_token_ids}.")
+
+        if not self.is_running:
+            raise AsyncEngineDeadError(
+                "Background loop is not running. If it was running, "
+                "inspect the output to find the stacktrace of the "
+                "error that caused the background loop to stop "
+                "(AsyncEngineDeadError).")
 
         stream = self.request_tracker.add_request(
             request_id,
@@ -367,6 +381,13 @@ class AsyncLLMEngine:
         Args:
             request_id: The unique id of the request.
         """
+        if not self.is_running:
+            raise AsyncEngineDeadError(
+                "Background loop is not running. If it was running, "
+                "inspect the output to find the stacktrace of the "
+                "error that caused the background loop to stop "
+                "(AsyncEngineDeadError).")
+
         return self._abort(request_id)
 
     def _abort(self, request_id: str) -> None:
