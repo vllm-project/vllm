@@ -56,10 +56,8 @@ class Sampler(nn.Module):
     ) -> SamplerOutput:
         # Decide whether to perform `echo`
         if (input_metadata.echo is not None and any(input_metadata.echo)
-                and any([
-                    x.logprobs is not None
-                    for _, x in input_metadata.seq_groups
-                ])):
+                and any(x.logprobs is not None
+                        for _, x in input_metadata.seq_groups)):
             self._process_echo(
                 embedding=embedding,
                 hidden_states=hidden_states,
@@ -169,11 +167,10 @@ class Sampler(nn.Module):
                                                  prompt_len],
                                        k=num_log_probs,
                                        dim=-1)
-            seq_datum.prompt_top_logprobs = [{
-                i: j
-                for i, j in zip(x, y)
-            } for x, y in zip(top_log_porbs.indices.tolist(),
-                              top_log_porbs.values.tolist())]
+            seq_datum.prompt_top_logprobs = [
+                dict(zip(x, y)) for x, y in zip(top_log_porbs.indices.tolist(),
+                                                top_log_porbs.values.tolist())
+            ]
             seq_datum.prompt_logprobs = selected_log_probs[
                 start_idx:start_idx + prompt_len]
             start_idx += prompt_len
