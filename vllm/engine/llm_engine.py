@@ -256,6 +256,9 @@ class LLMEngine:
         if prompt_token_ids is None:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
+        if prompt is None:
+            prompt = self.tokenizer.decode(prompt_token_ids,
+                                           skip_special_tokens=True)
 
         # Create the sequences.
         block_size = self.cache_config.block_size
