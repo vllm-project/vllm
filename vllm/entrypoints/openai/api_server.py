@@ -178,7 +178,8 @@ def create_logprobs(token_ids: List[int],
 
 
 @app.post("/v1/chat/completions")
-async def create_chat_completion(raw_request: Request):
+async def create_chat_completion(request: ChatCompletionRequest,
+                                 raw_request: Request):
     """Completion API similar to OpenAI's API.
 
     See  https://platform.openai.com/docs/api-reference/chat/create
@@ -188,8 +189,10 @@ async def create_chat_completion(raw_request: Request):
         - function_call (Users should implement this by themselves)
         - logit_bias (to be supported by vLLM engine)
     """
-    request = ChatCompletionRequest(**await raw_request.json())
     logger.info(f"Received chat completion request: {request}")
+
+    if not engine.is_running:
+        engine.start_background_loop()
 
     error_check_ret = await check_model(request)
     if error_check_ret is not None:
@@ -348,7 +351,7 @@ async def create_chat_completion(raw_request: Request):
 
 
 @app.post("/v1/completions")
-async def create_completion(raw_request: Request):
+async def create_completion(request: CompletionRequest, raw_request: Request):
     """Completion API similar to OpenAI's API.
 
     See https://platform.openai.com/docs/api-reference/completions/create
@@ -361,8 +364,10 @@ async def create_completion(raw_request: Request):
           suffix)
         - logit_bias (to be supported by vLLM engine)
     """
-    request = CompletionRequest(**await raw_request.json())
     logger.info(f"Received completion request: {request}")
+
+    if not engine.is_running:
+        engine.start_background_loop()
 
     error_check_ret = await check_model(request)
     if error_check_ret is not None:
@@ -621,7 +626,8 @@ if __name__ == "__main__":
         served_model = args.model
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args,
+                                             start_engine_loop=False)
     engine_model_config = asyncio.run(engine.get_model_config())
     max_model_len = engine_model_config.get_max_model_len()
 
