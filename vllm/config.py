@@ -22,6 +22,7 @@ class ModelConfig:
             available, and "slow" will always use the slow tokenizer.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
+        keep_special_tokens: Keep special tokens in the generated text.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
         use_np_weights: Save a numpy copy of model weights for faster loading.
