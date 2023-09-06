@@ -51,24 +51,22 @@ class SamplingParams:
         logprobs: Number of log probabilities to return per output token.
     """
 
-    def __init__(
-        self,
-        n: int = 1,
-        best_of: Optional[int] = None,
-        presence_penalty: float = 0.0,
-        frequency_penalty: float = 0.0,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        top_k: int = -1,
-        use_beam_search: bool = False,
-        length_penalty: float = 1.0,
-        early_stopping: Union[bool, str] = False,
-        stop: Union[None, str, List[str]] = None,
-        ignore_eos: bool = False,
-        max_tokens: int = 16,
-        logprobs: Optional[int] = None,
-        echo: bool = False
-    ) -> None:
+    def __init__(self,
+                 n: int = 1,
+                 best_of: Optional[int] = None,
+                 presence_penalty: float = 0.0,
+                 frequency_penalty: float = 0.0,
+                 temperature: float = 1.0,
+                 top_p: float = 1.0,
+                 top_k: int = -1,
+                 use_beam_search: bool = False,
+                 length_penalty: float = 1.0,
+                 early_stopping: Union[bool, str] = False,
+                 stop: Union[None, str, List[str]] = None,
+                 ignore_eos: bool = False,
+                 max_tokens: int = 16,
+                 logprobs: Optional[int] = None,
+                 echo: bool = False) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
         self.presence_penalty = presence_penalty

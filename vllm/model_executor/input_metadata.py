@@ -21,17 +21,15 @@ class InputMetadata:
         echo: Whether to echo the prompt tokens. Defaults to False.
     """
 
-    def __init__(
-        self,
-        seq_groups: List[Tuple[List[int], SamplingParams]],
-        seq_data: Dict[int, SequenceData],
-        prompt_lens: List[int],
-        slot_mapping: torch.Tensor,
-        context_lens: torch.Tensor,
-        max_context_len: int,
-        block_tables: torch.Tensor,
-        echo: Optional[List[bool]] = None
-    ) -> None:
+    def __init__(self,
+                 seq_groups: List[Tuple[List[int], SamplingParams]],
+                 seq_data: Dict[int, SequenceData],
+                 prompt_lens: List[int],
+                 slot_mapping: torch.Tensor,
+                 context_lens: torch.Tensor,
+                 max_context_len: int,
+                 block_tables: torch.Tensor,
+                 echo: Optional[List[bool]] = None) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens

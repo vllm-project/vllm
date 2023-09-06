@@ -162,19 +162,22 @@ def create_logprobs(
     """Create OpenAI-style logprobs."""
     logprobs = LogProbs()
     last_token_len = 0
-    for token_id, token_logprob, t_logprobs in zip(token_ids, token_logprobs, top_logprobs):
+    for token_id, token_logprob, t_logprobs in zip(token_ids, token_logprobs,
+                                                   top_logprobs):
         token = tokenizer.convert_ids_to_tokens(token_id)
         logprobs.tokens.append(token)
         logprobs.token_logprobs.append(token_logprob)
         if len(logprobs.text_offset) == 0:
             logprobs.text_offset.append(initial_text_offset)
         else:
-            logprobs.text_offset.append(logprobs.text_offset[-1] + last_token_len)
+            logprobs.text_offset.append(logprobs.text_offset[-1] +
+                                        last_token_len)
         last_token_len = len(token)
 
-        logprobs.top_logprobs.append(
-            {tokenizer.convert_ids_to_tokens(i): p for i, p in t_logprobs.items()}
-        )
+        logprobs.top_logprobs.append({
+            tokenizer.convert_ids_to_tokens(i): p
+            for i, p in t_logprobs.items()
+        })
     return logprobs
 
 
@@ -491,8 +494,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 if request.logprobs is not None:
                     logprobs = create_logprobs(
                         token_ids=output.token_ids[previous_num_tokens[i]:],
-                        token_logprobs=output.logprobs[previous_num_tokens[i]:],
-                        top_logprobs=output.top_logprobs[previous_num_tokens[i]:],
+                        token_logprobs=output.
+                        logprobs[previous_num_tokens[i]:],
+                        top_logprobs=output.
+                        top_logprobs[previous_num_tokens[i]:],
                         initial_text_offset=len(previous_texts[i]),
                     )
                 else:
@@ -505,7 +510,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                     logprobs=logprobs,
                 )
                 yield f"data: {response_json}\n\n"
-                echo_self_ends[i] = echo_self and len(previous_texts[i]) == len(res.prompt_token_ids)
+                echo_self_ends[i] = echo_self and len(
+                    previous_texts[i]) == len(res.prompt_token_ids)
                 if echo_self and echo_self_ends[i]:
                     output.finish_reason = "length"
                 if output.finish_reason is not None:
@@ -543,18 +549,22 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     choices = []
     for output in final_res.outputs:
         if request.logprobs is not None:
-            token_ids = output.token_ids if not echo_self else output.token_ids[:-1]
-            token_logprobs = output.logprobs if not echo_self else output.logprobs[:-1]
-            top_logprobs = output.top_logprobs if not echo_self else output.top_logprobs[:-1]
+            token_ids = (output.token_ids
+                         if not echo_self else output.token_ids[:-1])
+            token_logprobs = (output.logprobs
+                              if not echo_self else output.logprobs[:-1])
+            top_logprobs = (output.top_logprobs
+                            if not echo_self else output.top_logprobs[:-1])
             logprobs = create_logprobs(
                 token_ids=token_ids,
                 token_logprobs=token_logprobs,
-                top_logprobs=top_logprobs
+                top_logprobs=top_logprobs,
             )
         else:
             logprobs = None
         if echo_self:
-            output_text = tokenizer.decode(output.token_ids[:-1], skip_special_tokens=True)
+            output_text = tokenizer.decode(output.token_ids[:-1],
+                                           skip_special_tokens=True)
         else:
             output_text = output.text
         choice_data = CompletionResponseChoice(

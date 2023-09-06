@@ -23,8 +23,8 @@ class CompletionOutput:
         text: str,
         token_ids: List[int],
         cumulative_logprob: float,
-        logprobs: Optional[List[float]] = (None,)
-        top_logprobs: Optional[List[Dict[int, float]]] = (None,)
+        logprobs: Optional[List[float]] = None,
+        top_logprobs: Optional[List[Dict[int, float]]] = None,
         finish_reason: Optional[str] = None,
     ) -> None:
         self.index = index
@@ -79,8 +79,7 @@ class RequestOutput:
         seqs = seq_group.get_seqs()
         if seq_group.sampling_params.use_beam_search:
             sorting_key = lambda seq: seq.get_beam_search_score(
-                seq_group.sampling_params.length_penalty
-            )
+                seq_group.sampling_params.length_penalty)
         else:
             sorting_key = lambda seq: seq.get_cumulative_logprob()
         sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
@@ -90,7 +89,10 @@ class RequestOutput:
         echo = seq_group.sampling_params.echo
         outputs: List[CompletionOutput] = []
         for seq in top_n_seqs:
-            logprobs = [seq.output_logprobs[i][x] for i, x in enumerate(seq.data.output_token_ids)]
+            logprobs = [
+                seq.output_logprobs[i][x]
+                for i, x in enumerate(seq.data.output_token_ids)
+            ]
             top_logprobs = seq.output_logprobs
             output_text = seq.output_text
             output_token_ids = seq.get_output_token_ids()
@@ -102,7 +104,8 @@ class RequestOutput:
                 output_text = seq.prompt + output_text
                 output_token_ids = seq.data.prompt_token_ids + output_token_ids
                 if seq_group.sampling_params.logprobs is not None:
-                    cumulative_logprob = sum(seq.data.prompt_logprobs) + cumulative_logprob
+                    cumulative_logprob = sum(
+                        seq.data.prompt_logprobs) + cumulative_logprob
             if seq_group.sampling_params.logprobs is None:
                 # NOTE: We need to take care of this case because the sequence
                 # always has the logprobs of the sampled tokens even if the
