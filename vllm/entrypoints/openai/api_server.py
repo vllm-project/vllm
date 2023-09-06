@@ -129,14 +129,13 @@ async def check_length(
         input_ids = tokenizer(prompt).input_ids
     token_num = len(input_ids)
 
-    if token_num + request.max_tokens > max_model_len:
+    if token_num > max_model_len:
         return input_ids, create_error_response(
             HTTPStatus.BAD_REQUEST,
             f"This model's maximum context length is {max_model_len} tokens. "
-            f"However, you requested {request.max_tokens + token_num} tokens "
+            f"However, you requested {token_num} tokens "
             f"({token_num} in the messages, "
-            f"{request.max_tokens} in the completion). "
-            f"Please reduce the length of the messages or completion.",
+            f"Please reduce the length of the messages.",
         )
     else:
         return input_ids, None
