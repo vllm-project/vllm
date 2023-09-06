@@ -84,7 +84,8 @@ def ref_single_query_cached_kv_attention(
             # Create the ALiBi bias used in the paged attention kernel.
             position_ids = torch.arange(context_len, device="cuda").int()
             alibi_bias = (context_len - position_ids).float()
-            alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(1, 1, -1)
+            alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
+                1, 1, -1)
 
         out = ref_masked_attention(q, keys, values, scale, alibi_bias)
         out = out.view(num_query_heads, head_size)
@@ -126,7 +127,7 @@ def test_single_query_cached_kv_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_mapping = torch.repeat_interleave(
         torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"),
-                     num_queries_per_kv)
+        num_queries_per_kv)
     alibi_slopes = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads,

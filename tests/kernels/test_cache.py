@@ -59,12 +59,8 @@ def test_copy_blocks(
                                                 head_size, dtype, seed)
 
     # Clone the KV caches.
-    cloned_key_caches = [
-        key_cache.clone() for key_cache in key_caches
-    ]
-    cloned_value_caches = [
-        value_cache.clone() for value_cache in value_caches
-    ]
+    cloned_key_caches = [key_cache.clone() for key_cache in key_caches]
+    cloned_value_caches = [value_cache.clone() for value_cache in value_caches]
 
     # Call the copy blocks kernel.
     cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
