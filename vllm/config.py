@@ -39,6 +39,7 @@ class ModelConfig:
         tokenizer: str,
         tokenizer_mode: str,
         trust_remote_code: bool,
+        keep_special_tokens: bool,
         download_dir: Optional[str],
         use_np_weights: bool,
         use_dummy_weights: bool,
@@ -49,6 +50,7 @@ class ModelConfig:
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
+        self.keep_special_tokens = keep_special_tokens
         self.download_dir = download_dir
         self.use_np_weights = use_np_weights
         self.use_dummy_weights = use_dummy_weights

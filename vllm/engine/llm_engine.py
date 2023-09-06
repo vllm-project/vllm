@@ -628,7 +628,7 @@ class LLMEngine:
             self.tokenizer,
             seq.output_tokens,
             seq.get_last_token_id(),
-            skip_special_tokens=True,
+            skip_special_tokens=not self.model_config.keep_special_tokens,
         )
         if new_token is not None:
             seq.output_tokens.append(new_token)

@@ -14,6 +14,7 @@ class EngineArgs:
     tokenizer: Optional[str] = None
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
+    keep_special_tokens: bool = False
     download_dir: Optional[str] = None
     use_np_weights: bool = False
     use_dummy_weights: bool = False
@@ -130,6 +131,9 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+        parser.add_argument('--keep-special-tokens',
+                            action='store_true',
+                            help='keep special tokens in the output')
         return parser
 
     @classmethod
@@ -146,9 +150,9 @@ class EngineArgs:
         # Initialize the configs.
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
-                                   self.download_dir, self.use_np_weights,
-                                   self.use_dummy_weights, self.dtype,
-                                   self.seed)
+                                   self.keep_special_tokens, self.download_dir,
+                                   self.use_np_weights, self.use_dummy_weights,
+                                   self.dtype, self.seed)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)
