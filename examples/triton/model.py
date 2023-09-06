@@ -23,22 +23,45 @@ class TritonPythonModel:
         engine_args = AsyncEngineArgs.from_cli_args(args)
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
 
+        self._loop = asyncio.get_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self.engine_loop, args=(self._loop,)
+        )
+        self._shutdown_event = asyncio.Event()
+        self._loop_thread.start()
+
         logging.info("model initialized")
+
+    def engine_loop(self, loop):
+        asyncio.set_event_loop(loop)
+        self._loop.run_until_complete(self.await_shutdown())
+
+    async def await_shutdown(self):
+        while self._shutdown_event.is_set() is False:
+            await asyncio.sleep(5)
+        logging.info("shutdown complete")
 
     def execute(self, requests):
         for request in requests:
-            self.process_request(request)
+            self.create_task(self.generate(request))
         return None
 
-    def process_request(self, request):
-        thread = threading.Thread(
-            target=asyncio.run,
-            args=(self.response_thread(request.get_response_sender(), request),),
-        )
-        thread.daemon = True
-        thread.start()
+    def create_task(self, coro):
+        assert (
+            self._shutdown_event.is_set() is False
+        ), "cannot create tasks after shutdown has been requested"
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
-    async def response_thread(self, response_sender, request):
+    def create_response(self, vllm_output):
+        text_outputs = [(output.text).encode("utf-8") for output in vllm_output.outputs]
+        triton_output_tensor = pb_utils.Tensor(
+            "response", np.asarray(text_outputs, dtype=object)
+        )
+        return pb_utils.InferenceResponse(output_tensors=[triton_output_tensor])
+
+    async def generate(self, request):
+        response_sender = request.get_response_sender()
+
         prompt = pb_utils.get_input_tensor_by_name(request, "prompt")
         max_tokens = pb_utils.get_input_tensor_by_name(request, "max_tokens")
 
@@ -47,21 +70,19 @@ class TritonPythonModel:
             max_tokens=max_tokens.as_numpy().item(),
         )
 
-        results_generator = self.engine.generate(req[0], sampling_params, random_uuid())
+        last_output = None
+        async for output in self.engine.generate(
+            req[0], sampling_params, random_uuid()
+        ):
+            last_output = output
 
-        final_output = None
-        async for request_output in results_generator:
-            final_output = request_output
-        assert final_output is not None
-
-        output_tensor = pb_utils.Tensor(
-            "response",
-            np.array([final_output.outputs[0].text], dtype=object),
-        )
-
-        inference_response = pb_utils.InferenceResponse(output_tensors=[output_tensor])
-        response_sender.send(inference_response)
+        response_sender.send(self.create_response(last_output))
         response_sender.send(flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL)
 
     def finalize(self):
         logging.info("model finalized")
+
+        self._shutdown_event.set()
+        if self._loop_thread is not None:
+            self._loop_thread.join()
+            self._loop_thread = None
