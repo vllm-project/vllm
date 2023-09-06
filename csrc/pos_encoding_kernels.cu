@@ -3,8 +3,6 @@
 
 #include "dispatch_utils.h"
 
-#include <string>
-
 namespace vllm {
 
 template<typename scalar_t, bool IS_NEOX>
