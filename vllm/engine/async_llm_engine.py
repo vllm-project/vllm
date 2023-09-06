@@ -1,7 +1,7 @@
 import asyncio
 import time
 from functools import partial
-from typing import Any, Dict, Iterable, List, Optional, Set, Type, Union
+from typing import Any, Dict, Iterable, List, Optional, Type, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
