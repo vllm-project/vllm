@@ -19,6 +19,18 @@ class SamplingType(IntEnum):
             return cls.GREEDY
         return cls.RANDOM
 
+    @classmethod
+    def last_vectorized(cls):
+        return cls.RANDOM
+
+    @classmethod
+    def min(cls) -> "SamplingType":
+        return min(cls.__members__.values())
+
+    @classmethod
+    def max(cls) -> "SamplingType":
+        return max(cls.__members__.values())
+
 
 class SamplingParams:
     """Sampling parameters for text generation.

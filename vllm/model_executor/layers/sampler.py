@@ -76,8 +76,10 @@ class Sampler(nn.Module):
         sampling_type_indices_values, sampling_type_indices_index = (
             sampling_type_indices.sort())
         # We use the bincount+cumsum to compute the offsets.
+        # Discard last one as it will always be empty.
         sampling_type_offsets = torch.bincount(sampling_type_indices_values,
-                                               minlength=3).cumsum(0)[:-1]
+                                               minlength=SamplingType.max() +
+                                               1).cumsum(0)[:-1]
         # The logit_to_id_map lets us reverse the sort we did above when we
         # match outputs to sequences.
         logit_to_id_map = sampling_type_indices_index.argsort()
@@ -88,31 +90,32 @@ class Sampler(nn.Module):
         # Otherwise, we will slice the logits and modify only the non-greedy
         # subset.
         if sampling_type_indices.max() > SamplingType.GREEDY:
-            non_greedy_offset = sampling_type_offsets[0]
+            non_greedy_offset = sampling_type_offsets[SamplingType.GREEDY]
+            non_greedy_logits = logits[non_greedy_offset:]
             # Apply temperature scaling.
             temperatures = _get_temperatures(input_metadata)
-            assert len(temperatures) == logits.shape[0]
             temperatures = temperatures[non_greedy_offset:]
-            if any(t != 1.0 for t in temperatures):
-                t = torch.tensor(temperatures,
-                                 dtype=logits.dtype,
-                                 device=logits.device)
-                # Use in-place division to avoid creating a new tensor.
-                logits[non_greedy_offset:].div_(t.unsqueeze(dim=1))
+            assert len(temperatures) == non_greedy_logits.shape[0]
+            t = torch.tensor(temperatures,
+                             dtype=logits.dtype,
+                             device=logits.device)
+            # Use in-place division to avoid creating a new tensor.
+            non_greedy_logits.div_(t.unsqueeze(dim=1))
 
             # Apply top-p and top-k truncation.
             top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
-            assert len(top_ps) == len(top_ks) == logits.shape[0]
             top_ps = top_ps[non_greedy_offset:]
             top_ks = top_ks[non_greedy_offset:]
-            do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
-            do_top_k = any(k != self.vocab_size for k in top_ks)
-            if do_top_p or do_top_k:
+            assert len(top_ps) == len(top_ks) == non_greedy_logits.shape[0]
+            do_top_p_or_top_k = any(
+                p < 1.0 - _SAMPLING_EPS or k != self.vocab_size
+                for p, k in zip(top_ps, top_ks))
+            if do_top_p_or_top_k:
                 p = torch.tensor(top_ps,
                                  dtype=logits.dtype,
                                  device=logits.device)
                 k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
-                _apply_top_p_top_k_in_place(logits[non_greedy_offset:], p, k)
+                _apply_top_p_top_k_in_place(non_greedy_logits, p, k)
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
@@ -417,39 +420,49 @@ def _batched_sample(gen_probs: torch.Tensor, gen_logprobs: torch.Tensor,
     # Create a tensor to store the tokens sampled by greedy or multinomial
     # sampling. Note that beam search tokens are not stored here.
     batch_chosen_tokens = torch.empty(
-        (sum(t.shape[0] for t in sampling_type_tensors[:2]), max_best_of),
+        (sum(t.shape[0]
+             for t in sampling_type_tensors[:SamplingType.last_vectorized() +
+                                            1]), max_best_of),
         dtype=torch.long,
         device=gen_probs.device)
     # Because batch_chosen_tokens_tensors are views of
     # batch_chosen_tokens_tensor, any changes to
     # batch_chosen_tokens_tensors will be reflected in
     # batch_chosen_tokens_tensor.
-    batch_chosen_tokens_tensors = torch.tensor_split(batch_chosen_tokens,
-                                                     sampling_type_offsets[:2])
+    batch_chosen_tokens_tensors = torch.tensor_split(
+        batch_chosen_tokens,
+        sampling_type_offsets[:SamplingType.last_vectorized() + 1])
 
     # Do vectorized sampling.
-    if len(sampling_type_tensors) > 0 and sampling_type_tensors[0].numel() > 0:
+    if len(sampling_type_tensors
+           ) > SamplingType.GREEDY and sampling_type_tensors[
+               SamplingType.GREEDY].numel() > 0:
         # If we have best_of, use topk.
         if max_best_of > 1:
-            dummy_out = torch.empty_like(sampling_type_tensors[0])
-            torch.topk(sampling_type_tensors[0],
+            dummy_out = torch.empty_like(
+                sampling_type_tensors[SamplingType.GREEDY])
+            torch.topk(sampling_type_tensors[SamplingType.GREEDY],
                        max_best_of,
                        dim=-1,
                        sorted=False,
-                       out=(dummy_out, batch_chosen_tokens_tensors[0]))
+                       out=(dummy_out,
+                            batch_chosen_tokens_tensors[SamplingType.GREEDY]))
         # Otherwise, do argmax which is faster
         else:
-            torch.argmax(sampling_type_tensors[0],
+            torch.argmax(sampling_type_tensors[SamplingType.GREEDY],
                          dim=-1,
                          keepdim=True,
-                         out=batch_chosen_tokens_tensors[0])
-    if len(sampling_type_tensors) > 1 and sampling_type_tensors[1].numel() > 0:
-        torch.multinomial(sampling_type_tensors[1],
+                         out=batch_chosen_tokens_tensors[SamplingType.GREEDY])
+    if len(sampling_type_tensors
+           ) > SamplingType.RANDOM and sampling_type_tensors[
+               SamplingType.RANDOM].numel() > 0:
+        torch.multinomial(sampling_type_tensors[SamplingType.RANDOM],
                           num_samples=max_best_of,
                           replacement=True,
-                          out=batch_chosen_tokens_tensors[1])
+                          out=batch_chosen_tokens_tensors[SamplingType.RANDOM])
     # Everything that is not greedy or multinomial (currently, beam search)
-    # (sampling_type_tensors[2:]) is handled iteratively below.
+    # (sampling_type_tensors[SamplingType.last_vectorized()+1:])
+    # is handled iteratively below.
 
     batch_chosen_logprobs = torch.gather(gen_logprobs,
                                          dim=-1,
@@ -501,8 +514,7 @@ def _sample(
             logprob = logprobs[idx]
 
             # Sample the next tokens.
-            if sampling_params.sampling_type in (SamplingType.GREEDY,
-                                                 SamplingType.RANDOM):
+            if sampling_params.sampling_type <= SamplingType.last_vectorized():
                 next_token_ids = batch_chosen_tokens_list[idx][:sampling_params
                                                                .best_of]
             else:
@@ -517,8 +529,8 @@ def _sample(
             j = 0
             for next_token_id in next_token_ids:
                 output_logprobs = next_logprobs.copy()
-                if sampling_params.sampling_type in (SamplingType.GREEDY,
-                                                     SamplingType.RANDOM):
+                if (sampling_params.sampling_type <=
+                        SamplingType.last_vectorized()):
                     output_logprobs[
                         next_token_id] = batch_chosen_logprobs_list[idx][j]
                 else:
@@ -538,8 +550,7 @@ def _sample(
             # Sample the next tokens.
             parent_seq_ids = seq_ids
 
-            if sampling_params.sampling_type in (SamplingType.GREEDY,
-                                                 SamplingType.RANDOM):
+            if sampling_params.sampling_type <= SamplingType.last_vectorized():
                 next_token_ids = batch_chosen_tokens_list[idx:idx +
                                                           num_parent_seqs]
                 next_token_ids = [
@@ -565,8 +576,8 @@ def _sample(
                                                     next_token_ids):
                 j = seq_ids.index(parent_seq_id)
                 output_logprobs = next_logprobs[parent_seq_id].copy()
-                if sampling_params.sampling_type in (SamplingType.GREEDY,
-                                                     SamplingType.RANDOM):
+                if (sampling_params.sampling_type <=
+                        SamplingType.last_vectorized()):
                     output_logprobs[
                         next_token_id] = batch_chosen_logprobs_list[idx + j][0]
                 else:
