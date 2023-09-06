@@ -18,17 +18,22 @@ class AsyncEngineDeadError(RuntimeError):
     pass
 
 
-def _raise_exception_on_finish(task: asyncio.Task) -> None:
+def _raise_exception_on_finish(task: asyncio.Task,
+                               request_tracker: "RequestTracker") -> None:
     msg = ("Task finished unexpectedly. This should never happen! "
            "Please open an issue on Github.")
     try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception as e:
-        raise AsyncEngineDeadError(
-            msg + "  See stack trace above for the actual cause.") from e
-    raise AsyncEngineDeadError(msg)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            raise AsyncEngineDeadError(
+                msg + " See stack trace above for the actual cause.") from exc
+        raise AsyncEngineDeadError(msg)
+    except Exception as exc:
+        request_tracker.propagate_exception(exc)
+        raise exc
 
 
 class AsyncStream:
@@ -60,6 +65,8 @@ class AsyncStream:
         result = await self._queue.get()
         if result is StopIteration:
             raise StopAsyncIteration
+        elif isinstance(result, Exception):
+            raise result
         return result
 
 
@@ -74,6 +81,11 @@ class RequestTracker:
 
     def __contains__(self, item):
         return item in self._request_streams
+
+    def propagate_exception(self, exc: Exception) -> None:
+        """Propagate an exception to all request streams."""
+        for stream in self._request_streams.values():
+            stream.put(exc)
 
     def process_request_output(self,
                                request_output: RequestOutput,
@@ -251,7 +263,9 @@ class AsyncLLMEngine:
             raise RuntimeError("Background loop is already running.")
         self.background_loop = asyncio.get_event_loop().create_task(
             self.run_engine_loop())
-        self.background_loop.add_done_callback(_raise_exception_on_finish)
+        self.background_loop.add_done_callback(
+            partial(_raise_exception_on_finish,
+                    request_tracker=self.request_tracker))
 
     def _init_engine(self, *args,
                      **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
