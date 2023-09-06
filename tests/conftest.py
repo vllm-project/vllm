@@ -156,8 +156,8 @@ class VllmRunner:
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params)
-        return [(output_ids[0], output_str[0]) for output_ids, output_str in
-                outputs]
+        return [(output_ids[0], output_str[0])
+                for output_ids, output_str in outputs]
 
     def generate_beam_search(
         self,
