@@ -121,22 +121,18 @@ def hf_model_weights_iterator(
     cache_dir: Optional[str] = None,
     load_format: str = "auto",
 ) -> Iterator[Tuple[str, torch.Tensor]]:
+    use_safe_tensors = False
+    use_np_cache = False
+    fall_back_to_pt = False
     if load_format == "auto":
         use_safetensors = True
-        use_np_cache = False
         fall_back_to_pt = True
     elif load_format == "safetensors":
         use_safetensors = True
-        use_np_cache = False
-        fall_back_to_pt = False
     elif load_format == "pt":
-        use_safetensors = False
-        use_np_cache = False
-        fall_back_to_pt = False
+        pass
     elif load_format == "npcache":
-        use_safetensors = False
         use_np_cache = True
-        fall_back_to_pt = False
     else:
         raise ValueError(f"Unknown load_format: {load_format}")
 
