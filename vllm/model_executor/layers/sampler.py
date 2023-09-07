@@ -123,19 +123,19 @@ class Sampler(nn.Module):
     ):
         """This method has side effects on `input_metadata`."""
         prompt_index_list: List[int] = []
-        seq_data = []
+        seq_data = [
+            input_metadata.seq_data[x[0]] for x, _ in input_metadata.seq_groups
+            if len(input_metadata.seq_data[x[0]].output_token_ids) == 0
+        ]
         prompt_id_list: List[int] = []
         start_idx = 0
-        for prompt_len, seq_group in zip(input_metadata.prompt_lens,
-                                         input_metadata.seq_groups):
+        for prompt_len, seq_datum in zip(input_metadata.prompt_lens, seq_data):
             prompt_index_list.extend(
-                list(range(start_idx, start_idx + prompt_len)))
+                list(range(start_idx, start_idx + prompt_len - 1)))
             start_idx += prompt_len
 
             # Pick the first seq_id
-            seq_datum = input_metadata.seq_data[seq_group[0][0]]
-            seq_data.append(seq_datum)
-            prompt_id_list.extend(seq_datum.prompt_token_ids)
+            prompt_id_list.extend(seq_datum.prompt_token_ids[1:])
 
         if len(seq_data) == 0:
             return
@@ -155,6 +155,7 @@ class Sampler(nn.Module):
         log_probs = self._logits_forward(embedding, selected_hidden_states,
                                          embedding_bias).log_softmax(dim=-1)
         # Log probs used in the prompt
+        # Shift by 1 to account for the start token
         selected_log_probs = log_probs.gather(
             dim=-1, index=prompt_ids.unsqueeze(dim=-1)).squeeze(-1).tolist()
 
@@ -168,13 +169,14 @@ class Sampler(nn.Module):
                                                      prompt_len],
                                            k=num_log_probs,
                                            dim=-1)
-                seq_datum.prompt_top_logprobs = [
+                seq_datum.prompt_top_logprobs = [None] + [
                     dict(zip(x, y))
                     for x, y in zip(top_log_porbs.indices.tolist(),
                                     top_log_porbs.values.tolist())
                 ]
-            seq_datum.prompt_logprobs = selected_log_probs[
-                start_idx:start_idx + prompt_len]
+            seq_datum.prompt_logprobs = [
+                None
+            ] + selected_log_probs[start_idx:start_idx + prompt_len]
             start_idx += prompt_len
 
 

@@ -108,7 +108,7 @@ class RequestOutput:
                 output_text = seq.prompt + output_text
                 output_token_ids = seq.data.prompt_token_ids + output_token_ids
                 if seq_group.sampling_params.logprobs is not None:
-                    cumulative_logprob = (sum(seq.data.prompt_logprobs) +
+                    cumulative_logprob = (seq.data.cumulative_prompt_logprob +
                                           cumulative_logprob)
             if seq_group.sampling_params.logprobs is None:
                 # NOTE: We need to take care of this case because the sequence
