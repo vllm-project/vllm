@@ -1,22 +1,36 @@
-import time
 import subprocess
 import sys
+import time
+from multiprocessing import Pool
+from pathlib import Path
+
 import pytest
 import requests
-from multiprocessing import Pool
 
-def _query_server(prompt: str)->dict:
-    response = requests.post("http://localhost:8000/generate", json={"prompt": prompt, "max_tokens": 100, "temperature": 0, "ignore_eos": True})
+
+def _query_server(prompt: str) -> dict:
+    response = requests.post("http://localhost:8000/generate",
+                             json={
+                                 "prompt": prompt,
+                                 "max_tokens": 100,
+                                 "temperature": 0,
+                                 "ignore_eos": True
+                             })
     response.raise_for_status()
     return response.json()
 
+
 @pytest.fixture
 def api_server():
-    # See if we can import it
-    import vllm.entrypoints.api_server  # pylint: disable=unused-import
-    uvicorn_process = subprocess.Popen([sys.executable, "-u", "-m", "vllm.entrypoints.api_server", "--model", "facebook/opt-125m"])
+    script_path = Path(__file__).parent.joinpath(
+        "api_server_async_engine.py").absolute()
+    uvicorn_process = subprocess.Popen([
+        sys.executable, "-u",
+        str(script_path), "--model", "facebook/opt-125m"
+    ])
     yield
     uvicorn_process.terminate()
+
 
 def test_api_server(api_server):
     """
@@ -44,6 +58,10 @@ def test_api_server(api_server):
         for result in pool.map(_query_server, prompts):
             assert result
 
+        num_aborted_requests = requests.get(
+            "http://localhost:8000/stats").json()["num_aborted_requests"]
+        assert num_aborted_requests == 0
+
         # Try with 100 prompts
         prompts = ["Hello world"] * 100
         for result in pool.map(_query_server, prompts):
@@ -55,6 +73,12 @@ def test_api_server(api_server):
         pool.terminate()
         pool.join()
 
+        # check cancellation stats
+        num_aborted_requests = requests.get(
+            "http://localhost:8000/stats").json()["num_aborted_requests"]
+        assert num_aborted_requests > 0
+
+    # check that server still runs after cancellations
     with Pool(32) as pool:
         # Try with 100 prompts
         prompts = ["Hello world"] * 100
