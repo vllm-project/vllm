@@ -19,6 +19,7 @@ class EngineArgs:
     use_dummy_weights: bool = False
     dtype: str = 'auto'
     seed: int = 0
+    max_model_len: Optional[int] = None
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
@@ -73,6 +74,11 @@ class EngineArgs:
         parser.add_argument('--use-dummy-weights',
                             action='store_true',
                             help='use dummy values for model weights')
+        parser.add_argument('--max-model-len',
+                            type=int,
+                            default=None,
+                            help='model context length. If unspecified, '
+                            'will be automatically derived from the model.')
         # TODO(woosuk): Support FP32.
         parser.add_argument(
             '--dtype',
@@ -148,7 +154,7 @@ class EngineArgs:
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.use_np_weights,
                                    self.use_dummy_weights, self.dtype,
-                                   self.seed)
+                                   self.seed, self.max_model_len)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)

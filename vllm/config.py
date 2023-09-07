@@ -31,6 +31,8 @@ class ModelConfig:
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
         seed: Random seed for reproducibility.
+        max_model_len: Maximum length of a sequence (including prompt and
+            output). If None, will be derived from the model.
     """
 
     def __init__(
@@ -44,6 +46,7 @@ class ModelConfig:
         use_dummy_weights: bool,
         dtype: str,
         seed: int,
+        max_model_len: Optional[int] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -53,6 +56,7 @@ class ModelConfig:
         self.use_np_weights = use_np_weights
         self.use_dummy_weights = use_dummy_weights
         self.seed = seed
+        self.max_model_len = max_model_len
 
         self.hf_config = get_config(model, trust_remote_code)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
@@ -117,6 +121,8 @@ class ModelConfig:
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
     def get_max_model_len(self) -> int:
+        if self.max_model_len is not None:
+            return self.max_model_len
         max_model_len = float("inf")
         possible_keys = [
             # OPT
