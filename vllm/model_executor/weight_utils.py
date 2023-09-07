@@ -108,6 +108,11 @@ def prepare_hf_model_weights(
                                         cache_dir=cache_dir,
                                         use_safetensors=False,
                                         fall_back_to_pt=False)
+
+    if len(hf_weights_files) == 0:
+        raise RuntimeError(
+            f"Cannot find any model weights with `{model_name_or_path}`")
+
     return hf_folder, hf_weights_files, use_safetensors
 
 
