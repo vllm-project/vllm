@@ -92,7 +92,10 @@ class Scheduler:
             request_id = (request_id, )
         request_ids = set(request_id)
         for state_queue in [self.waiting, self.running, self.swapped]:
-            for seq_group in state_queue:
+            # We need to reverse the list as we are removing elements
+            # from it as we iterate over it. If we don't do it,
+            # indices will get messed up and we will skip over elements.
+            for seq_group in reversed(state_queue):
                 if seq_group.request_id in request_ids:
                     # Remove the sequence group from the state queue.
                     state_queue.remove(seq_group)

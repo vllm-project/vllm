@@ -44,6 +44,7 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 logger = init_logger(__name__)
 served_model = None
 app = fastapi.FastAPI()
+engine = None
 
 
 def create_error_response(status_code: HTTPStatus,

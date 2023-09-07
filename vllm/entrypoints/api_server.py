@@ -14,6 +14,7 @@ from vllm.utils import random_uuid
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
+engine = None
 
 
 @app.post("/generate")
