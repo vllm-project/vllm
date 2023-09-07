@@ -359,6 +359,11 @@ class LLMEngine:
         }
         for sample in samples:
             parent_child_dict[sample.parent_seq_id].append(sample)
+            seq_data = seq_group.seqs_dict[sample.parent_seq_id].data
+            if sample.prompt_logprobs is not None:
+                seq_data.prompt_logprobs = sample.prompt_logprobs
+            if sample.prompt_top_logprobs is not None:
+                seq_data.prompt_top_logprobs = sample.prompt_top_logprobs
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 
@@ -559,17 +564,6 @@ class LLMEngine:
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
-
-        for seq_group_meta, o in zip(seq_group_metadata_list, output):
-            seq_group_meta: SequenceGroupMetadata
-            o: List[SequenceOutputs]
-            for seq_output in o:
-                seq_data = seq_group_meta.seq_data[seq_output.parent_seq_id]
-                if seq_output.prompt_logprobs is not None:
-                    seq_data.prompt_logprobs = seq_output.prompt_logprobs
-                if seq_output.prompt_top_logprobs is not None:
-                    # pylint: disable=C0301
-                    seq_data.prompt_top_logprobs = seq_output.prompt_top_logprobs
 
         return self._process_model_outputs(output, scheduler_outputs)
 
