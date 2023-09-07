@@ -242,7 +242,7 @@ class PagedAttention(nn.Module):
 
 
 class PagedAttentionWithRoPE(PagedAttention):
-    """PagedAttention with GPT-NeoX style rotary embedding."""
+    """PagedAttention with rotary embedding."""
 
     def __init__(
         self,
@@ -253,8 +253,10 @@ class PagedAttentionWithRoPE(PagedAttention):
         max_position: int = 8192,
         base: int = 10000,
         num_kv_heads: Optional[int] = None,
+        is_neox_style: bool = True,
     ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
+        self.is_neox_style = is_neox_style
 
         # Create the cos and sin cache.
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
@@ -303,12 +305,13 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
-        pos_encoding_ops.rotary_embedding_neox(
+        pos_encoding_ops.rotary_embedding(
             positions,
             query,
             key,
             self.head_size,
             self.cos_sin_cache,
+            self.is_neox_style,
         )
         return super().forward(
             query,
