@@ -623,15 +623,17 @@ class LLMEngine:
 
     def _decode_sequence(self, seq: Sequence) -> None:
         """Decodes the new token for a sequence."""
-        new_token, new_output_text = detokenize_incrementally(
+        new_token_text, prefix_offset, read_offset = detokenize_incrementally(
             self.tokenizer,
-            seq.output_tokens,
-            seq.get_last_token_id(),
+            seq.get_token_ids(),
+            prefix_offset=seq.prefix_offset,
+            read_offset=seq.read_offset,
             skip_special_tokens=True,
         )
-        if new_token is not None:
-            seq.output_tokens.append(new_token)
-            seq.output_text = new_output_text
+        seq.prefix_offset = prefix_offset
+        seq.read_offset = read_offset
+        seq.output_tokens.append(new_token_text)
+        seq.output_text += new_token_text
 
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:

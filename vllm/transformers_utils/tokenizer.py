@@ -67,53 +67,30 @@ def get_tokenizer(
     return tokenizer
 
 
+# Based on huggingface/text-generation-inference/blob/v0.9.4/\
+# server/text_generation_server/models/model.py#L62C9-L62C15
+# under Apache 2.0 license
 def detokenize_incrementally(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    prev_output_tokens: List[str],
-    new_token_id: int,
-    skip_special_tokens: bool,
-) -> Tuple[str, str]:
-    """Detokenizes the new token in conjunction with the previous output tokens.
+    all_input_ids: List[int],
+    prefix_offset: int = 0,
+    read_offset: int = 0,
+    skip_special_tokens: bool = False,
+) -> Tuple[str, int, int]:
+    # The prefix text is necessary only to defeat cleanup algorithms in
+    # the decode which decide to add a space or not depending on the
+    # surrounding ids.
+    prefix_text = tokenizer.decode(all_input_ids[prefix_offset:read_offset],
+                                   skip_special_tokens=skip_special_tokens)
+    new_text = tokenizer.decode(all_input_ids[prefix_offset:],
+                                skip_special_tokens=skip_special_tokens)
 
-    NOTE: This function does not update prev_output_tokens.
-
-    Returns:
-        new_token: The new token as a string.
-        output_text: The new output text as a string.
-    """
-    if skip_special_tokens and (new_token_id in tokenizer.all_special_ids):
-        return None, prev_output_tokens
-    new_token = tokenizer.convert_ids_to_tokens(
-        new_token_id, skip_special_tokens=skip_special_tokens)
-    output_tokens = prev_output_tokens + [new_token]
-
-    # Convert the tokens to a string.
-    # Optimization: If the tokenizer does not have `added_tokens_encoder`,
-    # then we can directly use `convert_tokens_to_string`.
-    if not getattr(tokenizer, "added_tokens_encoder", {}):
-        output_text = tokenizer.convert_tokens_to_string(output_tokens)
-        return new_token, output_text
-
-    # Adapted from
-    # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
-    # NOTE(woosuk): The following code is slow because it runs a for loop over
-    # the output_tokens. In Python, running a for loop over a list can be slow
-    # even when the loop body is very simple.
-    sub_texts = []
-    current_sub_text = []
-    for token in output_tokens:
-        if skip_special_tokens and token in tokenizer.all_special_tokens:
-            continue
-        if token in tokenizer.added_tokens_encoder:
-            if current_sub_text:
-                sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
-                sub_texts.append(sub_text)
-                current_sub_text = []
-            sub_texts.append(token)
-        else:
-            current_sub_text.append(token)
-    if current_sub_text:
-        sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
-        sub_texts.append(sub_text)
-    output_text = " ".join(sub_texts)
-    return new_token, output_text
+    if len(new_text) > len(prefix_text) and not new_text.endswith("�"):
+        # utf-8 char at the end means it's a potential unfinished byte sequence
+        # from byte fallback tokenization.
+        # If it's in the middle, it's probably a real invalid id generated
+        # by the model
+        new_text = new_text[len(prefix_text):]
+        return new_text, read_offset, len(all_input_ids)
+    else:
+        return "", prefix_offset, read_offset
