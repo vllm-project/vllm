@@ -81,11 +81,12 @@ def convert_bin_to_safetensor_file(
 def prepare_hf_model_weights(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
-    use_safetensor: bool = False,
+    use_safetensors: bool = False,
+    fall_back_to_pt: bool = True,
 ):
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
-    allow_patterns = "*.safetensors" if use_safetensor else "*.bin"
+    allow_patterns = "*.safetensors" if use_safetensors else "*.bin"
     if not is_local:
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
@@ -97,32 +98,53 @@ def prepare_hf_model_weights(
     else:
         hf_folder = model_name_or_path
     hf_weights_files = glob.glob(os.path.join(hf_folder, allow_patterns))
-    if not use_safetensor:
+    if not use_safetensors:
         hf_weights_files = [
             x for x in hf_weights_files if not x.endswith("training_args.bin")
         ]
 
-    if len(hf_weights_files) == 0 and use_safetensor:
-        logger.warning("No *.safetensors files found, "
-                       "fall back to *.bin files")
+    if len(hf_weights_files) == 0 and use_safetensors and fall_back_to_pt:
         return prepare_hf_model_weights(model_name_or_path,
                                         cache_dir=cache_dir,
-                                        use_safetensor=False)
-    return hf_folder, hf_weights_files, use_safetensor
+                                        use_safetensors=False,
+                                        fall_back_to_pt=False)
+
+    if len(hf_weights_files) == 0:
+        raise RuntimeError(
+            f"Cannot find any model weights with `{model_name_or_path}`")
+
+    return hf_folder, hf_weights_files, use_safetensors
 
 
 def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
-    use_np_cache: bool = False,
-    use_safetensor: bool = False,
+    load_format: str = "auto",
 ) -> Iterator[Tuple[str, torch.Tensor]]:
-    hf_folder, hf_weights_files, use_safetensor = prepare_hf_model_weights(
-        model_name_or_path, cache_dir=cache_dir, use_safetensor=use_safetensor)
+    use_safetensors = False
+    use_np_cache = False
+    fall_back_to_pt = False
+    if load_format == "auto":
+        use_safetensors = True
+        fall_back_to_pt = True
+    elif load_format == "safetensors":
+        use_safetensors = True
+    elif load_format == "pt":
+        pass
+    elif load_format == "npcache":
+        use_np_cache = True
+    else:
+        raise ValueError(f"Unknown load_format: {load_format}")
+
+    hf_folder, hf_weights_files, use_safetensors = prepare_hf_model_weights(
+        model_name_or_path,
+        cache_dir=cache_dir,
+        use_safetensors=use_safetensors,
+        fall_back_to_pt=fall_back_to_pt)
 
     if use_np_cache:
         # Currently np_cache only support *.bin checkpoints
-        assert use_safetensor is False
+        assert use_safetensors is False
 
         # Convert the model weights from torch tensors to numpy arrays for
         # faster loading.
@@ -152,7 +174,7 @@ def hf_model_weights_iterator(
             with open(param_path, "rb") as f:
                 param = np.load(f)
             yield name, torch.from_numpy(param)
-    elif use_safetensor:
+    elif use_safetensors:
         for st_file in hf_weights_files:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():
@@ -167,6 +189,21 @@ def hf_model_weights_iterator(
             torch.cuda.empty_cache()
 
 
+def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
+    """convert PySafeSlice object from safetensors to torch.Tensor
+
+    PySafeSlice object supports indexing, which is done before loading the
+    actual tensor and can reduce the amount of memory being read into the
+    memory. However, it does not support more advanced functionalities
+    like `.view()` or `.t()`. Therefore, if we need to modify the loaded
+    tensor with these more complicated operators, we need to convert to
+    tensor first.
+    """
+    if not isinstance(x, torch.Tensor):
+        x = x[:]
+    return x
+
+
 def load_padded_tensor_parallel_vocab(
     param: torch.Tensor,
     loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
@@ -176,11 +213,7 @@ def load_padded_tensor_parallel_vocab(
     start_idx = tensor_model_parallel_rank * shard_size
     end_idx = (tensor_model_parallel_rank + 1) * shard_size
     loaded_weight = loaded_weight[start_idx:end_idx]
-
-    # convert PySafeSlice object to torch.Tensor
-    if not isinstance(loaded_weight, torch.Tensor):
-        loaded_weight = loaded_weight[:]
-
+    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
     param[:loaded_weight.shape[0]].copy_(loaded_weight)
 
 
@@ -207,10 +240,7 @@ def load_tensor_parallel_weights(
             loaded_weight = loaded_weight[:, start_idx:end_idx]
             break
 
-    # convert PySafeSlice object to torch.Tensor
-    if not isinstance(loaded_weight, torch.Tensor):
-        loaded_weight = loaded_weight[:]
-
+    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
     assert param.shape == loaded_weight.shape, (
         f"{param_name} shape mismatch between model and checkpoint: "
         f"{param.shape} != {loaded_weight.shape}")

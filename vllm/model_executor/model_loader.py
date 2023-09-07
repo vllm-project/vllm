@@ -56,7 +56,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         # Create a model instance.
         # The weights will be initialized as empty tensors.
         model = model_class(model_config.hf_config)
-        if model_config.use_dummy_weights:
+        if model_config.load_format == "dummy":
             model = model.cuda()
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
@@ -64,6 +64,6 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         else:
             # Load the weights from the cached or downloaded files.
             model.load_weights(model_config.model, model_config.download_dir,
-                               model_config.use_np_weights)
+                               model_config.load_format)
             model = model.cuda()
     return model.eval()

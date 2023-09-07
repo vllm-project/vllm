@@ -15,8 +15,7 @@ class EngineArgs:
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
-    use_np_weights: bool = False
-    use_dummy_weights: bool = False
+    load_format: str = 'auto'
     dtype: str = 'auto'
     seed: int = 0
     worker_use_ray: bool = False
@@ -65,14 +64,21 @@ class EngineArgs:
                             help='directory to download and load the weights, '
                             'default to the default cache dir of '
                             'huggingface')
-        parser.add_argument('--use-np-weights',
-                            action='store_true',
-                            help='save a numpy copy of model weights for '
-                            'faster loading. This can increase the disk '
-                            'usage by up to 2x.')
-        parser.add_argument('--use-dummy-weights',
-                            action='store_true',
-                            help='use dummy values for model weights')
+        parser.add_argument(
+            '--load-format',
+            type=str,
+            default=EngineArgs.load_format,
+            choices=['auto', 'pt', 'safetensors', 'npcache', 'dummy'],
+            help='The format of the model weights to load. '
+            '"auto" will try to load the weights in the safetensors format '
+            'and fall back to the pytorch bin format if safetensors format '
+            'is not available. '
+            '"pt" will load the weights in the pytorch bin format. '
+            '"safetensors" will load the weights in the safetensors format. '
+            '"npcache" will load the weights in pytorch format and store '
+            'a numpy cache to speed up the loading. '
+            '"dummy" will initialize the weights with random values, '
+            'which is mainly for profiling.')
         # TODO(woosuk): Support FP32.
         parser.add_argument(
             '--dtype',
@@ -146,9 +152,8 @@ class EngineArgs:
         # Initialize the configs.
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
-                                   self.download_dir, self.use_np_weights,
-                                   self.use_dummy_weights, self.dtype,
-                                   self.seed)
+                                   self.download_dir, self.load_format,
+                                   self.dtype, self.seed)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)
