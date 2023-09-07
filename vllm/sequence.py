@@ -1,7 +1,6 @@
 """Sequence and its related classes."""
 import copy
 import enum
-from functools import cached_property
 from typing import Dict, List, Optional, Union
 
 from vllm.block import LogicalTokenBlock
@@ -71,9 +70,9 @@ class SequenceData:
         self.prompt_top_logprobs: Optional[List[Optional[Dict[int,
                                                               float]]]] = None
 
-    @cached_property
+    @property
     def cumulative_prompt_logprob(self) -> float:
-        return sum(x for x in self.prompt_logprobs if x is not None)
+        return sum(x for x in self.prompt_logprobs if x is not None)  # pylint: disable=E1133
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
