@@ -11,6 +11,9 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceOutputs
 
+LogProbsList = Optional[List[Optional[float]]]
+TopLogProbsList = Optional[List[Optional[Dict[int, float]]]]
+
 _SAMPLING_EPS = 1e-5
 
 
@@ -58,12 +61,14 @@ class Sampler(nn.Module):
         if (input_metadata.echo is not None and any(input_metadata.echo)
                 and any(x.logprobs is not None
                         for _, x in input_metadata.seq_groups)):
-            self._process_echo(
+            echo_results = self._process_echo(
                 embedding=embedding,
                 hidden_states=hidden_states,
                 input_metadata=input_metadata,
                 embedding_bias=embedding_bias,
             )
+        else:
+            echo_results = None
 
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
@@ -112,7 +117,16 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        return _sample(probs, logprobs, input_metadata)
+        samples = _sample(probs, logprobs, input_metadata)
+        if echo_results:
+            for i, ss in enumerate(samples):
+                if i in echo_results:
+                    logprobs_list, top_logprobs_list = echo_results[i]
+                    for s in ss:
+                        s.prompt_logprobs = logprobs_list
+                        s.prompt_top_logprobs = top_logprobs_list
+
+        return samples
 
     def _process_echo(
         self,
@@ -120,13 +134,14 @@ class Sampler(nn.Module):
         hidden_states: torch.Tensor,
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
-    ):
-        """This method has side effects on `input_metadata`."""
+    ) -> Dict[int, Tuple[LogProbsList, TopLogProbsList]]:
         prompt_index_list: List[int] = []
-        seq_data = [
-            input_metadata.seq_data[x[0]] for x, _ in input_metadata.seq_groups
-            if len(input_metadata.seq_data[x[0]].output_token_ids) == 0
-        ]
+        seq_data = []
+        has_prompt_seq_group_ids = []
+        for i, (x, _) in enumerate(input_metadata.seq_groups):
+            if len(input_metadata.seq_data[x[0]].output_token_ids) == 0:
+                seq_data.append(input_metadata.seq_data[x[0]])
+                has_prompt_seq_group_ids.append(i)
         prompt_id_list: List[int] = []
         start_idx = 0
         for prompt_len, seq_datum in zip(input_metadata.prompt_lens, seq_data):
@@ -160,6 +175,9 @@ class Sampler(nn.Module):
             dim=-1, index=prompt_ids.unsqueeze(dim=-1)).squeeze(-1).tolist()
 
         start_idx = 0
+        logprobs_list = [None] * len(seq_data)
+        top_logprobs_list = [None] * len(seq_data)
+        echo_results = {}
         for i, (prompt_len, seq_datum) in enumerate(
                 zip(input_metadata.prompt_lens, seq_data)):
             num_log_probs = input_metadata.seq_groups[i][1].logprobs
@@ -169,15 +187,19 @@ class Sampler(nn.Module):
                                                      prompt_len],
                                            k=num_log_probs,
                                            dim=-1)
-                seq_datum.prompt_top_logprobs = [None] + [
+                # seq_datum.prompt_top_logprobs = [None] + [
+                top_logprobs_list[i] = [None] + [
                     dict(zip(x, y))
                     for x, y in zip(top_log_porbs.indices.tolist(),
                                     top_log_porbs.values.tolist())
                 ]
-            seq_datum.prompt_logprobs = [
+            # seq_datum.prompt_logprobs = [
+            logprobs_list[i] = [
                 None
             ] + selected_log_probs[start_idx:start_idx + prompt_len]
             start_idx += prompt_len
+            echo_results[i] = (logprobs_list[i], top_logprobs_list[i])
+        return echo_results
 
 
 def _prune_hidden_states(

@@ -560,6 +560,17 @@ class LLMEngine:
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
 
+        for seq_group_meta, o in zip(seq_group_metadata_list, output):
+            seq_group_meta: SequenceGroupMetadata
+            o: List[SequenceOutputs]
+            for seq_output in o:
+                seq_data = seq_group_meta.seq_data[seq_output.parent_seq_id]
+                if seq_output.prompt_logprobs is not None:
+                    seq_data.prompt_logprobs = seq_output.prompt_logprobs
+                if seq_output.prompt_top_logprobs is not None:
+                    # pylint: disable=C0301
+                    seq_data.prompt_top_logprobs = seq_output.prompt_top_logprobs
+
         return self._process_model_outputs(output, scheduler_outputs)
 
     def _log_system_stats(

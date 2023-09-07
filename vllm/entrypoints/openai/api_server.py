@@ -557,8 +557,11 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                          if not echo_self else output.token_ids[:-1])
             token_logprobs = (output.logprobs
                               if not echo_self else output.logprobs[:-1])
-            top_logprobs = (output.top_logprobs
-                            if not echo_self else output.top_logprobs[:-1])
+            if request.logprobs == 0:
+                top_logprobs = None
+            else:
+                top_logprobs = (output.top_logprobs
+                                if not echo_self else output.top_logprobs[:-1])
             logprobs = create_logprobs(
                 token_ids=token_ids,
                 token_logprobs=token_logprobs,

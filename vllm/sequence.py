@@ -95,19 +95,6 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
-    def __copy__(self) -> "SequenceData":
-        """Deepcopy everything except for `prompt_token_logprobs`."""
-        keys = self.__dict__.keys()
-        new_seq_data = SequenceData(prompt_token_ids=[])
-        for key in keys:
-            if key == "prompt_top_logprobs":
-                setattr(new_seq_data, key, self.prompt_top_logprobs)
-            elif key == "prompt_logprobs":
-                setattr(new_seq_data, key, self.prompt_logprobs)
-            else:
-                setattr(new_seq_data, key, copy.deepcopy(getattr(self, key)))
-        return new_seq_data
-
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
@@ -227,19 +214,8 @@ class Sequence:
         return SequenceStatus.is_finished(self.status)
 
     def fork(self, new_seq_id: int) -> "Sequence":
-        keys = self.__dict__.keys()
-        new_seq = Sequence(seq_id=-1,
-                           prompt="",
-                           prompt_token_ids=[],
-                           block_size=-1)
-        for key in keys:
-            if key == "data":  # We don't want to copy prompt log_probs
-                new_value = copy.copy(getattr(self, key))
-            elif key == "seq_id":
-                new_value = new_seq_id
-            else:
-                new_value = copy.deepcopy(getattr(self, key))
-            setattr(new_seq, key, new_value)
+        new_seq = copy.deepcopy(self)
+        new_seq.seq_id = new_seq_id
         return new_seq
 
     def __repr__(self) -> str:
@@ -397,6 +373,10 @@ class SequenceOutputs:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
+
+        self.prompt_logprobs: Optional[List[Optional[float]]] = None
+        self.prompt_top_logprobs: Optional[List[Optional[Dict[int,
+                                                              float]]]] = None
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
