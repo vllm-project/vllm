@@ -5,7 +5,7 @@ The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -23,7 +23,7 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
-from vllm.sequence import SequenceOutputs
+from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -120,7 +120,8 @@ class Attention(nn.Module):
             self.head_dim,
             self.scaling,
             slopes=alibi_slopes,
-            num_kv_heads=1
+            num_kv_heads=1,
+            dtype=self.q.weight.dtype
         )
 
     def forward(
@@ -255,7 +256,7 @@ class GPTRefactForCausalLM(nn.Module):
             kv_caches: List[KVCache],
             input_metadata: InputMetadata,
             cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         hidden_states = self.ln_f(hidden_states)
