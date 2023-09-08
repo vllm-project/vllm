@@ -82,7 +82,9 @@ class Sampler(nn.Module):
                                                1).cumsum(0)[:-1]
         # The logit_to_id_map lets us reverse the sort we did above when we
         # match outputs to sequences.
-        logit_to_id_map = sampling_type_indices_index.argsort()
+        # We discard logits we will not use vectorized sampling for.
+        logit_to_id_map = sampling_type_indices_index[:sampling_type_offsets[
+            -1]].argsort()
         logits = logits[sampling_type_indices_index]
 
         # If there are only greedy requests (and therefore, no requests
@@ -419,7 +421,7 @@ def _batched_sample(gen_probs: torch.Tensor, gen_logprobs: torch.Tensor,
 
     # Create a tensor to store the tokens sampled by greedy or multinomial
     # sampling. Note that beam search tokens are not stored here.
-    batch_chosen_tokens = torch.empty(
+    batch_chosen_tokens = torch.zeros(
         (sum(t.shape[0]
              for t in sampling_type_tensors[:SamplingType.last_vectorized() +
                                             1]), max_best_of),
@@ -437,22 +439,11 @@ def _batched_sample(gen_probs: torch.Tensor, gen_logprobs: torch.Tensor,
     if len(sampling_type_tensors
            ) > SamplingType.GREEDY and sampling_type_tensors[
                SamplingType.GREEDY].numel() > 0:
-        # If we have best_of, use topk.
-        if max_best_of > 1:
-            dummy_out = torch.empty_like(
-                sampling_type_tensors[SamplingType.GREEDY])
-            torch.topk(sampling_type_tensors[SamplingType.GREEDY],
-                       max_best_of,
-                       dim=-1,
-                       sorted=False,
-                       out=(dummy_out,
-                            batch_chosen_tokens_tensors[SamplingType.GREEDY]))
-        # Otherwise, do argmax which is faster
-        else:
-            torch.argmax(sampling_type_tensors[SamplingType.GREEDY],
-                         dim=-1,
-                         keepdim=True,
-                         out=batch_chosen_tokens_tensors[SamplingType.GREEDY])
+        torch.argmax(sampling_type_tensors[SamplingType.GREEDY],
+                     dim=-1,
+                     keepdim=True,
+                     out=batch_chosen_tokens_tensors[SamplingType.GREEDY][:,
+                                                                          0])
     if len(sampling_type_tensors
            ) > SamplingType.RANDOM and sampling_type_tensors[
                SamplingType.RANDOM].numel() > 0:
@@ -481,6 +472,7 @@ def _sample(
 
     # TODO(woosuk): Optimize.
     idx = 0
+    vectorized_idx = 0
 
     # Find the maximum best_of value to use as a shape for
     # topk/multinomial tensors.
@@ -500,7 +492,8 @@ def _sample(
     if batch_chosen_tokens_tensor.shape[0] > 0:
         batch_chosen_logprobs_tensor = batch_chosen_logprobs_tensor[
             logit_to_id_map]
-        batch_chosen_tokens_tensor = batch_chosen_tokens_tensor[logit_to_id_map]
+        batch_chosen_tokens_tensor = batch_chosen_tokens_tensor[
+            logit_to_id_map]
 
         batch_chosen_logprobs_list = batch_chosen_logprobs_tensor.tolist()
         batch_chosen_tokens_list = batch_chosen_tokens_tensor.tolist()
@@ -511,13 +504,14 @@ def _sample(
         if i < input_metadata.num_prompts:
             # Generate the next tokens for a prompt input.
             assert len(seq_ids) == 1, "Prompt input should have only one seq."
+            num_parent_seqs = 1
             parent_seq_id = seq_ids[0]
             logprob = logprobs[idx]
 
             # Sample the next tokens.
             if sampling_params.sampling_type <= SamplingType.last_vectorized():
-                next_token_ids = batch_chosen_tokens_list[idx][:sampling_params
-                                                               .best_of]
+                next_token_ids = batch_chosen_tokens_list[
+                    vectorized_idx][:sampling_params.best_of]
             else:
                 prob = gen_probs[idx]
                 next_token_ids = _sample_from_prompt(prob, sampling_params)
@@ -533,7 +527,8 @@ def _sample(
                 if (sampling_params.sampling_type <=
                         SamplingType.last_vectorized()):
                     output_logprobs[
-                        next_token_id] = batch_chosen_logprobs_list[idx][j]
+                        next_token_id] = batch_chosen_logprobs_list[
+                            vectorized_idx][j]
                 else:
                     output_logprobs[next_token_id] = logprob[
                         next_token_id].item()
@@ -541,8 +536,6 @@ def _sample(
                     SequenceOutputs(parent_seq_id, next_token_id,
                                     output_logprobs))
                 j += 1
-
-            idx += 1
         else:
             # Generate the next tokens for generation tokens.
             num_parent_seqs = len(seq_ids)
@@ -552,8 +545,8 @@ def _sample(
             parent_seq_ids = seq_ids
 
             if sampling_params.sampling_type <= SamplingType.last_vectorized():
-                next_token_ids = batch_chosen_tokens_list[idx:idx +
-                                                          num_parent_seqs]
+                next_token_ids = batch_chosen_tokens_list[
+                    vectorized_idx:vectorized_idx + num_parent_seqs]
                 next_token_ids = [
                     item for sublist in next_token_ids for item in sublist
                 ]
@@ -580,14 +573,18 @@ def _sample(
                 if (sampling_params.sampling_type <=
                         SamplingType.last_vectorized()):
                     output_logprobs[
-                        next_token_id] = batch_chosen_logprobs_list[idx + j][0]
+                        next_token_id] = batch_chosen_logprobs_list[
+                            vectorized_idx + j][0]
                 else:
                     output_logprobs[next_token_id] = logprob[
                         j, next_token_id].item()
                 seq_group_outputs.append(
                     SequenceOutputs(parent_seq_id, next_token_id,
                                     output_logprobs))
-            idx += num_parent_seqs
+        # We need to track the general index and vectorized index separately.
+        idx += num_parent_seqs
+        vectorized_idx += num_parent_seqs * int(
+            sampling_params.sampling_type <= SamplingType.last_vectorized())
         seq_outputs.append(seq_group_outputs)
 
     return seq_outputs
