@@ -331,7 +331,7 @@ class AsyncLLMEngine:
                         f"prompt token ids: {prompt_token_ids}.")
 
         if not self.is_running:
-            if start_engine_loop:
+            if self.start_engine_loop:
                 self.start_background_loop()
             else:
                 raise AsyncEngineDeadError(
