@@ -259,8 +259,9 @@ class PagedAttentionWithRoPE(PagedAttention):
         self.is_neox_style = is_neox_style
 
         # Create the cos and sin cache.
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
-        t = torch.arange(max_position).float()
+        inv_freq = 1.0 / (base**(
+            torch.arange(0, rotary_dim, 2, device="cuda") / rotary_dim))
+        t = torch.arange(max_position, device="cuda").float()
         freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
         cos = freqs.cos()
         sin = freqs.sin()
