@@ -115,7 +115,7 @@ class ModelConfig:
         # multi_query flag is ignored and we use n_head_kv for the number of
         # KV heads.
         new_decoder_arch_falcon = (
-            self.hf_config.model_type == "falcon"
+            self.hf_config.to_dict().["model_type"] == "falcon"
             and getattr(self.hf_config, "new_decoder_architecture", False))
         if not new_decoder_arch_falcon and getattr(self.hf_config,
                                                    "multi_query", False):
