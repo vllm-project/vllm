@@ -27,6 +27,7 @@ class EngineArgs:
     max_num_batched_tokens: int = 2560
     max_num_seqs: int = 256
     disable_log_stats: bool = False
+    max_log_tokens: int = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -183,4 +184,8 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='disable logging requests')
+        parser.add_argument('--max_log_tokens',
+                            type=int,
+                            default=None,
+                            help='max prompt/token being printed in log')
         return parser

@@ -242,11 +242,13 @@ class AsyncLLMEngine:
                  engine_use_ray: bool,
                  *args,
                  log_requests: bool = True,
+                 max_log_tokens: int = None,
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
+        self.max_log_tokens = max_log_tokens
         self.engine = self._init_engine(*args, **kwargs)
 
         self.request_tracker: RequestTracker = RequestTracker()
@@ -325,10 +327,18 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
     ) -> AsyncStream:
         if self.log_requests:
+            shorted_prompt = prompt
+            shorted_token_ids = prompt_token_ids
+            if self.max_log_tokens is not None:
+                idx = self.max_log_tokens * -1
+                if shorted_prompt is not None:
+                    shorted_prompt = shorted_prompt[idx:]
+                if shorted_token_ids is not None:
+                    shorted_token_ids = shorted_token_ids[idx:]
             logger.info(f"Received request {request_id}: "
-                        f"prompt: {prompt!r}, "
+                        f"prompt: {shorted_prompt!r}, "
                         f"sampling params: {sampling_params}, "
-                        f"prompt token ids: {prompt_token_ids}.")
+                        f"prompt token ids: {shorted_token_ids}.")
 
         if not self.is_running:
             if self.start_engine_loop:
@@ -446,5 +456,6 @@ class AsyncLLMEngine:
                      placement_group,
                      log_requests=not engine_args.disable_log_requests,
                      log_stats=not engine_args.disable_log_stats,
+                     max_log_tokens=engine_args.max_log_tokens,
                      start_engine_loop=start_engine_loop)
         return engine
