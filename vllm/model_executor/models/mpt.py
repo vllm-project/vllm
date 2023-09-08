@@ -244,12 +244,13 @@ class MPTForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     load_format: str = "auto"):
+                     load_format: str = "auto",
+                     revision: str = "main"):
         tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format):
+                model_name_or_path, cache_dir, load_format, revision):
             if "Wqkv" in name:
                 # NOTE(woosuk): MPT's fused QKV has the shape of
                 # [3 * num_heads * head_size, hidden_size].

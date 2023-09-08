@@ -83,6 +83,7 @@ def prepare_hf_model_weights(
     cache_dir: Optional[str] = None,
     use_safetensors: bool = False,
     fall_back_to_pt: bool = True,
+    revision: str = "main",
 ):
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
@@ -94,7 +95,8 @@ def prepare_hf_model_weights(
             hf_folder = snapshot_download(model_name_or_path,
                                           allow_patterns=allow_patterns,
                                           cache_dir=cache_dir,
-                                          tqdm_class=Disabledtqdm)
+                                          tqdm_class=Disabledtqdm,
+                                          revision=revision)
     else:
         hf_folder = model_name_or_path
     hf_weights_files = glob.glob(os.path.join(hf_folder, allow_patterns))
@@ -107,7 +109,8 @@ def prepare_hf_model_weights(
         return prepare_hf_model_weights(model_name_or_path,
                                         cache_dir=cache_dir,
                                         use_safetensors=False,
-                                        fall_back_to_pt=False)
+                                        fall_back_to_pt=False,
+                                        revision=revision)
 
     if len(hf_weights_files) == 0:
         raise RuntimeError(
@@ -120,6 +123,7 @@ def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
     load_format: str = "auto",
+    revision: str = "main",
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     use_safetensors = False
     use_np_cache = False
@@ -140,7 +144,8 @@ def hf_model_weights_iterator(
         model_name_or_path,
         cache_dir=cache_dir,
         use_safetensors=use_safetensors,
-        fall_back_to_pt=fall_back_to_pt)
+        fall_back_to_pt=fall_back_to_pt,
+        revision=revision)
 
     if use_np_cache:
         # Currently np_cache only support *.bin checkpoints

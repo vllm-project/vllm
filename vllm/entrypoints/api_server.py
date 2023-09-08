@@ -16,8 +16,9 @@ TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
 engine = None
 
+url_path = ""
 
-@app.post("/generate")
+@app.post(f"{url_path}/generate")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
 
@@ -73,8 +74,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--url", type=str, default="")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+
+    url_path = args.url
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)

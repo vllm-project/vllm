@@ -231,11 +231,12 @@ class GPTNeoXForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     load_format: str = "auto"):
+                     load_format: str = "auto",
+                     revision: str = "main"):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format):
+                model_name_or_path, cache_dir, load_format, revision):
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
                 continue

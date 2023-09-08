@@ -38,6 +38,8 @@ class LLM:
             However, if the `torch_dtype` in the config is `float32`, we will
             use `float16` instead.
         seed: The seed to initialize the random number generator for sampling.
+        revision: The specific model version to use. It can be a branch name, 
+            a tag name, or a commit id.
     """
 
     def __init__(

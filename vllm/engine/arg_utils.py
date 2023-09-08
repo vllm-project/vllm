@@ -27,6 +27,7 @@ class EngineArgs:
     max_num_batched_tokens: int = 2560
     max_num_seqs: int = 256
     disable_log_stats: bool = False
+    revision: str = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -48,6 +49,12 @@ class EngineArgs:
             type=str,
             default=EngineArgs.tokenizer,
             help='name or path of the huggingface tokenizer to use')
+        parser.add_argument(
+            '--revision',
+            type=str,
+            default=None,
+            help='The specific model version to use. It can be a branch '
+            'name, a tag name, or a commit id.')
         parser.add_argument('--tokenizer-mode',
                             type=str,
                             default=EngineArgs.tokenizer_mode,
@@ -153,7 +160,7 @@ class EngineArgs:
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
-                                   self.dtype, self.seed)
+                                   self.dtype, self.seed, self.revision)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)

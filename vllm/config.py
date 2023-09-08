@@ -50,6 +50,7 @@ class ModelConfig:
         load_format: str,
         dtype: str,
         seed: int,
+        revision: str,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -58,8 +59,9 @@ class ModelConfig:
         self.download_dir = download_dir
         self.load_format = load_format
         self.seed = seed
+        self.revision = revision
 
-        self.hf_config = get_config(model, trust_remote_code)
+        self.hf_config = get_config(model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self._verify_load_format()
         self._verify_tokenizer_mode()
