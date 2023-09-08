@@ -497,12 +497,13 @@ def _sample(
     batch_chosen_tokens_tensor, batch_chosen_logprobs_tensor = _batched_sample(
         gen_probs, gen_logprobs, sampling_type_offsets, max_best_of)
 
-    batch_chosen_logprobs_tensor = batch_chosen_logprobs_tensor[
-        logit_to_id_map]
-    batch_chosen_tokens_tensor = batch_chosen_tokens_tensor[logit_to_id_map]
+    if batch_chosen_tokens_tensor.shape[0] > 0:
+        batch_chosen_logprobs_tensor = batch_chosen_logprobs_tensor[
+            logit_to_id_map]
+        batch_chosen_tokens_tensor = batch_chosen_tokens_tensor[logit_to_id_map]
 
-    batch_chosen_logprobs_list = batch_chosen_logprobs_tensor.tolist()
-    batch_chosen_tokens_list = batch_chosen_tokens_tensor.tolist()
+        batch_chosen_logprobs_list = batch_chosen_logprobs_tensor.tolist()
+        batch_chosen_tokens_list = batch_chosen_tokens_tensor.tolist()
 
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_group_outputs: List[SequenceOutputs] = []
