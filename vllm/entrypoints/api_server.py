@@ -32,9 +32,6 @@ async def generate(request: Request) -> Response:
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
-    if not engine.is_running:
-        engine.start_background_loop()
-
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Streaming case
@@ -80,8 +77,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args,
-                                             start_engine_loop=False)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     uvicorn.run(app,
                 host=args.host,

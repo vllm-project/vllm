@@ -230,6 +230,8 @@ class AsyncLLMEngine:
             async frontend will be executed in a separate process as the
             model workers.
         log_requests: Whether to log the requests.
+        start_engine_loop: If True, the background task to run the engine
+            will be automatically started in the generate call.
         *args, *kwargs: Arguments for LLMEngine.
     """
 
@@ -240,7 +242,7 @@ class AsyncLLMEngine:
                  engine_use_ray: bool,
                  *args,
                  log_requests: bool = True,
-                 start_engine_loop: bool = False,
+                 start_engine_loop: bool = True,
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
@@ -249,8 +251,7 @@ class AsyncLLMEngine:
 
         self.request_tracker: RequestTracker = RequestTracker()
         self.background_loop = None
-        if start_engine_loop:
-            self.start_background_loop()
+        self.start_engine_loop = start_engine_loop
 
     @property
     def is_running(self) -> bool:
@@ -330,11 +331,14 @@ class AsyncLLMEngine:
                         f"prompt token ids: {prompt_token_ids}.")
 
         if not self.is_running:
-            raise AsyncEngineDeadError(
-                "Background loop is not running. If it was running, "
-                "inspect the output to find the stacktrace of the "
-                "error that caused the background loop to stop "
-                "(AsyncEngineDeadError).")
+            if self.start_engine_loop:
+                self.start_background_loop()
+            else:
+                raise AsyncEngineDeadError(
+                    "Background loop is not running. If it was running, "
+                    "inspect the output to find the stacktrace of the "
+                    "error that caused the background loop to stop "
+                    "(AsyncEngineDeadError).")
 
         stream = self.request_tracker.add_request(
             request_id,
@@ -426,7 +430,7 @@ class AsyncLLMEngine:
     @classmethod
     def from_engine_args(cls,
                          engine_args: AsyncEngineArgs,
-                         start_engine_loop: bool = False) -> "AsyncLLMEngine":
+                         start_engine_loop: bool = True) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
