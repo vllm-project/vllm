@@ -122,6 +122,8 @@ class Sequence:
         self._append_tokens_to_blocks(prompt_token_ids)
         self.status = SequenceStatus.WAITING
         # Used for incremental detokenization
+        # 5 is an arbitrary value that should work for all
+        # tokenizers (bigger = more conservative).
         self.prefix_offset = len(prompt_token_ids) - 5
         self.read_offset = len(prompt_token_ids)
 
