@@ -44,6 +44,7 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 logger = init_logger(__name__)
 served_model = None
 app = fastapi.FastAPI()
+engine = None
 
 
 def create_error_response(status_code: HTTPStatus,
@@ -190,9 +191,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
         - logit_bias (to be supported by vLLM engine)
     """
     logger.info(f"Received chat completion request: {request}")
-
-    if not engine.is_running:
-        engine.start_background_loop()
 
     error_check_ret = await check_model(request)
     if error_check_ret is not None:
@@ -365,9 +363,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         - logit_bias (to be supported by vLLM engine)
     """
     logger.info(f"Received completion request: {request}")
-
-    if not engine.is_running:
-        engine.start_background_loop()
 
     error_check_ret = await check_model(request)
     if error_check_ret is not None:
@@ -626,8 +621,7 @@ if __name__ == "__main__":
         served_model = args.model
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args,
-                                             start_engine_loop=False)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
     engine_model_config = asyncio.run(engine.get_model_config())
     max_model_len = engine_model_config.get_max_model_len()
 
