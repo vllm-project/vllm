@@ -430,7 +430,7 @@ class AsyncLLMEngine:
     @classmethod
     def from_engine_args(cls,
                          engine_args: AsyncEngineArgs,
-                         start_engine_loop: bool = False) -> "AsyncLLMEngine":
+                         start_engine_loop: bool = True) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
