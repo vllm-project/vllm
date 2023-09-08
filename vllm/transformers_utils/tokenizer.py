@@ -67,8 +67,8 @@ def get_tokenizer(
     return tokenizer
 
 
-# Based on huggingface/text-generation-inference/blob/v0.9.4/\
-# server/text_generation_server/models/model.py#L62C9-L62C15
+# Based on https://github.com/huggingface/text-generation-inference/\
+# blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
 # under Apache 2.0 license
 def detokenize_incrementally(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
