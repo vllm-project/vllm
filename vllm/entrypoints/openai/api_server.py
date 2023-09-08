@@ -181,7 +181,7 @@ def create_logprobs(
             logprobs.top_logprobs.append({
                 tokenizer.convert_ids_to_tokens(i): p
                 for i, p in top_logprobs[i].items()
-            })
+            } if top_logprobs[i] else None)
     return logprobs
 
 
