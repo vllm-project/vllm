@@ -25,9 +25,11 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
+from packaging.version import parse
 from typing import List, Optional, Tuple
 
 import torch
+import transformers
 from torch import nn
 from transformers import LlamaConfig
 
@@ -148,7 +150,13 @@ class LlamaDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 10000)
+        model_transformers_version = parse(
+            getattr(config, "transformers_version", transformers.__version__))
+        expected_transformers_version = parse("4.32.0")
+        if model_transformers_version > expected_transformers_version:
+            rope_theta = getattr(config, "rope_theta", 10000)
+        else:
+            rope_theta = 10000
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
