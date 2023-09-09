@@ -21,7 +21,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -31,13 +31,14 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
+from vllm.model_executor.weight_utils import (
+    convert_pyslice_to_tensor, hf_model_weights_iterator,
+    load_padded_tensor_parallel_vocab, load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.sequence import SequenceOutputs
+from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -217,27 +218,27 @@ class GPT2LMHeadModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["wte.weight", "c_fc.weight", "c_fc.bias"]
+    _column_parallel_weights = ["c_fc.weight", "c_fc.bias"]
     _row_parallel_weights = ["c_proj.weight"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     use_np_cache: bool = False):
+                     load_format: str = "auto"):
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache):
+                model_name_or_path, cache_dir, load_format):
             if "lm_head.weight" in name:
                 # GPT-2 ties the weights of the embedding layer and the final
                 # linear layer.
@@ -250,6 +251,8 @@ class GPT2LMHeadModel(nn.Module):
             if not name.startswith("transformer."):
                 name = "transformer." + name
 
+            loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+
             # The HF's GPT-2 implementation uses Conv1D instead of Linear.
             # Because of this, we need to transpose the weights.
             for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
@@ -261,14 +264,9 @@ class GPT2LMHeadModel(nn.Module):
             param = state_dict[name]
 
             if name == "transformer.wte.weight":
-                # Consider padding in the vocab size.
-                padded_vocab_size = (param.shape[0] *
-                                     tensor_model_parallel_world_size)
-                num_extra_rows = padded_vocab_size - self.config.vocab_size
-                extra_rows = torch.empty(num_extra_rows,
-                                         loaded_weight.shape[1])
-                extra_rows = extra_rows.to(loaded_weight)
-                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
+                load_padded_tensor_parallel_vocab(param, loaded_weight,
+                                                  tensor_model_parallel_rank)
+                continue
 
             # For the fused QKV linear layer, manually shard the weights.
             if "c_attn" in name:

@@ -1,6 +1,7 @@
 import asyncio
 import time
-from typing import Dict, List, Optional
+from functools import partial
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -12,7 +13,202 @@ from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 
-TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds
+
+class AsyncEngineDeadError(RuntimeError):
+    pass
+
+
+def _raise_exception_on_finish(task: asyncio.Task,
+                               request_tracker: "RequestTracker") -> None:
+    msg = ("Task finished unexpectedly. This should never happen! "
+           "Please open an issue on Github.")
+    try:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            raise AsyncEngineDeadError(
+                msg + " See stack trace above for the actual cause.") from exc
+        raise AsyncEngineDeadError(msg)
+    except Exception as exc:
+        request_tracker.propagate_exception(exc)
+        raise exc
+
+
+class AsyncStream:
+    """A stream of RequestOutputs for a request that can be
+    iterated over asynchronously."""
+
+    def __init__(self, request_id: str) -> None:
+        self.request_id = request_id
+        self._queue = asyncio.Queue()
+        self._finished = False
+
+    def put(self, item: RequestOutput) -> None:
+        if self._finished:
+            return
+        self._queue.put_nowait(item)
+
+    def finish(self) -> None:
+        self._queue.put_nowait(StopIteration)
+        self._finished = True
+
+    @property
+    def finished(self) -> bool:
+        return self._finished
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> RequestOutput:
+        result = await self._queue.get()
+        if result is StopIteration:
+            raise StopAsyncIteration
+        elif isinstance(result, Exception):
+            raise result
+        return result
+
+
+class RequestTracker:
+    """Synchronous abstraction for tracking requests."""
+
+    def __init__(self) -> None:
+        self._request_streams: Dict[str, AsyncStream] = {}
+        self._finished_requests: asyncio.Queue[str] = asyncio.Queue()
+        self._new_requests: asyncio.Queue[Tuple[AsyncStream,
+                                                dict]] = asyncio.Queue()
+
+    def __contains__(self, item):
+        return item in self._request_streams
+
+    def propagate_exception(self, exc: Exception) -> None:
+        """Propagate an exception to all request streams."""
+        for stream in self._request_streams.values():
+            stream.put(exc)
+
+    def process_request_output(self,
+                               request_output: RequestOutput,
+                               *,
+                               verbose: bool = False) -> None:
+        """Process a request output from the engine."""
+        request_id = request_output.request_id
+
+        self._request_streams[request_id].put(request_output)
+        if request_output.finished:
+            if verbose:
+                logger.info(f"Finished request {request_id}.")
+            self.abort_request(request_id)
+
+    def add_request(self, request_id: str,
+                    **engine_add_request_kwargs) -> AsyncStream:
+        """Add a request to be sent to the engine on the next background
+        loop iteration."""
+        if request_id in self._request_streams:
+            raise KeyError(f"Request {request_id} already exists.")
+
+        stream = AsyncStream(request_id)
+        self._new_requests.put_nowait((stream, {
+            "request_id": request_id,
+            **engine_add_request_kwargs
+        }))
+        return stream
+
+    def abort_request(self, request_id: str, *, verbose: bool = False) -> None:
+        """Abort a request during next background loop iteration."""
+        if verbose:
+            logger.info(f"Aborted request {request_id}.")
+
+        self._finished_requests.put_nowait(request_id)
+
+        if request_id not in self._request_streams or self._request_streams[
+                request_id].finished:
+            # The request has already finished or been aborted.
+            return
+
+        self._request_streams[request_id].finish()
+
+    def get_new_and_finished_requests(self) -> Tuple[List[dict], Set[str]]:
+        """Get the new requests and finished requests to be
+        sent to the engine."""
+        new_requests: List[dict] = []
+        finished_requests: Set[str] = set()
+
+        while not self._finished_requests.empty():
+            request_id = self._finished_requests.get_nowait()
+            finished_requests.add(request_id)
+            self._request_streams.pop(request_id, None)
+
+        while not self._new_requests.empty():
+            stream, new_request = self._new_requests.get_nowait()
+            if stream.request_id in finished_requests:
+                # The request has already been aborted.
+                stream.finish()
+                continue
+            self._request_streams[stream.request_id] = stream
+            new_requests.append(new_request)
+
+        return new_requests, finished_requests
+
+
+class _AsyncLLMEngine(LLMEngine):
+    """Extension of LLMEngine to add async methods."""
+
+    async def step_async(self) -> List[RequestOutput]:
+        """Performs one decoding iteration and returns newly generated results.
+        The workers are ran asynchronously if possible.
+
+        This function performs one decoding iteration of the engine. It first
+        schedules the sequences to be executed in the next iteration and the
+        token blocks to be swapped in/out/copy. Then, it executes the model
+        and updates the scheduler with the model outputs. Finally, it decodes
+        the sequences and returns the newly generated results.
+        """
+        (seq_group_metadata_list, scheduler_outputs,
+         early_return) = self._schedule()
+        if early_return is not None:
+            return early_return
+
+        # Execute the model.
+        output = await self._run_workers_async(
+            "execute_model",
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+            blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+            blocks_to_copy=scheduler_outputs.blocks_to_copy,
+        )
+
+        return self._process_model_outputs(output, scheduler_outputs)
+
+    async def _run_workers_async(
+        self,
+        method: str,
+        *args,
+        get_all_outputs: bool = False,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers."""
+        all_outputs = []
+        for worker in self.workers:
+            if self.parallel_config.worker_use_ray:
+                executor = partial(worker.execute_method.remote, method)
+            else:
+                executor = getattr(worker, method)
+
+            output = executor(*args, **kwargs)
+            all_outputs.append(output)
+
+        if self.parallel_config.worker_use_ray:
+            all_outputs = await asyncio.gather(*all_outputs)
+
+        if get_all_outputs:
+            return all_outputs
+
+        # Make sure all workers have the same results.
+        output = all_outputs[0]
+        for other_output in all_outputs[1:]:
+            assert output == other_output
+        return output
 
 
 class AsyncLLMEngine:
@@ -34,52 +230,124 @@ class AsyncLLMEngine:
             async frontend will be executed in a separate process as the
             model workers.
         log_requests: Whether to log the requests.
+        start_engine_loop: If True, the background task to run the engine
+            will be automatically started in the generate call.
         *args, *kwargs: Arguments for LLMEngine.
     """
+
+    _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
 
     def __init__(self,
                  worker_use_ray: bool,
                  engine_use_ray: bool,
                  *args,
                  log_requests: bool = True,
+                 start_engine_loop: bool = True,
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
-        if not self.engine_use_ray:
-            engine_class = LLMEngine
-        elif self.worker_use_ray:
-            engine_class = ray.remote(num_cpus=0)(LLMEngine).remote
-        else:
-            engine_class = ray.remote(num_gpus=1)(LLMEngine).remote
-        self.engine = engine_class(*args, **kwargs)
-        # Request id -> request output.
-        self.request_outputs: Dict[str, RequestOutput] = {}
-        # Request id -> event to notify that there is new output.
-        self.request_events: Dict[str, asyncio.Event] = {}
-        self.is_engine_running = False
-        self.kicking_request_id: Optional[str] = None
+        self.engine = self._init_engine(*args, **kwargs)
 
-    async def engine_step(self, kicking_request_id: Optional[str] = None):
+        self.request_tracker: RequestTracker = RequestTracker()
+        self.background_loop = None
+        self.start_engine_loop = start_engine_loop
+
+    @property
+    def is_running(self) -> bool:
+        return (self.background_loop is not None
+                and not self.background_loop.done())
+
+    def start_background_loop(self) -> None:
+        """Start the background loop."""
+        if self.is_running:
+            raise RuntimeError("Background loop is already running.")
+        self.background_loop = asyncio.get_event_loop().create_task(
+            self.run_engine_loop())
+        self.background_loop.add_done_callback(
+            partial(_raise_exception_on_finish,
+                    request_tracker=self.request_tracker))
+
+    def _init_engine(self, *args,
+                     **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
+        if not self.engine_use_ray:
+            engine_class = self._engine_class
+        elif self.worker_use_ray:
+            engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
+        else:
+            engine_class = ray.remote(num_gpus=1)(self._engine_class).remote
+        return engine_class(*args, **kwargs)
+
+    async def engine_step(self):
         """Kick the engine to process the waiting requests."""
-        self.is_engine_running = True
-        self.kicking_request_id = kicking_request_id
+
+        new_requests, finished_requests = (
+            self.request_tracker.get_new_and_finished_requests())
+
+        for new_request in new_requests:
+            # Add the request into the vLLM engine's waiting queue.
+            # TODO: Maybe add add_request_batch to reduce Ray overhead
+            if self.engine_use_ray:
+                await self.engine.add_request.remote(**new_request)
+            else:
+                self.engine.add_request(**new_request)
+
+        if finished_requests:
+            await self._engine_abort(finished_requests)
+
         if self.engine_use_ray:
             request_outputs = await self.engine.step.remote()
         else:
-            # Yield to the event loop to allow other coroutines to run
-            # while is_engine_running is True. This let the engine to add new
-            # requests into the queue.
-            await asyncio.sleep(0)
-            request_outputs = self.engine.step()
-        self.is_engine_running = False
-        self.kicking_request_id = None
+            request_outputs = await self.engine.step_async()
 
-        # Notify the waiting coroutines that there are new outputs ready.
+        # Put the outputs into the corresponding streams.
         for request_output in request_outputs:
-            request_id = request_output.request_id
-            self.request_outputs[request_id] = request_output
-            self.request_events[request_id].set()
+            self.request_tracker.process_request_output(
+                request_output, verbose=self.log_requests)
+
+    async def _engine_abort(self, request_ids: Iterable[str]):
+        if self.engine_use_ray:
+            await self.engine.abort_request.remote(request_ids)
+        else:
+            self.engine.abort_request(request_ids)
+
+    async def run_engine_loop(self):
+        while True:
+            await self.engine_step()
+            await asyncio.sleep(0)
+
+    async def add_request(
+        self,
+        request_id: str,
+        prompt: Optional[str],
+        sampling_params: SamplingParams,
+        prompt_token_ids: Optional[List[int]] = None,
+        arrival_time: Optional[float] = None,
+    ) -> AsyncStream:
+        if self.log_requests:
+            logger.info(f"Received request {request_id}: "
+                        f"prompt: {prompt!r}, "
+                        f"sampling params: {sampling_params}, "
+                        f"prompt token ids: {prompt_token_ids}.")
+
+        if not self.is_running:
+            if self.start_engine_loop:
+                self.start_background_loop()
+            else:
+                raise AsyncEngineDeadError(
+                    "Background loop is not running. If it was running, "
+                    "inspect the output to find the stacktrace of the "
+                    "error that caused the background loop to stop "
+                    "(AsyncEngineDeadError).")
+
+        stream = self.request_tracker.add_request(
+            request_id,
+            prompt=prompt,
+            sampling_params=sampling_params,
+            prompt_token_ids=prompt_token_ids,
+            arrival_time=arrival_time)
+
+        return stream
 
     async def generate(
             self,
@@ -108,76 +376,19 @@ class AsyncLLMEngine:
         # Preprocess the request.
         arrival_time = time.time()
 
-        # Create an event to notify us that there is new output from the
-        # vLLM engine.
-        request_event = asyncio.Event()
-        self.request_events[request_id] = request_event
+        try:
+            stream = await self.add_request(request_id,
+                                            prompt,
+                                            sampling_params,
+                                            prompt_token_ids=prompt_token_ids,
+                                            arrival_time=arrival_time)
 
-        if self.log_requests:
-            logger.info(f"Received request {request_id}: "
-                        f"prompt: {prompt!r}, "
-                        f"sampling params: {sampling_params}, "
-                        f"prompt token ids: {prompt_token_ids}.")
-
-        # Add the request into the vLLM engine's waiting queue.
-        if self.engine_use_ray:
-            await self.engine.add_request.remote(
-                request_id,
-                prompt,
-                sampling_params,
-                prompt_token_ids=prompt_token_ids,
-                arrival_time=arrival_time)
-        else:
-            self.engine.add_request(request_id,
-                                    prompt,
-                                    sampling_params,
-                                    prompt_token_ids=prompt_token_ids,
-                                    arrival_time=arrival_time)
-
-        # The vLLM engine does not have a background loop that keeps
-        # processing incoming requests. Therefore, we need to keep kicking
-        # the engine to process the requests.
-        while True:
-            if request_id not in self.request_events:
-                # The request has been aborted.
-                return
-
-            # Kick the engine if the engine is not running.
-            if not self.is_engine_running:
-                try:
-                    await self.engine_step(request_id)
-                except RuntimeError as e:
-                    await self.abort(request_id)
-                    raise e
-
-            # Wait for new output. The group_event will be set in engine_step
-            # when there is new output available for the sequence group.
-            # Added a timeout to prevent deadlock.
-            try:
-                await asyncio.wait_for(request_event.wait(),
-                                       timeout=TIMEOUT_TO_PREVENT_DEADLOCK)
-            except asyncio.TimeoutError:
-                continue
-            # Reset the event to wait for the next output.
-            request_event.clear()
-
-            # Decode and return new outputs.
-            request_output = self.request_outputs[request_id]
-            yield request_output
-
-            # Once finished, release the resources of the sequence group.
-            if request_output.finished:
-                if self.log_requests:
-                    logger.info(f"Finished request {request_id}.")
-
-                del self.request_outputs[request_id]
-                del self.request_events[request_id]
-                # Kick the engine if the engine is not running. This is to
-                # prevent that there are still requests in engine's waiting
-                # queue to be executed.
-                if not self.is_engine_running:
-                    await self.engine_step()
-                break
+            async for request_output in stream:
+                yield request_output
+        except Exception as e:
+            # If there is an exception, abort the request.
+            self._abort(request_id)
+            raise e
 
     async def abort(self, request_id: str) -> None:
         """Abort a request.
@@ -188,28 +399,26 @@ class AsyncLLMEngine:
         Args:
             request_id: The unique id of the request.
         """
-        if request_id not in self.request_events:
-            # The request has already finished or been aborted.
-            return
+        if not self.is_running:
+            raise AsyncEngineDeadError(
+                "Background loop is not running. If it was running, "
+                "inspect the output to find the stacktrace of the "
+                "error that caused the background loop to stop "
+                "(AsyncEngineDeadError).")
 
-        if self.log_requests:
-            logger.info(f"Aborted request {request_id}.")
+        return self._abort(request_id)
 
-        if self.engine_use_ray:
-            await self.engine.abort_request.remote(request_id)
-        else:
-            self.engine.abort_request(request_id)
+    def _abort(self, request_id: str) -> None:
+        """Abort a request.
 
-        if request_id in self.request_events:
-            del self.request_events[request_id]
-        if request_id in self.request_outputs:
-            del self.request_outputs[request_id]
+        Abort a submitted request. If the request is finished or not found,
+        this method will be a no-op.
 
-        # To prevent deadlock when a request is aborted while the engine is
-        # running.
-        if self.kicking_request_id == request_id:
-            self.is_engine_running = False
-            self.kicking_request_id = None
+        Args:
+            request_id: The unique id of the request.
+        """
+        self.request_tracker.abort_request(request_id,
+                                           verbose=self.log_requests)
 
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
@@ -220,7 +429,8 @@ class AsyncLLMEngine:
 
     @classmethod
     def from_engine_args(cls,
-                         engine_args: AsyncEngineArgs) -> "AsyncLLMEngine":
+                         engine_args: AsyncEngineArgs,
+                         start_engine_loop: bool = True) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
@@ -235,5 +445,6 @@ class AsyncLLMEngine:
                      distributed_init_method,
                      placement_group,
                      log_requests=not engine_args.disable_log_requests,
-                     log_stats=not engine_args.disable_log_stats)
+                     log_stats=not engine_args.disable_log_stats,
+                     start_engine_loop=start_engine_loop)
         return engine

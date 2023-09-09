@@ -178,7 +178,7 @@ __global__ void single_query_cached_kv_attention_kernel(
       // This includes a reduction across the threads in the same thread group.
       float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs[thread_group_offset], k_vecs);
       // Add the ALiBi bias if slopes are given.
-      qk += (alibi_slope != 0) ? alibi_slope * (token_idx - context_len) : 0;
+      qk += (alibi_slope != 0) ? alibi_slope * (token_idx - context_len + 1) : 0;
 
       if (thread_group_offset == 0) {
         // Store the partial reductions to shared memory.
@@ -246,6 +246,8 @@ __global__ void single_query_cached_kv_attention_kernel(
     accs[i] = 0.f;
   }
 
+  scalar_t zero_value;
+  zero(zero_value);
   for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
     const int physical_block_number = block_table[block_idx];
     const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
@@ -261,6 +263,16 @@ __global__ void single_query_cached_kv_attention_kernel(
       if (row_idx < HEAD_SIZE) {
         const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
         V_vec v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
+        if (block_idx == num_blocks - 1) {
+          // NOTE(woosuk): When v_vec contains the tokens that are out of the context,
+          // we should explicitly zero out the values since they may contain NaNs.
+          // See https://github.com/vllm-project/vllm/issues/641#issuecomment-1682544472
+          scalar_t* v_vec_ptr = reinterpret_cast<scalar_t*>(&v_vec);
+#pragma unroll
+          for (int j = 0; j <= V_VEC_SIZE; j++) {
+            v_vec_ptr[j] = token_idx + j < context_len ? v_vec_ptr[j] : zero_value;
+          }
+        }
         accs[i] += dot(logits_vec, v_vec);
       }
     }

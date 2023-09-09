@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -14,9 +14,10 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding)
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
-from vllm.sequence import SequenceOutputs
+from vllm.model_executor.weight_utils import (
+    hf_model_weights_iterator, load_padded_tensor_parallel_vocab,
+    load_tensor_parallel_weights)
+from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -217,7 +218,7 @@ class InternLMForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
@@ -225,35 +226,27 @@ class InternLMForCausalLM(nn.Module):
         return next_tokens
 
     _column_parallel_weights = [
-        "embed_tokens.weight", "lm_head.weight", "qkv_proj.weight",
-        "gate_proj.weight", "up_proj.weight"
+        "qkv_proj.weight", "gate_proj.weight", "up_proj.weight"
     ]
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     use_np_cache: bool = False):
-        tensor_model_parallel_world_size = (
-            get_tensor_model_parallel_world_size())
+                     load_format: str = "auto"):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache):
+                model_name_or_path, cache_dir, load_format):
             if "rotary_emb.inv_freq" in name:
                 continue
 
             if "embed_tokens" in name or "lm_head" in name:
                 param = state_dict[name]
-                # Consider padding in the vocab size.
-                padded_vocab_size = (param.shape[0] *
-                                     tensor_model_parallel_world_size)
-                num_extra_rows = padded_vocab_size - self.config.vocab_size
-                extra_rows = torch.empty(num_extra_rows,
-                                         loaded_weight.shape[1])
-                extra_rows = extra_rows.to(loaded_weight)
-                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
+                load_padded_tensor_parallel_vocab(param, loaded_weight,
+                                                  tensor_model_parallel_rank)
+                continue
 
             is_attention_weight = False
             for stride_id, att_weight_name in enumerate(

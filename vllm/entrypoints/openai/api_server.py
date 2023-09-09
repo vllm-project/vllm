@@ -44,6 +44,7 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 logger = init_logger(__name__)
 served_model = None
 app = fastapi.FastAPI()
+engine = None
 
 
 def create_error_response(status_code: HTTPStatus,
@@ -178,7 +179,8 @@ def create_logprobs(token_ids: List[int],
 
 
 @app.post("/v1/chat/completions")
-async def create_chat_completion(raw_request: Request):
+async def create_chat_completion(request: ChatCompletionRequest,
+                                 raw_request: Request):
     """Completion API similar to OpenAI's API.
 
     See  https://platform.openai.com/docs/api-reference/chat/create
@@ -188,7 +190,6 @@ async def create_chat_completion(raw_request: Request):
         - function_call (Users should implement this by themselves)
         - logit_bias (to be supported by vLLM engine)
     """
-    request = ChatCompletionRequest(**await raw_request.json())
     logger.info(f"Received chat completion request: {request}")
 
     error_check_ret = await check_model(request)
@@ -348,7 +349,7 @@ async def create_chat_completion(raw_request: Request):
 
 
 @app.post("/v1/completions")
-async def create_completion(raw_request: Request):
+async def create_completion(request: CompletionRequest, raw_request: Request):
     """Completion API similar to OpenAI's API.
 
     See https://platform.openai.com/docs/api-reference/completions/create
@@ -361,7 +362,6 @@ async def create_completion(raw_request: Request):
           suffix)
         - logit_bias (to be supported by vLLM engine)
     """
-    request = CompletionRequest(**await raw_request.json())
     logger.info(f"Received completion request: {request}")
 
     error_check_ret = await check_model(request)

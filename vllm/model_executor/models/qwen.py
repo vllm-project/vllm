@@ -8,7 +8,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -19,7 +19,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (
+    convert_pyslice_to_tensor,
     hf_model_weights_iterator,
+    load_padded_tensor_parallel_vocab,
     load_tensor_parallel_weights,
 )
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -31,7 +33,7 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.sequence import SequenceOutputs
+from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.qwen import QWenConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -234,40 +236,32 @@ class QWenLMHeadModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["wte.weight", "lm_head.weight"]
+    _column_parallel_weights = []
     _row_parallel_weights = ["c_proj.weight"]
 
     def load_weights(
         self,
         model_name_or_path: str,
         cache_dir: Optional[str] = None,
-        use_np_cache: bool = False,
+        load_format: str = "auto",
     ):
         tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache):
+                model_name_or_path, cache_dir, load_format):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if "wte" in name or "lm_head" in name:
-                # Consider padding in the vocab size.
-                param = state_dict[name]
-                padded_vocab_size = param.shape[0] * tp_world_size
-                num_extra_rows = padded_vocab_size - self.config.vocab_size
-                extra_rows = torch.empty(num_extra_rows,
-                                         loaded_weight.shape[1])
-                extra_rows = extra_rows.to(loaded_weight)
-                loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
+            loaded_weight = convert_pyslice_to_tensor(loaded_weight)
 
             if "c_attn" in name:
                 total_num_heads = self.config.num_attention_heads
@@ -306,6 +300,12 @@ class QWenLMHeadModel(nn.Module):
                 continue
 
             param = state_dict[name]
+
+            if "wte" in name or "lm_head" in name:
+                load_padded_tensor_parallel_vocab(param, loaded_weight,
+                                                  tp_rank)
+                continue
+
             load_tensor_parallel_weights(
                 param,
                 loaded_weight,
