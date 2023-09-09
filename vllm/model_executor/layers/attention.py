@@ -74,10 +74,11 @@ class PagedAttention(nn.Module):
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
 
     def set_attn_bias(
-            self,
-            input_metadata: InputMetadata,
-            dtype: torch.dtype  # pylint: disable=unused-argument
+        self,
+        input_metadata: InputMetadata,
+        dtype: torch.dtype,
     ) -> None:
+        del dtype  # Unused.
         if input_metadata.attn_bias:
             # Already set by a previous layer.
             return
