@@ -76,9 +76,8 @@ class LLMEngine:
             f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"trust_remote_code={model_config.trust_remote_code}, "
             f"dtype={model_config.dtype}, "
-            f"use_dummy_weights={model_config.use_dummy_weights}, "
             f"download_dir={model_config.download_dir!r}, "
-            f"use_np_weights={model_config.use_np_weights}, "
+            f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
@@ -154,7 +153,7 @@ class LLMEngine:
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
                 **ray_remote_kwargs,
-            )(RayWorker).remote()
+            )(RayWorker).remote(self.model_config.trust_remote_code)
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
