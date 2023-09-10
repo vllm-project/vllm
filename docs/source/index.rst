@@ -77,7 +77,7 @@ Documentation
    :maxdepth: 2
    :caption: Developer doc
 
-   dev/engine
+   dev/engine/engine_index
 
 Indices and tables
 ==================

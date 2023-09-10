@@ -188,7 +188,19 @@ class LLMEngine:
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
     def _init_cache(self) -> None:
-        """Profiles the memory usage and initializes the KV cache."""
+        """Profiles the memory usage and initializes the KV cache.
+        
+        The engine will first conduct a profiling of the existing memory usage. Then, it calculate 
+        the maximum number of GPU and CPU blocks that can be allocated with the remaining free memory.
+        Note that all available GPU memory will be considered during the calculation. More details can 
+        be found in the :meth:`~vllm.worker.worker.Worker.profile_num_available_blocks` method 
+        from class :class:`~vllm.worker.Worker`.
+
+        As there may be multiple workers, we take the minimum number of blocks across all workers to ensure 
+        this can be applied to all workers.
+
+        Finally, the engine will initialize the KV cache with the calculated number of blocks.
+        """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_blocks = self._run_workers(
             "profile_num_available_blocks",
@@ -242,7 +254,7 @@ class LLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
     ) -> None:
-        r"""Add a request to the engine's request pool.
+        """Add a request to the engine's request pool.
 
         The request is added to the request pool and will be processed by the
         scheduler as `engine.step()` is called. The exact scheduling policy is
@@ -301,7 +313,7 @@ class LLMEngine:
             request_id: The ID(s) of the request to abort.
 
         Details:
-            - Refer to the :meth:`~vllm.core.scheduler.Scheduler.abort_seq_group`.
+            - Refer to the :meth:`~vllm.core.scheduler.Scheduler.abort_seq_group` from class :class:`~vllm.core.scheduler.Scheduler`.
 
         Example::
             >>> # initialize engine and add a request with request_id
