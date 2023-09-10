@@ -29,10 +29,10 @@ inline __device__ void apply_rotary_embedding(
     sin = __ldg(sin_ptr + x_index / 2);
   }
 
-  const scalar_t x = arr[x_index];
-  const scalar_t y = arr[y_index];
-  arr[x_index] = x * cos - y * sin;
-  arr[y_index] = y * cos + x * sin;
+  const float x = static_cast<float>(arr[x_index]);
+  const float y = static_cast<float>(arr[y_index]);
+  arr[x_index] = static_cast<scalar_t>(x * cos - y * sin);
+  arr[y_index] = static_cast<scalar_t>(y * cos + x * sin);
 }
 
 template<typename scalar_t, bool IS_NEOX>
