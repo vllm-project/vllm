@@ -8,13 +8,13 @@ namespace vllm {
 template<typename scalar_t, bool IS_NEOX>
 inline __device__ void apply_rotary_embedding(
   scalar_t* __restrict__ arr,
-  const scalar_t* __restrict__ cos_ptr,
-  const scalar_t* __restrict__ sin_ptr,
+  const float* __restrict__ cos_ptr,
+  const float* __restrict__ sin_ptr,
   int rot_offset,
   int embed_dim)
 {
   int x_index, y_index;
-  scalar_t cos, sin;
+  float cos, sin;
   if (IS_NEOX) {
     // GPT-NeoX style rotary embedding.
     x_index = rot_offset;
@@ -40,7 +40,7 @@ __global__ void rotary_embedding_kernel(
   const int64_t* __restrict__ positions,        // [num_tokens]
   scalar_t* __restrict__ query,                 // [num_tokens, num_heads, head_size]
   scalar_t* __restrict__ key,                   // [num_tokens, num_kv_heads, head_size]
-  const scalar_t* __restrict__ cos_sin_cache,   // [max_position, 2, rot_dim // 2]
+  const float* __restrict__ cos_sin_cache,      // [max_position, 2, rot_dim // 2]
   const int rot_dim,
   const int query_stride,
   const int key_stride,
@@ -50,11 +50,11 @@ __global__ void rotary_embedding_kernel(
   // Each thread block is responsible for one token.
   const int token_idx = blockIdx.x;
   int64_t pos = positions[token_idx];
-  const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
+  const float* cache_ptr = cos_sin_cache + pos * rot_dim;
 
   const int embed_dim = rot_dim / 2;
-  const scalar_t* cos_ptr = cache_ptr;
-  const scalar_t* sin_ptr = cache_ptr + embed_dim;
+  const float* cos_ptr = cache_ptr;
+  const float* sin_ptr = cache_ptr + embed_dim;
 
   const int nq = num_heads * embed_dim;
   for (int i = threadIdx.x; i < nq; i += blockDim.x) {
@@ -103,7 +103,7 @@ void rotary_embedding(
           positions.data_ptr<int64_t>(),
           query.data_ptr<scalar_t>(),
           key.data_ptr<scalar_t>(),
-          cos_sin_cache.data_ptr<scalar_t>(),
+          cos_sin_cache.data_ptr<float>(),
           rot_dim,
           query_stride,
           key_stride,
@@ -115,7 +115,7 @@ void rotary_embedding(
           positions.data_ptr<int64_t>(),
           query.data_ptr<scalar_t>(),
           key.data_ptr<scalar_t>(),
-          cos_sin_cache.data_ptr<scalar_t>(),
+          cos_sin_cache.data_ptr<float>(),
           rot_dim,
           query_stride,
           key_stride,
