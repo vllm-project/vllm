@@ -129,8 +129,9 @@ async def check_length(
         input_ids = tokenizer(prompt).input_ids
     token_num = len(input_ids)
 
-    unlimited_tokens = request.max_tokens == max_model_len
-    if not unlimited_tokens and token_num + request.max_tokens > max_model_len:
+    if request.max_tokens is None:
+        request.max_tokens = max_model_len - token_num
+    if token_num + request.max_tokens > max_model_len:
         return input_ids, create_error_response(
             HTTPStatus.BAD_REQUEST,
             f"This model's maximum context length is {max_model_len} tokens. "
@@ -190,8 +191,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
         - function_call (Users should implement this by themselves)
         - logit_bias (to be supported by vLLM engine)
     """
-    if request.max_tokens is None:
-        request.max_tokens = max_model_len
     logger.info(f"Received chat completion request: {request}")
 
     error_check_ret = await check_model(request)
