@@ -428,7 +428,7 @@ class AsyncLLMEngine:
 
                If the request is finished, release and reset necessary resources.
 
-        Example::
+        Example:
             >>> # Please refer to the code in entrypoints/api_server.py for a complete example.
             >>> # initialize the engine and the example input
             >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
@@ -482,7 +482,7 @@ class AsyncLLMEngine:
         Args:
             request_id: The unique id of the request.
 
-        Example::
+        Example:
             Please see the example in :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.generate`.
         """
         if not self.is_running:
