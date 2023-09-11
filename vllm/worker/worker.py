@@ -74,7 +74,7 @@ class Worker:
         gpu_memory_utilization: float,
         cpu_swap_space: int,
     ) -> Tuple[int, int]:
-        """Profiles the peak memory usage of the model and returns the maximum 
+        """Profiles the peak memory usage of the model and returns the maximum
         number of GPU and CPU cache blocks that can be allocated.
 
         Args:

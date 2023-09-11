@@ -90,7 +90,7 @@ class Scheduler:
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a sequence group with the given ID.
 
-        Check if the sequence group with the given ID 
+        Check if the sequence group with the given ID
             is present in any of the state queue.
         If present, remove the sequence group from the state queue.
             Also, if any of the sequences in the sequence group is not finished,

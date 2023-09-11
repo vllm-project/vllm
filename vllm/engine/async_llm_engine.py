@@ -420,16 +420,16 @@ class AsyncLLMEngine:
         Details:
             - If the engine is not running, start the background loop,
               which iteratively invokes
-              :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step` 
+              :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
               to process the waiting requests.
             - Add the request to the engine's `RequestTracker`.
-              On the next background loop, this request will be sent to 
+              On the next background loop, this request will be sent to
               the underlying engine.
               Also, a corresponding `AsyncStream` will be created.
             - Wait for the request outputs from `AsyncStream` and yield them.
 
         Example:
-            >>> # Please refer to entrypoints/api_server.py for 
+            >>> # Please refer to entrypoints/api_server.py for
             >>> # the complete example.
             >>>
             >>> # initialize the engine and the example input
@@ -443,8 +443,8 @@ class AsyncLLMEngine:
             >>>
             >>> # start the generation
             >>> results_generator = engine.generate(
-            >>>    example_input["prompt"], 
-            >>>    SamplingParams(temperature=example_input["temperature"]), 
+            >>>    example_input["prompt"],
+            >>>    SamplingParams(temperature=example_input["temperature"]),
             >>>    example_input["request_id"])
             >>>
             >>> # get the results
@@ -452,7 +452,7 @@ class AsyncLLMEngine:
             >>> async for request_output in results_generator:
             >>>     if await request.is_disconnected():
             >>>         # Abort the request if the client disconnects.
-            >>>         await engine.abort(request_id) 
+            >>>         await engine.abort(request_id)
             >>>         # Return or raise an error
             >>>         ...
             >>>     final_output = request_output
