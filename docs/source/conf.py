@@ -12,15 +12,14 @@
 
 import os
 import sys
-sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
 
+sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
 
 # -- Project information -----------------------------------------------------
 
 project = 'vLLM'
 copyright = '2023, vLLM Team'
 author = 'the vLLM Team'
-
 
 # -- General configuration ---------------------------------------------------
 

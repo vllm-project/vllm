@@ -75,7 +75,7 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Developer doc
+   :caption: Developer Documentation
 
    dev/engine/engine_index
 

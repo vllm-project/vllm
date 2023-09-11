@@ -250,7 +250,8 @@ class AsyncLLMEngine:
         log_requests: Whether to log the requests.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
-        *args, *kwargs: Arguments for LLMEngine.
+        *args: Arguments for LLMEngine.
+        *kwargs: Arguments for LLMEngine.
     """
 
     _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
@@ -415,38 +416,43 @@ class AsyncLLMEngine:
         Yields:
             The output `RequestOutput` objects from the LLMEngine for the
             request.
-        
-        Details:
-            - Create an event to notify us that there is new request to the engine.
-            - Add the request into the engine's waiting queue via :meth:`~vllm.engine.llm_engine.LLMEngine.add_request`.
-            - Create a loop that keeps processing 
-               If the engine is not running, kick it off with :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step` 
-               Else, Wait for new output via :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.request_event.wait`.
-               If timed out, continue.
-               
-               Upon receiving a new result, decode and yield.
 
-               If the request is finished, release and reset necessary resources.
+        Details:
+            - If the engine is not running, start the background loop,
+              which iteratively invokes
+              :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step` 
+              to process the waiting requests.
+            - Add the request to the engine's `RequestTracker`.
+              On the next background loop, this request will be sent to 
+              the underlying engine.
+              Also, a corresponding `AsyncStream` will be created.
+            - Wait for the request outputs from `AsyncStream` and yield them.
 
         Example:
-            >>> # Please refer to the code in entrypoints/api_server.py for a complete example.
+            >>> # Please refer to entrypoints/api_server.py for 
+            >>> # the complete example.
+            >>>
             >>> # initialize the engine and the example input
             >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
             >>> example_input = {
-            >>>     "prompt": "Who is the president of the United States?",
+            >>>     "prompt": "What is LLM?",
             >>>     "stream": False, # assume the non-streaming case
             >>>     "temperature": 0.0,
             >>>     "request_id": 0,
             >>> }
             >>>
             >>> # start the generation
-            >>> results_generator = engine.generate(example_input["prompt"], SamplingParams(temperature=example_input["temperature"]), example_input["request_id"])
+            >>> results_generator = engine.generate(
+            >>>    example_input["prompt"], 
+            >>>    SamplingParams(temperature=example_input["temperature"]), 
+            >>>    example_input["request_id"])
             >>>
             >>> # get the results
             >>> final_output = None
             >>> async for request_output in results_generator:
             >>>     if await request.is_disconnected():
-            >>>         await engine.abort(request_id) # Abort the request if the client disconnects.
+            >>>         # Abort the request if the client disconnects.
+            >>>         await engine.abort(request_id) 
             >>>         # Return or raise an error
             >>>         ...
             >>>     final_output = request_output
@@ -481,9 +487,6 @@ class AsyncLLMEngine:
 
         Args:
             request_id: The unique id of the request.
-
-        Example:
-            Please see the example in :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.generate`.
         """
         if not self.is_running:
             raise AsyncEngineDeadError(
