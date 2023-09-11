@@ -133,9 +133,10 @@ def test_rotary_embedding(
                       device="cuda")
 
     # Create the rotary embedding.
-    inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
+    inv_freq = 1.0 / (base**(
+        torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
     t = torch.arange(max_position).float()
-    freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
+    freqs = torch.einsum("i,j -> ij", t, inv_freq)
     cos = freqs.cos()
     sin = freqs.sin()
     cos_sin_cache = torch.cat((cos, sin), dim=-1)
