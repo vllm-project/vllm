@@ -189,14 +189,14 @@ class LLMEngine:
 
     def _init_cache(self) -> None:
         """Profiles the memory usage and initializes the KV cache.
-        
-        The engine will first conduct a profiling of the existing memory usage. Then, it calculate 
+
+        The engine will first conduct a profiling of the existing memory usage. Then, it calculate
         the maximum number of GPU and CPU blocks that can be allocated with the remaining free memory.
-        Note that all available GPU memory will be considered during the calculation. More details can 
-        be found in the :meth:`~vllm.worker.worker.Worker.profile_num_available_blocks` method 
+        Note that all available GPU memory will be considered during the calculation. More details can
+        be found in the :meth:`~vllm.worker.worker.Worker.profile_num_available_blocks` method
         from class :class:`~vllm.worker.Worker`.
 
-        As there may be multiple workers, we take the minimum number of blocks across all workers to ensure 
+        As there may be multiple workers, we take the minimum number of blocks across all workers to ensure
         this can be applied to all workers.
 
         Finally, the engine will initialize the KV cache with the calculated number of blocks.
@@ -581,11 +581,22 @@ class LLMEngine:
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
 
-        This function performs one decoding iteration of the engine. It first
-        schedules the sequences to be executed in the next iteration and the
-        token blocks to be swapped in/out/copy. Then, it executes the model
-        and updates the scheduler with the model outputs. Finally, it decodes
-        the sequences and returns the newly generated results.
+        .. figure:: https://i.imgur.com/vOy3B90.png
+            :alt: Overview of the step function
+            :align: center
+
+            Overview of how the step function performs one decoding iteration of the engine.
+
+        - Step 1: Schedules the sequences to be executed in the next iteration and the token blocks to be swapped in/out/copy.
+
+            - Depending on the scheduling policy, sequences may be `preempted/reordered`.
+            - Sequence Group (SG) refer to a group of sequences that are generated from the same prompt.
+
+        - Step 2: Calls the workers to execute the model.
+        - Step 3: Updates the scheduler with the model outputs.
+        - Step 4: Decodes the sequences.
+        - Step 5: Stops the sequences which satisfied the stopping requirements and frees their memory.
+        - Finally, it returns the newly generated results.
 
         Example::
             >>> # Please see the example/ folder for more detailed examples.
