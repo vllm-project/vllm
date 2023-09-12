@@ -327,18 +327,18 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
     ) -> AsyncStream:
         if self.log_requests:
-            shorted_prompt = prompt
-            shorted_token_ids = prompt_token_ids
+            shortened_prompt = prompt
+            shortened_token_ids = prompt_token_ids
             if self.max_log_tokens is not None:
-                idx = self.max_log_tokens * -1
-                if shorted_prompt is not None:
-                    shorted_prompt = shorted_prompt[idx:]
-                if shorted_token_ids is not None:
-                    shorted_token_ids = shorted_token_ids[idx:]
+                if shortened_prompt is not None:
+                    shortened_prompt = shortened_prompt[-self.max_log_tokens:]
+                if shortened_token_ids is not None:
+                    shortened_token_ids = shortened_token_ids[-self.
+                                                              max_log_tokens:]
             logger.info(f"Received request {request_id}: "
-                        f"prompt: {shorted_prompt!r}, "
+                        f"prompt: {shortened_prompt!r}, "
                         f"sampling params: {sampling_params}, "
-                        f"prompt token ids: {shorted_token_ids}.")
+                        f"prompt token ids: {shortened_token_ids}.")
 
         if not self.is_running:
             if self.start_engine_loop:
