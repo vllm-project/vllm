@@ -66,15 +66,14 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self._verify_load_format()
         self._verify_tokenizer_mode()
-        if max_model_len:
+        if max_model_len is not None:
             derived_max_model_len = self.get_max_model_len()
             if max_model_len > derived_max_model_len:
                 logger.warning(
                     f"User-specified max_model_len ({max_model_len}) is "
                     f"greater than the derived max_model_len "
                     f"({derived_max_model_len}). Make sure the value is "
-                    "correct and within the model context size."
-                )
+                    "correct and within the model context size.")
         self.max_model_len = max_model_len
 
     def _verify_load_format(self) -> None:
