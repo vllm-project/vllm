@@ -437,11 +437,12 @@ def _batched_sample(gen_probs: torch.Tensor, gen_logprobs: torch.Tensor,
     if len(sampling_type_tensors
            ) > SamplingType.GREEDY and sampling_type_tensors[
                SamplingType.GREEDY].numel() > 0:
-        torch.argmax(sampling_type_tensors[SamplingType.GREEDY],
-                     dim=-1,
-                     keepdim=True,
-                     out=batch_chosen_tokens_tensors[SamplingType.GREEDY][:,
-                                                                          0])
+        torch.argmax(
+            sampling_type_tensors[SamplingType.GREEDY],
+            dim=-1,
+            keepdim=True,
+            out=batch_chosen_tokens_tensors[SamplingType.GREEDY][:,
+                                                                 0].resize_(0))
     if len(sampling_type_tensors
            ) > SamplingType.RANDOM and sampling_type_tensors[
                SamplingType.RANDOM].numel() > 0:

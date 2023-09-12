@@ -125,6 +125,8 @@ class SamplingParams:
                 # Zero temperature means greedy sampling.
                 self._verify_greedy_sampling()
 
+        self.sampling_type = SamplingType.from_sampling_params(self)
+
     def _verify_args(self) -> None:
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
@@ -200,8 +202,5 @@ class SamplingParams:
                 f"stop={self.stop}, "
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
-                f"logprobs={self.logprobs})")
-
-    @property
-    def sampling_type(self) -> SamplingType:
-        return SamplingType.from_sampling_params(self)
+                f"logprobs={self.logprobs}, "
+                f"sampling_type={self.sampling_type})")

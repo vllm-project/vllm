@@ -156,7 +156,6 @@ class Worker:
         # Add prompt tokens.
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
-
             if not seq_group_metadata.is_prompt:
                 continue
 
@@ -198,9 +197,7 @@ class Worker:
         max_num_blocks_per_seq = 0
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
-
         for seq_group_metadata in seq_group_metadata_list:
-
             if seq_group_metadata.is_prompt:
                 continue
 
