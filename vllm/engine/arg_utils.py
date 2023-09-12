@@ -171,7 +171,7 @@ class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
     engine_use_ray: bool = False
     disable_log_requests: bool = False
-    max_log_length: int = None
+    max_log_len: Optional[int] = None
 
     @staticmethod
     def add_cli_args(
@@ -184,7 +184,7 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='disable logging requests')
-        parser.add_argument('--max-log-length',
+        parser.add_argument('--max-log-len',
                             type=int,
                             default=None,
                             help='max number of prompt characters or prompt '

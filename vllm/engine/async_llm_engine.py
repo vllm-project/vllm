@@ -242,13 +242,13 @@ class AsyncLLMEngine:
                  engine_use_ray: bool,
                  *args,
                  log_requests: bool = True,
-                 max_log_length: Optional[int] = None,
+                 max_log_len: Optional[int] = None,
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
-        self.max_log_length = max_log_length
+        self.max_log_len = max_log_len
         self.engine = self._init_engine(*args, **kwargs)
 
         self.request_tracker: RequestTracker = RequestTracker()
@@ -329,12 +329,12 @@ class AsyncLLMEngine:
         if self.log_requests:
             shortened_prompt = prompt
             shortened_token_ids = prompt_token_ids
-            if self.max_log_length is not None:
+            if self.max_log_len is not None:
                 if shortened_prompt is not None:
-                    shortened_prompt = shortened_prompt[:self.max_log_length]
+                    shortened_prompt = shortened_prompt[:self.max_log_len]
                 if shortened_token_ids is not None:
                     shortened_token_ids = shortened_token_ids[:self.
-                                                              max_log_length]
+                                                              max_log_len]
             logger.info(f"Received request {request_id}: "
                         f"prompt: {shortened_prompt!r}, "
                         f"sampling params: {sampling_params}, "
@@ -456,6 +456,6 @@ class AsyncLLMEngine:
                      placement_group,
                      log_requests=not engine_args.disable_log_requests,
                      log_stats=not engine_args.disable_log_stats,
-                     max_log_length=engine_args.max_log_length,
+                     max_log_len=engine_args.max_log_len,
                      start_engine_loop=start_engine_loop)
         return engine
