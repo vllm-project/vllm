@@ -14,6 +14,7 @@ from vllm.utils import random_uuid
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
+engine = None
 
 
 @app.post("/generate")
@@ -30,9 +31,6 @@ async def generate(request: Request) -> Response:
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
-
-    if not engine.is_running:
-        engine.start_background_loop()
 
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
@@ -79,8 +77,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args,
-                                             start_engine_loop=False)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     uvicorn.run(app,
                 host=args.host,
