@@ -1,6 +1,6 @@
 import random
-from unittest.mock import patch
 from typing import Tuple
+from unittest.mock import patch
 
 import torch
 

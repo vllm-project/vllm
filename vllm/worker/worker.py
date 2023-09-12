@@ -162,8 +162,7 @@ class Worker:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
-            sampling_type_indices.extend([sampling_params.sampling_type] *
-                                         len(seq_ids))
+            sampling_type_indices.append(sampling_params.sampling_type)
 
             # Use any sequence in the group.
             seq_id = seq_ids[0]

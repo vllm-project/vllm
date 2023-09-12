@@ -56,7 +56,6 @@ class Sampler(nn.Module):
     ) -> SamplerOutput:
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
-
         logits = self._get_logits(embedding, hidden_states, embedding_bias)
 
         # Apply presence and frequency penalties.
