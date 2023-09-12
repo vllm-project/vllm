@@ -1,5 +1,6 @@
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
+from vllm.transformers_utils.configs.baichuan2 import BaiChuan2Config
 from vllm.transformers_utils.configs.aquila import AquilaConfig
 from vllm.transformers_utils.configs.qwen import QWenConfig
 # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
@@ -10,6 +11,7 @@ from vllm.transformers_utils.configs.falcon import RWConfig
 __all__ = [
     "MPTConfig",
     "BaiChuanConfig",
+    "BaiChuan2Config",
     "AquilaConfig",
     "QWenConfig",
     "RWConfig",
