@@ -184,7 +184,7 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='disable logging requests')
-        parser.add_argument('--max_log_tokens',
+        parser.add_argument('--max-log-tokens',
                             type=int,
                             default=None,
                             help='max prompt/token being printed in log')
