@@ -27,7 +27,6 @@ class EngineArgs:
     max_num_batched_tokens: int = 2560
     max_num_seqs: int = 256
     disable_log_stats: bool = False
-    max_log_tokens: int = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -172,6 +171,7 @@ class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
     engine_use_ray: bool = False
     disable_log_requests: bool = False
+    max_log_length: int = None
 
     @staticmethod
     def add_cli_args(
@@ -184,8 +184,10 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='disable logging requests')
-        parser.add_argument('--max-log-tokens',
+        parser.add_argument('--max-log-length',
                             type=int,
                             default=None,
-                            help='max prompt/token being printed in log')
+                            help='max number of prompt characters or prompt '
+                            'ID numbers being printed in log. '
+                            'Default: unlimited.')
         return parser
