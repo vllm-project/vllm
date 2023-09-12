@@ -151,12 +151,7 @@ class Worker:
         slot_mapping: List[int] = []
 
         # Get the map of index -> sampling type
-        sampling_type_indices = torch.tensor([
-            seq_group_metadata.sampling_params.sampling_type
-            for seq_group_metadata in seq_group_metadata_list
-        ],
-                                             dtype=torch.long,
-                                             device="cpu")
+        sampling_type_indices = []
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -168,6 +163,8 @@ class Worker:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
+            sampling_type_indices.extend([sampling_params.sampling_type] *
+                                         len(seq_ids))
 
             # Use any sequence in the group.
             seq_id = seq_ids[0]
@@ -210,6 +207,8 @@ class Worker:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
+            sampling_type_indices.extend([sampling_params.sampling_type] *
+                                         len(seq_ids))
 
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
@@ -248,7 +247,9 @@ class Worker:
             for block_table in generation_block_tables
         ]
         block_tables_tensor = torch.cuda.IntTensor(padded_block_tables)
-
+        sampling_type_indices = torch.tensor(sampling_type_indices,
+                                             dtype=torch.long,
+                                             device="cpu")
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)

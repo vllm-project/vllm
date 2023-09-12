@@ -94,27 +94,27 @@ class Sampler(nn.Module):
             non_greedy_logits = logits[non_greedy_offset:]
             # Apply temperature scaling.
             temperatures = _get_temperatures(input_metadata)
-            temperatures = temperatures[non_greedy_offset:]
-            assert len(temperatures) == non_greedy_logits.shape[0]
             t = torch.tensor(temperatures,
                              dtype=logits.dtype,
-                             device=logits.device)
+                             device=logits.device
+                             )[sampling_type_indices_index][non_greedy_offset:]
+            assert t.shape[0] == non_greedy_logits.shape[0]
             # Use in-place division to avoid creating a new tensor.
             non_greedy_logits.div_(t.unsqueeze(dim=1))
 
             # Apply top-p and top-k truncation.
             top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
-            top_ps = top_ps[non_greedy_offset:]
-            top_ks = top_ks[non_greedy_offset:]
-            assert len(top_ps) == len(top_ks) == non_greedy_logits.shape[0]
             do_top_p_or_top_k = any(
                 p < 1.0 - _SAMPLING_EPS or k != self.vocab_size
                 for p, k in zip(top_ps, top_ks))
             if do_top_p_or_top_k:
-                p = torch.tensor(top_ps,
-                                 dtype=logits.dtype,
-                                 device=logits.device)
-                k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
+                p = torch.tensor(
+                    top_ps, dtype=logits.dtype, device=logits.device
+                )[sampling_type_indices_index][non_greedy_offset:]
+                k = torch.tensor(
+                    top_ks, dtype=torch.int, device=logits.device
+                )[sampling_type_indices_index][non_greedy_offset:]
+                assert p.shape[0] == k.shape[0] == non_greedy_logits.shape[0]
                 _apply_top_p_top_k_in_place(non_greedy_logits, p, k)
 
         # We use float32 for probabilities and log probabilities.
