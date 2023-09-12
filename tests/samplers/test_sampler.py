@@ -1,4 +1,5 @@
 import random
+from unittest.mock import patch
 from typing import Tuple
 
 import torch
@@ -17,6 +18,11 @@ class MockLogitsSampler(Sampler):
 
     def _get_logits(self, *args, **kwargs) -> torch.Tensor:
         return self.fake_logits
+
+    def forward(self, *args, **kwargs):
+        with patch("vllm.model_executor.layers.sampler._prune_hidden_states",
+                   lambda x, y: x):
+            return super().forward(*args, **kwargs)
 
 
 def _prepare_test(
