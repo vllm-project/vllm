@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union, Optional
+from typing import List, Optional, Tuple, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
@@ -68,9 +68,10 @@ def get_tokenizer(
 
 
 def _convert_tokens_to_string_with_added_encoders(
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        output_tokens: List[str],
-        skip_special_tokens: bool = False):
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    output_tokens: List[str],
+    skip_special_tokens: bool,
+) -> str:
     # Adapted from
     # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
     # NOTE(woosuk): The following code is slow because it runs a for loop over
@@ -95,8 +96,8 @@ def _convert_tokens_to_string_with_added_encoders(
     return " ".join(sub_texts)
 
 
-# Based on https://github.com/huggingface/text-generation-inference/\
-# blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
+# Based on 
+# https://github.com/huggingface/text-generation-inference/blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
 # under Apache 2.0 license
 def detokenize_incrementally(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
@@ -105,7 +106,7 @@ def detokenize_incrementally(
     prefix_offset: int = 0,
     read_offset: int = 0,
     skip_special_tokens: bool = False,
-) -> Tuple[str, str, int, int]:
+) -> Tuple[List[str], str, int, int]:
     new_token_id = all_input_ids[-1]
     # This is the first iteration for this sequence
     if prev_output_tokens is None:

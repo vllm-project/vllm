@@ -42,8 +42,8 @@ def _run_incremental_decode(llama_tokenizer, all_input_ids):
 
 @pytest.mark.parametrize("TRUTH_AND_INPUT_PAIRS", TRUTH_AND_INPUT_PAIRS)
 def test_decode_streaming_english_spaces(llama_tokenizer,
-                                         TRUTH_AND_INPUT_PAIRS):
-    truth, all_input_ids = TRUTH_AND_INPUT_PAIRS
+                                         truth_and_input_pairs):
+    truth, all_input_ids = truth_and_input_pairs
     assert (all_input_ids == llama_tokenizer(
         truth, add_special_tokens=False)["input_ids"])
 
