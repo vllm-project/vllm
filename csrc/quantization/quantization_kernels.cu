@@ -1,5 +1,5 @@
 /*
-https://github.com/mit-han-lab/llm-awq
+Adapted from https://github.com/mit-han-lab/llm-awq
 @article{lin2023awq,
   title={AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration},
   author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song},
