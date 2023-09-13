@@ -24,24 +24,12 @@ InputMetadata to extract the original 2D shape of the input.
 """
 import math
 from typing import List, Optional, Tuple
-from threading import Thread
-from typing import List, Optional, Tuple, Union
-from contextlib import contextmanager
 
 import torch
 from torch import nn
-from torch.nn import CrossEntropyLoss
-from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-)
-from transformers.utils import logging
-from transformers.generation.utils import GenerationConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import (
     PagedAttentionWithRoPE,
@@ -68,81 +56,30 @@ from vllm.transformers_utils.configs.baichuan2 import BaiChuan2Config as BaiChua
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
-# try:
-#     from xformers import ops as xops
-# except ImportError:
-#     xops = None
-#     print(
-#         "Xformers is not installed correctly. If you want to use memory_efficient_attention to accelerate training use the following command to install Xformers\npip install xformers."
-#     )
-
 
 def _get_interleave(n):
+
     def _get_interleave_power_of_2(n):
-        start = 2 ** (-(2 ** -(math.log2(n) - 3)))
+        start = 2**(-(2**-(math.log2(n) - 3)))
         ratio = start
         return [start * ratio**i for i in range(n)]
 
     if math.log2(n).is_integer():
         return _get_interleave_power_of_2(n)
     else:
-        closest_power_of_2 = 2 ** math.floor(math.log2(n))
-        return (
-            _get_interleave_power_of_2(closest_power_of_2)
-            + _get_interleave(2 * closest_power_of_2)[0::2][: n - closest_power_of_2]
-        )
-
-
-def _fill_with_neg_inf(t):
-    """FP16-compatible function that fills a tensor with -inf."""
-    return t.float().fill_(float("-inf")).type_as(t)
-
-
-def _gen_alibi_mask(tensor, n_head, max_pos):
-    slopes = torch.Tensor(_get_interleave(n_head))
-    position_point = torch.arange(max_pos) - max_pos + 1
-    position_point = position_point.unsqueeze(0).unsqueeze(0).expand(n_head, -1, -1)
-    diag = torch.diag(position_point[0])
-    position_point = position_point - diag.unsqueeze(0).unsqueeze(0).transpose(-1, -2)
-    alibi = slopes.unsqueeze(1).unsqueeze(1) * position_point
-    alibi = alibi.view(n_head, 1, max_pos)
-    alibi_mask = torch.triu(_fill_with_neg_inf(torch.zeros([max_pos, max_pos])), 1)
-    alibi_mask = alibi_mask.unsqueeze(0) + alibi
-    return alibi_mask
+        closest_power_of_2 = 2**math.floor(math.log2(n))
+        return (_get_interleave_power_of_2(closest_power_of_2) +
+                _get_interleave(
+                    2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
-    closest_power_of_2 = 2 ** math.floor(math.log2(total_num_heads))
-    base = torch.tensor(
-        2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3))),
-        dtype=torch.float32,
-    )
-    powers = torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32)
-    slopes = torch.pow(base, powers)
-
-    if closest_power_of_2 != total_num_heads:
-        extra_base = torch.tensor(
-            2 ** (-(2 ** -(math.log2(2 * closest_power_of_2) - 3))),
-            dtype=torch.float32,
-        )
-        num_remaining_heads = min(
-            closest_power_of_2, total_num_heads - closest_power_of_2
-        )
-        extra_powers = torch.arange(
-            start=1, end=1 + 2 * num_remaining_heads, step=2, dtype=torch.int32
-        )
-        slopes = torch.cat([slopes, torch.pow(extra_base, extra_powers)], dim=0)
+    slopes = torch.Tensor(_get_interleave(total_num_heads))
     return slopes
 
 
-def _buffered_future_mask(tensor, maxpos, alibi, attn_heads):
-    _future_mask = torch.triu(_fill_with_neg_inf(torch.zeros([maxpos, maxpos])), 1)
-    _future_mask = _future_mask.unsqueeze(0) + alibi
-    new_future_mask = _future_mask.to(tensor)
-    return new_future_mask[: tensor.shape[0] * attn_heads, :maxpos, :maxpos]
-
-
 class MLP(torch.nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
@@ -184,7 +121,8 @@ class BaichuanAttention(torch.nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
+        )
         self.total_num_heads = num_heads
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
@@ -215,14 +153,14 @@ class BaichuanAttention(torch.nn.Module):
             alibi_slopes = alibi_slopes[head_start:head_end].tolist()
 
             scaling = self.head_dim**-0.5
-            self.attn = PagedAttentionWithALiBi(
-                self.num_heads, self.head_dim, scaling, alibi_slopes
-            )
+            self.attn = PagedAttentionWithALiBi(self.num_heads, self.head_dim,
+                                                scaling, alibi_slopes)
         else:
             self.scaling = self.head_dim**-0.5
-            self.attn = PagedAttentionWithRoPE(
-                self.num_heads, self.head_dim, self.scaling, rotary_dim=self.head_dim
-            )
+            self.attn = PagedAttentionWithRoPE(self.num_heads,
+                                               self.head_dim,
+                                               self.scaling,
+                                               rotary_dim=self.head_dim)
 
     def forward(
         self,
@@ -236,19 +174,18 @@ class BaichuanAttention(torch.nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
         if self.postion_embedding == "ALIBI":
-            attn_output = self.attn(
-                q, k, v, k_cache, v_cache, input_metadata, cache_event
-            )
+            attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                    cache_event)
         else:
-            attn_output = self.attn(
-                positions, q, k, v, k_cache, v_cache, input_metadata, cache_event
-            )
+            attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
+                                    input_metadata, cache_event)
 
         output, _ = self.o_proj(attn_output)
         return output
 
 
 class BaichuanLayer(torch.nn.Module):
+
     def __init__(self, config: BaiChuanConfig, position_embedding: str):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -262,10 +199,10 @@ class BaichuanLayer(torch.nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, epsilon=config.rms_norm_eps
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -297,21 +234,21 @@ class BaichuanLayer(torch.nn.Module):
 
 
 class BaichuanModel(nn.Module):
+
     def __init__(self, config: BaiChuanConfig, position_embedding: str):
         super().__init__(config)
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size, perform_initialization=False
-        )
-        self.layers = nn.ModuleList(
-            [
-                BaichuanLayer(config, position_embedding)
-                for _ in range(config.num_hidden_layers)
-            ]
-        )
-        self.norm = RMSNorm(config.hidden_size, epsilon=config.rms_norm_eps)
+            config.vocab_size,
+            config.hidden_size,
+            perform_initialization=False)
+        self.layers = nn.ModuleList([
+            BaichuanLayer(config, position_embedding)
+            for _ in range(config.num_hidden_layers)
+        ])
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -340,6 +277,7 @@ class BaichuanModel(nn.Module):
 
 
 class BaiChuanBaseForCausalLM(nn.Module):
+
     def __init__(self, config, position_embedding: str):
         super().__init__()
         self.config = config
@@ -349,7 +287,7 @@ class BaiChuanBaseForCausalLM(nn.Module):
             config.vocab_size,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
+            perform_initialization=True,
         )
         self.sampler = Sampler(config.vocab_size)
 
@@ -361,10 +299,10 @@ class BaiChuanBaseForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.model(
-            input_ids, positions, kv_caches, input_metadata, cache_events
-        )
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states, input_metadata)
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   input_metadata, cache_events)
+        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
+                                   input_metadata)
         return next_tokens
 
     _column_parallel_weights = []
@@ -379,10 +317,10 @@ class BaiChuanBaseForCausalLM(nn.Module):
         tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
+        has_norm_head = False
 
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format
-        ):
+                model_name_or_path, cache_dir, load_format):
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -396,9 +334,8 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 head_start = tp_rank * num_heads
                 head_end = (tp_rank + 1) * num_heads
 
-                loaded_weight = loaded_weight.view(
-                    3, total_num_heads, head_size, hidden_size
-                )
+                loaded_weight = loaded_weight.view(3, total_num_heads,
+                                                   head_size, hidden_size)
                 loaded_weight = loaded_weight[:, head_start:head_end, :, :]
                 loaded_weight = loaded_weight.reshape(-1, hidden_size)
 
@@ -408,12 +345,10 @@ class BaiChuanBaseForCausalLM(nn.Module):
                     continue
                 param = state_dict[name.replace(weight_name, "gate_up_proj")]
                 shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[
-                    shard_size * tp_rank : shard_size * (tp_rank + 1)
-                ]
-                param_slice = param.data[
-                    shard_size * stride_id : shard_size * (stride_id + 1)
-                ]
+                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
+                                              (tp_rank + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size *
+                                         (stride_id + 1)]
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_gate_up_weight = True
@@ -423,8 +358,19 @@ class BaiChuanBaseForCausalLM(nn.Module):
 
             param = state_dict[name]
 
+            if name == "lm_head.weight":
+                print(
+                    f"loading lm_head weight, norm: {loaded_weight.norm(2.0, 1, True).clamp_min(1e-12)}"
+                )
+                loaded_weight = torch.nn.functional.normalize(loaded_weight)
+                print(
+                    f"after normalization, norm: {loaded_weight.norm(2.0, 1, True).clamp_min(1e-12)}"
+                )
+                has_norm_head = True
+
             if "embed_tokens" in name or "lm_head" in name:
-                load_padded_tensor_parallel_vocab(param, loaded_weight, tp_rank)
+                load_padded_tensor_parallel_vocab(param, loaded_weight,
+                                                  tp_rank)
                 continue
 
             load_tensor_parallel_weights(
@@ -435,13 +381,16 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 self._row_parallel_weights,
                 tp_rank,
             )
+        assert has_norm_head, "lm_head silently evades normalization"
 
 
 class Baichuan2ForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 13b
+
     def __init__(self, config):
         super().__init__(config, "ALIBI")
 
 
 class BaiChuan2ForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 7b
+
     def __init__(self, config):
         super().__init__(config, "ROPE")
