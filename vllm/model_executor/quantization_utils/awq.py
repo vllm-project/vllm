@@ -19,9 +19,10 @@ class AWQConfig(QuantizationConfig):
         self.group_size = group_size
         self.zero_point = zero_point
 
-        if 32 % self.weight_bits != 0:
-            raise ValueError("Weight bits must be a factor of 32, but got "
-                             f"{self.weight_bits}")
+        if self.weight_bits != 4:
+            raise ValueError(
+                "Currently, only 4-bit weight quantization is supported for "
+                f"AWQ, but got {self.weight_bits} bits.")
         self.pack_factor = 32 // self.weight_bits
 
     @property
