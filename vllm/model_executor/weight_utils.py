@@ -25,8 +25,7 @@ class Disabledtqdm(tqdm):
         super().__init__(*args, **kwargs, disable=True)
 
 
-def is_transposed(param_name,
-                  quant_config: Optional[WeightQuantizationConfig] = None):
+def is_transposed(param_name, quant_config):
     """Returns True if the parameter tensor given by state_dict[param_name] is
     transposed relative to torch.nn.Linear.weight. Otherwise, returns False.
     """
@@ -36,8 +35,7 @@ def is_transposed(param_name,
     return False
 
 
-def is_packed(param_name,
-              quant_config: Optional[WeightQuantizationConfig] = None):
+def is_packed(param_name, quant_config):
     """Returns True if each element of state_dict[param_name] contains more than
     one parameter. For example, with AWQ quantization, each INT32 element
     corresponds to 8 INT4 weights. Otherwise, returns False.
@@ -124,7 +122,8 @@ def get_quant_config(
 
     quant_cls = get_quant_class(quantization)
     quant_config_files = [
-        f for f in config_files if f in quant_cls.get_config_filenames()
+        f for f in config_files if any(
+            f.endswith(x) for x in quant_cls.get_config_filenames())
     ]
     if len(quant_config_files) == 0:
         raise ValueError(f"Cannot find the config file for {quantization}")
