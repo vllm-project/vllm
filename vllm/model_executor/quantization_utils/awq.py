@@ -33,7 +33,7 @@ class AWQConfig(QuantizationConfig):
     def get_config_filenames(cls) -> List[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
-            "quantization_config.json",  # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq  # pylint: disable=line-too-long
+            "quantize_config.json",  # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq  # pylint: disable=line-too-long
         ]
 
     @classmethod
@@ -42,3 +42,8 @@ class AWQConfig(QuantizationConfig):
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
         return cls(weight_bits, group_size, zero_point)
+
+    def __repr__(self) -> str:
+        return (f"AWQConfig(weight_bits={self.weight_bits}, "
+                f"group_size={self.group_size}, "
+                f"zero_point={self.zero_point})")
