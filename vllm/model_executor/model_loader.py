@@ -31,9 +31,9 @@ _MODEL_REGISTRY = {
     "RWForCausalLM": FalconForCausalLM,
 }
 
+# FIXME: Remove this once all models support quantization.
 _MODEL_CLASSES_SUPPORT_QUANTIZATION = [
     LlamaForCausalLM,
-    MPTForCausalLM,
 ]
 
 
@@ -62,7 +62,6 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     # Get the quantization config.
     quant_config = None
     if model_config.quantization is not None:
-        # FIXME: Remove this check once all models support quantization.
         if model_class not in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
             raise ValueError(
                 f"Quantization is not supported for {model_class}.")
