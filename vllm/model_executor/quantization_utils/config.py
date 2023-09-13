@@ -70,7 +70,7 @@ def get_quant_config(quantization: str) -> QuantizationConfig:
     return _QUANTIZATION_REGISTRY[quantization]
 
 
-def _get_config_value(cls, config: Dict[str, Any], keys: List[str]) -> Any:
+def _get_config_value(config: Dict[str, Any], keys: List[str]) -> Any:
     """Get a value from the model's quantization config."""
     for key in keys:
         if key in config:
