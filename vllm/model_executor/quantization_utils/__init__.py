@@ -1,5 +1,5 @@
 from vllm.model_executor.quantization_utils.awq import AWQConfig
-from vllm.vllm.model_executor.quantization_utils.config import QuantizationConfig
+from vllm.model_executor.quantization_utils.config import QuantizationConfig
 
 _QUANTIZATION_REGISTRY = {
     "awq": AWQConfig,
