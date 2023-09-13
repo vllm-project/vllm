@@ -74,6 +74,7 @@ class LLMEngine:
             f"model={model_config.model!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
+            f"revision={model_config.revision}, "
             f"trust_remote_code={model_config.trust_remote_code}, "
             f"dtype={model_config.dtype}, "
             f"download_dir={model_config.download_dir!r}, "
@@ -92,7 +93,8 @@ class LLMEngine:
         self.tokenizer = get_tokenizer(
             model_config.tokenizer,
             tokenizer_mode=model_config.tokenizer_mode,
-            trust_remote_code=model_config.trust_remote_code)
+            trust_remote_code=model_config.trust_remote_code,
+            revision=model_config.revision)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
