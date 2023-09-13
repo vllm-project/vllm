@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
@@ -67,33 +67,11 @@ def get_tokenizer(
     return tokenizer
 
 
-def detokenize_incrementally(
+def _convert_tokens_to_string_with_added_encoders(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    prev_output_tokens: List[str],
-    new_token_id: int,
+    output_tokens: List[str],
     skip_special_tokens: bool,
-) -> Tuple[str, str]:
-    """Detokenizes the new token in conjunction with the previous output tokens.
-
-    NOTE: This function does not update prev_output_tokens.
-
-    Returns:
-        new_token: The new token as a string.
-        output_text: The new output text as a string.
-    """
-    if skip_special_tokens and (new_token_id in tokenizer.all_special_ids):
-        return None, prev_output_tokens
-    new_token = tokenizer.convert_ids_to_tokens(
-        new_token_id, skip_special_tokens=skip_special_tokens)
-    output_tokens = prev_output_tokens + [new_token]
-
-    # Convert the tokens to a string.
-    # Optimization: If the tokenizer does not have `added_tokens_encoder`,
-    # then we can directly use `convert_tokens_to_string`.
-    if not getattr(tokenizer, "added_tokens_encoder", {}):
-        output_text = tokenizer.convert_tokens_to_string(output_tokens)
-        return new_token, output_text
-
+) -> str:
     # Adapted from
     # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
     # NOTE(woosuk): The following code is slow because it runs a for loop over
@@ -115,5 +93,61 @@ def detokenize_incrementally(
     if current_sub_text:
         sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
         sub_texts.append(sub_text)
-    output_text = " ".join(sub_texts)
-    return new_token, output_text
+    return " ".join(sub_texts)
+
+
+# Based on
+# https://github.com/huggingface/text-generation-inference/blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
+# under Apache 2.0 license
+def detokenize_incrementally(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    all_input_ids: List[int],
+    prev_tokens: Optional[List[str]],
+    prefix_offset: int = 0,
+    read_offset: int = 0,
+    skip_special_tokens: bool = False,
+) -> Tuple[List[str], str, int, int]:
+    new_token_id = all_input_ids[-1]
+    # This is the first iteration for this sequence
+    if prev_tokens is None:
+        new_tokens = tokenizer.convert_ids_to_tokens(
+            all_input_ids, skip_special_tokens=skip_special_tokens)
+        output_tokens = new_tokens
+        # 5 is an arbitrary value that should work for all
+        # tokenizers (bigger = more conservative).
+        # Subtract 1 extra to account for the generated token.
+        prefix_offset = max(len(output_tokens) - 6, 0)
+        read_offset = max(len(output_tokens) - 1, 0)
+    else:
+        new_token = tokenizer.convert_ids_to_tokens(
+            new_token_id, skip_special_tokens=skip_special_tokens)
+        new_tokens = [new_token]
+        output_tokens = prev_tokens + new_tokens
+
+    # The prefix text is necessary only to defeat cleanup algorithms in
+    # the decode which decide to add a space or not depending on the
+    # surrounding ids.
+    if not getattr(tokenizer, "added_tokens_encoder", {}):
+        prefix_text = tokenizer.convert_tokens_to_string(
+            output_tokens[prefix_offset:read_offset])
+        new_text = tokenizer.convert_tokens_to_string(
+            output_tokens[prefix_offset:])
+    else:
+        prefix_text = _convert_tokens_to_string_with_added_encoders(
+            tokenizer,
+            output_tokens[prefix_offset:read_offset],
+            skip_special_tokens=skip_special_tokens)
+        new_text = _convert_tokens_to_string_with_added_encoders(
+            tokenizer,
+            output_tokens[prefix_offset:],
+            skip_special_tokens=skip_special_tokens)
+
+    if len(new_text) > len(prefix_text) and not new_text.endswith("�"):
+        # utf-8 char at the end means it's a potential unfinished byte sequence
+        # from byte fallback tokenization.
+        # If it's in the middle, it's probably a real invalid id generated
+        # by the model
+        new_text = new_text[len(prefix_text):]
+        return new_tokens, new_text, read_offset, len(output_tokens)
+    else:
+        return new_tokens, "", prefix_offset, read_offset
