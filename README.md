@@ -35,13 +35,13 @@ vLLM is fast with:
 
 vLLM is flexible and easy to use with:
 
-- Seamless integration with popular HuggingFace models
+- Seamless integration with popular Hugging Face models
 - High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
 - Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
 
-vLLM seamlessly supports many Huggingface models, including the following architectures:
+vLLM seamlessly supports many Hugging Face models, including the following architectures:
 
 - Aquila (`BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc.)
 - Baichuan (`baichuan-inc/Baichuan-7B`, `baichuan-inc/Baichuan-13B-Chat`, etc.)
@@ -72,7 +72,7 @@ Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to get started
 
 ## Performance
 
-vLLM outperforms HuggingFace Transformers (HF) by up to 24x and Text Generation Inference (TGI) by up to 3.5x, in terms of throughput.
+vLLM outperforms Hugging Face Transformers (HF) by up to 24x and Text Generation Inference (TGI) by up to 3.5x, in terms of throughput.
 For details, check out our [blog post](https://vllm.ai).
 
 <p align="center">
