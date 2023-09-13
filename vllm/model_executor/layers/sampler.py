@@ -147,7 +147,7 @@ class Sampler(nn.Module):
         for prompt_len, seq_datum in zip(input_metadata.prompt_lens, seq_data):
             prompt_index_list.extend(
                 list(range(start_idx, start_idx + prompt_len - 1)))
-            start_idx += prompt_len
+            start_idx += prompt_len + len(seq_datum.output_token_ids)
 
             # Pick the first seq_id
             prompt_id_list.extend(seq_datum.prompt_token_ids[1:])
@@ -184,7 +184,7 @@ class Sampler(nn.Module):
             assert num_log_probs is not None
             if num_log_probs > 0:
                 top_log_porbs = torch.topk(log_probs[start_idx:start_idx +
-                                                     prompt_len],
+                                                     prompt_len - 1],
                                            k=num_log_probs,
                                            dim=-1)
                 # seq_datum.prompt_top_logprobs = [None] + [
@@ -196,8 +196,8 @@ class Sampler(nn.Module):
             # seq_datum.prompt_logprobs = [
             logprobs_list[i] = [
                 None
-            ] + selected_log_probs[start_idx:start_idx + prompt_len]
-            start_idx += prompt_len
+            ] + selected_log_probs[start_idx:start_idx + prompt_len - 1]
+            start_idx += prompt_len - 1
             echo_results[i] = (logprobs_list[i], top_logprobs_list[i])
         return echo_results
 
