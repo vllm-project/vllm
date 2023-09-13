@@ -102,14 +102,14 @@ def _convert_tokens_to_string_with_added_encoders(
 def detokenize_incrementally(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     all_input_ids: List[int],
-    prev_output_tokens: Optional[List[str]],
+    prev_tokens: Optional[List[str]],
     prefix_offset: int = 0,
     read_offset: int = 0,
     skip_special_tokens: bool = False,
 ) -> Tuple[List[str], str, int, int]:
     new_token_id = all_input_ids[-1]
     # This is the first iteration for this sequence
-    if prev_output_tokens is None:
+    if prev_tokens is None:
         new_tokens = tokenizer.convert_ids_to_tokens(
             all_input_ids, skip_special_tokens=skip_special_tokens)
         output_tokens = new_tokens
@@ -122,7 +122,7 @@ def detokenize_incrementally(
         new_token = tokenizer.convert_ids_to_tokens(
             new_token_id, skip_special_tokens=skip_special_tokens)
         new_tokens = [new_token]
-        output_tokens = prev_output_tokens + new_tokens
+        output_tokens = prev_tokens + new_tokens
 
     # The prefix text is necessary only to defeat cleanup algorithms in
     # the decode which decide to add a space or not depending on the
