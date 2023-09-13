@@ -1,7 +1,7 @@
 # coding=utf-8
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/tree/main
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -10,13 +10,14 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttentionWithALiBi
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
+from vllm.model_executor.weight_utils import (convert_pyslice_to_tensor,
+                                              hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.sequence import SequenceOutputs
+from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -230,7 +231,7 @@ class MPTForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
@@ -243,12 +244,12 @@ class MPTForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     use_np_cache: bool = False):
+                     load_format: str = "auto"):
         tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache):
+                model_name_or_path, cache_dir, load_format):
             if "Wqkv" in name:
                 # NOTE(woosuk): MPT's fused QKV has the shape of
                 # [3 * num_heads * head_size, hidden_size].
@@ -260,7 +261,7 @@ class MPTForCausalLM(nn.Module):
                 num_heads = total_num_heads // tp_world_size
                 head_start = tp_rank * num_heads
                 head_end = (tp_rank + 1) * num_heads
-
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 if name.endswith(".weight"):
                     loaded_weight = loaded_weight.view(3, total_num_heads,
                                                        head_size, hidden_size)

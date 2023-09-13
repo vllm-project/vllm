@@ -59,7 +59,7 @@ Next, you need to rewrite the :code:`forward` methods of your model by following
     +    kv_caches: List[KVCache],
     +    input_metadata: InputMetadata,
     +    cache_events: Optional[List[torch.cuda.Event]],
-    +) -> Dict[int, SequenceOutputs]:
+    +) -> SamplerOutput:
 
 3. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
 4. Replace the attention operation with either :code:`GPTPagedAttention` or :code:`GPTNeoXPagedAttention`, depending on the model's architecture.

@@ -75,10 +75,12 @@ class RequestOutput:
         # Get the top-n sequences.
         n = seq_group.sampling_params.n
         seqs = seq_group.get_seqs()
-        assert n <= len(seqs)
-        sorted_seqs = sorted(seqs,
-                             key=lambda seq: seq.get_cumulative_logprob(),
-                             reverse=True)
+        if seq_group.sampling_params.use_beam_search:
+            sorting_key = lambda seq: seq.get_beam_search_score(
+                seq_group.sampling_params.length_penalty)
+        else:
+            sorting_key = lambda seq: seq.get_cumulative_logprob()
+        sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
         top_n_seqs = sorted_seqs[:n]
 
         # Create the outputs.
