@@ -27,10 +27,16 @@ def _run_incremental_decode(llama_tokenizer, all_input_ids):
     decoded_text = ""
     offset = 0
     token_offset = 0
+    prev_output_tokens = None
     for i in range(len(all_input_ids)):
-        text, offset, token_offset = detokenize_incrementally(
-            llama_tokenizer, all_input_ids[:i + 1], offset, token_offset)
+        new_tokens, text, offset, token_offset = detokenize_incrementally(
+            llama_tokenizer, all_input_ids[:i + 1], prev_output_tokens, offset,
+            token_offset)
         decoded_text += text
+        if prev_output_tokens is None:
+            prev_output_tokens = new_tokens
+        else:
+            prev_output_tokens += new_tokens
     return decoded_text
 
 
