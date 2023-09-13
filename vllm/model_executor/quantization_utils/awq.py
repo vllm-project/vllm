@@ -1,10 +1,10 @@
 from typing import Any, Dict, List
 
-from vllm.vllm.model_executor.quantization_utils.config import QuantizationConfig
+from vllm.model_executor.quantization_utils.config import QuantizationConfig
 
 
 class AWQConfig(QuantizationConfig):
-    """AWQ: Activation-aware Weight Quantization.
+    """Config class for AWQ.
 
     Reference: https://arxiv.org/abs/2306.00978
     """
