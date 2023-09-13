@@ -1,3 +1,5 @@
+from typing import Type
+
 from vllm.model_executor.quantization_utils.awq import AWQConfig
 from vllm.model_executor.quantization_utils.config import QuantizationConfig
 
@@ -6,7 +8,7 @@ _QUANTIZATION_REGISTRY = {
 }
 
 
-def get_quant_config(quantization: str) -> QuantizationConfig:
+def get_quant_class(quantization: str) -> Type[QuantizationConfig]:
     if quantization not in _QUANTIZATION_REGISTRY:
         raise ValueError(f"Invalid quantization method: {quantization}")
     return _QUANTIZATION_REGISTRY[quantization]

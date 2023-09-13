@@ -13,6 +13,8 @@ import torch
 from tqdm.auto import tqdm
 
 from vllm.logger import init_logger
+from vllm.model_executor.quantization_utils import get_quant_class
+from vllm.model_executor.quantization_utils.config import QuantizationConfig
 
 logger = init_logger(__name__)
 
@@ -102,12 +104,46 @@ def convert_bin_to_safetensor_file(
             raise RuntimeError(f"The output tensors do not match for key {k}")
 
 
+# TODO(woosuk): Move this to other place.
+def get_quant_config(
+    quantization: str,
+    model_name_or_path: str,
+    cache_dir: Optional[str] = None,
+) -> QuantizationConfig:
+    is_local = os.path.isdir(model_name_or_path)
+    if not is_local:
+        # Download the config files.
+        with get_lock(model_name_or_path, cache_dir):
+            hf_folder = snapshot_download(model_name_or_path,
+                                          allow_patterns="*.json",
+                                          cache_dir=cache_dir,
+                                          tqdm_class=Disabledtqdm)
+    else:
+        hf_folder = model_name_or_path
+    config_files = glob.glob(os.path.join(hf_folder, "*.json"))
+
+    quant_cls = get_quant_class(quantization)
+    quant_config_files = [
+        f for f in config_files if f in quant_cls.get_config_filenames()
+    ]
+    if len(quant_config_files) == 0:
+        raise ValueError(f"Cannot find the config file for {quantization}")
+    if len(quant_config_files) > 1:
+        raise ValueError(f"Found multiple config files for {quantization}: "
+                         f"{quant_config_files}")
+
+    quant_config_file = quant_config_files[0]
+    with open(quant_config_file, "r") as f:
+        config = json.load(f)
+    return quant_cls.from_config(config)
+
+
 def prepare_hf_model_weights(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
     use_safetensors: bool = False,
     fall_back_to_pt: bool = True,
-):
+) -> Tuple[str, List[str], bool]:
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
     allow_patterns = "*.safetensors" if use_safetensors else "*.bin"
@@ -144,6 +180,7 @@ def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
     load_format: str = "auto",
+    quant_config: Optional[QuantizationConfig] = None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     use_safetensors = False
     use_np_cache = False

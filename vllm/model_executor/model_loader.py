@@ -8,7 +8,8 @@ from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import *  # pylint: disable=wildcard-import
-from vllm.model_executor.weight_utils import initialize_dummy_weights
+from vllm.model_executor.weight_utils import (get_quant_config,
+                                              initialize_dummy_weights)
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
@@ -55,12 +56,20 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def _supports_quantization(model_class):
-    return model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION
-
-
 def get_model(model_config: ModelConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
+
+    # Get the quantization config.
+    quant_config = None
+    if model_config.quantization is not None:
+        # FIXME: Remove this check once all models support quantization.
+        if model_class not in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
+            raise ValueError(
+                f"Quantization is not supported for {model_class}.")
+        quant_config = get_quant_config(model_config.quantization,
+                                        model_config.model,
+                                        model_config.download_dir)
+
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
