@@ -12,7 +12,6 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from vllm.config import WeightQuantizationConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -46,12 +45,7 @@ def is_packed(param_name,
     return False
 
 
-def hf_model_weights_iterator(
-    model_name_or_path: str,
-    cache_dir: Optional[str] = None,
-    use_np_cache: bool = False,
-    quant_config: Optional[WeightQuantizationConfig] = None,
-) -> Iterator[Tuple[str, torch.Tensor]]:
+def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
     # Prepare file lock directory to prevent multiple processes from
     # downloading the same model weights at the same time.
     lock_dir = cache_dir if cache_dir is not None else "/tmp"
