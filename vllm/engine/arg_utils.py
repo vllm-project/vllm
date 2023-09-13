@@ -53,9 +53,9 @@ class EngineArgs:
         parser.add_argument(
             '--revision',
             type=str,
-            default=None,
+            default="main",
             help='The specific model version to use. It can be a branch '
-            'name, a tag name, or a commit id.')
+            'name, a tag name, or a commit id. Default to \'main\' branch')
         parser.add_argument('--tokenizer-mode',
                             type=str,
                             default=EngineArgs.tokenizer_mode,
