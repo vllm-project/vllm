@@ -244,7 +244,7 @@ class SequenceGroup:
             # candidates running in the future.
             return self.sampling_params.best_of
         else:
-            if self.sampling_params.best_of > self.num_seqs():
+            if self.sampling_params.best_of >= self.num_seqs():
                 # At prompt stage, the sequence group is not yet filled up
                 # and only have one sequence running. However, in the
                 # generation stage, we will have `best_of` sequences running.
