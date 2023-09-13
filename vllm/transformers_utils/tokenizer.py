@@ -25,7 +25,8 @@ def get_tokenizer(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
-    if "llama" in tokenizer_name.lower() and kwargs.get("use_fast", True):
+    if ("llama" in tokenizer_name.lower() and kwargs.get("use_fast", True)
+            and tokenizer_name != _FAST_LLAMA_TOKENIZER):
         logger.info(
             "For some LLaMA-based models, initializing the fast tokenizer may "
             "take a long time. To eliminate the initialization time, consider "
@@ -72,7 +73,7 @@ def detokenize_incrementally(
     new_token_id: int,
     skip_special_tokens: bool,
 ) -> Tuple[str, str]:
-    """Detokenizes the new token in conjuction with the previous output tokens.
+    """Detokenizes the new token in conjunction with the previous output tokens.
 
     NOTE: This function does not update prev_output_tokens.
 

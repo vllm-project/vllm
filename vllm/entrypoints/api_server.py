@@ -14,6 +14,7 @@ from vllm.utils import random_uuid
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
+engine = None
 
 
 @app.post("/generate")
@@ -30,6 +31,7 @@ async def generate(request: Request) -> Response:
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
+
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Streaming case

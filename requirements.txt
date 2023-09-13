@@ -4,8 +4,8 @@ ray >= 2.5.1
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch >= 2.0.0
-transformers >= 4.31.0  # Required for LLaMA-2.
-xformers >= 0.0.19
+transformers >= 4.33.1  # Required for Code Llama.
+xformers >= 0.0.21
 fastapi
 uvicorn
 pydantic < 2  # Required for OpenAI server.

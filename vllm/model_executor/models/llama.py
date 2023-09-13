@@ -25,7 +25,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -37,14 +37,14 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights,
-                                              get_param)
+from vllm.model_executor.weight_utils import (
+    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab,
+    hf_model_weights_iterator, get_param)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.sequence import SequenceOutputs
+from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -87,6 +87,7 @@ class LlamaAttention(nn.Module):
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
+                 rope_theta: float = 10000,
                  quant_config: WeightQuantizationConfig = None):
         super().__init__()
         self.hidden_size = hidden_size
@@ -101,6 +102,7 @@ class LlamaAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
+        self.rope_theta = rope_theta
 
         self.qkv_proj = ColumnParallelLinear(
             hidden_size, (self.total_num_heads + 2 * self.total_num_kv_heads) *
@@ -118,6 +120,7 @@ class LlamaAttention(nn.Module):
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
                                            self.scaling,
+                                           base=self.rope_theta,
                                            rotary_dim=self.head_dim,
                                            num_kv_heads=self.num_kv_heads)
 
@@ -145,11 +148,13 @@ class LlamaDecoderLayer(nn.Module):
                  quant_config: WeightQuantizationConfig = None):
         super().__init__()
         self.hidden_size = config.hidden_size
-
+        # Requires transformers > 4.32.0
+        rope_theta = getattr(config, "rope_theta", 10000)
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
+            rope_theta=rope_theta,
             quant_config=quant_config)
         self.mlp = LlamaMLP(hidden_size=self.hidden_size,
                             intermediate_size=config.intermediate_size,
@@ -258,7 +263,7 @@ class LlamaForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
@@ -289,7 +294,7 @@ class LlamaForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     use_np_cache: bool = False):
+                     load_format: str = "auto"):
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         q_proj_shard_size = (self.config.hidden_size // tp_size)
@@ -306,10 +311,8 @@ class LlamaForCausalLM(nn.Module):
         ]
         state_dict = self.state_dict()
 
-        for name, loaded_weight, transposed, packed \
-            in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache,
-                self.quant_config):
+        for name, loaded_weight, transposed, packed in hf_model_weights_iterator(
+                model_name_or_path, cache_dir, load_format):
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -371,6 +374,12 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             param = get_param(state_dict, name, transposed)
+
+            if "embed_tokens" in name or "lm_head" in name:
+                load_padded_tensor_parallel_vocab(param, loaded_weight,
+                                                  tensor_model_parallel_rank)
+                continue
+
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
