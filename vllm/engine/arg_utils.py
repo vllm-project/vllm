@@ -18,6 +18,7 @@ class EngineArgs:
     load_format: str = 'auto'
     dtype: str = 'auto'
     seed: int = 0
+    max_model_len: Optional[int] = None
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
@@ -89,6 +90,11 @@ class EngineArgs:
             'The "auto" option will use FP16 precision '
             'for FP32 and FP16 models, and BF16 precision '
             'for BF16 models.')
+        parser.add_argument('--max-model-len',
+                            type=int,
+                            default=None,
+                            help='model context length. If unspecified, '
+                            'will be automatically derived from the model.')
         # Parallel arguments
         parser.add_argument('--worker-use-ray',
                             action='store_true',
@@ -153,7 +159,7 @@ class EngineArgs:
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
-                                   self.dtype, self.seed)
+                                   self.dtype, self.seed, self.max_model_len)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)
@@ -171,6 +177,7 @@ class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
     engine_use_ray: bool = False
     disable_log_requests: bool = False
+    max_log_len: Optional[int] = None
 
     @staticmethod
     def add_cli_args(
@@ -183,4 +190,10 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='disable logging requests')
+        parser.add_argument('--max-log-len',
+                            type=int,
+                            default=None,
+                            help='max number of prompt characters or prompt '
+                            'ID numbers being printed in log. '
+                            'Default: unlimited.')
         return parser
