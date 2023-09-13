@@ -83,7 +83,7 @@ def prepare_hf_model_weights(
     cache_dir: Optional[str] = None,
     use_safetensors: bool = False,
     fall_back_to_pt: bool = True,
-    revision: str = "main",
+    revision: Optional[str] = None,
 ):
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
@@ -123,7 +123,7 @@ def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
     load_format: str = "auto",
-    revision: str = "main",
+    revision: Optional[str] = None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     use_safetensors = False
     use_np_cache = False

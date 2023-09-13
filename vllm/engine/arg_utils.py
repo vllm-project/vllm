@@ -28,7 +28,7 @@ class EngineArgs:
     max_num_batched_tokens: int = 2560
     max_num_seqs: int = 256
     disable_log_stats: bool = False
-    revision: str = None
+    revision: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -53,9 +53,10 @@ class EngineArgs:
         parser.add_argument(
             '--revision',
             type=str,
-            default="main",
-            help='The specific model version to use. It can be a branch '
-            'name, a tag name, or a commit id. Default to \'main\' branch')
+            default=None,
+            help='the specific model version to use. It can be a branch '
+            'name, a tag name, or a commit id. If unspecified, will use '
+            'the default version.')
         parser.add_argument('--tokenizer-mode',
                             type=str,
                             default=EngineArgs.tokenizer_mode,
@@ -166,7 +167,7 @@ class EngineArgs:
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
-                                   self.dtype, self.seed, self.revision, 
+                                   self.dtype, self.seed, self.revision,
                                    self.max_model_len)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,

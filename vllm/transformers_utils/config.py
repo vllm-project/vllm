@@ -1,3 +1,5 @@
+from typing import Optional
+
 from transformers import AutoConfig, PretrainedConfig
 
 from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
@@ -14,7 +16,7 @@ _CONFIG_REGISTRY = {
 
 def get_config(model: str,
                trust_remote_code: bool,
-               revision: str = None) -> PretrainedConfig:
+               revision: Optional[str] = None) -> PretrainedConfig:
     try:
         config = AutoConfig.from_pretrained(
             model, trust_remote_code=trust_remote_code, revision=revision)
