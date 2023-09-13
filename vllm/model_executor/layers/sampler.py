@@ -8,7 +8,7 @@ import torch.nn as nn
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     gather_from_tensor_model_parallel_region)
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceOutputs
 
 _SAMPLING_EPS = 1e-5
@@ -41,15 +41,11 @@ class Sampler(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
         # Get the hidden states that we use for sampling.
-        hidden_states = _prune_hidden_states(hidden_states, input_metadata)
+        hidden_states, indices = _prune_hidden_states(hidden_states, input_metadata)
 
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
-        if embedding_bias is not None:
-            logits += embedding_bias
-        logits = gather_from_tensor_model_parallel_region(logits)
-        # Remove paddings in vocab (if any).
-        logits = logits[:, :self.vocab_size]
+        logits = _get_logits(hidden_states, embedding, embedding_bias,
+                             self.vocab_size)
 
         # Apply presence and frequency penalties.
         output_tokens = _get_output_tokens(input_metadata)
@@ -89,20 +85,44 @@ class Sampler(nn.Module):
         return _sample(probs, logprobs, input_metadata)
 
 
+def _get_logits(hidden_states: torch.Tensor,
+                embedding: torch.Tensor,
+                embedding_bias: Optional[torch.Tensor],
+                vocab_size: int):
+    # Get the logits for the next tokens.
+    logits = torch.matmul(hidden_states, embedding.t())
+    if embedding_bias is not None:
+        logits += embedding_bias
+    logits = gather_from_tensor_model_parallel_region(logits)
+    # Remove paddings in vocab (if any).
+    logits = logits[:, :vocab_size]
+    return logits
+
+
 def _prune_hidden_states(
     hidden_states: torch.Tensor,
     input_metadata: InputMetadata,
 ) -> torch.Tensor:
-    start_idx = 0
-    last_token_indicies: List[int] = []
-    for prompt_len in input_metadata.prompt_lens:
-        last_token_indicies.append(start_idx + prompt_len - 1)
-        start_idx += prompt_len
-    last_token_indicies.extend(
-        range(start_idx, start_idx + input_metadata.num_generation_tokens))
-    return hidden_states.index_select(
-        0, torch.tensor(last_token_indicies, device=hidden_states.device))
+    indices = {t: [] for t in SamplingType}
 
+    last_token_idx = 0
+    for i, seq_group in enumerate(input_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+        sampling_type = sampling_params.sampling_type
+        if i < input_metadata.num_prompts:
+            assert len(seq_ids) == 1, "Prompt input should have only one seq."
+            indices[sampling_type].append(last_token_idx)
+            prompt_len = input_metadata.prompt_lens[i]
+            last_token_idx += prompt_len
+        else:
+            num_seqs = len(seq_ids)
+            indices[sampling_type].extend(range(last_token_idx,
+                                                last_token_idx + num_seqs))
+            last_token_idx += num_seqs
+    indices = {t: torch.tensor(indices[t], device=hidden_states.device)
+               for t in SamplingType}
+    all_indices = torch.cat([indices[t] for t in SamplingType])
+    return hidden_states.index_select(0, all_indices), indices
 
 def _get_penalties(
         input_metadata: InputMetadata) -> Tuple[List[float], List[float]]:

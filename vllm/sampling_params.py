@@ -1,7 +1,13 @@
 """Sampling parameters for text generation."""
+from enum import IntEnum
 from typing import List, Optional, Union
 
 _SAMPLING_EPS = 1e-5
+
+class SamplingType(IntEnum):
+    GREEDY = 0
+    RANDOM = 1
+    BEAM = 2
 
 
 class SamplingParams:
@@ -157,6 +163,14 @@ class SamplingParams:
             raise ValueError("top_p must be 1 when using greedy sampling.")
         if self.top_k != -1:
             raise ValueError("top_k must be -1 when using greedy sampling.")
+
+    @property
+    def sampling_type(self) -> SamplingType:
+        if self.use_beam_search:
+            return SamplingType.BEAM
+        if self.temperature < _SAMPLING_EPS:
+            return SamplingType.GREEDY
+        return SamplingType.RANDOM
 
     def __repr__(self) -> str:
         return (f"SamplingParams(n={self.n}, "
