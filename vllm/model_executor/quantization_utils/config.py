@@ -24,5 +24,5 @@ class QuantizationConfig:
         for key in keys:
             if key in config:
                 return config[key]
-        raise ValueError(f"Could not find any of {keys} in the model's "
+        raise ValueError(f"Cannot find any of {keys} in the model's "
                          "quantization config.")
