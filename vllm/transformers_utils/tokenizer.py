@@ -96,7 +96,7 @@ def _convert_tokens_to_string_with_added_encoders(
     return " ".join(sub_texts)
 
 
-# Based on 
+# Based on
 # https://github.com/huggingface/text-generation-inference/blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
 # under Apache 2.0 license
 def detokenize_incrementally(
