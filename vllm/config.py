@@ -38,6 +38,9 @@ class ModelConfig:
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
         seed: Random seed for reproducibility.
+        revision: The specific model version to use. It can be a branch name,
+            a tag name, or a commit id. If unspecified, will use the default
+            version.
         max_model_len: Maximum length of a sequence (including prompt and
             output). If None, will be derived from the model.
     """
@@ -52,6 +55,7 @@ class ModelConfig:
         load_format: str,
         dtype: str,
         seed: int,
+        revision: Optional[str],
         max_model_len: Optional[int] = None,
     ) -> None:
         self.model = model
@@ -61,8 +65,9 @@ class ModelConfig:
         self.download_dir = download_dir
         self.load_format = load_format
         self.seed = seed
+        self.revision = revision
 
-        self.hf_config = get_config(model, trust_remote_code)
+        self.hf_config = get_config(model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self._verify_load_format()
         self._verify_tokenizer_mode()
