@@ -287,9 +287,7 @@ class LlamaForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = [
-        "qkv_proj.weight", "gate_proj.weight", "up_proj.weight"
-    ]
+    _column_parallel_weights = []
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
     def load_weights(self,
