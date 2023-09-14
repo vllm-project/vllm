@@ -4,6 +4,7 @@ from typing import List, Optional, Union
 
 _SAMPLING_EPS = 1e-5
 
+
 class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
