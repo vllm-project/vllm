@@ -15,8 +15,10 @@ _CONFIG_REGISTRY = {
 }
 
 
-def get_config(model: str, trust_remote_code: bool,
-               rope_scaling: Optional[dict], revision: Optional[str] = None) -> PretrainedConfig:
+def get_config(model: str,
+               trust_remote_code: bool,
+               rope_scaling: Optional[dict],
+               revision: Optional[str] = None) -> PretrainedConfig:
 
     def _rope_scaling_validation():
         """

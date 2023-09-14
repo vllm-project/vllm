@@ -174,8 +174,7 @@ class EngineArgs:
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
                                    self.dtype, self.seed, self.rope_scaling,
-                                   self.revision,
-                                   self.max_model_len)
+                                   self.revision, self.max_model_len)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)

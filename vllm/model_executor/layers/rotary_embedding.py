@@ -1,19 +1,21 @@
 import torch
 import torch.nn as nn
 
+
 class RotaryEmbedding(nn.Module):
 
     def __init__(self,
-                 rotary_dim:int,
-                 max_position_embeddings:int = 2048,
-                 base:int = 10000) -> None:
+                 rotary_dim: int,
+                 max_position_embeddings: int = 2048,
+                 base: int = 10000) -> None:
         super().__init__()
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         self.rotary_dim = rotary_dim
 
         # Create the cos and sin cache.
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float, device='cuda') / rotary_dim))
+        inv_freq = 1.0 / (base**(torch.arange(
+            0, rotary_dim, 2, dtype=torch.float, device='cuda') / rotary_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._set_cos_sin_cache(seq_len=max_position_embeddings)
 
@@ -44,26 +46,28 @@ class RotaryEmbedding(nn.Module):
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
 
     def __init__(self,
-                 rotary_dim:int,
-                 max_position_embeddings:int = 2048,
-                 base:int = 10000,
-                 scaling_factor:float = 1.0):
+                 rotary_dim: int,
+                 max_position_embeddings: int = 2048,
+                 base: int = 10000,
+                 scaling_factor: float = 1.0):
         self.scaling_factor = scaling_factor
         super().__init__(rotary_dim, max_position_embeddings, base)
 
     def _set_cos_sin_cache(self, seq_len: int):
         self.max_seq_len_cached = seq_len * self.scaling_factor
-        t = torch.arange(self.max_seq_len_cached, dtype=torch.float, device='cuda') / self.scaling_factor
+        t = torch.arange(self.max_seq_len_cached,
+                         dtype=torch.float,
+                         device='cuda') / self.scaling_factor
         self._set_cache(t)
 
 
 class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
 
     def __init__(self,
-                 rotary_dim:int,
-                 max_position_embeddings:int = 2048,
-                 base:int = 10000,
-                 scaling_factor:float = 1.0):
+                 rotary_dim: int,
+                 max_position_embeddings: int = 2048,
+                 base: int = 10000,
+                 scaling_factor: float = 1.0):
         self.scaling_factor = scaling_factor
         super().__init__(rotary_dim, max_position_embeddings, base)
 

@@ -11,10 +11,8 @@ from vllm import attention_ops
 from vllm import cache_ops
 from vllm import pos_encoding_ops
 from vllm.model_executor.layers.rotary_embedding import (
-    RotaryEmbedding,
-    LinearScalingRotaryEmbedding,
-    DynamicNTKScalingRotaryEmbedding
-)
+    RotaryEmbedding, LinearScalingRotaryEmbedding,
+    DynamicNTKScalingRotaryEmbedding)
 
 from vllm.model_executor.input_metadata import InputMetadata
 
@@ -269,10 +267,9 @@ class PagedAttentionWithRoPE(PagedAttention):
     ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
         self.is_neox_style = is_neox_style
-        
+
         if rope_scaling is None:
-            self.rotary_emb = RotaryEmbedding(rotary_dim, max_position,
-                                                   base)
+            self.rotary_emb = RotaryEmbedding(rotary_dim, max_position, base)
         elif rope_scaling["type"] == "linear":
             self.rotary_emb = LinearScalingRotaryEmbedding(
                 rotary_dim, max_position, base, rope_scaling["factor"])
@@ -309,14 +306,9 @@ class PagedAttentionWithRoPE(PagedAttention):
         # to the attention op.
         cos_sin_cache = self.rotary_emb()
 
-        pos_encoding_ops.rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            cos_sin_cache,
-            self.is_neox_style
-        )
+        pos_encoding_ops.rotary_embedding(positions, query, key,
+                                          self.head_size, cos_sin_cache,
+                                          self.is_neox_style)
 
         return super().forward(
             query,
