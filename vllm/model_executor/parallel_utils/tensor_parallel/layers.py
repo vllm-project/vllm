@@ -66,59 +66,6 @@ def copy_tensor_model_parallel_attributes(destination_tensor, source_tensor):
         maybe_copy(attribute)
 
 
-def _initialize_affine_weight_gpu(weight, init_method,
-                                  partition_dim, stride=1):
-    """Initialize affine weight for model parallel on GPU."""
-
-    set_tensor_model_parallel_attributes(tensor=weight,
-                                         is_parallel=True,
-                                         dim=partition_dim,
-                                         stride=stride)
-
-    with get_cuda_rng_tracker().fork():
-        init_method(weight)
-
-
-def _initialize_affine_weight_cpu(weight, output_size, input_size,
-                                  per_partition_size, partition_dim,
-                                  init_method, stride=1,
-                                  return_master_weight=False,
-                                  *, params_dtype=None):
-    """Initialize affine weight for model parallel.
-
-    Build the master weight on all processes and scatter
-    the relevant chunk."""
-
-    set_tensor_model_parallel_attributes(tensor=weight,
-                                         is_parallel=True,
-                                         dim=partition_dim,
-                                         stride=stride)
-
-    if params_dtype is None:
-        params_dtype = torch.get_default_dtype()
-
-    # Initialize master weight
-    master_weight = torch.empty(output_size, input_size,
-                                dtype=torch.float,
-                                requires_grad=False)
-    init_method(master_weight)
-    master_weight = master_weight.to(dtype=params_dtype)
-
-    # Split and copy
-    per_partition_per_stride_size = divide(per_partition_size, stride)
-    weight_list = torch.split(master_weight, per_partition_per_stride_size,
-                              dim=partition_dim)
-    rank = get_tensor_model_parallel_rank()
-    world_size = get_tensor_model_parallel_world_size()
-    my_weight_list = weight_list[rank::world_size]
-
-    with torch.no_grad():
-        torch.cat(my_weight_list, dim=partition_dim, out=weight)
-    if return_master_weight:
-        return master_weight
-    return None
-
-
 class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
 
@@ -141,6 +88,9 @@ class VocabParallelEmbedding(torch.nn.Module):
                  use_cpu_initialization: bool=False,
                  perform_initialization: bool=True):
         super(VocabParallelEmbedding, self).__init__()
+        assert not perform_initialization
+        assert not use_cpu_initialization
+
         # Keep the input dimensions.
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
@@ -163,24 +113,10 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings_per_partition = self.vocab_end_index - \
             self.vocab_start_index
 
-        # Allocate weights and initialize.
-        if use_cpu_initialization:
-            self.weight = Parameter(torch.empty(
-                self.num_embeddings_per_partition, self.embedding_dim,
-                dtype=params_dtype))
-            if perform_initialization:
-                _initialize_affine_weight_cpu(
-                    self.weight, self.num_embeddings, self.embedding_dim,
-                    self.num_embeddings_per_partition, 0, init_method,
-                    params_dtype=params_dtype)
-        else:
-            self.weight = Parameter(torch.empty(
-                self.num_embeddings_per_partition, self.embedding_dim,
-                device=torch.cuda.current_device(), dtype=params_dtype))
-            if perform_initialization:
-                _initialize_affine_weight_gpu(self.weight, init_method,
-                                              partition_dim=0, stride=1)
-
+        self.weight = Parameter(torch.empty(
+            self.num_embeddings_per_partition, self.embedding_dim,
+            device=torch.cuda.current_device(), dtype=params_dtype))
+ 
     def forward(self, input_):
         if self.tensor_model_parallel_size > 1:
             # Build the mask.
@@ -271,7 +207,7 @@ class ColumnParallelLinear(torch.nn.Module):
             self.register_parameter('scales', None)
         else:
             # Quantized parameters.
-            assert self.input_size % self.quant_config.w_bit == 0
+            assert self.input_size % self.quant_config.weight_bits == 0
             assert self.output_size_per_partition % self.quant_config.pack_factor == 0
             self.qweight = Parameter(torch.empty(
                 self.input_size,
@@ -406,7 +342,7 @@ class RowParallelLinear(torch.nn.Module):
             self.register_parameter('scales', None)
         else:
             # Quantized parameters.
-            assert self.input_size_per_partition % self.quant_config.w_bit == 0
+            assert self.input_size_per_partition % self.quant_config.weight_bits == 0
             assert self.output_size % self.quant_config.pack_factor == 0
             self.qweight = Parameter(torch.empty(
                 self.input_size_per_partition,
