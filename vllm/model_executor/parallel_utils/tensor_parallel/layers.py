@@ -355,7 +355,7 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
 
         # Matrix multiply.
-        output_parallel = self.apply_weights(input_parallel, None)
+        output_parallel = self.apply_weights(input_parallel)
 
         if self.reduce_results and self.world_size > 1:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
