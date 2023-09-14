@@ -46,8 +46,6 @@ def is_packed(param_name, quant_config):
 
 
 def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
-    # Prepare file lock directory to prevent multiple processes from
-    # downloading the same model weights at the same time.
     lock_dir = cache_dir if cache_dir is not None else "/tmp"
     lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name))
@@ -68,7 +66,7 @@ def _shared_pointers(tensors):
 def convert_bin_to_safetensor_file(
     pt_filename: str,
     sf_filename: str,
-):
+) -> None:
     loaded = torch.load(pt_filename, map_location="cpu")
     if "state_dict" in loaded:
         loaded = loaded["state_dict"]
