@@ -263,7 +263,7 @@ class LlamaForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.model = LlamaModel(config)
+        self.model = LlamaModel(config, quant_config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLinear.column(config.hidden_size,
                                              vocab_size,
