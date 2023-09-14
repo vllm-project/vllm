@@ -4,26 +4,23 @@
 
 # Parts of the code here are adapted from PyTorch
 # repo: https://github.com/pytorch/pytorch
-
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
 import torch.nn.init as init
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.quantized_linear import awq_linear
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from .mappings import (
-    copy_to_tensor_model_parallel_region,
     gather_from_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
     scatter_to_tensor_model_parallel_region,
 )
 
-from .random import get_cuda_rng_tracker
 from .utils import (
     divide,
     VocabUtility,
@@ -195,33 +192,10 @@ class ColumnParallelLinear(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
-        if self.quant_config is None:
-            # Parameters.
-            # Note: torch.nn.functional.linear performs XA^T + b and as a result
-            # we allocate the transpose.
-            self.weight = Parameter(torch.empty(
-                self.output_size_per_partition, self.input_size,
-                device=torch.cuda.current_device(), dtype=params_dtype))
-            self.register_parameter('qweight', None)
-            self.register_parameter('qzeros', None)
-            self.register_parameter('scales', None)
-        else:
-            # Quantized parameters.
-            assert self.input_size % self.quant_config.weight_bits == 0
-            assert self.output_size_per_partition % self.quant_config.pack_factor == 0
-            self.qweight = Parameter(torch.empty(
-                self.input_size,
-                self.output_size_per_partition // self.quant_config.pack_factor,
-                device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
-            self.qzeros = Parameter(torch.empty(
-                self.input_size // self.quant_config.group_size,
-                self.output_size_per_partition // self.quant_config.pack_factor,
-                device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
-            self.scales = Parameter(torch.empty(
-                self.input_size // self.quant_config.group_size,
-                self.output_size_per_partition,
-                device=torch.cuda.current_device(), dtype=params_dtype), requires_grad=False)
-            self.register_parameter('weight', None)
+        # Parameters.
+        # Note: torch.nn.functional.linear performs XA^T + b and as a result
+        # we allocate the transpose.
+        self.create_weights(params_dtype)
 
         if bias:
             self.bias = Parameter(torch.empty(
@@ -235,6 +209,18 @@ class ColumnParallelLinear(torch.nn.Module):
         else:
             self.register_parameter('bias', None)
 
+    def create_weights(self, dtype: torch.dtype) -> None:
+        """Create a unquantized weight tensor."""
+        self.weight = Parameter(torch.empty(
+            self.output_size_per_partition, self.input_size,
+            device=torch.cuda.current_device(), dtype=dtype))
+
+    def apply_weights(
+        self,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        return F.linear(x, self.weight, bias)
 
     def forward(self, input_):
         """Forward of ColumnParallelLinear
@@ -251,10 +237,7 @@ class ColumnParallelLinear(torch.nn.Module):
         input_parallel = input_
 
         # Matrix multiply.
-        if self.quant_config and self.quant_config.method == "awq":
-            output_parallel = awq_linear(input_parallel, self.qweight, self.scales, self.qzeros, bias, pack_factor=self.quant_config.pack_factor)
-        else:
-            output_parallel = F.linear(input_parallel, self.weight, bias)
+        output_parallel = self.apply_weights(input_parallel, bias)
 
         if self.gather_output:
             # All-gather across the partitions.
@@ -330,33 +313,7 @@ class RowParallelLinear(torch.nn.Module):
         self.skip_bias_add = skip_bias_add
         self.quant_config = quant_config
 
-        if self.quant_config is None:
-            # Parameters.
-            # Note: torch.nn.functional.linear performs XA^T + b and as a result
-            # we allocate the transpose.
-            self.weight = Parameter(torch.empty(
-                self.output_size, self.input_size_per_partition,
-                device=torch.cuda.current_device(), dtype=params_dtype))
-            self.register_parameter('qweight', None)
-            self.register_parameter('qzeros', None)
-            self.register_parameter('scales', None)
-        else:
-            # Quantized parameters.
-            assert self.input_size_per_partition % self.quant_config.weight_bits == 0
-            assert self.output_size % self.quant_config.pack_factor == 0
-            self.qweight = Parameter(torch.empty(
-                self.input_size_per_partition,
-                self.output_size // self.quant_config.pack_factor,
-                device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
-            self.qzeros = Parameter(torch.empty(
-                self.input_size_per_partition // self.quant_config.group_size,
-                self.output_size // self.quant_config.pack_factor,
-                device=torch.cuda.current_device(), dtype=torch.int32), requires_grad=False)
-            self.scales = Parameter(torch.empty(
-                self.input_size_per_partition // self.quant_config.group_size,
-                self.output_size,
-                device=torch.cuda.current_device(), dtype=params_dtype), requires_grad=False)
-            self.register_parameter('weight', None)
+        self.create_weights(params_dtype)
 
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
@@ -372,6 +329,14 @@ class RowParallelLinear(torch.nn.Module):
                 self.bias.zero_()
         else:
             self.register_parameter('bias', None)
+
+    def create_weights(self, dtype: torch.dtype) -> None:
+        self.weight = Parameter(torch.empty(
+                self.output_size, self.input_size_per_partition,
+                device=torch.cuda.current_device(), dtype=dtype))
+
+    def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self.weight)
 
     def forward(self, input_):
         """Forward of RowParallelLinear
@@ -390,10 +355,7 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
 
         # Matrix multiply.
-        if self.quant_config and self.quant_config.method == "awq":
-            output_parallel = awq_linear(input_parallel, self.qweight, self.scales, self.qzeros, pack_factor=self.quant_config.pack_factor)
-        else:
-            output_parallel = F.linear(input_parallel, self.weight)
+        output_parallel = self.apply_weights(input_parallel, None)
 
         if self.reduce_results and self.world_size > 1:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
