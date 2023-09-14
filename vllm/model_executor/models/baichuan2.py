@@ -27,8 +27,8 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers.activations import ACT2FN
 
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import (
@@ -101,7 +101,10 @@ class MLP(torch.nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.act_fn = ACT2FN[hidden_act]
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -236,7 +239,7 @@ class BaichuanLayer(torch.nn.Module):
 class BaichuanModel(nn.Module):
 
     def __init__(self, config: BaiChuanConfig, position_embedding: str):
-        super().__init__(config)
+        super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -287,7 +290,7 @@ class BaiChuanBaseForCausalLM(nn.Module):
             config.vocab_size,
             bias=False,
             gather_output=False,
-            perform_initialization=True,
+            perform_initialization=False,
         )
         self.sampler = Sampler(config.vocab_size)
 
@@ -308,19 +311,18 @@ class BaiChuanBaseForCausalLM(nn.Module):
     _column_parallel_weights = []
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
-    def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-    ):
+    def load_weights(self,
+                     model_name_or_path: str,
+                     cache_dir: Optional[str] = None,
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         has_norm_head = False
 
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format):
+                model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -359,13 +361,13 @@ class BaiChuanBaseForCausalLM(nn.Module):
             param = state_dict[name]
 
             if name == "lm_head.weight":
-                print(
-                    f"loading lm_head weight, norm: {loaded_weight.norm(2.0, 1, True).clamp_min(1e-12)}"
-                )
+                # print(
+                #     f"loading lm_head weight, norm: {loaded_weight.norm(2.0, 1, True).clamp_min(1e-12)}, shape: {loaded_weight.size()}"
+                # )
                 loaded_weight = torch.nn.functional.normalize(loaded_weight)
-                print(
-                    f"after normalization, norm: {loaded_weight.norm(2.0, 1, True).clamp_min(1e-12)}"
-                )
+                # print(
+                #     f"after normalization, norm: {loaded_weight.norm(2.0, 1, True).clamp_min(1e-12)}, shape: {loaded_weight.size()}"
+                # )
                 has_norm_head = True
 
             if "embed_tokens" in name or "lm_head" in name:
