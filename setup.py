@@ -151,7 +151,7 @@ quantization_extension = CUDAExtension(
     name="vllm.quantization_ops",
     sources=[
         "csrc/quantization.cpp",
-        "csrc/quantization/quantization_kernels.cu",
+        "csrc/quantization/awq/gemm_kernels.cu",
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,
