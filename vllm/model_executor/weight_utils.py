@@ -4,7 +4,7 @@ import glob
 import json
 import os
 from collections import defaultdict
-from typing import Iterator, List, Optional, Tuple, Any
+from typing import Any, Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file, safe_open
