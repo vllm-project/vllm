@@ -147,6 +147,7 @@ def prepare_hf_model_weights(
     if use_safetensors:
         allow_patterns = ["*.safetensors"]
     else:
+        # Some quantized models use .pt files for storing the weights.
         allow_patterns = ["*.bin", "*.pt"]
     if not is_local:
         # Use file lock to prevent multiple processes from
