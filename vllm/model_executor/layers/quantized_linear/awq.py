@@ -54,6 +54,8 @@ class AWQColumnParallelLinear(ColumnParallelLinear):
         reshaped_x = x.reshape(-1, x.shape[-1])
         out = quantization_ops.awq_gemm(reshaped_x, self.qweight, self.scales,
                                         self.qzeros, pack_factor)
+        if bias is not None:
+            out = out + bias
         return out.reshape(out_shape)
 
 
