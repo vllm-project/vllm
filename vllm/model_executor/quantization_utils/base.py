@@ -33,3 +33,20 @@ class QuantizationConfig:
                 return config[key]
         raise ValueError(f"Cannot find any of {keys} in the model's "
                          "quantization config.")
+
+    @classmethod
+    def get_packed_tensor_names(cls) -> List[str]:
+        raise NotImplementedError
+
+    @classmethod
+    def is_packed(cls, tensor_name: str) -> bool:
+        return any(tag in tensor_name for tag in cls.get_packed_tensor_names())
+
+    @classmethod
+    def get_transposed_tensor_names(cls) -> List[str]:
+        raise NotImplementedError
+
+    @classmethod
+    def is_transposed(cls, tensor_name: str) -> bool:
+        return any(tag in tensor_name
+                   for tag in cls.get_transposed_tensor_names())

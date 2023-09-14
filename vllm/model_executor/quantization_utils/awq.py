@@ -27,6 +27,11 @@ class AWQConfig(QuantizationConfig):
                 f"AWQ, but got {self.weight_bits} bits.")
         self.pack_factor = 32 // self.weight_bits
 
+    def __repr__(self) -> str:
+        return (f"AWQConfig(weight_bits={self.weight_bits}, "
+                f"group_size={self.group_size}, "
+                f"zero_point={self.zero_point})")
+
     @classmethod
     def get_name(cls) -> str:
         return "awq"
@@ -49,7 +54,10 @@ class AWQConfig(QuantizationConfig):
         zero_point = cls.get_from_keys(config, ["zero_point"])
         return cls(weight_bits, group_size, zero_point)
 
-    def __repr__(self) -> str:
-        return (f"AWQConfig(weight_bits={self.weight_bits}, "
-                f"group_size={self.group_size}, "
-                f"zero_point={self.zero_point})")
+    @classmethod
+    def get_packed_tensor_names(cls) -> List[str]:
+        return ["qweight", "qzeros"]
+
+    @classmethod
+    def get_transposed_tensor_names(cls) -> List[str]:
+        return ["qweight", "qzeros", "scales"]
