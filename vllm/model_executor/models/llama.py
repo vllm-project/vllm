@@ -36,13 +36,15 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (
-    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab,
-    hf_model_weights_iterator)
+from vllm.model_executor.layers.quantized_linear import ParallelLinear
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
+    VocabParallelEmbedding)
+from vllm.model_executor.quantization_utils import QuantizationConfig
+from vllm.model_executor.weight_utils import (
+    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab,
+    hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -55,18 +57,21 @@ class LlamaMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-    ):
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                 2 * intermediate_size,
-                                                 bias=False,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           input_is_parallel=True,
-                                           perform_initialization=False)
+        self.gate_up_proj = ParallelLinear.column(hidden_size,
+                                                  2 * intermediate_size,
+                                                  bias=False,
+                                                  gather_output=False,
+                                                  perform_initialization=False,
+                                                  quant_config=quant_config)
+        self.down_proj = ParallelLinear.row(intermediate_size,
+                                            hidden_size,
+                                            bias=False,
+                                            input_is_parallel=True,
+                                            perform_initialization=False,
+                                            quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -87,7 +92,8 @@ class LlamaAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-    ):
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -103,20 +109,22 @@ class LlamaAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
 
-        self.qkv_proj = ColumnParallelLinear(
+        self.qkv_proj = ParallelLinear.column(
             hidden_size,
             (self.total_num_heads + 2 * self.total_num_kv_heads) *
             self.head_dim,
             bias=False,
             gather_output=False,
             perform_initialization=False,
+            quant_config=quant_config,
         )
-        self.o_proj = RowParallelLinear(
+        self.o_proj = ParallelLinear.row(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             input_is_parallel=True,
             perform_initialization=False,
+            quant_config=quant_config,
         )
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
@@ -144,7 +152,11 @@ class LlamaAttention(nn.Module):
 
 class LlamaDecoderLayer(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
@@ -154,11 +166,13 @@ class LlamaDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
+            quant_config=quant_config,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
+            quant_config=quant_config,
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -195,7 +209,11 @@ class LlamaDecoderLayer(nn.Module):
 
 class LlamaModel(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -205,7 +223,8 @@ class LlamaModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             vocab_size, config.hidden_size, perform_initialization=False)
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)
+            LlamaDecoderLayer(config, quant_config)
+            for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -237,16 +256,21 @@ class LlamaModel(nn.Module):
 
 class LlamaForCausalLM(nn.Module):
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
         super().__init__()
         self.config = config
         self.model = LlamaModel(config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.lm_head = ColumnParallelLinear(config.hidden_size,
-                                            vocab_size,
-                                            bias=False,
-                                            gather_output=False,
-                                            perform_initialization=False)
+        self.lm_head = ParallelLinear.column(config.hidden_size,
+                                             vocab_size,
+                                             bias=False,
+                                             gather_output=False,
+                                             perform_initialization=False,
+                                             quant_config=quant_config)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
