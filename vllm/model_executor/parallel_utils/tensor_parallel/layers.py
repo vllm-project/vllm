@@ -235,10 +235,8 @@ class ColumnParallelLinear(torch.nn.Module):
         bias = self.bias if not self.skip_bias_add else None
 
         input_parallel = input_
-
         # Matrix multiply.
         output_parallel = self.apply_weights(input_parallel, bias)
-
         if self.gather_output:
             # All-gather across the partitions.
             output = gather_from_tensor_model_parallel_region(output_parallel)
@@ -353,10 +351,8 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = input_
         else:
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
-
         # Matrix multiply.
         output_parallel = self.apply_weights(input_parallel)
-
         if self.reduce_results and self.world_size > 1:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
         else:
