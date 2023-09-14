@@ -263,6 +263,7 @@ class LlamaForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        self.quant_config = quant_config
         self.model = LlamaModel(config, quant_config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ParallelLinear.column(config.hidden_size,
@@ -270,7 +271,7 @@ class LlamaForCausalLM(nn.Module):
                                              bias=False,
                                              gather_output=False,
                                              perform_initialization=False,
-                                             quant_config=quant_config)
+                                             quant_config=None)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -315,11 +316,25 @@ class LlamaForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
+            is_packed = False
+            is_transposed = False
+            if self.quant_config is not None:
+                is_packed = self.quant_config.is_packed(name)
+                is_transposed = self.quant_config.is_transposed(name)
+            if is_transposed:
+                loaded_weight = loaded_weight.T
+
             is_attention_weight = False
             for weight_name, shard_size, offset in attention_weight_specs:
                 if weight_name not in name:
                     continue
                 param = state_dict[name.replace(weight_name, "qkv_proj")]
+                if is_transposed:
+                    param = param.T
+
+                if is_packed:
+                    shard_size //= self.quant_config.pack_factor
+                    offset //= self.quant_config.pack_factor
 
                 loaded_weight = loaded_weight[
                     shard_size * tensor_model_parallel_rank:shard_size *
@@ -338,6 +353,9 @@ class LlamaForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 param = state_dict[name.replace(weight_name, "gate_up_proj")]
+                if is_transposed:
+                    param = param.T
+
                 shard_size = param.shape[0] // 2
                 loaded_weight = loaded_weight[
                     shard_size * tensor_model_parallel_rank:shard_size *
@@ -352,6 +370,8 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             param = state_dict[name]
+            if is_transposed:
+                param = param.T
 
             if "embed_tokens" in name or "lm_head" in name:
                 load_padded_tensor_parallel_vocab(param, loaded_weight,
