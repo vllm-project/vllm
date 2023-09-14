@@ -59,3 +59,7 @@ class QuantizationConfig:
         """
         return any(tag in tensor_name
                    for tag in cls.get_transposed_tensor_names())
+
+    @classmethod
+    def get_tp_tensor_names(cls) -> List[str]:
+        raise NotImplementedError
