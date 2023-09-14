@@ -25,26 +25,6 @@ class Disabledtqdm(tqdm):
         super().__init__(*args, **kwargs, disable=True)
 
 
-def is_transposed(param_name, quant_config):
-    """Returns True if the parameter tensor given by state_dict[param_name] is
-    transposed relative to torch.nn.Linear.weight. Otherwise, returns False.
-    """
-    if quant_config and quant_config.method == "awq":
-        return any(tag in param_name
-                   for tag in ["qweight", "scales", "qzeros"])
-    return False
-
-
-def is_packed(param_name, quant_config):
-    """Returns True if each element of state_dict[param_name] contains more than
-    one parameter. For example, with AWQ quantization, each INT32 element
-    corresponds to 8 INT4 weights. Otherwise, returns False.
-    """
-    if quant_config and quant_config.method == "awq":
-        return any(tag in param_name for tag in ["qweight", "qzeros"])
-    return False
-
-
 def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
     lock_dir = cache_dir if cache_dir is not None else "/tmp"
     lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
@@ -187,7 +167,6 @@ def hf_model_weights_iterator(
     cache_dir: Optional[str] = None,
     load_format: str = "auto",
     revision: Optional[str] = None,
-    quant_config: Optional[QuantizationConfig] = None,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     use_safetensors = False
     use_np_cache = False
@@ -314,13 +293,6 @@ def load_tensor_parallel_weights(
         f"{param_name} shape mismatch between model and checkpoint: "
         f"{param.shape} != {loaded_weight.shape}")
     param.data.copy_(loaded_weight)
-
-
-def get_param(state_dict, key, transposed=False):
-    param = state_dict[key]
-    if transposed:
-        return param.T
-    return param
 
 
 def initialize_dummy_weights(
