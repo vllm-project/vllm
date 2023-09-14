@@ -10,7 +10,7 @@ Easy, fast, and cheap LLM serving for everyone
 </h3>
 
 <p align="center">
-| <a href="https://vllm.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://vllm.ai"><b>Blog</b></a> | <a href="https://github.com/vllm-project/vllm/discussions"><b>Discussions</b></a> |
+| <a href="https://vllm.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://vllm.ai"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://github.com/vllm-project/vllm/discussions"><b>Discussions</b></a> |
 
 </p>
 
@@ -104,3 +104,17 @@ For details, check out our [blog post](https://vllm.ai).
 
 We welcome and value any contributions and collaborations.
 Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
+
+## Citation
+
+If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
+```bibtex
+@misc{kwon2023efficient,
+      title={Efficient Memory Management for Large Language Model Serving with PagedAttention}, 
+      author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
+      year={2023},
+      eprint={2309.06180},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
+}
+```
