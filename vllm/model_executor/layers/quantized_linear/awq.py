@@ -19,24 +19,30 @@ class AWQColumnParallelLinear(ColumnParallelLinear):
                 self.input_size,
                 self.output_size_per_partition //
                 self.quant_config.pack_factor,
-                device=torch.cuda.current_device(),
+                device="cuda",
                 dtype=torch.int32,
-            ))
+            ),
+            requires_grad=False,
+        )
         self.qzeros = Parameter(
             torch.empty(
                 self.input_size // self.quant_config.group_size,
                 self.output_size_per_partition //
                 self.quant_config.pack_factor,
-                device=torch.cuda.current_device(),
+                device="cuda",
                 dtype=torch.int32,
-            ))
+            ),
+            requires_grad=False,
+        )
         self.scales = Parameter(
             torch.empty(
                 self.input_size // self.quant_config.group_size,
                 self.output_size_per_partition,
-                device=torch.cuda.current_device(),
+                device="cuda",
                 dtype=dtype,
-            ))
+            ),
+            requires_grad=False,
+        )
 
     def apply_weights(
         self,
@@ -62,23 +68,29 @@ class AWQRowParallelLinear(RowParallelLinear):
             torch.empty(
                 self.input_size_per_partition,
                 self.output_size // self.quant_config.pack_factor,
-                device=torch.cuda.current_device(),
+                device="cuda",
                 dtype=torch.int32,
-            ))
+            ),
+            requires_grad=False,
+        )
         self.qzeros = Parameter(
             torch.empty(
                 self.input_size_per_partition // self.quant_config.group_size,
                 self.output_size // self.quant_config.pack_factor,
-                device=torch.cuda.current_device(),
+                device="cuda",
                 dtype=torch.int32,
-            ))
+            ),
+            requires_grad=False,
+        )
         self.scales = Parameter(
             torch.empty(
                 self.input_size_per_partition // self.quant_config.group_size,
                 self.output_size,
-                device=torch.cuda.current_device(),
+                device="cuda",
                 dtype=dtype,
-            ))
+            ),
+            requires_grad=False,
+        )
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         pack_factor = self.quant_config.pack_factor
