@@ -31,7 +31,7 @@ _MODEL_REGISTRY = {
     "RWForCausalLM": FalconForCausalLM,
 }
 
-# FIXME: Remove this once all models support quantization.
+# FIXME(woosuk): Remove this once all models support quantization.
 _MODEL_CLASSES_SUPPORT_QUANTIZATION = [
     LlamaForCausalLM,
 ]
