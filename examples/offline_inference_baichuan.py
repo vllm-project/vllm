@@ -81,7 +81,8 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.3,
                                  top_k=5,
                                  top_p=0.85,
-                                 max_tokens=2048
+                                 max_tokens=2048,
+                                 stop=[".</s>"]
                                  # repetition_penalty=1.05
                                  )
 
