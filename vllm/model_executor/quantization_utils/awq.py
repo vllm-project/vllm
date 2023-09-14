@@ -1,31 +1,6 @@
-from typing import Any, Dict, List, Type
+from typing import Any, Dict, List
 
-
-class QuantizationConfig:
-
-    @property
-    def name(self) -> str:
-        """Name of the quantization method."""
-        raise NotImplementedError
-
-    @classmethod
-    def get_config_filenames(cls) -> List[str]:
-        """List of filenames to search for in the model directory."""
-        raise NotImplementedError
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
-        """Create a config class from the model's quantization config."""
-        raise NotImplementedError
-
-    @staticmethod
-    def get_from_keys(config: Dict[str, Any], keys: List[str]) -> Any:
-        """Get a value from the model's quantization config."""
-        for key in keys:
-            if key in config:
-                return config[key]
-        raise ValueError(f"Cannot find any of {keys} in the model's "
-                         "quantization config.")
+from vllm.model_executor.quantization_utils.base import QuantizationConfig
 
 
 class AWQConfig(QuantizationConfig):
@@ -72,14 +47,3 @@ class AWQConfig(QuantizationConfig):
         return (f"AWQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
                 f"zero_point={self.zero_point})")
-
-
-_QUANTIZATION_REGISTRY = {
-    "awq": AWQConfig,
-}
-
-
-def get_quant_class(quantization: str) -> Type[QuantizationConfig]:
-    if quantization not in _QUANTIZATION_REGISTRY:
-        raise ValueError(f"Invalid quantization method: {quantization}")
-    return _QUANTIZATION_REGISTRY[quantization]

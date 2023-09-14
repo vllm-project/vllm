@@ -13,8 +13,8 @@ import torch
 from tqdm.auto import tqdm
 
 from vllm.logger import init_logger
-from vllm.model_executor.quantization import (get_quant_class,
-                                              QuantizationConfig)
+from vllm.model_executor.quantization_utils import get_quant_class
+from vllm.model_executor.quantization_utils.base import QuantizationConfig
 
 logger = init_logger(__name__)
 
