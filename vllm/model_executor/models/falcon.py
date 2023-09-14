@@ -420,7 +420,8 @@ class FalconForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     load_format: str = "auto"):
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         tp_size = (get_tensor_model_parallel_world_size())
         tp_rank = get_tensor_model_parallel_rank()
 
@@ -451,8 +452,8 @@ class FalconForCausalLM(nn.Module):
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         state_dict = self.state_dict()
 
-        for name, loaded_weight, _, _ in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format):
+        for name, loaded_weight in hf_model_weights_iterator(
+                model_name_or_path, cache_dir, load_format, revision):
             if "query_key_value" in name:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 loaded_weight_size = loaded_weight.size()
