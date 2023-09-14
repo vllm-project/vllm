@@ -13,8 +13,8 @@ import torch
 from tqdm.auto import tqdm
 
 from vllm.logger import init_logger
-from vllm.model_executor.quantization_utils import get_quant_class
-from vllm.model_executor.quantization_utils.config import QuantizationConfig
+from vllm.model_executor.quantization import (get_quant_class,
+                                              QuantizationConfig)
 
 logger = init_logger(__name__)
 
@@ -143,7 +143,10 @@ def prepare_hf_model_weights(
 ) -> Tuple[str, List[str], bool]:
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
-    allow_patterns = "*.safetensors" if use_safetensors else "*.bin"
+    if use_safetensors:
+        allow_patterns = ["*.safetensors"]
+    else:
+        allow_patterns = ["*.bin", "*.pt"]
     if not is_local:
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
@@ -154,7 +157,9 @@ def prepare_hf_model_weights(
                                           tqdm_class=Disabledtqdm)
     else:
         hf_folder = model_name_or_path
-    hf_weights_files = glob.glob(os.path.join(hf_folder, allow_patterns))
+    hf_weights_files: List[str] = []
+    for pattern in allow_patterns:
+        hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
     if not use_safetensors:
         hf_weights_files = [
             x for x in hf_weights_files if not x.endswith("training_args.bin")
