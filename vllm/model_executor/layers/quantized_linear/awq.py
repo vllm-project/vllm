@@ -12,7 +12,8 @@ class AWQColumnParallelLinear(ColumnParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
         assert self.input_size % self.quant_config.weight_bits == 0
-        assert self.output_size_per_partition % self.quant_config.pack_factor == 0
+        assert (self.output_size_per_partition %
+                self.quant_config.pack_factor == 0)
         self.qweight = Parameter(
             torch.empty(
                 self.input_size,
@@ -54,7 +55,8 @@ class AWQColumnParallelLinear(ColumnParallelLinear):
 class AWQRowParallelLinear(RowParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
-        assert self.input_size_per_partition % self.quant_config.weight_bits == 0
+        assert (self.input_size_per_partition %
+                self.quant_config.weight_bits == 0)
         assert self.output_size % self.quant_config.pack_factor == 0
         self.qweight = Parameter(
             torch.empty(
