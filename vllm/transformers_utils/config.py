@@ -1,3 +1,5 @@
+from typing import Optional
+
 from transformers import AutoConfig, PretrainedConfig
 from typing import Optional
 
@@ -14,7 +16,7 @@ _CONFIG_REGISTRY = {
 
 
 def get_config(model: str, trust_remote_code: bool,
-               rope_scaling: Optional[dict]) -> PretrainedConfig:
+               rope_scaling: Optional[dict], revision: Optional[str] = None) -> PretrainedConfig:
 
     def _rope_scaling_validation():
         """
@@ -47,7 +49,8 @@ def get_config(model: str, trust_remote_code: bool,
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
-            rope_scaling=rope_scaling)
+            rope_scaling=rope_scaling,
+            revision=revision)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
@@ -61,5 +64,5 @@ def get_config(model: str, trust_remote_code: bool,
             raise e
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
-        config = config_class.from_pretrained(model)
+        config = config_class.from_pretrained(model, revision=revision)
     return config
