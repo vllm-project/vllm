@@ -40,6 +40,13 @@ class QuantizationConfig:
 
     @classmethod
     def is_packed(cls, tensor_name: str) -> bool:
+        """Returns True if a tensor is packed.
+
+        A tensor is considered packed if each element in the tensor is a
+        packed representation of multiple elements in the original tensor.
+        For example, an INT32 element in the tensor may represent 8 INT4
+        elements in the original tensor.
+        """
         return any(tag in tensor_name for tag in cls.get_packed_tensor_names())
 
     @classmethod
@@ -48,5 +55,7 @@ class QuantizationConfig:
 
     @classmethod
     def is_transposed(cls, tensor_name: str) -> bool:
+        """Returns True if a tensor is transposed relative to nn.Linear.weight.
+        """
         return any(tag in tensor_name
                    for tag in cls.get_transposed_tensor_names())
