@@ -350,7 +350,7 @@ class SequenceOutputs:
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
-            return NotImplementedError()
+            raise NotImplementedError()
         return (self.parent_seq_id == other.parent_seq_id
                 and self.output_token == other.output_token
                 and self.logprobs == other.logprobs)
