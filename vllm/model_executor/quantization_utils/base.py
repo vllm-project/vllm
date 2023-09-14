@@ -1,11 +1,18 @@
 from typing import Any, Dict, List
 
+import torch
+
 
 class QuantizationConfig:
 
-    @property
-    def name(self) -> str:
+    @classmethod
+    def get_name(cls) -> str:
         """Name of the quantization method."""
+        raise NotImplementedError
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+        """List of supported activation dtypes."""
         raise NotImplementedError
 
     @classmethod

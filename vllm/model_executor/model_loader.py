@@ -68,6 +68,12 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         quant_config = get_quant_config(model_config.quantization,
                                         model_config.model,
                                         model_config.download_dir)
+        supported_dtypes = quant_config.get_supported_act_dtypes()
+        if model_config.dtype not in supported_dtypes:
+            raise ValueError(
+                f"{model_config.dtype} is not supported for quantization "
+                f"method {model_config.quantization}. Supported dtypes: "
+                f"{supported_dtypes}")
 
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.

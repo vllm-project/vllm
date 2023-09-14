@@ -1,5 +1,7 @@
 from typing import Any, Dict, List
 
+import torch
+
 from vllm.model_executor.quantization_utils.base import QuantizationConfig
 
 
@@ -25,9 +27,13 @@ class AWQConfig(QuantizationConfig):
                 f"AWQ, but got {self.weight_bits} bits.")
         self.pack_factor = 32 // self.weight_bits
 
-    @property
-    def name(self) -> str:
+    @classmethod
+    def get_name(cls) -> str:
         return "awq"
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+        return [torch.half]
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
