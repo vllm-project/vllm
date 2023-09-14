@@ -23,7 +23,8 @@ TOKENIZERS = [
 ]
 
 
-def _run_incremental_decode(tokenizer, all_input_ids):
+def _run_incremental_decode(tokenizer, all_input_ids,
+                            skip_special_tokens: bool):
     decoded_text = ""
     offset = 0
     token_offset = 0
@@ -35,7 +36,7 @@ def _run_incremental_decode(tokenizer, all_input_ids):
             prev_tokens,
             offset,
             token_offset,
-            skip_special_tokens=False)
+            skip_special_tokens=skip_special_tokens)
         decoded_text += text
         if prev_tokens is None:
             prev_tokens = new_tokens
@@ -46,10 +47,16 @@ def _run_incremental_decode(tokenizer, all_input_ids):
 
 @pytest.mark.parametrize("truth", TRUTH)
 @pytest.mark.parametrize("tokenizer_id", TOKENIZERS)
-def test_decode_streaming(tokenizer_id, truth):
+@pytest.mark.parametrize("skip_special_tokens", (True, False))
+def test_decode_streaming(tokenizer_id, truth, skip_special_tokens):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
     all_input_ids = tokenizer(truth, add_special_tokens=False)["input_ids"]
+    if skip_special_tokens:
+        all_input_ids = ([tokenizer.bos_token_id]
+                         if tokenizer.bos_token_id is not None else
+                         []) + all_input_ids + [tokenizer.eos_token_id]
 
-    decoded_text = _run_incremental_decode(tokenizer, all_input_ids)
+    decoded_text = _run_incremental_decode(
+        tokenizer, all_input_ids, skip_special_tokens=skip_special_tokens)
 
     assert decoded_text == truth
