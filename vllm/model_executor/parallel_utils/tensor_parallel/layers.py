@@ -210,7 +210,6 @@ class ColumnParallelLinear(torch.nn.Module):
             self.register_parameter('bias', None)
 
     def create_weights(self, dtype: torch.dtype) -> None:
-        """Create a unquantized weight tensor."""
         self.weight = Parameter(torch.empty(
             self.output_size_per_partition, self.input_size,
             device=torch.cuda.current_device(), dtype=dtype))
