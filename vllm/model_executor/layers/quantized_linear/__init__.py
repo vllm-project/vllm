@@ -12,7 +12,7 @@ class ParallelLinear:
 
     @classmethod
     def column(cls, *args, **kwargs) -> ColumnParallelLinear:
-        quant_config = getattr(kwargs, "quant_config", None)
+        quant_config = kwargs.get("quant_config", None)
         if quant_config is None:
             return ColumnParallelLinear(*args, **kwargs)
 
@@ -25,7 +25,7 @@ class ParallelLinear:
 
     @classmethod
     def row(cls, *args, **kwargs) -> RowParallelLinear:
-        quant_config = getattr(kwargs, "quant_config", None)
+        quant_config = kwargs.get("quant_config", None)
         if quant_config is None:
             return RowParallelLinear(*args, **kwargs)
 
