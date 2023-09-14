@@ -24,13 +24,25 @@ class ModelConfig:
             downloading the model and tokenizer.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
-        use_np_weights: Save a numpy copy of model weights for faster loading.
-            This can increase the disk usage by up to 2x.
-        use_dummy_weights: Use dummy values for model weights (for profiling).
+        load_format: The format of the model weights to load:
+            "auto" will try to load the weights in the safetensors format and
+                fall back to the pytorch bin format if safetensors format is
+                not available.
+            "pt" will load the weights in the pytorch bin format.
+            "safetensors" will load the weights in the safetensors format.
+            "npcache" will load the weights in pytorch format and store
+                a numpy cache to speed up the loading.
+            "dummy" will initialize the weights with random values, which is
+                mainly for profiling.
         dtype: Data type for model weights and activations. The "auto" option
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
         seed: Random seed for reproducibility.
+        revision: The specific model version to use. It can be a branch name,
+            a tag name, or a commit id. If unspecified, will use the default
+            version.
+        max_model_len: Maximum length of a sequence (including prompt and
+            output). If None, will be derived from the model.
     """
 
     def __init__(
@@ -40,23 +52,45 @@ class ModelConfig:
         tokenizer_mode: str,
         trust_remote_code: bool,
         download_dir: Optional[str],
-        use_np_weights: bool,
-        use_dummy_weights: bool,
+        load_format: str,
         dtype: str,
         seed: int,
+        revision: Optional[str],
+        max_model_len: Optional[int] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
         self.download_dir = download_dir
-        self.use_np_weights = use_np_weights
-        self.use_dummy_weights = use_dummy_weights
+        self.load_format = load_format
         self.seed = seed
+        self.revision = revision
 
-        self.hf_config = get_config(model, trust_remote_code)
+        self.hf_config = get_config(model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
+        self._verify_load_format()
         self._verify_tokenizer_mode()
+        self.max_model_len = None
+        if max_model_len is not None:
+            derived_max_model_len = self.get_max_model_len()
+            if max_model_len > derived_max_model_len:
+                logger.warning(
+                    f"User-specified max_model_len ({max_model_len}) is "
+                    f"greater than the derived max_model_len "
+                    f"({derived_max_model_len}). Make sure the value is "
+                    "correct and within the model context size.")
+        self.max_model_len = max_model_len
+
+    def _verify_load_format(self) -> None:
+        load_format = self.load_format.lower()
+        if load_format not in [
+                "auto", "pt", "safetensors", "npcache", "dummy"
+        ]:
+            raise ValueError(
+                f"Unknown load format: {self.load_format}. Must be one of "
+                "'auto', 'pt', 'safetensors', 'npcache', or 'dummy'.")
+        self.load_format = load_format
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -98,8 +132,9 @@ class ModelConfig:
         # Note: for falcon, when new_decoder_architecture is True, the
         # multi_query flag is ignored and we use n_head_kv for the number of
         # KV heads.
+        falcon_model_types = ["falcon", "RefinedWeb", "RefinedWebModel"]
         new_decoder_arch_falcon = (
-            self.hf_config.model_type == "falcon"
+            self.hf_config.model_type in falcon_model_types
             and getattr(self.hf_config, "new_decoder_architecture", False))
         if not new_decoder_arch_falcon and getattr(self.hf_config,
                                                    "multi_query", False):
@@ -117,6 +152,8 @@ class ModelConfig:
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
     def get_max_model_len(self) -> int:
+        if self.max_model_len is not None:
+            return self.max_model_len
         max_model_len = float("inf")
         possible_keys = [
             # OPT
