@@ -102,7 +102,7 @@ def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
 def _prune_hidden_states(
     hidden_states: torch.Tensor,
     input_metadata: InputMetadata,
-) -> [torch.Tensor, Dict[SamplingType, torch.Tensor]]:
+) -> torch.Tensor:
     last_token_indices = {t: [] for t in SamplingType}
     last_token_idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
