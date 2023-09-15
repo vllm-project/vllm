@@ -84,6 +84,7 @@ class LLM:
         sampling_params: Optional[SamplingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
+        stream: bool = False,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -129,7 +130,7 @@ class LLM:
             else:
                 token_ids = prompt_token_ids[i]
             self._add_request(prompt, sampling_params, token_ids)
-        return self._run_engine(use_tqdm)
+        return self._run_stream_engine() if stream else self._run_engine(use_tqdm)
 
     def _add_request(
         self,
@@ -162,3 +163,10 @@ class LLM:
         # its previous requests.
         outputs = sorted(outputs, key=lambda x: int(x.request_id))
         return outputs
+
+    def _run_stream_engine(self) -> RequestOutput:
+        # Run the stram engine.
+        while self.llm_engine.has_unfinished_requests():
+            step_outputs = self.llm_engine.step()
+            for output in step_outputs:
+                yield output
