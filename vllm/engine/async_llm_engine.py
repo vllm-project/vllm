@@ -1,7 +1,7 @@
 import asyncio
 import time
 from functools import partial
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Callable, Coroutine, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -70,6 +70,40 @@ class AsyncStream:
         return result
 
 
+class ShieldedTaskSet:
+    """A task set that runs a coroutine with shielding.
+
+    This task set will ensure that a coroutine runs by wrapping it
+    in a task, and shielding it from parent cancellations.
+
+    Note: this class does not protect against event loop failure.
+    """
+
+    def __init__(self):
+        self.task_set = set()
+
+    def run(self, coroutine: Coroutine, callback: Callable):
+        # Wrap the coroutine in a task so it executes immediately
+        # Save a reference to the task so it doesn't get garbage collected
+        # Remove the task from the task set when it is completed
+        task = asyncio.get_event_loop().create_task(coroutine)
+        self.task_set.add(task)
+        if callback:
+
+            def combined_callback(task):
+                self.task_set.discard(task)
+                callback(task)
+        else:
+            combined_callback = self.task_set.discard
+        task.add_done_callback(combined_callback)
+
+        # Shield the task so it cannot be cancelled by the parent
+        shielded_task = asyncio.shield(task)
+
+        # Return the shielded task so it can be awaited by the parent.
+        return shielded_task
+
+
 class RequestTracker:
     """Synchronous abstraction for tracking requests."""
 
@@ -78,9 +112,13 @@ class RequestTracker:
         self._finished_requests: asyncio.Queue[str] = asyncio.Queue()
         self._new_requests: asyncio.Queue[Tuple[AsyncStream,
                                                 dict]] = asyncio.Queue()
+        self.new_requests_event = None
 
     def __contains__(self, item):
         return item in self._request_streams
+
+    def init_event(self):
+        self.new_requests_event = asyncio.Event()
 
     def propagate_exception(self, exc: Exception) -> None:
         """Propagate an exception to all request streams."""
@@ -112,6 +150,9 @@ class RequestTracker:
             "request_id": request_id,
             **engine_add_request_kwargs
         }))
+
+        self.new_requests_event.set()
+
         return stream
 
     def abort_request(self, request_id: str, *, verbose: bool = False) -> None:
@@ -148,7 +189,12 @@ class RequestTracker:
             self._request_streams[stream.request_id] = stream
             new_requests.append(new_request)
 
+        self.new_requests_event.clear()
+
         return new_requests, finished_requests
+
+    async def wait_for_new_requests(self):
+        await self.new_requests_event.wait()
 
 
 class _AsyncLLMEngine(LLMEngine):
@@ -251,9 +297,10 @@ class AsyncLLMEngine:
         self.max_log_len = max_log_len
         self.engine = self._init_engine(*args, **kwargs)
 
-        self.request_tracker: RequestTracker = RequestTracker()
         self.background_loop = None
         self.start_engine_loop = start_engine_loop
+        self._task_set = ShieldedTaskSet()
+        self._request_tracker = RequestTracker()
 
     @property
     def is_running(self) -> bool:
@@ -264,11 +311,11 @@ class AsyncLLMEngine:
         """Start the background loop."""
         if self.is_running:
             raise RuntimeError("Background loop is already running.")
-        self.background_loop = asyncio.get_event_loop().create_task(
-            self.run_engine_loop())
-        self.background_loop.add_done_callback(
-            partial(_raise_exception_on_finish,
-                    request_tracker=self.request_tracker))
+        self._request_tracker.init_event()
+        self.background_loop = self._task_set.run(
+            self.run_engine_loop(),
+            callback=partial(_raise_exception_on_finish,
+                             request_tracker=self._request_tracker))
 
     def _init_engine(self, *args,
                      **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
@@ -280,11 +327,13 @@ class AsyncLLMEngine:
             engine_class = ray.remote(num_gpus=1)(self._engine_class).remote
         return engine_class(*args, **kwargs)
 
-    async def engine_step(self):
-        """Kick the engine to process the waiting requests."""
+    async def engine_step(self) -> bool:
+        """Kick the engine to process the waiting requests.
+
+        Returns True if there are in-progress requests."""
 
         new_requests, finished_requests = (
-            self.request_tracker.get_new_and_finished_requests())
+            self._request_tracker.get_new_and_finished_requests())
 
         for new_request in new_requests:
             # Add the request into the vLLM engine's waiting queue.
@@ -304,8 +353,10 @@ class AsyncLLMEngine:
 
         # Put the outputs into the corresponding streams.
         for request_output in request_outputs:
-            self.request_tracker.process_request_output(
+            self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
+
+        return bool(request_outputs)
 
     async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
@@ -314,8 +365,12 @@ class AsyncLLMEngine:
             self.engine.abort_request(request_ids)
 
     async def run_engine_loop(self):
+        # Initialize the RequestTracker here so it uses the right event loop.
+        has_requests_in_progress = False
         while True:
-            await self.engine_step()
+            if not has_requests_in_progress:
+                await self._request_tracker.wait_for_new_requests()
+            has_requests_in_progress = await self.engine_step()
             await asyncio.sleep(0)
 
     async def add_request(
@@ -350,7 +405,7 @@ class AsyncLLMEngine:
                     "error that caused the background loop to stop "
                     "(AsyncEngineDeadError).")
 
-        stream = self.request_tracker.add_request(
+        stream = self._request_tracker.add_request(
             request_id,
             prompt=prompt,
             sampling_params=sampling_params,
@@ -428,8 +483,8 @@ class AsyncLLMEngine:
         Args:
             request_id: The unique id of the request.
         """
-        self.request_tracker.abort_request(request_id,
-                                           verbose=self.log_requests)
+        self._request_tracker.abort_request(request_id,
+                                            verbose=self.log_requests)
 
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
