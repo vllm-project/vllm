@@ -123,7 +123,8 @@ class RequestTracker:
     def propagate_exception(self,
                             exc: Exception,
                             request_id: Optional[str] = None) -> None:
-        """Propagate an exception to request streams (all if request_id is None)."""
+        """Propagate an exception to request streams
+        (all if request_id is None)."""
         if request_id is not None:
             self._request_streams[request_id].put(exc)
         else:
