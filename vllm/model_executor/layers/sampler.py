@@ -9,7 +9,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     gather_from_tensor_model_parallel_region)
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SamplerOutput, SequenceOutputs
+from vllm.sequence import SequenceData, SamplerOutput, SequenceOutputs
 
 _SAMPLING_EPS = 1e-5
 
@@ -308,23 +308,124 @@ def _get_topk_logprobs(
 
 
 def _build_sequence_outputs(
-    parent_seq_ids: List[int],
+    parent_ids: List[int],
     next_token_ids: List[int],
-    all_parent_seq_ids: List[int],
+    parent_seq_ids: List[int],
     parrent_logprobs: torch.Tensor,
     num_output_logprobs: Optional[int],
 ) -> List[SequenceOutputs]:
     # Get top-k log probabilities for the next tokens.
     next_logprobs = _get_topk_logprobs(parrent_logprobs, num_output_logprobs)
     seq_outputs: List[SequenceOutputs] = []
-    for parent_seq_id, next_token_id in zip(parent_seq_ids, next_token_ids):
-        i = all_parent_seq_ids.index(parent_seq_id)
-        output_logprobs = next_logprobs[i].copy()
+    for parent_id, next_token_id in zip(parent_ids, next_token_ids):
+        output_logprobs = next_logprobs[parent_id].copy()
         output_logprobs[next_token_id] = parrent_logprobs[
-            i, next_token_id].item()
+            parent_id, next_token_id].item()
         seq_outputs.append(
-            SequenceOutputs(parent_seq_id, next_token_id, output_logprobs))
+            SequenceOutputs(parent_seq_ids[parent_id], next_token_id,
+                            output_logprobs))
     return seq_outputs
+
+
+def _greedy_sample(
+    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
+    logprobs: torch.tensor,
+) -> List[Tuple[List[int], List[int]]]:
+    samples = torch.argmax(logprobs, dim=-1)
+    sample_idx = 0
+    results = []
+    for seq_group in selected_seq_groups:
+        seq_ids, _ = seq_group
+        num_parent_seqs = len(seq_ids)
+        assert num_parent_seqs == 1, (
+            "Greedy sampling should have only one seq.")
+        parent_ids = list(range(num_parent_seqs))
+        next_token_ids = [samples[sample_idx].item()]
+        results.append((next_token_ids, parent_ids))
+        sample_idx += num_parent_seqs
+    assert sample_idx == logprobs.size(0)
+    return results
+
+
+def _random_sample(
+    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
+    is_prompts: List[bool],
+    probs: torch.Tensor,
+) -> List[Tuple[List[int], List[int]]]:
+    max_best_of = max(seq_group[1].best_of
+                      for seq_group in selected_seq_groups)
+    random_samples = torch.multinomial(probs,
+                                       num_samples=max_best_of,
+                                       replacement=True)
+    sample_idx = 0
+    results = []
+    for seq_group, is_prompt in zip(selected_seq_groups, is_prompts):
+        seq_ids, sampling_params = seq_group
+        num_parent_seqs = len(seq_ids)
+        if is_prompt:
+            # Prompt phase.
+            assert num_parent_seqs == 1, (
+                "Prompt input should have only one seq.")
+            parent_ids = [0] * sampling_params.best_of
+            next_token_ids = random_samples[
+                sample_idx, :sampling_params.best_of].tolist()
+        else:
+            # Generation phase.
+            parent_ids = list(range(num_parent_seqs))
+            next_token_ids = random_samples[sample_idx:sample_idx +
+                                            num_parent_seqs, 0].tolist()
+        results.append((next_token_ids, parent_ids))
+        sample_idx += num_parent_seqs
+    assert sample_idx == probs.size(0)
+    return results
+
+
+def _beam_search_sample(
+    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
+    is_prompts: List[bool],
+    seq_data: Dict[int, SequenceData],
+    logprobs: torch.Tensor,
+) -> List[Tuple[List[int], List[int]]]:
+    # We sample 2 * beam_width candidates to make sure that with high
+    # probability we can get `beam_width` candidates in addition to
+    # the finished sequences for the next iteration. See
+    # https://github.com/tensorflow/tensor2tensor/blob/bafdc1b67730430d38d6ab802cbd51f9d053ba2e/tensor2tensor/utils/beam_search.py#L557-L563
+    # for details. See also HF reference:
+    # https://github.com/huggingface/transformers/blob/a4dd53d88e4852f023332d284ff07a01afcd5681/src/transformers/generation/utils.py#L3063-L3065
+    sample_idx = 0
+    results = []
+    for seq_group, is_prompt in zip(selected_seq_groups, is_prompts):
+        seq_ids, sampling_params = seq_group
+        num_parent_seqs = len(seq_ids)
+        beam_width = sampling_params.best_of
+        seq_group_logprobs = logprobs[sample_idx:sample_idx + num_parent_seqs]
+        if is_prompt:
+            # Prompt phase.
+            assert num_parent_seqs == 1, (
+                "Prompt input should have only one seq.")
+            parent_ids = [0] * (2 * beam_width)
+            _, next_token_ids = torch.topk(seq_group_logprobs[0],
+                                           2 * beam_width)
+            next_token_ids = next_token_ids.tolist()
+        else:
+            # Generation phase.
+            seq_logprobs = [
+                seq_data[seq_id].cumulative_logprob for seq_id in seq_ids
+            ]
+            seq_logprobs = torch.tensor(seq_logprobs,
+                                        dtype=torch.float,
+                                        device=seq_group_logprobs.device)
+            seq_group_logprobs += seq_logprobs.unsqueeze(dim=1)
+            _, topk_ids = torch.topk(seq_group_logprobs.flatten(),
+                                     2 * beam_width)
+            topk_ids = topk_ids.tolist()
+            vocab_size = seq_group_logprobs.size(-1)
+            parent_ids = [i // vocab_size for i in topk_ids]
+            next_token_ids = [i % vocab_size for i in topk_ids]
+        results.append((next_token_ids, parent_ids))
+        sample_idx += num_parent_seqs
+    assert sample_idx == logprobs.size(0)
+    return results
 
 
 def _sample(
@@ -332,9 +433,6 @@ def _sample(
     logprobs: torch.Tensor,
     input_metadata: InputMetadata,
 ) -> SamplerOutput:
-    # Seq group id -> (next token ids, corresponding parent seq ids)
-    next_tokens_dict: Dict[int, Tuple(List[int], List[int])] = {}
-
     categorized_seq_group_ids = {t: [] for t in SamplingType}
     category_num_tokens = {t: 0 for t in SamplingType}
     for i, seq_group in enumerate(input_metadata.seq_groups):
@@ -343,121 +441,45 @@ def _sample(
         categorized_seq_group_ids[sample_type].append(i)
         num_seqs = len(seq_ids)
         category_num_tokens[sample_type] += num_seqs
-    category_start_idx = 0
-
-    # Greedy sampling
-    greedy_seq_group_ids = categorized_seq_group_ids[SamplingType.GREEDY]
-    greedy_num_tokens = category_num_tokens[SamplingType.GREEDY]
-    if greedy_num_tokens > 0:
-        greedy_logprobs = logprobs[category_start_idx:category_start_idx +
-                                   greedy_num_tokens]
-        greedy_samples = torch.argmax(greedy_logprobs, dim=-1)
-        sample_idx = 0
-        for seq_group_id in greedy_seq_group_ids:
-            seq_ids, sampling_params = input_metadata.seq_groups[seq_group_id]
-            num_parent_seqs = len(seq_ids)
-            assert num_parent_seqs == 1, (
-                "Greedy sampling should have only one seq.")
-            parent_seq_ids = seq_ids
-            next_token_ids = [greedy_samples[sample_idx].item()]
-            next_tokens_dict[seq_group_id] = (next_token_ids, parent_seq_ids)
-            sample_idx += num_parent_seqs
-        assert sample_idx == greedy_num_tokens
-    category_start_idx += greedy_num_tokens
-
-    # Random sampling
-    random_seq_group_ids = categorized_seq_group_ids[SamplingType.RANDOM]
-    random_num_tokens = category_num_tokens[SamplingType.RANDOM]
-    if random_num_tokens > 0:
-        random_probs = probs[category_start_idx:category_start_idx +
-                             random_num_tokens]
-        max_best_of = max(input_metadata.seq_groups[i][1].best_of
-                          for i in random_seq_group_ids)
-        random_samples = torch.multinomial(random_probs,
-                                           num_samples=max_best_of,
-                                           replacement=True)
-        sample_idx = 0
-        for seq_group_id in random_seq_group_ids:
-            seq_ids, sampling_params = input_metadata.seq_groups[seq_group_id]
-            num_parent_seqs = len(seq_ids)
-            if seq_group_id < input_metadata.num_prompts:
-                # Prompt phase.
-                assert num_parent_seqs == 1, (
-                    "Prompt input should have only one seq.")
-                parent_seq_ids = [seq_ids[0]] * sampling_params.best_of
-                next_token_ids = random_samples[
-                    sample_idx, :sampling_params.best_of].tolist()
-            else:
-                # Generation phase.
-                parent_seq_ids = seq_ids
-                next_token_ids = random_samples[sample_idx:sample_idx +
-                                                num_parent_seqs, 0].tolist()
-            next_tokens_dict[seq_group_id] = (next_token_ids, parent_seq_ids)
-            sample_idx += num_parent_seqs
-        assert sample_idx == random_num_tokens
-    category_start_idx += random_num_tokens
-
-    # Beam search
-    # Sample 2 * beam_width candidates to make sure that with high
-    # probability we can get `beam_width` candidates in addition to
-    # the finished sequences for the next iteration. See
-    # https://github.com/tensorflow/tensor2tensor/blob/bafdc1b67730430d38d6ab802cbd51f9d053ba2e/tensor2tensor/utils/beam_search.py#L557-L563
-    # for details. See also HF reference:
-    # https://github.com/huggingface/transformers/blob/a4dd53d88e4852f023332d284ff07a01afcd5681/src/transformers/generation/utils.py#L3063-L3065
-
-    beam_seq_group_ids = categorized_seq_group_ids[SamplingType.BEAM_SEARCH]
-    beam_num_tokens = category_num_tokens[SamplingType.BEAM_SEARCH]
-    if beam_num_tokens > 0:
-        beam_logprobs = logprobs[category_start_idx:category_start_idx +
-                                 beam_num_tokens]
-        sample_idx = 0
-        for seq_group_id in beam_seq_group_ids:
-            seq_ids, sampling_params = input_metadata.seq_groups[seq_group_id]
-            num_parent_seqs = len(seq_ids)
-            beam_width = sampling_params.best_of
-            seq_group_logprobs = beam_logprobs[sample_idx:sample_idx +
-                                               num_parent_seqs]
-            if seq_group_id < input_metadata.num_prompts:
-                # Prompt phase.
-                assert num_parent_seqs == 1, (
-                    "Prompt input should have only one seq.")
-                parent_seq_ids = [seq_ids[0]] * (2 * beam_width)
-                _, next_token_ids = torch.topk(seq_group_logprobs[0],
-                                               2 * beam_width)
-                next_token_ids = next_token_ids.tolist()
-            else:
-                # Generation phase.
-                seq_logprobs = [
-                    input_metadata.seq_data[seq_id].cumulative_logprob
-                    for seq_id in seq_ids
-                ]
-                seq_logprobs = torch.tensor(seq_logprobs,
-                                            dtype=torch.float,
-                                            device=seq_group_logprobs.device)
-                seq_group_logprobs += seq_logprobs.unsqueeze(dim=1)
-                _, topk_ids = torch.topk(seq_group_logprobs.flatten(),
-                                         2 * beam_width)
-                topk_ids = topk_ids.tolist()
-                vocab_size = seq_group_logprobs.size(-1)
-                seq_idx = [i // vocab_size for i in topk_ids]
-                parent_seq_ids = [seq_ids[i] for i in seq_idx]
-                next_token_ids = [i % vocab_size for i in topk_ids]
-            next_tokens_dict[seq_group_id] = (next_token_ids, parent_seq_ids)
-            sample_idx += num_parent_seqs
-        assert sample_idx == beam_num_tokens
 
     seq_outputs_dict: Dict[int, List[SequenceOutputs]] = {}
-    sample_idx = 0
+    category_start_idx = 0
     for sampling_type in SamplingType:
-        for seq_group_id in categorized_seq_group_ids[sampling_type]:
-            seq_ids, sampling_params = input_metadata.seq_groups[seq_group_id]
+        seq_group_ids = categorized_seq_group_ids[sampling_type]
+        seq_groups = [input_metadata.seq_groups[i] for i in seq_group_ids]
+        is_prompts = [i < input_metadata.num_prompts for i in seq_group_ids]
+        num_tokens = category_num_tokens[sampling_type]
+        if num_tokens == 0:
+            continue
+        category_logprobs = logprobs[category_start_idx:category_start_idx +
+                                     num_tokens]
+        category_probs = probs[category_start_idx:category_start_idx +
+                               num_tokens]
+        if sample_type == SamplingType.GREEDY:
+            sample_results = _greedy_sample(seq_groups, category_logprobs)
+        elif sample_type == SamplingType.RANDOM:
+            sample_results = _random_sample(seq_groups, is_prompts,
+                                            category_probs)
+        elif sample_type == SamplingType.BEAM:
+            sample_results = _beam_search_sample(seq_groups, is_prompts,
+                                                 input_metadata.seq_data,
+                                                 category_logprobs)
+        else:
+            raise ValueError(f"Unsupported sampling type: {sample_type}")
+
+        sample_idx = 0
+        for seq_group_id, seq_group, next_token_ids, parent_ids in zip(
+                seq_group_ids, seq_groups, *sample_results):
+            seq_ids, sampling_params = seq_group
             num_parent_seqs = len(seq_ids)
-            next_token_ids, parent_seq_ids = next_tokens_dict[seq_group_id]
-            parent_logprobs = logprobs[sample_idx:sample_idx + num_parent_seqs]
-            seq_output = _build_sequence_outputs(parent_seq_ids,
-                                                 next_token_ids, seq_ids,
-                                                 parent_logprobs,
+            parent_logprobs = category_logprobs[sample_idx:sample_idx +
+                                                num_parent_seqs]
+            seq_output = _build_sequence_outputs(parent_ids, next_token_ids,
+                                                 seq_ids, parent_logprobs,
                                                  sampling_params.logprobs)
             seq_outputs_dict[seq_group_id] = seq_output
+            sample_idx += num_parent_seqs
+        assert sample_idx == num_tokens
+        category_start_idx += num_tokens
 
     return [seq_outputs_dict[i] for i in range(len(input_metadata.seq_groups))]
