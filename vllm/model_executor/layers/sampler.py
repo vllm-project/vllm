@@ -119,7 +119,8 @@ def _prune_hidden_states(
                 range(last_token_idx, last_token_idx + num_seqs))
             last_token_idx += num_seqs
     last_token_indices = {
-        t: torch.tensor(last_token_indices[t], device=hidden_states.device)
+        t: torch.tensor(last_token_indices[t], device=hidden_states.device,
+                        dtype=torch.long)
         for t in SamplingType
     }
     all_last_token_indices = torch.cat(
@@ -468,9 +469,10 @@ def _sample(
             raise ValueError(f"Unsupported sampling type: {sample_type}")
 
         sample_idx = 0
-        for seq_group_id, seq_group, next_token_ids, parent_ids in zip(
-                seq_group_ids, seq_groups, *sample_results):
+        for seq_group_id, seq_group, sample_result in zip(
+                seq_group_ids, seq_groups, sample_results):
             seq_ids, sampling_params = seq_group
+            next_token_ids, parent_ids = sample_result
             num_parent_seqs = len(seq_ids)
             parent_logprobs = category_logprobs[sample_idx:sample_idx +
                                                 num_parent_seqs]
