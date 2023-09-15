@@ -119,7 +119,8 @@ def _prune_hidden_states(
                 range(last_token_idx, last_token_idx + num_seqs))
             last_token_idx += num_seqs
     last_token_indices = {
-        t: torch.tensor(last_token_indices[t], device=hidden_states.device,
+        t: torch.tensor(last_token_indices[t],
+                        device=hidden_states.device,
                         dtype=torch.long)
         for t in SamplingType
     }
