@@ -120,10 +120,15 @@ class RequestTracker:
     def init_event(self):
         self.new_requests_event = asyncio.Event()
 
-    def propagate_exception(self, exc: Exception) -> None:
+    def propagate_exception(self,
+                            exc: Exception,
+                            request_id: Optional[str] = None) -> None:
         """Propagate an exception to all request streams."""
-        for stream in self._request_streams.values():
-            stream.put(exc)
+        if request_id is not None:
+            self._request_streams[request_id].put(exc)
+        else:
+            for stream in self._request_streams.values():
+                stream.put(exc)
 
     def process_request_output(self,
                                request_output: RequestOutput,
