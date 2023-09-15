@@ -97,7 +97,8 @@ class RequestTracker:
         self._request_streams[request_id].put(request_output)
         if request_output.finished:
             if verbose:
-                logger.info(f"Finished request {request_id}.")
+                output_text = request_output.outputs[0].text if request_output.outputs else ""
+                logger.info(f"Finished request {request_id}: {output_text}")
             self.abort_request(request_id)
 
     def add_request(self, request_id: str,
