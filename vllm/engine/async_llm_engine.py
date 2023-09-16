@@ -1,7 +1,8 @@
 import asyncio
 import time
 from functools import partial
-from typing import Any, Callable, Coroutine, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
+from typing import (Any, Dict, Iterable, List, Optional, Set, Tuple, Type,
+                    Union)
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -68,40 +69,6 @@ class AsyncStream:
         elif isinstance(result, Exception):
             raise result
         return result
-
-
-class ShieldedTaskSet:
-    """A task set that runs a coroutine with shielding.
-
-    This task set will ensure that a coroutine runs by wrapping it
-    in a task, and shielding it from parent cancellations.
-
-    Note: this class does not protect against event loop failure.
-    """
-
-    def __init__(self):
-        self.task_set = set()
-
-    def run(self, coroutine: Coroutine, callback: Callable):
-        # Wrap the coroutine in a task so it executes immediately
-        # Save a reference to the task so it doesn't get garbage collected
-        # Remove the task from the task set when it is completed
-        task = asyncio.get_event_loop().create_task(coroutine)
-        self.task_set.add(task)
-        if callback:
-
-            def combined_callback(task):
-                self.task_set.discard(task)
-                callback(task)
-        else:
-            combined_callback = self.task_set.discard
-        task.add_done_callback(combined_callback)
-
-        # Shield the task so it cannot be cancelled by the parent
-        shielded_task = asyncio.shield(task)
-
-        # Return the shielded task so it can be awaited by the parent.
-        return shielded_task
 
 
 class RequestTracker:
@@ -298,8 +265,11 @@ class AsyncLLMEngine:
         self.engine = self._init_engine(*args, **kwargs)
 
         self.background_loop = None
+        # We need to keep a reference to unshielded
+        # task as well to prevent it from being garbage
+        # collected
+        self._background_loop_unshielded = None
         self.start_engine_loop = start_engine_loop
-        self._task_set = ShieldedTaskSet()
         self._request_tracker = RequestTracker()
 
     @property
@@ -312,10 +282,13 @@ class AsyncLLMEngine:
         if self.is_running:
             raise RuntimeError("Background loop is already running.")
         self._request_tracker.init_event()
-        self.background_loop = self._task_set.run(
-            self.run_engine_loop(),
-            callback=partial(_raise_exception_on_finish,
-                             request_tracker=self._request_tracker))
+
+        self._background_loop_unshielded = asyncio.get_event_loop(
+        ).create_task(self.run_engine_loop())
+        self._background_loop_unshielded.add_done_callback(
+            partial(_raise_exception_on_finish,
+                    request_tracker=self._request_tracker))
+        self.background_loop = asyncio.shield(self._background_loop_unshielded)
 
     def _init_engine(self, *args,
                      **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
@@ -356,7 +329,7 @@ class AsyncLLMEngine:
             self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
 
-        return bool(request_outputs)
+        return len(request_outputs) > 0
 
     async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
