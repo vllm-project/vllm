@@ -412,13 +412,15 @@ def _beam_search_sample(
             next_token_ids = next_token_ids.tolist()
         else:
             # Generation phase.
-            seq_logprobs = [
+            cumulative_logprobs = [
                 seq_data[seq_id].cumulative_logprob for seq_id in seq_ids
             ]
-            seq_logprobs = torch.tensor(seq_logprobs,
-                                        dtype=torch.float,
-                                        device=seq_group_logprobs.device)
-            seq_group_logprobs += seq_logprobs.unsqueeze(dim=1)
+            cumulative_logprobs = torch.tensor(
+                cumulative_logprobs,
+                dtype=torch.float,
+                device=seq_group_logprobs.device)
+            seq_group_logprobs = (seq_group_logprobs +
+                                  cumulative_logprobs.unsqueeze(dim=1))
             _, topk_ids = torch.topk(seq_group_logprobs.flatten(),
                                      2 * beam_width)
             topk_ids = topk_ids.tolist()
