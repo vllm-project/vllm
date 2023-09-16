@@ -312,17 +312,18 @@ def _get_topk_logprobs(
 def _build_sequence_outputs(
     parent_ids: List[int],
     next_token_ids: List[int],
+    selected_token_logprobs: torch.Tensor,
     parent_seq_ids: List[int],
-    parrent_logprobs: torch.Tensor,
+    parent_logprobs: torch.Tensor,
     num_output_logprobs: Optional[int],
 ) -> List[SequenceOutputs]:
     # Get top-k log probabilities for the next tokens.
-    next_logprobs = _get_topk_logprobs(parrent_logprobs, num_output_logprobs)
+    next_logprobs = _get_topk_logprobs(parent_logprobs, num_output_logprobs)
     seq_outputs: List[SequenceOutputs] = []
-    for parent_id, next_token_id in zip(parent_ids, next_token_ids):
+    for parent_id, next_token_id, token_logprob in zip(
+            parent_ids, next_token_ids, selected_token_logprobs):
         output_logprobs = next_logprobs[parent_id].copy()
-        output_logprobs[next_token_id] = parrent_logprobs[
-            parent_id, next_token_id].item()
+        output_logprobs[next_token_id] = token_logprob
         seq_outputs.append(
             SequenceOutputs(parent_seq_ids[parent_id], next_token_id,
                             output_logprobs))
@@ -469,19 +470,45 @@ def _sample(
         else:
             raise ValueError(f"Unsupported sampling type: {sample_type}")
 
+        # Batched query for logprobs of selected token
+        batched_logprobs_query_seq_indices = []
+        batched_logprobs_query_token_indices = []
         sample_idx = 0
         for seq_group_id, seq_group, sample_result in zip(
                 seq_group_ids, seq_groups, sample_results):
             seq_ids, sampling_params = seq_group
             next_token_ids, parent_ids = sample_result
             num_parent_seqs = len(seq_ids)
+            batched_logprobs_query_seq_indices.extend(
+                [sample_idx + parent_id for parent_id in parent_ids])
+            batched_logprobs_query_token_indices.extend(next_token_ids)
+            sample_idx += num_parent_seqs
+        assert sample_idx == num_tokens
+        batched_logprobs_query_result = category_logprobs[[
+            batched_logprobs_query_seq_indices,
+            batched_logprobs_query_token_indices
+        ]].tolist()
+
+        # Build the sequence outputs.
+        sample_idx = 0
+        result_idx = 0
+        for seq_group_id, seq_group, sample_result in zip(
+                seq_group_ids, seq_groups, sample_results):
+            seq_ids, sampling_params = seq_group
+            next_token_ids, parent_ids = sample_result
+            num_results = len(next_token_ids)
+            num_parent_seqs = len(seq_ids)
             parent_logprobs = category_logprobs[sample_idx:sample_idx +
                                                 num_parent_seqs]
+            selected_token_logprobs = batched_logprobs_query_result[
+                result_idx:result_idx + num_results]
             seq_output = _build_sequence_outputs(parent_ids, next_token_ids,
+                                                 selected_token_logprobs,
                                                  seq_ids, parent_logprobs,
                                                  sampling_params.logprobs)
             seq_outputs_dict[seq_group_id] = seq_output
             sample_idx += num_parent_seqs
+            result_idx += num_results
         assert sample_idx == num_tokens
         category_start_idx += num_tokens
 
