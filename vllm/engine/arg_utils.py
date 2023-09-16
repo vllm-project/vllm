@@ -152,6 +152,7 @@ class EngineArgs:
                             help='disable logging statistics')
         # Quantization settings.
         parser.add_argument('--quantization',
+                            '-q',
                             type=str,
                             choices=['awq', None],
                             default=None,
