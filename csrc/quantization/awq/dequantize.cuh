@@ -11,9 +11,14 @@ Modified from NVIDIA FasterTransformer: https://github.com/NVIDIA/FasterTransfor
 
 #pragma once
 
+namespace vllm {
+namespace awq {
 
 __device__ uint4 dequantize_s4_to_fp16x2(uint32_t const& source)
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  assert(false);
+#else
     uint4 result;
 
     uint32_t*      h   = reinterpret_cast<uint32_t*>(&result);
@@ -75,5 +80,8 @@ __device__ uint4 dequantize_s4_to_fp16x2(uint32_t const& source)
     asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(h[3]) : "r"(h[3]), "r"(ONE_SIXTEENTH), "r"(NEG_64));
 
     return result;
+#endif
 }
 
+} // namespace awq
+} // namespace vllm

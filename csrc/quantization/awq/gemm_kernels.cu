@@ -16,6 +16,9 @@ Adapted from https://github.com/mit-han-lab/llm-awq
 
 #include <cuda_fp16.h>
 
+namespace vllm {
+namespace awq {
+
 // Pack two half values.
 static inline __device__ __host__ unsigned
 __pack_half2(const half x, const half y) {
@@ -26,6 +29,9 @@ __pack_half2(const half x, const half y) {
 
 __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, half* __restrict__ C) 
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  assert(false);
+#else
   static constexpr uint32_t ZERO = 0x0;
   float C_warp[32];
   __shared__ half A_shared[16 * (32 + 8)];
@@ -214,11 +220,15 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
       }
     }
   }
+#endif
 }
 
 
 __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, half* __restrict__ C) 
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  assert(false);
+#else
   static constexpr uint32_t ZERO = 0x0;
   float C_warp[32];
   __shared__ half A_shared[16 * (32 + 8)];
@@ -412,7 +422,11 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
       }
     }
   }
+#endif
 }
+
+} // namespace awq
+} // namespace vllm
 
 // in_feats: M, IC [float16]
 // kernel: IC, OC // 8 [int32] -> cast to IC, OC [uint4b]
@@ -459,7 +473,7 @@ torch::Tensor awq_gemm(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        gemm_forward_4bit_cuda_m16n128k32<<<num_blocks, threads_per_block>>>(
+        vllm::awq::gemm_forward_4bit_cuda_m16n128k32<<<num_blocks, threads_per_block>>>(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
     else if (num_out_channels % 64 == 0)
@@ -470,7 +484,7 @@ torch::Tensor awq_gemm(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        gemm_forward_4bit_cuda_m16n64k32<<<num_blocks, threads_per_block>>>(
+        vllm::awq::gemm_forward_4bit_cuda_m16n64k32<<<num_blocks, threads_per_block>>>(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
     return _out_feats.sum(0);
