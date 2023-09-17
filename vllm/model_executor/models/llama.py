@@ -43,8 +43,8 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding)
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
-    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab,
-    hf_model_weights_iterator)
+    convert_pyslice_to_tensor, hf_model_weights_iterator,
+    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -337,6 +337,7 @@ class LlamaForCausalLM(nn.Module):
                 is_packed = self.quant_config.is_packed(name)
                 is_transposed = self.quant_config.is_transposed(name)
             if is_transposed:
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 loaded_weight = loaded_weight.T
 
             is_attention_weight = False
