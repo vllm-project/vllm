@@ -104,20 +104,20 @@ def _prune_hidden_states(
     input_metadata: InputMetadata,
 ) -> torch.Tensor:
     last_token_indices = {t: [] for t in SamplingType}
-    last_token_idx = 0
+    start_idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
         sampling_type = sampling_params.sampling_type
         if i < input_metadata.num_prompts:
             assert len(seq_ids) == 1, "Prompt input should have only one seq."
-            last_token_indices[sampling_type].append(last_token_idx)
             prompt_len = input_metadata.prompt_lens[i]
-            last_token_idx += prompt_len
+            last_token_indices[sampling_type].append(start_idx + prompt_len - 1)
+            start_idx += prompt_len
         else:
             num_seqs = len(seq_ids)
             last_token_indices[sampling_type].extend(
-                range(last_token_idx, last_token_idx + num_seqs))
-            last_token_idx += num_seqs
+                range(start_idx, start_idx + num_seqs))
+            start_idx += num_seqs
     last_token_indices = {
         t: torch.tensor(last_token_indices[t],
                         device=hidden_states.device,
