@@ -356,8 +356,12 @@ def _random_sample(
     is_prompts: List[bool],
     probs: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
-    max_best_of = max(seq_group[1].best_of
-                      for seq_group in selected_seq_groups)
+    # Find the maximum best_of value of the prompt phase requests.
+    max_best_of = 1
+    for seq_group, is_prompt in zip(selected_seq_groups, is_prompts):
+        if is_prompt:
+            seq_ids, sampling_params = seq_group
+            max_best_of = max(max_best_of, sampling_params.best_of)
     random_samples = torch.multinomial(probs,
                                        num_samples=max_best_of,
                                        replacement=True)
