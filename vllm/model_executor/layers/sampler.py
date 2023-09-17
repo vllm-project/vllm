@@ -335,7 +335,7 @@ def _greedy_sample(
     selected_seq_groups: List[Tuple[List[int], SamplingParams]],
     logprobs: torch.tensor,
 ) -> List[Tuple[List[int], List[int]]]:
-    samples = torch.argmax(logprobs, dim=-1)
+    samples = torch.argmax(logprobs, dim=-1).cpu()
     sample_idx = 0
     results = []
     for seq_group in selected_seq_groups:
@@ -364,7 +364,7 @@ def _random_sample(
             max_best_of = max(max_best_of, sampling_params.best_of)
     random_samples = torch.multinomial(probs,
                                        num_samples=max_best_of,
-                                       replacement=True)
+                                       replacement=True).cpu()
     sample_idx = 0
     results = []
     for seq_group, is_prompt in zip(selected_seq_groups, is_prompts):
