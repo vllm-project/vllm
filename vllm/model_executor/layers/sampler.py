@@ -443,10 +443,10 @@ def _sample(
     category_num_tokens = {t: 0 for t in SamplingType}
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
-        sample_type = sampling_params.sampling_type
-        categorized_seq_group_ids[sample_type].append(i)
+        sampling_type = sampling_params.sampling_type
+        categorized_seq_group_ids[sampling_type].append(i)
         num_seqs = len(seq_ids)
-        category_num_tokens[sample_type] += num_seqs
+        category_num_tokens[sampling_type] += num_seqs
 
     seq_outputs_dict: Dict[int, List[SequenceOutputs]] = {}
     category_start_idx = 0
@@ -461,17 +461,17 @@ def _sample(
                                      num_tokens]
         category_probs = probs[category_start_idx:category_start_idx +
                                num_tokens]
-        if sample_type == SamplingType.GREEDY:
+        if sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(seq_groups, category_logprobs)
-        elif sample_type == SamplingType.RANDOM:
+        elif sampling_type == SamplingType.RANDOM:
             sample_results = _random_sample(seq_groups, is_prompts,
                                             category_probs)
-        elif sample_type == SamplingType.BEAM:
+        elif sampling_type == SamplingType.BEAM:
             sample_results = _beam_search_sample(seq_groups, is_prompts,
                                                  input_metadata.seq_data,
                                                  category_logprobs)
         else:
-            raise ValueError(f"Unsupported sampling type: {sample_type}")
+            raise ValueError(f"Unsupported sampling type: {sampling_type}")
 
         # Batched query for logprobs of selected token
         batched_logprobs_query_seq_indices = []
