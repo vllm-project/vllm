@@ -48,9 +48,9 @@ if torch_arch_list is not None:
         if len(major_minor) != 2:
             raise ValueError(
                 "The TORCH_CUDA_ARCH_LIST env variable should be a list of "
-                "compute capabilities separated by ';', and each compute "
-                "capability should be a string of the form 'major.minor'."
-            )
+                "compute capabilities separated by ';' or a space, and each "
+                "compute capability should be a string of the form "
+                "'major.minor'.")
         major, minor = cc.split(".")
         compute_capabilities.add(int(major) * 10 + int(minor))
 else:
@@ -61,7 +61,7 @@ else:
         major, minor = torch.cuda.get_device_capability(i)
         if major < 7:
             raise RuntimeError(
-                "GPUs with compute capability less than 7.0 are not supported.")
+                "GPUs with compute capability below 7.0 are not supported.")
         compute_capabilities.add(major * 10 + minor)
 
 nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
