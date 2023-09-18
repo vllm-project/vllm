@@ -1,8 +1,9 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import pytest
 import torch
 from transformers import AutoModelForCausalLM
+from transformers.utils import ModelOutput
 
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -53,23 +54,29 @@ class HfRunner:
     def generate(
         self,
         prompts: List[str],
+        raw_output: bool = False,
         **kwargs,
-    ) -> List[Tuple[List[int], str]]:
-        outputs: List[Tuple[List[int], str]] = []
+    ) -> Union[List[Tuple[List[int], str]], List[ModelOutput]]:
+        if raw_output:
+            kwargs["return_dict_in_generate"] = True
+        outputs: Union[List[Tuple[List[int], str]], List[ModelOutput]] = []
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
-            output_ids = self.model.generate(
+            model_output = self.model.generate(
                 input_ids.cuda(),
                 use_cache=True,
                 **kwargs,
             )
-            output_str = self.tokenizer.batch_decode(
-                output_ids,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )
-            output_ids = output_ids.cpu().tolist()
-            outputs.append((output_ids, output_str))
+            if raw_output:
+                outputs.append(model_output)
+            else:
+                output_str = self.tokenizer.batch_decode(
+                    model_output,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )
+                output_ids = model_output.cpu().tolist()
+                outputs.append((output_ids, output_str))
         return outputs
 
     def generate_greedy(
