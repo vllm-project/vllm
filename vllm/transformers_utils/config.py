@@ -7,6 +7,7 @@ from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
 _CONFIG_REGISTRY = {
     "mpt": MPTConfig,
     "baichuan": BaiChuanConfig,
+    "baichuan2": BaiChuan2Config,
     "aquila": AquilaConfig,
     "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)

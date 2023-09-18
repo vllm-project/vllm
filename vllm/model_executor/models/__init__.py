@@ -1,6 +1,8 @@
 from vllm.model_executor.models.aquila import AquilaForCausalLM
 from vllm.model_executor.models.baichuan import (BaiChuanForCausalLM,
                                                  BaichuanForCausalLM)
+from vllm.model_executor.models.baichuan2 import (BaiChuan2ForCausalLM,
+                                                 Baichuan2ForCausalLM)
 from vllm.model_executor.models.bloom import BloomForCausalLM
 from vllm.model_executor.models.falcon import FalconForCausalLM
 from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
@@ -17,6 +19,8 @@ __all__ = [
     "AquilaForCausalLM",
     "BaiChuanForCausalLM",
     "BaichuanForCausalLM",
+    "BaiChuan2ForCausalLM",
+    "Baichuan2ForCausalLM",
     "BloomForCausalLM",
     "FalconForCausalLM",
     "GPT2LMHeadModel",
