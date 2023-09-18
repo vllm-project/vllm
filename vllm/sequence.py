@@ -127,7 +127,7 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
-        
+
         self.prompt_top_logprobs: Optional[List[Optional[Dict[int,
                                                               float]]]] = None
 
