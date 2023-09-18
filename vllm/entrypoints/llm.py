@@ -51,6 +51,7 @@ class LLM:
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         seed: int = 0,
+        quantization: Optional[str] = None,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -63,6 +64,7 @@ class LLM:
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             seed=seed,
+            quantization=quantization,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
