@@ -2,6 +2,7 @@ from typing import Optional
 
 import torch
 from transformers import PretrainedConfig
+from transformers.utils.quantization_config import QuantizationMethod
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
@@ -106,7 +107,12 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq"]
+        supported_quantization = ["awq", "gptq"]
+        if hasattr(self.hf_config, "quantization_config"
+                   ) and self.hf_config.quantization_config.get(
+                       "quant_method") == QuantizationMethod.GPTQ:
+            self.quantization = "gptq"
+
         if self.quantization is None:
             return
         quantization = self.quantization.lower()

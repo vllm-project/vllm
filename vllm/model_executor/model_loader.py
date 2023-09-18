@@ -10,6 +10,7 @@ from vllm.config import ModelConfig
 from vllm.model_executor.models import *  # pylint: disable=wildcard-import
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+from vllm.model_executor.layers.quantized_linear.utils import quant_post_init
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
@@ -32,9 +33,10 @@ _MODEL_REGISTRY = {
 }
 
 # FIXME(woosuk): Remove this once all models support quantization.
-_MODEL_CLASSES_SUPPORT_QUANTIZATION = [
-    LlamaForCausalLM,
-]
+_MODEL_CLASSES_SUPPORT_QUANTIZATION = {
+    "awq": [LlamaForCausalLM],
+    "gptq": [LlamaForCausalLM],
+}
 
 
 @contextlib.contextmanager
@@ -56,17 +58,19 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def get_model(model_config: ModelConfig) -> nn.Module:
+def get_model(model_config: ModelConfig, max_tokens: int) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
 
     # Get the quantization config.
     quant_config = None
     if model_config.quantization is not None:
-        if model_class not in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
+        if model_class not in _MODEL_CLASSES_SUPPORT_QUANTIZATION[
+                model_config.quantization]:
             raise ValueError(
                 f"Quantization is not supported for {model_class}.")
         quant_config = get_quant_config(model_config.quantization,
                                         model_config.model,
+                                        model_config.hf_config,
                                         model_config.download_dir)
         supported_dtypes = quant_config.get_supported_act_dtypes()
         if model_config.dtype not in supported_dtypes:
@@ -78,7 +82,8 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
+        if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION[
+                model_config.quantization]:
             model = model_class(model_config.hf_config, quant_config)
         else:
             model = model_class(model_config.hf_config)
@@ -92,4 +97,6 @@ def get_model(model_config: ModelConfig) -> nn.Module:
             model.load_weights(model_config.model, model_config.download_dir,
                                model_config.load_format, model_config.revision)
             model = model.cuda()
+        if model_config.quantization is not None:
+            quant_post_init(model, max_tokens)
     return model.eval()

@@ -114,6 +114,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             self.num_embeddings_per_partition, self.embedding_dim,
             device=torch.cuda.current_device(), dtype=params_dtype))
 
+
     def forward(self, input_):
         if self.tensor_model_parallel_size > 1:
             # Build the mask.

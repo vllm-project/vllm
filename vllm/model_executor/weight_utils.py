@@ -11,6 +11,7 @@ from safetensors.torch import load_file, save_file, safe_open
 import numpy as np
 import torch
 from tqdm.auto import tqdm
+from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.quantization_utils import get_quant_class
@@ -84,8 +85,13 @@ def convert_bin_to_safetensor_file(
 def get_quant_config(
     quantization: str,
     model_name_or_path: str,
+    hf_config: PretrainedConfig,
     cache_dir: Optional[str] = None,
 ) -> QuantizationConfig:
+    if quantization == "gptq" and hasattr(hf_config, "quantization_config"):
+        config = hf_config.quantization_config
+        return get_quant_class(quantization).from_config(config)
+
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
