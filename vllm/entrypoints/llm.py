@@ -37,10 +37,12 @@ class LLM:
             the `torch_dtype` attribute specified in the model config file.
             However, if the `torch_dtype` in the config is `float32`, we will
             use `float16` instead.
-        seed: The seed to initialize the random number generator for sampling.
-        quantization: Method used to quantize the weights
+        quantization: The method used to quantize the model weights. Currently,
+            we support "awq". If None, we assume the model weights are not
+            quantized and use `dtype` to determine the data type of the weights.
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id.
+        seed: The seed to initialize the random number generator for sampling.
     """
 
     def __init__(
@@ -51,8 +53,8 @@ class LLM:
         trust_remote_code: bool = False,
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
-        seed: int = 0,
         quantization: Optional[str] = None,
+        seed: int = 0,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -64,8 +66,8 @@ class LLM:
             trust_remote_code=trust_remote_code,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
-            seed=seed,
             quantization=quantization,
+            seed=seed,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
