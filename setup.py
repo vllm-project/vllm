@@ -66,8 +66,8 @@ def get_torch_arch_list() -> Set[str]:
 # First, check the TORCH_CUDA_ARCH_LIST environment variable.
 compute_capabilities = get_torch_arch_list()
 if not compute_capabilities:
-    # If TORCH_CUDA_ARCH_LIST is not defined, target all available GPUs on the
-    # machine.
+    # If TORCH_CUDA_ARCH_LIST is not defined or empty, target all available
+    # GPUs on the current machine.
     device_count = torch.cuda.device_count()
     for i in range(device_count):
         major, minor = torch.cuda.get_device_capability(i)
