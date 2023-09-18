@@ -83,7 +83,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                  init_method=init.xavier_normal_,
                  params_dtype: torch.dtype=None,
                  use_cpu_initialization: bool=False,
-                 perform_initialization: bool=True):
+                 perform_initialization: bool=False):
         super(VocabParallelEmbedding, self).__init__()
         assert not perform_initialization
         assert not use_cpu_initialization
@@ -113,7 +113,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.weight = Parameter(torch.empty(
             self.num_embeddings_per_partition, self.embedding_dim,
             device=torch.cuda.current_device(), dtype=params_dtype))
- 
+
     def forward(self, input_):
         if self.tensor_model_parallel_size > 1:
             # Build the mask.
@@ -172,7 +172,7 @@ class ColumnParallelLinear(torch.nn.Module):
                  skip_bias_add=False,
                  params_dtype=None,
                  use_cpu_initialization=False,
-                 perform_initialization=True,
+                 perform_initialization=False,
                  quant_config=None,
                  ):
         super(ColumnParallelLinear, self).__init__()
@@ -288,7 +288,7 @@ class RowParallelLinear(torch.nn.Module):
                  skip_bias_add=False,
                  params_dtype=None,
                  use_cpu_initialization=False,
-                 perform_initialization=True,
+                 perform_initialization=False,
                  reduce_results=True,
                  quant_config=None,
                  ):
