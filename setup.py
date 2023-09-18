@@ -38,18 +38,43 @@ def get_nvcc_cuda_version(cuda_dir: str) -> Version:
     return nvcc_cuda_version
 
 
-# Collect the compute capabilities of all available GPUs.
-device_count = torch.cuda.device_count()
 compute_capabilities: Set[int] = set()
-for i in range(device_count):
-    major, minor = torch.cuda.get_device_capability(i)
-    if major < 7:
-        raise RuntimeError(
-            "GPUs with compute capability less than 7.0 are not supported.")
-    compute_capabilities.add(major * 10 + minor)
+torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST", None)
+if torch_arch_list is not None:
+    # If TORCH_CUDA_ARCH_LIST is defined, target the GPUs specified in the
+    # environment variable.
+    for cc in torch_arch_list.replace(" ", ";").split(";"):
+        major_minor = cc.split(".")
+        if len(major_minor) != 2:
+            raise ValueError(
+                "The TORCH_CUDA_ARCH_LIST env variable should be a list of "
+                "compute capabilities separated by ';', and each compute "
+                "capability should be a string of the form 'major.minor'."
+            )
+        major, minor = cc.split(".")
+        compute_capabilities.add(int(major) * 10 + int(minor))
+else:
+    # If TORCH_CUDA_ARCH_LIST is not defined, target all available GPUs on the
+    # machine.
+    device_count = torch.cuda.device_count()
+    for i in range(device_count):
+        major, minor = torch.cuda.get_device_capability(i)
+        if major < 7:
+            raise RuntimeError(
+                "GPUs with compute capability less than 7.0 are not supported.")
+        compute_capabilities.add(major * 10 + minor)
+
+nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
+# If no GPU is specified nor available, add all supported compute capabilities.
+if not compute_capabilities:
+    compute_capabilities = {70, 75, 80}
+    if nvcc_cuda_version >= Version("11.1"):
+        compute_capabilities.add(86)
+    if nvcc_cuda_version >= Version("11.8"):
+        compute_capabilities.add(89)
+        compute_capabilities.add(90)
 
 # Validate the NVCC CUDA version.
-nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
 if nvcc_cuda_version < Version("11.0"):
     raise RuntimeError("CUDA 11.0 or higher is required to build the package.")
 if 86 in compute_capabilities and nvcc_cuda_version < Version("11.1"):
@@ -68,15 +93,6 @@ if 90 in compute_capabilities and nvcc_cuda_version < Version("11.8"):
     raise RuntimeError(
         "CUDA 11.8 or higher is required for GPUs with compute capability 9.0."
     )
-
-# If no GPU is available, add all supported compute capabilities.
-if not compute_capabilities:
-    compute_capabilities = {70, 75, 80}
-    if nvcc_cuda_version >= Version("11.1"):
-        compute_capabilities.add(86)
-    if nvcc_cuda_version >= Version("11.8"):
-        compute_capabilities.add(89)
-        compute_capabilities.add(90)
 
 # Add target compute capabilities to NVCC flags.
 for capability in compute_capabilities:
