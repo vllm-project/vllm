@@ -115,7 +115,6 @@ class Sequence:
 
         self.data = SequenceData(prompt_token_ids)
         self.output_logprobs: List[Dict[int, float]] = []
-        self.output_tokens: List[str] = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
@@ -123,6 +122,12 @@ class Sequence:
         self._append_tokens_to_blocks(prompt_token_ids)
         self.status = SequenceStatus.WAITING
 
+        # Used for incremental detokenization
+        self.prefix_offset = 0
+        self.read_offset = 0
+        # Input + output tokens
+        self.tokens: Optional[List[str]] = None
+        
         self.prompt_top_logprobs: Optional[List[Optional[Dict[int,
                                                               float]]]] = None
 

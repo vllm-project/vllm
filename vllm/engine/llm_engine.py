@@ -74,11 +74,13 @@ class LLMEngine:
             f"model={model_config.model!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
+            f"revision={model_config.revision}, "
             f"trust_remote_code={model_config.trust_remote_code}, "
             f"dtype={model_config.dtype}, "
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
+            f"quantization={model_config.quantization}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -92,7 +94,8 @@ class LLMEngine:
         self.tokenizer = get_tokenizer(
             model_config.tokenizer,
             tokenizer_mode=model_config.tokenizer_mode,
-            trust_remote_code=model_config.trust_remote_code)
+            trust_remote_code=model_config.trust_remote_code,
+            revision=model_config.revision)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -296,14 +299,12 @@ class LLMEngine:
     def _schedule(
         self
     ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs,
-               Optional[List[RequestOutput]]]:
+               List[RequestOutput]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
-        if scheduler_outputs.is_empty():
-            return seq_group_metadata_list, scheduler_outputs, [
-                RequestOutput.from_seq_group(seq_group)
-                for seq_group in scheduler_outputs.ignored_seq_groups
-            ]
-        return seq_group_metadata_list, scheduler_outputs, None
+        return seq_group_metadata_list, scheduler_outputs, [
+            RequestOutput.from_seq_group(seq_group)
+            for seq_group in scheduler_outputs.ignored_seq_groups
+        ]
 
     def _check_beam_search_early_stopping(
         self,
@@ -550,10 +551,9 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        (seq_group_metadata_list, scheduler_outputs,
-         early_return) = self._schedule()
-        if early_return is not None:
-            return early_return
+        seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
+        if scheduler_outputs.is_empty():
+            return ignored
 
         # Execute the model.
         output = self._run_workers(
@@ -564,7 +564,7 @@ class LLMEngine:
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        return self._process_model_outputs(output, scheduler_outputs) + ignored
 
     def _log_system_stats(
         self,
@@ -631,15 +631,22 @@ class LLMEngine:
 
     def _decode_sequence(self, seq: Sequence) -> None:
         """Decodes the new token for a sequence."""
-        new_token, new_output_text = detokenize_incrementally(
-            self.tokenizer,
-            seq.output_tokens,
-            seq.get_last_token_id(),
-            skip_special_tokens=True,
-        )
-        if new_token is not None:
-            seq.output_tokens.append(new_token)
-            seq.output_text = new_output_text
+        (new_tokens, new_output_text, prefix_offset,
+         read_offset) = detokenize_incrementally(
+             self.tokenizer,
+             all_input_ids=seq.get_token_ids(),
+             prev_tokens=seq.tokens,
+             prefix_offset=seq.prefix_offset,
+             read_offset=seq.read_offset,
+             skip_special_tokens=True,
+         )
+        if seq.tokens is None:
+            seq.tokens = new_tokens
+        else:
+            seq.tokens.extend(new_tokens)
+        seq.prefix_offset = prefix_offset
+        seq.read_offset = read_offset
+        seq.output_text += new_output_text
 
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:

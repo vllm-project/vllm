@@ -11,3 +11,4 @@ types-setuptools
 # testing
 pytest
 pytest-forked
+pytest-asyncio
