@@ -53,9 +53,6 @@ class SequenceData:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
-        prompt_logprobs: The log probabilities of the prompt tokens.
-        prompt_top_logprobs: The log probabilities of the top probability
-        tokens in the prompt.
     """
 
     def __init__(
@@ -65,14 +62,6 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
-
-        self.prompt_logprobs: Optional[List[Optional[float]]] = None
-        self.prompt_top_logprobs: Optional[List[Optional[Dict[int,
-                                                              float]]]] = None
-
-    @property
-    def cumulative_prompt_logprob(self) -> float:
-        return sum(x for x in self.prompt_logprobs if x is not None)  # pylint: disable=E1133
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
@@ -99,8 +88,7 @@ class SequenceData:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob}, "
-                f"prompt_logprobs={self.prompt_logprobs})")
+                f"cumulative_logprob={self.cumulative_logprob})")
 
 
 class Sequence:
@@ -134,6 +122,22 @@ class Sequence:
         # Initialize the logical token blocks with the prompt token ids.
         self._append_tokens_to_blocks(prompt_token_ids)
         self.status = SequenceStatus.WAITING
+
+        self.prompt_top_logprobs: Optional[List[Optional[Dict[int,
+                                                              float]]]] = None
+
+    @property
+    def cumulative_prompt_logprob(self) -> float:
+        return sum(x for x in self.prompt_logprobs if x is not None)  # pylint: disable=E1133
+
+    @property
+    def prompt_logprobs(self) -> Optional[List[Optional[float]]]:
+        if self.prompt_top_logprobs is None:
+            return None
+        return [
+            x[self.data.prompt_token_ids[i]] if x is not None else None
+            for i, x in enumerate(self.prompt_top_logprobs)
+        ]
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
@@ -247,13 +251,13 @@ class SequenceGroup:
         self.arrival_time = arrival_time
 
     @property
-    def prompt_top_logprobs(self) -> Optional[List[Dict[int, float]]]:
+    def prompt_top_logprobs(
+            self) -> Optional[List[Optional[Dict[int, float]]]]:
         # Randomly pick a seq since all of their prompts should be the same
         seq = next(iter(self.seqs_dict.values()))
-        if (self.sampling_params.echo
-                and self.sampling_params.logprobs is not None
-                and self.sampling_params.logprobs > 0):
-            return seq.data.prompt_top_logprobs
+        if (self.sampling_params.get_prompt_logprobs
+                and self.sampling_params.logprobs is not None):
+            return seq.prompt_top_logprobs
         else:
             return None
 
@@ -261,9 +265,9 @@ class SequenceGroup:
     def prompt_logprobs(self) -> Optional[List[float]]:
         # Randomly pick a seq since all of their prompts should be the same
         seq = next(iter(self.seqs_dict.values()))
-        if (self.sampling_params.echo
+        if (self.sampling_params.get_prompt_logprobs
                 and self.sampling_params.logprobs is not None):
-            return seq.data.prompt_logprobs
+            return seq.prompt_logprobs
         else:
             return None
 
@@ -374,18 +378,17 @@ class SequenceOutputs:
         self.output_token = output_token
         self.logprobs = logprobs
 
-        self.prompt_logprobs: Optional[List[Optional[float]]] = None
         self.prompt_top_logprobs: Optional[List[Optional[Dict[int,
                                                               float]]]] = None
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
-                f"output_token={self.output_token}), "
+                f"output_token={self.output_token}, "
                 f"logprobs={self.logprobs})")
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
-            raise NotImplementedError
+            raise NotImplementedError()
         return (self.parent_seq_id == other.parent_seq_id
                 and self.output_token == other.output_token
                 and self.logprobs == other.logprobs)

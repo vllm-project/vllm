@@ -156,17 +156,21 @@ async def show_available_models():
 
 def create_logprobs(
     token_ids: List[int],
-    token_logprobs: List[float],
-    top_logprobs: Optional[List[Dict[int, float]]] = None,
+    top_logprobs: List[Optional[Dict[int, float]]] = None,
+    num_output_top_logprobs: Optional[int] = None,
     initial_text_offset: int = 0,
 ) -> LogProbs:
     """Create OpenAI-style logprobs."""
     logprobs = LogProbs()
     last_token_len = 0
-    if top_logprobs:
+    if num_output_top_logprobs:
         logprobs.top_logprobs = []
-    for i, (token_id,
-            token_logprob) in enumerate(zip(token_ids, token_logprobs)):
+    for i, token_id in enumerate(token_ids):
+        step_top_logprobs = top_logprobs[i]
+        if step_top_logprobs is not None:
+            token_logprob = step_top_logprobs[token_id]
+        else:
+            token_logprob = None
         token = tokenizer.convert_ids_to_tokens(token_id)
         logprobs.tokens.append(token)
         logprobs.token_logprobs.append(token_logprob)
@@ -177,11 +181,15 @@ def create_logprobs(
                                         last_token_len)
         last_token_len = len(token)
 
-        if top_logprobs:
+        if num_output_top_logprobs:
             logprobs.top_logprobs.append({
                 tokenizer.convert_ids_to_tokens(i): p
-                for i, p in top_logprobs[i].items()
-            } if top_logprobs[i] else None)
+                for i, p in step_top_logprobs.items()
+                # Filter out additional logprobs for the chosen token
+                # This ensures the same number of top logprobs requested
+                if not (len(step_top_logprobs) > num_output_top_logprobs
+                        and i == token_id)
+            } if step_top_logprobs else None)
     return logprobs
 
 
@@ -363,7 +371,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     for the API specification. This API mimics the OpenAI Completion API.
 
     NOTE: Currently we do not support the following features:
-        - echo (since the vLLM engine does not currently support
+        - get_prompt_logprobs (since the vLLM engine does not currently support
           getting the logprobs of prompt tokens)
         - suffix (the language models we currently support do not support
           suffix)
@@ -433,7 +441,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             max_tokens=request.max_tokens if not echo_self else 1,
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
-            echo=request.echo,
+            get_prompt_logprobs=request.echo,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -492,11 +500,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 if request.logprobs is not None:
                     logprobs = create_logprobs(
                         token_ids=output.token_ids[previous_num_tokens[i]:],
-                        token_logprobs=output.
-                        logprobs[previous_num_tokens[i]:],
-                        top_logprobs=output.
-                        top_logprobs[previous_num_tokens[i]:]
-                        if request.logprobs > 0 else None,
+                        top_logprobs=output.logprobs[previous_num_tokens[i]:],
+                        num_output_top_logprobs=request.logprobs,
                         initial_text_offset=len(previous_texts[i]),
                     )
                 else:
@@ -550,17 +555,12 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         if request.logprobs is not None:
             token_ids = (output.token_ids
                          if not echo_self else output.token_ids[:-1])
-            token_logprobs = (output.logprobs
-                              if not echo_self else output.logprobs[:-1])
-            if request.logprobs == 0:
-                top_logprobs = None
-            else:
-                top_logprobs = (output.top_logprobs
-                                if not echo_self else output.top_logprobs[:-1])
+            top_logprobs = (output.logprobs
+                            if not echo_self else output.logprobs[:-1])
             logprobs = create_logprobs(
                 token_ids=token_ids,
-                token_logprobs=token_logprobs,
                 top_logprobs=top_logprobs,
+                num_output_top_logprobs=request.logprobs,
             )
         else:
             logprobs = None

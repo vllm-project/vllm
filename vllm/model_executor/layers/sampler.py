@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.tensor_parallel import (
-    gather_from_tensor_model_parallel_region)
+    gather_from_tensor_model_parallel_region, )
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceOutputs
 
@@ -57,18 +57,19 @@ class Sampler(nn.Module):
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
-        # Decide whether to perform `echo`
-        if (input_metadata.echo is not None and any(input_metadata.echo)
+        # Decide whether to perform `get_prompt_logprobs`
+        if (input_metadata.get_prompt_logprobs is not None
+                and any(input_metadata.get_prompt_logprobs)
                 and any(x.logprobs is not None
                         for _, x in input_metadata.seq_groups)):
-            echo_results = self._process_echo(
+            prompt_logprob_results = self._process_prompt_logprobs(
                 embedding=embedding,
                 hidden_states=hidden_states,
                 input_metadata=input_metadata,
                 embedding_bias=embedding_bias,
             )
         else:
-            echo_results = None
+            prompt_logprob_results = None
 
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
@@ -112,29 +113,29 @@ class Sampler(nn.Module):
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
-        # Compute the log probabilities (before applying top-p and top-k).
-        # Re-compute to ensure numerical stability.
+        # Compute the log probabilities.
+        # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        samples = _sample(probs, logprobs, input_metadata)
-        if echo_results:
-            for i, ss in enumerate(samples):
-                if i in echo_results:
-                    logprobs_list, top_logprobs_list = echo_results[i]
-                    for s in ss:
-                        s.prompt_logprobs = logprobs_list
-                        s.prompt_top_logprobs = top_logprobs_list
+        samples_list = _sample(probs, logprobs, input_metadata)
+        if prompt_logprob_results:
+            # Add prompt logprobs to the samples
+            for i, samples in enumerate(samples_list):
+                if i in prompt_logprob_results:
+                    top_logprobs_list = prompt_logprob_results[i]
+                    for sample in samples:
+                        sample.prompt_top_logprobs = top_logprobs_list
 
-        return samples
+        return samples_list
 
-    def _process_echo(
+    def _process_prompt_logprobs(
         self,
         embedding: torch.Tensor,
         hidden_states: torch.Tensor,
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
-    ) -> Dict[int, Tuple[LogProbsList, TopLogProbsList]]:
+    ) -> Dict[int, TopLogProbsList]:
         prompt_index_list: List[int] = []
         seq_data = []
         has_prompt_seq_group_ids = []
@@ -153,7 +154,7 @@ class Sampler(nn.Module):
             prompt_id_list.extend(seq_datum.prompt_token_ids[1:])
 
         if len(seq_data) == 0:
-            return
+            return {}
 
         prompt_indices = torch.tensor(
             prompt_index_list,
@@ -171,35 +172,47 @@ class Sampler(nn.Module):
                                          embedding_bias).log_softmax(dim=-1)
         # Log probs used in the prompt
         # Shift by 1 to account for the start token
-        selected_log_probs = log_probs.gather(
-            dim=-1, index=prompt_ids.unsqueeze(dim=-1)).squeeze(-1).tolist()
+        selected_log_probs = (log_probs.gather(
+            dim=-1, index=prompt_ids.unsqueeze(dim=-1)).squeeze(-1).tolist())
 
         start_idx = 0
-        logprobs_list = [None] * len(seq_data)
         top_logprobs_list = [None] * len(seq_data)
-        echo_results = {}
+        prompt_logprobs_results = {}
         for i, (prompt_len, seq_datum) in enumerate(
                 zip(input_metadata.prompt_lens, seq_data)):
+            if not input_metadata.seq_groups[i][1].get_prompt_logprobs:
+                continue
+            top_logprobs_list[i] = []
             num_log_probs = input_metadata.seq_groups[i][1].logprobs
             assert num_log_probs is not None
             if num_log_probs > 0:
-                top_log_porbs = torch.topk(log_probs[start_idx:start_idx +
-                                                     prompt_len - 1],
-                                           k=num_log_probs,
-                                           dim=-1)
-                # seq_datum.prompt_top_logprobs = [None] + [
-                top_logprobs_list[i] = [None] + [
-                    dict(zip(x, y))
-                    for x, y in zip(top_log_porbs.indices.tolist(),
-                                    top_log_porbs.values.tolist())
-                ]
-            # seq_datum.prompt_logprobs = [
-            logprobs_list[i] = [
-                None
-            ] + selected_log_probs[start_idx:start_idx + prompt_len - 1]
+                top_log_probs = torch.topk(
+                    log_probs[start_idx:start_idx + prompt_len - 1],
+                    k=num_log_probs,
+                    dim=-1,
+                )
+                top_logprobs_list[i].extend([None] + [
+                    dict(zip(x, y)) for x, y in zip(
+                        top_log_probs.indices.tolist(),
+                        top_log_probs.values.tolist(),
+                    )
+                ])
+            elif num_log_probs == 0:
+                top_logprobs_list[i].extend([None] +
+                                            [{}
+                                             for _ in range(prompt_len - 1)])
+            for j, (chosen_token_id, chosen_log_prob) in enumerate(
+                    zip(
+                        prompt_id_list[start_idx:start_idx + prompt_len - 1],
+                        selected_log_probs[start_idx:start_idx + prompt_len -
+                                           1],
+                    )):
+                # Index added 1 to count for the first `None`
+                top_logprobs_list[i][j + 1][chosen_token_id] = chosen_log_prob
+
             start_idx += prompt_len - 1
-            echo_results[i] = (logprobs_list[i], top_logprobs_list[i])
-        return echo_results
+            prompt_logprobs_results[i] = top_logprobs_list[i]
+        return prompt_logprobs_results
 
 
 def _prune_hidden_states(
@@ -218,7 +231,7 @@ def _prune_hidden_states(
 
 
 def _get_penalties(
-        input_metadata: InputMetadata) -> Tuple[List[float], List[float]]:
+    input_metadata: InputMetadata, ) -> Tuple[List[float], List[float]]:
     # Collect the presence and frequency penalties.
     presence_penalties: List[float] = []
     frequency_penalties: List[float] = []

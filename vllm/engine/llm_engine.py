@@ -256,6 +256,8 @@ class LLMEngine:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
         if prompt is None:
+            # If only `prompt_token_ids` provided, this ensures
+            # the prompt string presented.
             prompt = self.tokenizer.decode(prompt_token_ids,
                                            skip_special_tokens=True)
 
@@ -358,11 +360,9 @@ class LLMEngine:
         }
         for sample in samples:
             parent_child_dict[sample.parent_seq_id].append(sample)
-            seq_data = seq_group.seqs_dict[sample.parent_seq_id].data
-            if sample.prompt_logprobs is not None:
-                seq_data.prompt_logprobs = sample.prompt_logprobs
+            seq = seq_group.seqs_dict[sample.parent_seq_id]
             if sample.prompt_top_logprobs is not None:
-                seq_data.prompt_top_logprobs = sample.prompt_top_logprobs
+                seq.prompt_top_logprobs = sample.prompt_top_logprobs
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 

@@ -149,7 +149,7 @@ class Worker:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
-        use_echo: List[bool] = []
+        get_prompt_logprobs: List[bool] = []
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -188,8 +188,9 @@ class Worker:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-            # Whether to use echo for prompts.
-            use_echo.append(seq_group_metadata.sampling_params.echo)
+            # Whether to use get_prompt_logprobs for prompts.
+            get_prompt_logprobs.append(
+                seq_group_metadata.sampling_params.get_prompt_logprobs)
 
         # Add generation tokens.
         max_context_len = 0
@@ -254,7 +255,7 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
-            echo=use_echo,
+            get_prompt_logprobs=get_prompt_logprobs,
         )
         return tokens_tensor, positions_tensor, input_metadata
 
