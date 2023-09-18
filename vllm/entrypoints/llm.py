@@ -46,8 +46,8 @@ class LLM:
         gpu_memory_utilization: The ratio (between 0 and 1) of GPU memory to
             reserve for the model weights, activations, and KV cache. Higher
             values will increase the KV cache size and thus improve the model's
-            throughput. However, if the value is too high, it may cause out of
-            memory errors.
+            throughput. However, if the value is too high, it may cause out-of-
+            memory (OOM) errors.
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
