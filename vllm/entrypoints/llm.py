@@ -52,7 +52,7 @@ class LLM:
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
             requests will have `best_of=1`, you can safely set this to 0.
-            Otherwise, too small values may cause out of memory errors.
+            Otherwise, too small values may cause out-of-memory (OOM) errors.
     """
 
     def __init__(
