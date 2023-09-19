@@ -78,8 +78,8 @@ class ModelConfig:
         self._verify_quantization()
         self._max_model_len = None
         if max_model_len is not None:
-            (derived_max_model_len_key,
-             derived_max_model_len) = self._get_max_model_len()
+            (derived_max_model_len,
+             derived_max_model_len_key) = self._get_max_model_len()
             if max_model_len > derived_max_model_len:
                 raise ValueError(
                     f"User-specified max_model_len ({max_model_len}) is "
