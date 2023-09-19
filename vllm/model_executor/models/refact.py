@@ -21,8 +21,9 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
+from vllm.model_executor.weight_utils import (
+    convert_pyslice_to_tensor, hf_model_weights_iterator,
+    load_tensor_parallel_weights)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -273,7 +274,8 @@ class GPTRefactForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     use_np_cache: bool = False):
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         kv_proj_size = self.config.hidden_size // self.config.num_attention_heads
@@ -285,7 +287,9 @@ class GPTRefactForCausalLM(nn.Module):
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache):
+                model_name_or_path, cache_dir, load_format, revision):
+            loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+
             if "wte.weight" in name or "lm_head" in name:
                 param = state_dict[name]
                 # Consider padding in the vocab size.
