@@ -2,6 +2,7 @@ ninja  # For faster builds.
 psutil
 ray >= 2.5.1
 pandas  # Required for Ray data.
+pyarrow  # Required for Ray data.
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch >= 2.0.0
