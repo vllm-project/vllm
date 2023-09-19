@@ -95,7 +95,6 @@ class LlamaAttention(nn.Module):
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
-    ):
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
