@@ -56,7 +56,9 @@ class PagedAttention(nn.Module):
                  num_heads: int,
                  head_size: int,
                  scale: float,
-                 num_kv_heads: Optional[int] = None) -> None:
+                 num_kv_heads: Optional[int] = None,
+                 quant_kv_cache: bool = False,
+                 kv_quant_params: List[int] = None) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
@@ -65,6 +67,8 @@ class PagedAttention(nn.Module):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.quant_kv_cache = quant_kv_cache
+        self.kv_quant_params = kv_quant_params
         self.head_mapping = torch.repeat_interleave(
             torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
             self.num_queries_per_kv)
@@ -144,19 +148,35 @@ class PagedAttention(nn.Module):
             input_metadata: metadata for paged attention.
         """
         block_size = value_cache.shape[3]
-        attention_ops.single_query_cached_kv_attention(
-            output,
-            query,
-            key_cache,
-            value_cache,
-            self.head_mapping,
-            self.scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
-            block_size,
-            input_metadata.max_context_len,
-            None,  # alibi_slopes
-        )
+        if self.quant_kv_cache:
+            attention_ops.single_query_cached_kv_quantized_attention(
+                output,
+                query,
+                key_cache,
+                value_cache,
+                self.head_mapping,
+                self.scale,
+                input_metadata.block_tables,
+                input_metadata.context_lens,
+                block_size,
+                input_metadata.max_context_len,
+                None,  # alibi_slopes
+                *self.kv_quant_params,
+            )
+        else:
+            attention_ops.single_query_cached_kv_attention(
+                output,
+                query,
+                key_cache,
+                value_cache,
+                self.head_mapping,
+                self.scale,
+                input_metadata.block_tables,
+                input_metadata.context_lens,
+                block_size,
+                input_metadata.max_context_len,
+                None,  # alibi_slopes
+            )
 
     def forward(
         self,
@@ -221,13 +241,23 @@ class PagedAttention(nn.Module):
         if (num_valid_tokens > 0 and key_cache is not None
                 and value_cache is not None):
             # The stride is 3 because the key and value are sliced from qkv.
-            cache_ops.reshape_and_cache(
-                key[:num_valid_tokens],
-                value[:num_valid_tokens],
-                key_cache,
-                value_cache,
-                input_metadata.slot_mapping,
-            )
+            if self.quant_kv_cache:
+                cache_ops.reshape_and_cache_quantized(
+                    key[:num_valid_tokens],
+                    value[:num_valid_tokens],
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping,
+                    *self.kv_quant_params,
+                )
+            else:
+                cache_ops.reshape_and_cache(
+                    key[:num_valid_tokens],
+                    value[:num_valid_tokens],
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping,
+                )
 
         if input_metadata.num_generation_tokens > 0:
             # Decoding run.
@@ -259,6 +289,8 @@ class PagedAttentionWithRoPE(PagedAttention):
         base: int = 10000,
         num_kv_heads: Optional[int] = None,
         is_neox_style: bool = True,
+        quant_kv_cache: bool = False,
+        kv_quant_params: torch.Tensor = None,
     ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
         self.is_neox_style = is_neox_style

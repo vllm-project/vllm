@@ -93,6 +93,8 @@ class LlamaAttention(nn.Module):
         num_kv_heads: int,
         rope_theta: float = 10000,
         quant_config: Optional[QuantizationConfig] = None,
+        quant_kv_cache: bool = False,
+        kv_quant_params: List[int] = None
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -131,7 +133,9 @@ class LlamaAttention(nn.Module):
                                            self.scaling,
                                            base=self.rope_theta,
                                            rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads)
+                                           num_kv_heads=self.num_kv_heads,
+                                           quant_kv_cache=quant_kv_cache,
+                                           kv_quant_params=kv_quant_params)
 
     def forward(
         self,
@@ -156,6 +160,8 @@ class LlamaDecoderLayer(nn.Module):
         self,
         config: LlamaConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        quant_kv_cache: bool = False,
+        kv_quant_params: List[int] = None
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -167,6 +173,8 @@ class LlamaDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             quant_config=quant_config,
+            quant_kv_cache=quant_kv_cache,
+            kv_quant_params=kv_quant_params
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -213,6 +221,8 @@ class LlamaModel(nn.Module):
         self,
         config: LlamaConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        quant_kv_cache: bool = False,
+        kv_quant_params_list: List[List[int]] = None
     ) -> None:
         super().__init__()
         self.config = config
@@ -223,7 +233,7 @@ class LlamaModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             vocab_size, config.hidden_size, perform_initialization=False)
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config, quant_config)
+            LlamaDecoderLayer(config, quant_config, quant_kv_cache, kv_quant_params_list[i])
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -260,11 +270,13 @@ class LlamaForCausalLM(nn.Module):
         self,
         config: LlamaConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        quant_kv_cache: bool = False,
+        kv_quant_params_list: List[List[int]] = None
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = LlamaModel(config, quant_config)
+        self.model = LlamaModel(config, quant_config, quant_kv_cache, kv_quant_params_list)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         # NOTE: The LM head is not quantized.
         self.lm_head = ParallelLinear.column(config.hidden_size,
@@ -318,7 +330,7 @@ class LlamaForCausalLM(nn.Module):
                               self.config.num_attention_heads *
                               self.config.num_key_value_heads // tp_size)
         attention_weight_specs = [
-            # (weight_name, shard_size, offset)
+            # (weight_name, shard_size, offset),
             ("q_proj", q_proj_shard_size, 0),
             ("k_proj", kv_proj_shard_size, q_proj_shard_size),
             ("v_proj", kv_proj_shard_size,

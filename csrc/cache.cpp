@@ -27,6 +27,17 @@ void gather_cached_kv(
   torch::Tensor& value_cache,
   torch::Tensor& slot_mapping);
 
+void reshape_and_cache_quantized(
+  torch::Tensor& key,           // [num_tokens, num_heads, head_size]
+  torch::Tensor& value,         // [num_tokens, num_heads, head_size]
+  torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
+  torch::Tensor& value_cache,   // [num_blocks, num_heads, head_size, block_size]
+  torch::Tensor& slot_mapping,  // [num_tokens]
+  const float k_scale,
+  const float k_zp,
+  const float v_scale,
+  const float v_zp);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
     "swap_blocks",
@@ -44,4 +55,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "gather_cached_kv",
     &gather_cached_kv,
     "Gather key and value from the cache into contiguous QKV tensors");
+  m.def(
+    "reshape_and_cache_quantized",
+    &reshape_and_cache_quantized,
+    "Reshape and quantized key and value tensors and cache them");
 }
