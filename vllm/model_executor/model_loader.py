@@ -49,7 +49,11 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
             # baichuan 2 has different vocab size
             if ("baichuan" in arch.lower()) and (getattr(config, "vocab_size")
                                                  == 125696):
-                return Baichuan2ForCausalLM
+                # baichuan 2 7b and 13b have different intermediate size
+                if getattr(config, "intermediate_size") == 11008:
+                    return BaiChuan2ForCausalLM
+                elif getattr(config, "intermediate_size") == 13696:
+                    return Baichuan2ForCausalLM
             return _MODEL_REGISTRY[arch]
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
