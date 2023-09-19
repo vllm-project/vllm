@@ -67,11 +67,17 @@ class GPTJAttention(nn.Module):
         scaling = self.head_size**-0.5
         assert getattr(config, "rotary", True)
         assert config.rotary_dim % 2 == 0
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_size,
-                                           scaling,
-                                           config.rotary_dim,
-                                           is_neox_style=False)
+        rope_theta = getattr(config, "rope_theta", 10000)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_size,
+            scaling,
+            config.rotary_dim,
+            base=rope_theta,
+            max_position=max_position_embeddings,
+            is_neox_style=False)
         self.warmup = False
 
     def forward(

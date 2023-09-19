@@ -59,6 +59,8 @@ class InternLMAttention(nn.Module):
         self,
         hidden_size: int,
         num_heads: int,
+        rope_theta: float = 10000,
+        max_position_embeddings: int = 8192,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -70,6 +72,8 @@ class InternLMAttention(nn.Module):
                           tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
         self.scaling = self.head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = ColumnParallelLinear(
             hidden_size,
@@ -85,10 +89,13 @@ class InternLMAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           rotary_dim=self.head_dim)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            base=self.rope_theta,
+            max_position=self.max_position_embeddings,
+            rotary_dim=self.head_dim)
 
     def forward(
         self,
@@ -112,9 +119,14 @@ class InternLMDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
+        rope_theta = getattr(config, "rope_theta", 10000)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         self.self_attn = InternLMAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
+            rope_theta=rope_theta,
+            max_position_embeddings=max_position_embeddings,
         )
         self.mlp = InternLMMLP(
             hidden_size=self.hidden_size,
