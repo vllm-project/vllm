@@ -121,8 +121,7 @@ class Attention(nn.Module):
             self.head_dim,
             self.scaling,
             slopes=alibi_slopes,
-            num_kv_heads=1,
-            dtype=self.q.weight.dtype
+            num_kv_heads=1
         )
 
     def forward(
