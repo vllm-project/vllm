@@ -103,6 +103,18 @@ class EngineArgs:
                             default=None,
                             help='model context length. If unspecified, '
                             'will be automatically derived from the model.')
+        # kv cache quantization
+        parser.add_argument(
+            '--kv-cache-dtype',
+            type=str,
+            default="float16",
+            help='data type for kv cache')
+        parser.add_argument(
+            'kv-quant-params-path',
+            type=str,
+            default=None,
+            help="path to kv scales and zero points"
+        )
         # Parallel arguments
         parser.add_argument('--worker-use-ray',
                             action='store_true',

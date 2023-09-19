@@ -2,11 +2,12 @@
 import contextlib
 from typing import Type
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, ParallelConfig
 from vllm.model_executor.models import *  # pylint: disable=wildcard-import
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
@@ -102,6 +103,22 @@ def get_model(model_config: ModelConfig) -> nn.Module:
             model.load_weights(model_config.model, model_config.download_dir,
                                model_config.load_format, model_config.revision)
             model = model.cuda()
+    return model.eval()
+
+
+def get_quant_model_kv(model_config: ModelConfig, parallel_config: ParallelConfig,
+                       rank: int):
+    num_layers = model_config.get_num_layers(parallel_config)
+    ## num_layers * [k_scale, k_zp, v_scale, v_zp]
+    kv_quant_params_list = []
+    for i in range(num_layers):
+        path = model_config.kv_quant_params_path + f"/layers.{i}.past_kv_scale.{rank}.weight"
+        kv_quant_params = list(np.fromfile(path, dtype=np.float32))
+        kv_quant_params_list.append(kv_quant_params)
+    model_class = _get_model_architecture(model_config.hf_config)
+    torch.set_default_dtype(model_config.dtype)
+    model = model_class(model_config.hf_config, model_config.quant_kv_cache, kv_quant_params)
+    model = model.cuda()
     return model.eval()
 
 

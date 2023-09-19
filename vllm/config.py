@@ -60,6 +60,8 @@ class ModelConfig:
         revision: Optional[str],
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        kv_cache_dtype: str = None, ## for kv cache quantization, only for int8 right now
+        kv_quant_params_path: str = None, ## path for kv scales and zero points
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -74,6 +76,10 @@ class ModelConfig:
         self.hf_config = get_config(model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self._verify_load_format()
+        ## for kv cache quantization
+        self.kv_cache_dtype = _STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype] if kv_cache_dtype else self.dtype
+        self.quant_kv_cache = self.kv_cache_dtype == self.dtype
+        self.kv_quant_params_path = kv_quant_params_path
         self._verify_tokenizer_mode()
         self._verify_quantization()
         self.max_model_len = None
@@ -296,6 +302,7 @@ class SchedulerConfig:
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
+    "int8": torch.int8,
     "half": torch.float16,
     "float16": torch.float16,
     "float": torch.float32,
