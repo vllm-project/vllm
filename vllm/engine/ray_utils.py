@@ -2,6 +2,9 @@ import socket
 from typing import Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import ParallelConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 try:
     import ray
@@ -28,7 +31,10 @@ try:
             executor = getattr(self, method)
             return executor(*args, **kwargs)
 
-except ImportError:
+except ImportError as e:
+    logger.warning(f"Failed to import Ray with {e!r}. "
+                   "For distributed inference, please install Ray with "
+                   "`pip install ray pandas pyarrow`.")
     ray = None
     TorchDistributedWorker = None
     RayWorker = None  # pylint: disable=invalid-name
