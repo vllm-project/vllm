@@ -33,8 +33,8 @@ try:
 
 except ImportError as e:
     logger.warning(f"Failed to import Ray with {e!r}. "
-                   "Distributed inference will not be available. "
-                   "Please install Ray with `pip install ray pandas pyarrow`.")
+                   "For distributed inference, please install Ray with "
+                   "`pip install ray pandas pyarrow`.")
     ray = None
     TorchDistributedWorker = None
     RayWorker = None  # pylint: disable=invalid-name
