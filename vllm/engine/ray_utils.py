@@ -32,9 +32,9 @@ try:
             return executor(*args, **kwargs)
 
 except ImportError as e:
-    logger.warning(f"Failed to import Ray with {e}. "
+    logger.warning(f"Failed to import Ray with {e!r}. "
                    "Distributed inference will not be available. "
-                   "Please install Ray with `pip install ray[air]`.")
+                   "Please install Ray with `pip install ray pandas pyarrow`.")
     ray = None
     TorchDistributedWorker = None
     RayWorker = None  # pylint: disable=invalid-name
