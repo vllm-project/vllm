@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from transformers import PretrainedConfig
@@ -76,16 +76,20 @@ class ModelConfig:
         self._verify_load_format()
         self._verify_tokenizer_mode()
         self._verify_quantization()
-        self.max_model_len = None
+        self._max_model_len = None
         if max_model_len is not None:
-            derived_max_model_len = self.get_max_model_len()
+            (derived_max_model_len_key,
+             derived_max_model_len) = self._get_max_model_len()
             if max_model_len > derived_max_model_len:
-                logger.warning(
+                raise ValueError(
                     f"User-specified max_model_len ({max_model_len}) is "
                     f"greater than the derived max_model_len "
-                    f"({derived_max_model_len}). Make sure the value is "
-                    "correct and within the model context size.")
-        self.max_model_len = max_model_len
+                    f"({derived_max_model_len_key}={derived_max_model_len} in "
+                    "model config.json). This will lead to "
+                    "incorrect model outputs or CUDA errors. "
+                    "Make sure the value is correct and within the "
+                    "model context size.")
+            self._max_model_len = max_model_len
 
     def _verify_load_format(self) -> None:
         load_format = self.load_format.lower()
@@ -167,9 +171,11 @@ class ModelConfig:
         total_num_attention_heads = self.hf_config.num_attention_heads
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
-    def get_max_model_len(self) -> int:
-        if self.max_model_len is not None:
-            return self.max_model_len
+    def _get_max_model_len(self) -> Tuple[int, Optional[str]]:
+        """Returns the value of max_model_len and the
+        config key used to derive it."""
+        if self._max_model_len is not None:
+            return self._max_model_len, None
         max_model_len = float("inf")
         possible_keys = [
             # OPT
@@ -187,7 +193,12 @@ class ModelConfig:
             max_len_key = getattr(self.hf_config, key, None)
             if max_len_key is not None:
                 max_model_len = min(max_model_len, max_len_key)
-        return max_model_len
+        # Cache the property.
+        self._max_model_len = max_model_len
+        return max_model_len, max_len_key
+
+    def get_max_model_len(self) -> int:
+        return self._get_max_model_len()[0]
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_config.num_hidden_layers
