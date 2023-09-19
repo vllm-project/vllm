@@ -58,7 +58,7 @@ class PagedAttention(nn.Module):
                  scale: float,
                  num_kv_heads: Optional[int] = None,
                  quant_kv_cache: bool = False,
-                 kv_quant_params: List[int] = None) -> None:
+                 kv_quant_params: List[float] = None) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
