@@ -98,7 +98,7 @@ i8gemm_extension = CUDAExtension(
         'csrc/int8gemm/linear.cu',
         'csrc/int8gemm/bmm.cu',
         'csrc/int8gemm/fused.cu',
-        # 'csrc/int8gemm/bindings.cpp',
+        'csrc/int8gemm/bindings.cpp',
     ],
     include_dirs=['csrc/int8gemm/include'],
     extra_link_args=['-lcublas_static', '-lcublasLt_static',
@@ -235,5 +235,5 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension.with_options(use_ninja=False)},
+    cmdclass={"build_ext": BuildExtension},
 )

@@ -1,12 +1,7 @@
 # adapt from https://github.com/Guangxuan-Xiao/torch-int
 import torch
-from intgemm._CUDA import (linear_a8_w8_b32_o32,
-                     linear_relu_a8_w8_b8_o8,
-                     linear_a8_w8_b8_o8,
-                     linear_a8_w8_b32_o32_with_scaling,
-                     linear_a8_w8_bfp32_ofp32
-                     )
-from quantization import (
+from vllm import i8gemm
+from .quantization import (
     quantize_per_tensor_absmax,
     quantize_weight_per_channel_absmax,
     fake_quantize_activation_per_tensor_absmax,
@@ -37,10 +32,12 @@ class W8A8B8O8Linear(torch.nn.Module):
     def forward(self, x):
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
-        y = linear_a8_w8_b8_o8(x, self.weight, self.bias,
+        x = (x / self.inscale).clamp(-128, 127).to(torch.int8)
+        y = i8gemm.linear_a8_w8_b8_o8(x, self.weight, self.bias,
                                self.a.item(), self.b.item())
         y = y.view(*x_shape[:-1], -1)
-        return y
+        # FIXME: Just adapt to ParallelLinears' output
+        return y, None
 
     @staticmethod
     def from_float(module: torch.nn.Linear, input_scale, output_scale):
@@ -85,10 +82,10 @@ class W8A8B8O8LinearWithSFactor(torch.nn.Module):
     def forward(self, x):
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
-        y = linear_a8_w8_b8_o8(x, self.weight, self.bias,
+        y = i8gemm.linear_a8_w8_b8_o8(x, self.weight, self.bias,
                                self.a.item(), self.b.item())
         y = y.view(*x_shape[:-1], -1)
-        return y
+        return y, None
 
     @staticmethod
     def from_float(module: torch.nn.Linear, input_scale, output_scale):
@@ -139,11 +136,10 @@ class W8A8BFP32OFP32Linear(torch.nn.Module):
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
         self.bias = self.bias.to(torch.float32)
-        # beta should be 1 ?
-        y = linear_a8_w8_bfp32_ofp32(
+        y = i8gemm.linear_a8_w8_bfp32_ofp32(
             x, self.weight, self.bias, self.a.item(), 1)
         y = y.view(*x_shape[:-1], -1)
-        return y
+        return y, None
 
     @staticmethod
     def from_float(module: torch.nn.Linear, input_scale):
@@ -196,12 +192,13 @@ class W8A8BFP32OFP32LinearWithSFactor(torch.nn.Module):
     def forward(self, x):
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
+        # quant activation
+        x = (x / self.inscale).clamp(-128, 127).to(torch.int8)
         self.bias = self.bias.to(torch.float32)
-        # beta should be 1 ?
-        y = linear_a8_w8_bfp32_ofp32(
+        y = i8gemm.linear_a8_w8_bfp32_ofp32(
             x, self.weight, self.bias, self.a.item(), 1)
         y = y.view(*x_shape[:-1], -1)
-        return y
+        return y, None
 
     @staticmethod
     def from_float(module: torch.nn.Linear, input_scale):
