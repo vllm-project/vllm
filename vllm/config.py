@@ -172,8 +172,7 @@ class ModelConfig:
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
     def _get_max_model_len(self) -> Tuple[int, Optional[str]]:
-        """Returns the value of max_model_len and the
-        config key used to derive it."""
+        """Returns the value of max_model_len and the associated key."""
         if self._max_model_len is not None:
             return self._max_model_len, None
         max_model_len = float("inf")
