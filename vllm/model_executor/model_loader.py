@@ -88,10 +88,15 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
+        if model_config.quant_kv_cache:
+            for i in range(num_layers):
+                path = model_config.kv_quant_params_path + f"/layers.{i}.past_kv_scale.{rank}.weight"
+                kv_quant_params = list(np.fromfile(path, dtype=np.float32))
+                kv_quant_params_list.append(kv_quant_params)
         if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
-            model = model_class(model_config.hf_config, quant_config)
+            model = model_class(model_config.hf_config, quant_config, model_config.quant_kv_cache, kv_quant_params_list)
         else:
-            model = model_class(model_config.hf_config)
+            model = model_class(model_config.hf_config, None, model_config.quant_kv_cache, kv_quant_params_list)
         if model_config.load_format == "dummy":
             model = model.cuda()
             # NOTE(woosuk): For accurate performance evaluation, we assign

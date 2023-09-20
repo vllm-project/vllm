@@ -5,6 +5,5 @@ from vllm.model_executor.utils import set_random_seed
 __all__ = [
     "InputMetadata",
     "get_model",
-    "get_quant_model_v2",
     "set_random_seed",
 ]

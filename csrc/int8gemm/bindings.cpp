@@ -2,6 +2,10 @@
 #include "include/fused.h"
 #include "include/linear.h"
 #include <torch/extension.h>
+
+/*
+adapt from https://github.com/Guangxuan-Xiao/torch-int
+*/ 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("linear_relu_a8_w8_b8_o8", &linear_relu_a8_w8_b8_o8,
         "Linear ReLU (INT8)");
