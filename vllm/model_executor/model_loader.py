@@ -29,6 +29,7 @@ _MODEL_REGISTRY = {
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
     "RWForCausalLM": FalconForCausalLM,
+    "ChatGLMModel": ChatGLMHeadModel,
 }
 
 # FIXME(woosuk): Remove this once all models support quantization.
