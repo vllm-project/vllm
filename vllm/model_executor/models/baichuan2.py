@@ -364,7 +364,10 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 # print(
                 #     f"loading lm_head weight, norm: {loaded_weight.norm(2.0, 1, True).clamp_min(1e-12)}, shape: {loaded_weight.size()}"
                 # )
-                loaded_weight = torch.nn.functional.normalize(loaded_weight)
+                if loaded_weight.dtype == torch.float16 and loaded_weight.device == torch.device("cpu"):
+                    loaded_weight = torch.nn.functional.normalize(loaded_weight.float()).half()
+                else:
+                    loaded_weight = torch.nn.functional.normalize(loaded_weight)
                 # print(
                 #     f"after normalization, norm: {loaded_weight.norm(2.0, 1, True).clamp_min(1e-12)}, shape: {loaded_weight.size()}"
                 # )
