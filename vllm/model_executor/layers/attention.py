@@ -292,7 +292,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         quant_kv_cache: bool = False,
         kv_quant_params: torch.Tensor = None,
     ) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads)
+        super().__init__(num_heads, head_size, scale, num_kv_heads, quant_kv_cache, kv_quant_params)
         self.is_neox_style = is_neox_style
 
         # Create the cos and sin cache.
