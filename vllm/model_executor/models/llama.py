@@ -232,9 +232,11 @@ class LlamaModel(nn.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
             vocab_size, config.hidden_size, perform_initialization=False)
+        # print(kv_quant_params_list)
+        # print(quant_kv_cache)
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config, quant_config, quant_kv_cache, kv_quant_params_list[i] if quant_kv_cache else None)
-            for _ in range(config.num_hidden_layers)
+            for i in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 

@@ -128,10 +128,7 @@ void copy_blocks(
   dim3 grid(num_layers, num_pairs);
   dim3 block(std::min(1024, numel_per_block));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
-    at::ScalarType::Half,
-    // at::ScalarType::BFloat16,
-    at::ScalarType::Char,
+  VLLM_DISPATCH_QUANT_TYPES(
     key_caches[0].scalar_type(), "copy_blocks_kernel", ([&] {
       vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
         key_cache_ptrs_tensor.data_ptr<int64_t>(),
@@ -298,8 +295,6 @@ void reshape_and_cache_quantized(
   dim3 block(std::min(num_heads * head_size, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
-    at::ScalarType::Half,
-    at::ScalarType::BFloat16,
     key.scalar_type(),
     "reshape_and_cache_quantized_kernel",
     [&] {
