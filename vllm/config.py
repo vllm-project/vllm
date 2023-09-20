@@ -57,7 +57,7 @@ class ModelConfig:
         load_format: str,
         dtype: str,
         seed: int,
-        revision: Optional[str],
+        revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
     ) -> None:
@@ -73,19 +73,11 @@ class ModelConfig:
 
         self.hf_config = get_config(model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
+        self.max_model_len = _get_and_verify_max_len(self.hf_config,
+                                                     max_model_len)
         self._verify_load_format()
         self._verify_tokenizer_mode()
         self._verify_quantization()
-        self.max_model_len = None
-        if max_model_len is not None:
-            derived_max_model_len = self.get_max_model_len()
-            if max_model_len > derived_max_model_len:
-                logger.warning(
-                    f"User-specified max_model_len ({max_model_len}) is "
-                    f"greater than the derived max_model_len "
-                    f"({derived_max_model_len}). Make sure the value is "
-                    "correct and within the model context size.")
-        self.max_model_len = max_model_len
 
     def _verify_load_format(self) -> None:
         load_format = self.load_format.lower()
@@ -168,26 +160,7 @@ class ModelConfig:
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
     def get_max_model_len(self) -> int:
-        if self.max_model_len is not None:
-            return self.max_model_len
-        max_model_len = float("inf")
-        possible_keys = [
-            # OPT
-            "max_position_embeddings",
-            # GPT-2
-            "n_positions",
-            # MPT
-            "max_seq_len",
-            # Others
-            "max_sequence_length",
-            "max_seq_length",
-            "seq_len",
-        ]
-        for key in possible_keys:
-            max_len_key = getattr(self.hf_config, key, None)
-            if max_len_key is not None:
-                max_model_len = min(max_model_len, max_len_key)
-        return max_model_len
+        return self.max_model_len
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_config.num_hidden_layers
@@ -348,3 +321,38 @@ def _get_and_verify_dtype(
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "
                 f"{compute_capability[0]}.{compute_capability[1]}.")
     return torch_dtype
+
+
+def _get_and_verify_max_len(
+    hf_config: PretrainedConfig,
+    max_model_len: Optional[int],
+) -> int:
+    """Get and verify the model's maximum length."""
+    derived_max_model_len = float("inf")
+    possible_keys = [
+        # OPT
+        "max_position_embeddings",
+        # GPT-2
+        "n_positions",
+        # MPT
+        "max_seq_len",
+        # Others
+        "max_sequence_length",
+        "max_seq_length",
+        "seq_len",
+    ]
+    for key in possible_keys:
+        max_len_key = getattr(hf_config, key, None)
+        if max_len_key is not None:
+            derived_max_model_len = min(derived_max_model_len, max_len_key)
+
+    if max_model_len is None:
+        max_model_len = derived_max_model_len
+    elif max_model_len > derived_max_model_len:
+        raise ValueError(
+            f"User-specified max_model_len ({max_model_len}) is greater than "
+            f"the derived max_model_len ({max_len_key}={derived_max_model_len}"
+            " in model's config.json). This may lead to incorrect model "
+            "outputs or CUDA errors. Make sure the value is correct and "
+            "within the model context size.")
+    return max_model_len
