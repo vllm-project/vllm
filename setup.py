@@ -91,6 +91,24 @@ if nvcc_cuda_version >= Version("11.2"):
 
 ext_modules = []
 
+# Int8GEMM(cutlass required)
+i8gemm_extension = CUDAExtension(
+    name='vllm.i8gemm',
+    sources=[
+        'csrc/int8gemm/linear.cu',
+        'csrc/int8gemm/bmm.cu',
+        'csrc/int8gemm/fused.cu',
+        # 'csrc/int8gemm/bindings.cpp',
+    ],
+    include_dirs=['csrc/int8gemm/include'],
+    extra_link_args=['-lcublas_static', '-lcublasLt_static',
+                        '-lculibos', '-lcudart', '-lcudart_static',
+                        '-lrt', '-lpthread', '-ldl', '-L/usr/lib/x86_64-linux-gnu/'],
+    extra_compile_args={'cxx': ['-std=c++14', '-O3'],
+                        'nvcc': ['-O3', '-std=c++14', '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__']},
+)
+ext_modules.append(i8gemm_extension)
+
 # Cache operations.
 cache_extension = CUDAExtension(
     name="vllm.cache_ops",
@@ -217,5 +235,5 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension},
+    cmdclass={"build_ext": BuildExtension.with_options(use_ninja=False)},
 )
