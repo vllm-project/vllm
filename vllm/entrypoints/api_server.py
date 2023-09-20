@@ -1,5 +1,7 @@
 import argparse
 import json
+import time
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -15,6 +17,12 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
 engine = None
+served_model = None
+
+
+@app.get("/model")
+async def generate(request: Request) -> Response:
+    return JSONResponse({'model': served_model, 'timestamp': int(time.time())})
 
 
 @app.post("/generate")
@@ -75,6 +83,8 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+
+    served_model = Path(args.model).name
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
