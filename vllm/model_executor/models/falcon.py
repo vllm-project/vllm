@@ -164,7 +164,6 @@ class FalconAttention(nn.Module):
             rope_theta = getattr(config, "rope_theta", 10000)
             max_position_embeddings = getattr(config,
                                               "max_position_embeddings", 8192)
-            # TODO(zhuohan): Pass in correct `max_position``
             self.attn = PagedAttentionWithRoPE(
                 self.num_heads,
                 self.head_dim,
