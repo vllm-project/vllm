@@ -1,7 +1,6 @@
 """A layer that samples the next tokens from the model's outputs."""
 from typing import Dict, List, Tuple, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 
