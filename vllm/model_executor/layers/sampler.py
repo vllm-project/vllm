@@ -55,7 +55,7 @@ class Sampler(nn.Module):
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
         logits = _apply_penalties(logits, output_tokens, presence_penalties,
-                                  frequency_penalties, self.vocab_size)
+                                  frequency_penalties)
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(input_metadata)
@@ -173,11 +173,9 @@ def _apply_penalties(
     output_tokens: List[List[int]],
     presence_penalties: List[float],
     frequency_penalties: List[float],
-    vocab_size: int,
 ) -> torch.Tensor:
-    num_seqs = logits.shape[0]
-    # Collect the indices of sequences that have non-zero penalties.
-    indices = []
+    num_seqs, vocab_size = logits.shape
+    can_skip = True
     for i in range(num_seqs):
         if not output_tokens[i]:
             continue
@@ -185,33 +183,42 @@ def _apply_penalties(
         f = frequency_penalties[i]
         if abs(p) < _SAMPLING_EPS and abs(f) < _SAMPLING_EPS:
             continue
-        indices.append(i)
+        can_skip = False
+        break
 
     # Return early if all sequences have zero penalties.
-    if not indices:
+    if can_skip:
         return logits
 
-    bin_counts = []
-    for i in indices:
-        bin_counts.append(np.bincount(output_tokens[i], minlength=vocab_size))
-    bin_counts = np.stack(bin_counts, axis=0)
-    bin_counts = torch.from_numpy(bin_counts).to(dtype=logits.dtype,
-                                                 device=logits.device)
+    max_output_len = max(len(tokens) for tokens in output_tokens)
+    padded_output_tokens = [
+        tokens + [vocab_size] * (max_output_len - len(tokens))
+        for tokens in output_tokens
+    ]
+    output_tokens_tensor = torch.tensor(padded_output_tokens,
+                                        dtype=torch.long,
+                                        device=logits.device)
 
-    frequency_penalties = [frequency_penalties[i] for i in indices]
+    # Compute the bin counts for the output tokens.
+    # vocab_size + 1 for padding.
+    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
+                             dtype=torch.long,
+                             device=logits.device)
+    bin_counts.scatter_add_(1, output_tokens_tensor,
+                            torch.ones_like(output_tokens_tensor))
+    bin_counts = bin_counts[:, :vocab_size]  # Remove the padding bin.
+
     frequency_penalties = torch.tensor(frequency_penalties,
                                        dtype=logits.dtype,
                                        device=logits.device)
-    presence_penalties = [presence_penalties[i] for i in indices]
     presence_penalties = torch.tensor(presence_penalties,
                                       dtype=logits.dtype,
                                       device=logits.device)
 
     # We follow the definition in OpenAI API.
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits[indices] -= frequency_penalties.unsqueeze(dim=1) * bin_counts
-    presence_mask = (bin_counts > 0.0).to(dtype=logits.dtype)
-    logits[indices] -= presence_penalties.unsqueeze(dim=1) * presence_mask
+    logits -= frequency_penalties.unsqueeze(dim=1) * bin_counts
+    logits -= presence_penalties.unsqueeze(dim=1) * (bin_counts > 0)
     return logits
 
 
