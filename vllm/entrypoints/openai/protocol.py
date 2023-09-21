@@ -70,6 +70,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
+    stop_token_ids: Optional[List[int]] = Field(default_factory=list)
 
 
 class CompletionRequest(BaseModel):
@@ -94,6 +95,7 @@ class CompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
+    stop_token_ids: Optional[List[int]] = Field(default_factory=list)
 
 
 class LogProbs(BaseModel):
