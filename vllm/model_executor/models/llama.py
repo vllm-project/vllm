@@ -63,17 +63,9 @@ class LlamaMLP(nn.Module):
         super().__init__()
         if quant_config is not None and quant_config.get_name() == "smoothquant":
             self.gate_up_proj = W8A8BFP32OFP32LinearWithSFactor(hidden_size,
-                                                  2 * intermediate_size,
-                                                  bias=False,
-                                                  gather_output=False,
-                                                  perform_initialization=False,
-                                                  quant_config=quant_config)
+                                                  2 * intermediate_size)
             self.down_proj = W8A8BFP32OFP32LinearWithSFactor(intermediate_size,
-                                                    hidden_size,
-                                                    bias=False,
-                                                    input_is_parallel=True,
-                                                    perform_initialization=False,
-                                                    quant_config=quant_config)
+                                                    hidden_size)
         else:
             self.gate_up_proj = ParallelLinear.column(hidden_size,
                                                     2 * intermediate_size,
@@ -496,6 +488,7 @@ class LlamaForCausalLM(nn.Module):
                     shard_size * tensor_model_parallel_rank:shard_size *
                     (tensor_model_parallel_rank + 1)]
                 param_slice = param.data[offset:offset + shard_size]
+                print(f"{name}  param shape: {param.shape}  param_slice shape:{param_slice.shape} weight shape:{loaded_weight.shape}")
                 assert param_slice.shape == loaded_weight.shape
 
                 param_slice.copy_(loaded_weight)
@@ -518,6 +511,7 @@ class LlamaForCausalLM(nn.Module):
                     (tensor_model_parallel_rank + 1)]
                 param_slice = param.data[shard_size * stride_id:shard_size *
                                          (stride_id + 1)]
+                print(f"{name}  param shape: {param.shape}  param_slice shape:{param_slice.shape} weight shape:{loaded_weight.shape}")
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_gate_up_weight = True
