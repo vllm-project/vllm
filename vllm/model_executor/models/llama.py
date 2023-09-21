@@ -102,8 +102,9 @@ class LlamaAttention(nn.Module):
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
-        assert self.total_num_kv_heads % tp_size == 0
-        self.num_kv_heads = self.total_num_kv_heads // tp_size
+        assert max(self.total_num_kv_heads, tp_size)% min(self.total_num_kv_heads, tp_size) == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        repeat_num = max(1, tp_size//self.total_num_kv_heads)
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -113,7 +114,7 @@ class LlamaAttention(nn.Module):
 
         self.qkv_proj = ParallelLinear.column(
             hidden_size,
-            (self.total_num_heads + 2 * self.total_num_kv_heads) *
+            (self.total_num_heads + 2 * self.total_num_kv_heads * repeat_num) * #### repeate KV
             self.head_dim,
             bias=False,
             gather_output=False,
@@ -321,9 +322,10 @@ class LlamaForCausalLM(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         q_proj_shard_size = (self.config.hidden_size // tp_size)
+        repeat_num = max(1, tp_size//self.config.num_key_value_heads)
         kv_proj_shard_size = (self.config.hidden_size //
                               self.config.num_attention_heads *
-                              self.config.num_key_value_heads // tp_size)
+                              max(1,self.config.num_key_value_heads // tp_size))
         attention_weight_specs = [
             # (weight_name, shard_size, offset)
             ("q_proj", q_proj_shard_size, 0),
@@ -359,9 +361,13 @@ class LlamaForCausalLM(nn.Module):
                     shard_size //= self.quant_config.pack_factor
                     offset //= self.quant_config.pack_factor
 
+                if weight_name != "q_proj":
+                    tensor_model_parallel_rank_remap = tensor_model_parallel_rank//repeat_num
+                else:
+                    tensor_model_parallel_rank_remap = tensor_model_parallel_rank
                 loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
+                    shard_size * tensor_model_parallel_rank_remap:shard_size *
+                    (tensor_model_parallel_rank_remap + 1)]
                 param_slice = param.data[offset:offset + shard_size]
                 assert param_slice.shape == loaded_weight.shape
 
