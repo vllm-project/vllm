@@ -35,6 +35,10 @@ if __name__ == "__main__":
                         help="The model name used in the API. If not "
                         "specified, the model name will be the same as "
                         "the huggingface name.")
+    parser.add_argument("--default-model-template",
+                        type=str,
+                        default=None,
+                        help="model template")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
