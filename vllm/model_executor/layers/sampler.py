@@ -300,6 +300,8 @@ def _get_topk_logprobs(
     all_topk_logprobs, all_topk_ids = torch.topk(logprobs,
                                                  num_logprobs,
                                                  dim=-1)
+    all_topk_logprobs = all_topk_logprobs.cpu()
+    all_topk_ids = all_topk_ids.cpu()
     all_token_to_logprob = []
     for topk_logprobs, topk_ids in zip(all_topk_logprobs, all_topk_ids):
         token_to_logprob: Dict[int, float] = {}
