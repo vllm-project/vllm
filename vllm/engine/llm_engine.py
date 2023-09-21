@@ -650,6 +650,9 @@ class LLMEngine:
                 seq.output_text = seq.output_text[:-len(stop_str)]
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
+        if seq.get_last_token_id() in sampling_params.stop_token_ids:
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            return
 
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
