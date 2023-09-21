@@ -18,6 +18,15 @@ def get_conversation_stop(conv: Conversation):
     
     return conv.stop_str
     
+def get_default_model_template():
+    from vllm.entrypoints.openai.api_server import parser
+    
+    args = parser.parse_args()
+    default_model_template = getattr(args, 'default_model_template', None)
+    print('default_model_template', default_model_template)
+    return default_model_template
+
+
 
 async def patch_get_gen_prompt(request: ChatCompletionRequest) -> str:
     if not _fastchat_available:
@@ -29,8 +38,9 @@ async def patch_get_gen_prompt(request: ChatCompletionRequest) -> str:
         raise ImportError(
             f"fastchat version is low. Current version: {fastchat.__version__} "
             "Please upgrade fastchat to use: `$ pip install -U fschat`")
-
-    conv = get_conversation_template(request.model)
+    default_model_template = get_default_model_template()
+    model_name = default_model_template if default_model_template else request.model
+    conv = get_conversation_template(model_name)
     
     conv = Conversation(
         name=conv.name,
