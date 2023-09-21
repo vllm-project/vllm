@@ -1,3 +1,4 @@
+import pytest
 import random
 from typing import Tuple
 from unittest.mock import patch
@@ -176,10 +177,24 @@ def _test_sampler_mixed(seed: int):
             assert nth_output.output_token in expected_tokens
 
 
-def test_sampler():
-    for i in range(128):
-        print(f"Testing seed {i}...")
-        _test_sampler_all_greedy(i)
-        _test_sampler_all_random(i)
-        _test_sampler_all_beam(i)
-        _test_sampler_mixed(i)
+RANDOM_SEEDS = list(range(128))
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_all_greedy(seed):
+    _test_sampler_all_greedy(seed)
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_all_random(seed):
+    _test_sampler_all_random(seed)
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_all_beam(seed):
+    _test_sampler_all_beam(seed)
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_mixed(seed):
+    _test_sampler_mixed(seed)
