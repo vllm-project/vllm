@@ -58,7 +58,9 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def get_model(model_config: ModelConfig) -> nn.Module:
+def get_model(model_config: ModelConfig, 
+              parallel_config: ParallelConfig,
+              rank: int) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
 
     # Get the quantization config.
@@ -88,6 +90,8 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
+        num_layers = model_config.get_num_layers(parallel_config)
+        kv_quant_params_list = []
         if model_config.quant_kv_cache:
             for i in range(num_layers):
                 path = model_config.kv_quant_params_path + f"/layers.{i}.past_kv_scale.{rank}.weight"

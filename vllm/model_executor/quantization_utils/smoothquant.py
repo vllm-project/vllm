@@ -48,7 +48,10 @@ class SmoothQuantConfig(QuantizationConfig):
     @classmethod
     def get_config_filenames(cls) -> List[str]:
         """List of filenames to search for in the model directory."""
-        raise NotImplementedError
+        return [
+            "quant_config.json",
+            "quantize_config.json", 
+        ]
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SmoothQuantConfig":
