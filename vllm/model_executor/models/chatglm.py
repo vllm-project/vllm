@@ -567,7 +567,8 @@ class ChatGLMHeadModel(torch.nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     load_format: str = "auto"):
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
 
         offset = tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
