@@ -9,7 +9,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     gather_from_tensor_model_parallel_region)
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SequenceData, SamplerOutput, SequenceOutputs
+from vllm.sequence import SamplerOutput, SequenceData, SequenceOutputs
 
 _SAMPLING_EPS = 1e-5
 
@@ -400,6 +400,9 @@ def _beam_search_sample(
     # https://github.com/tensorflow/tensor2tensor/blob/bafdc1b67730430d38d6ab802cbd51f9d053ba2e/tensor2tensor/utils/beam_search.py#L557-L563
     # for details. See also HF reference:
     # https://github.com/huggingface/transformers/blob/a4dd53d88e4852f023332d284ff07a01afcd5681/src/transformers/generation/utils.py#L3063-L3065
+    #
+    # Note: Beam search is not vectorized, so its speed can be slower than
+    # other sampling methods.
     sample_idx = 0
     results = []
     for seq_group, is_prompt in zip(selected_seq_groups, is_prompts):
@@ -478,8 +481,8 @@ def _sample(
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
 
         # Batched query for logprobs of selected token
-        batched_logprobs_query_seq_indices = []
-        batched_logprobs_query_token_indices = []
+        batched_logprobs_query_seq_indices: List[int] = []
+        batched_logprobs_query_token_indices: List[int] = []
         sample_idx = 0
         for seq_group_id, seq_group, sample_result in zip(
                 seq_group_ids, seq_groups, sample_results):
