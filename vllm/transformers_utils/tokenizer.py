@@ -28,8 +28,8 @@ def get_tokenizer(
     if ("llama" in tokenizer_name.lower() and kwargs.get("use_fast", True)
             and tokenizer_name != _FAST_LLAMA_TOKENIZER):
         logger.info(
-            "For some LLaMA-based models, initializing the fast tokenizer may "
-            "take a long time. To eliminate the initialization time, consider "
+            "For some LLaMA V1 models, initializing the fast tokenizer may "
+            "take a long time. To reduce the initialization time, consider "
             f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
             "tokenizer.")
     try:
@@ -41,9 +41,9 @@ def get_tokenizer(
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments.
         err_msg = (
-            "Failed to load the tokenizer. If you are using a LLaMA-based "
-            f"model, use '{_FAST_LLAMA_TOKENIZER}' instead of the original "
-            "tokenizer.")
+            "Failed to load the tokenizer. If you are using a LLaMA V1 model "
+            f"consider using '{_FAST_LLAMA_TOKENIZER}' instead of the "
+            "original tokenizer.")
         raise RuntimeError(err_msg) from e
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
@@ -119,9 +119,9 @@ def detokenize_incrementally(
         prefix_offset = max(len(output_tokens) - 6, 0)
         read_offset = max(len(output_tokens) - 1, 0)
     else:
-        new_token = tokenizer.convert_ids_to_tokens(
-            new_token_id, skip_special_tokens=skip_special_tokens)
-        new_tokens = [new_token]
+        # Put new_token_id in a list so skip_special_tokens is respected
+        new_tokens = tokenizer.convert_ids_to_tokens(
+            [new_token_id], skip_special_tokens=skip_special_tokens)
         output_tokens = prev_tokens + new_tokens
 
     # The prefix text is necessary only to defeat cleanup algorithms in

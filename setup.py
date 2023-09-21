@@ -146,6 +146,20 @@ activation_extension = CUDAExtension(
 )
 ext_modules.append(activation_extension)
 
+# Quantization kernels.
+quantization_extension = CUDAExtension(
+    name="vllm.quantization_ops",
+    sources=[
+        "csrc/quantization.cpp",
+        "csrc/quantization/awq/gemm_kernels.cu",
+    ],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(quantization_extension)
+
 
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
