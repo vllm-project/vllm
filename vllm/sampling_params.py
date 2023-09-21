@@ -1,5 +1,6 @@
 """Sampling parameters for text generation."""
 from enum import IntEnum
+from functools import cached_property
 from typing import List, Optional, Union
 
 _SAMPLING_EPS = 1e-5
@@ -165,7 +166,7 @@ class SamplingParams:
         if self.top_k != -1:
             raise ValueError("top_k must be -1 when using greedy sampling.")
 
-    @property
+    @cached_property
     def sampling_type(self) -> SamplingType:
         if self.use_beam_search:
             return SamplingType.BEAM
