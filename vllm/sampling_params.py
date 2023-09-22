@@ -45,6 +45,9 @@ class SamplingParams:
             (canonical beam search algorithm).
         stop: List of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
+        stop_token_ids: List of tokens that stop the generation when they are
+            generated. The returned output will contain the stop tokens unless
+            the stop tokens are sepcial tokens.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
@@ -52,22 +55,25 @@ class SamplingParams:
         get_prompt_logprobs： Whether to output logprobs for the prompt.
     """
 
-    def __init__(self,
-                 n: int = 1,
-                 best_of: Optional[int] = None,
-                 presence_penalty: float = 0.0,
-                 frequency_penalty: float = 0.0,
-                 temperature: float = 1.0,
-                 top_p: float = 1.0,
-                 top_k: int = -1,
-                 use_beam_search: bool = False,
-                 length_penalty: float = 1.0,
-                 early_stopping: Union[bool, str] = False,
-                 stop: Union[None, str, List[str]] = None,
-                 ignore_eos: bool = False,
-                 max_tokens: int = 16,
-                 logprobs: Optional[int] = None,
-                 get_prompt_logprobs: bool = False) -> None:
+    def __init__(
+        self,
+        n: int = 1,
+        best_of: Optional[int] = None,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = -1,
+        use_beam_search: bool = False,
+        length_penalty: float = 1.0,
+        early_stopping: Union[bool, str] = False,
+        stop: Union[None, str, List[str]] = None,
+        stop_token_ids: List[int] = None,
+        ignore_eos: bool = False,
+        max_tokens: int = 16,
+        logprobs: Optional[int] = None,
+        get_prompt_logprobs: bool = False
+    ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
         self.presence_penalty = presence_penalty
@@ -84,6 +90,10 @@ class SamplingParams:
             self.stop = [stop]
         else:
             self.stop = list(stop)
+        if stop_token_ids is None:
+            self.stop_token_ids = []
+        else:
+            self.stop_token_ids = list(stop_token_ids)
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs
