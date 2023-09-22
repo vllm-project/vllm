@@ -120,15 +120,10 @@ def prepare_hf_model_weights(
     cache_dir: Optional[str] = None,
     use_safetensors: bool = False,
     fall_back_to_pt: bool = True,
-    revision: Optional[str] = None,
-) -> Tuple[str, List[str], bool]:
+):
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
-    if use_safetensors:
-        allow_patterns = ["*.safetensors"]
-    else:
-        # Some quantized models use .pt files for storing the weights.
-        allow_patterns = ["*.bin", "*.pt"]
+    allow_patterns = "*.safetensors" if use_safetensors else "*.bin"
     if not is_local:
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
@@ -159,9 +154,7 @@ def prepare_hf_model_weights(
                                             tqdm_class=Disabledtqdm)
     else:
         hf_folder = model_name_or_path
-    hf_weights_files: List[str] = []
-    for pattern in allow_patterns:
-        hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
+    hf_weights_files = glob.glob(os.path.join(hf_folder, allow_patterns))
     if not use_safetensors:
         hf_weights_files = [
             x for x in hf_weights_files if not x.endswith("training_args.bin")
@@ -171,8 +164,7 @@ def prepare_hf_model_weights(
         return prepare_hf_model_weights(model_name_or_path,
                                         cache_dir=cache_dir,
                                         use_safetensors=False,
-                                        fall_back_to_pt=False,
-                                        revision=revision)
+                                        fall_back_to_pt=False)
 
     if len(hf_weights_files) == 0:
         raise RuntimeError(
