@@ -16,7 +16,7 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
-**The First vLLM Bay Area Meetup (10/5 6pm-8pm PT)**
+**The First vLLM Bay Area Meetup (Oct 5th 6pm-8pm PT)**
 
 We are excited to invite you to the first vLLM meetup!
 The vLLM team will share recent updates and roadmap.
