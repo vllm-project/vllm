@@ -2,14 +2,15 @@ FROM continuumio/miniconda3:23.5.2-0
 
 WORKDIR /app/vllm
 
+# Upgrade OS Packages
 RUN set -eux; \
     apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY environment.yml /app/vllm
 
+# Preparing Conda Environment
 RUN apt-get update \
     && apt-get install -y build-essential \
     && conda env create \
