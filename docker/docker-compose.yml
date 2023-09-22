@@ -1,0 +1,26 @@
+services:
+  vllm:
+    build:
+      context: .
+    restart: on-failure:5
+    environment:
+      - NUM_GPUS=${NUM_GPUS}
+      # From hugging face, MODEL_NAME could be meta-llama/Llama-2-7b-chat-hf
+      # From local directory, MODEL_NAME could be /root/.cache/custom-Llama-2-7b-chat-hf
+      - MODEL_NAME=${MODEL_NAME}
+      # If you are downloading model from Hugging Face, then you must specify below environment variable.
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    volumes:
+      # Basically, this is the directory of the downloaded models or you can put your own model to below directory.
+      - ${HOME}/.cache:/root/.cache/
+    # Set to 30% of the machine available memory
+    shm_size: 1g
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
