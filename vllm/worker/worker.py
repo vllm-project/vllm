@@ -7,7 +7,7 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
-from vllm.model_executor import get_model, get_quant_model_v2, InputMetadata, set_random_seed
+from vllm.model_executor import get_model, InputMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sampling_params import SamplingParams

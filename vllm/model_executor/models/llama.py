@@ -281,10 +281,16 @@ class LlamaDecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             quant_config=quant_config,
         )
-        self.input_layernorm = I8RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = I8RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        if quant_config is not None and quant_config.get_name() == "smoothquant":
+            self.input_layernorm = I8RMSNorm(config.hidden_size,
+                                        eps=config.rms_norm_eps)
+            self.post_attention_layernorm = I8RMSNorm(config.hidden_size,
+                                                    eps=config.rms_norm_eps)
+        else:
+            self.input_layernorm = RMSNorm(config.hidden_size,
+                                        eps=config.rms_norm_eps)
+            self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                    eps=config.rms_norm_eps)
 
     def forward(
         self,
