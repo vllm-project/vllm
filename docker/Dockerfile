@@ -15,7 +15,6 @@ RUN apt-get update \
     && conda env create \
     && apt-get purge -y --auto-remove build-essential \
     && pip install --upgrade ray pyarrow pandas \
-    && pip install --upgrade \
     && rm -fr /var/lib/apt/lists/*
 
 COPY entrypoint.sh /app/vllm
