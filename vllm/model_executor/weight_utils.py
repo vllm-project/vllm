@@ -132,12 +132,31 @@ def prepare_hf_model_weights(
     if not is_local:
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
-        with get_lock(model_name_or_path, cache_dir):
-            hf_folder = snapshot_download(model_name_or_path,
-                                          allow_patterns=allow_patterns,
-                                          cache_dir=cache_dir,
-                                          tqdm_class=Disabledtqdm,
-                                          revision=revision)
+        model_path_temp = os.path.join(
+            os.getenv("HOME"),
+            ".cache/huggingface/hub",
+            "models--" + model_name_or_path.replace("/", "--"),
+            "snapshots/",
+        )
+        downloaded = False
+        if os.path.exists(model_path_temp):
+            temp_last_dir = os.listdir(model_path_temp)[-1]
+            model_path_temp = os.path.join(model_path_temp, temp_last_dir)
+            for temp in allow_patterns:
+                base_pattern = os.path.join(model_path_temp, temp)
+                files = glob.glob(base_pattern)
+                if len(files) > 0:
+                    downloaded = True
+                    break
+
+        if downloaded:
+           hf_folder = model_path_temp
+        else:
+            with get_lock(model_name_or_path, cache_dir):
+                hf_folder = snapshot_download(model_name_or_path,
+                                            allow_patterns=allow_patterns,
+                                            cache_dir=cache_dir,
+                                            tqdm_class=Disabledtqdm)
     else:
         hf_folder = model_name_or_path
     hf_weights_files: List[str] = []
