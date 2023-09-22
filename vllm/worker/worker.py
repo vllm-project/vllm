@@ -64,8 +64,7 @@ class Worker:
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
-        # self.model = get_model(self.model_config)
-        self.model = get_quant_model_v2(self.model_config)
+        self.model = get_model(self.model_config, self.parallel_config, self.rank)
 
     @torch.inference_mode()
     def profile_num_available_blocks(
