@@ -128,4 +128,4 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
                                           prompt="San Francisco is a")
     print("Completion result:", completion)
 
-For a more detailed client example, refer to `examples/openai_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_client.py>`_.
+For a more detailed client example, refer to `examples/openai_completion_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py>`_.
