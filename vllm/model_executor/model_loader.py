@@ -113,20 +113,3 @@ def get_model(model_config: ModelConfig,
                                model_config.load_format, model_config.revision)
             model = model.cuda()
     return model.eval()
-
-
-def get_quant_model_kv(model_config: ModelConfig, parallel_config: ParallelConfig,
-                       rank: int):
-    num_layers = model_config.get_num_layers(parallel_config)
-    ## num_layers * [k_scale, k_zp, v_scale, v_zp]
-    kv_quant_params_list = []
-    if model_config.quant_kv_cache:
-        for i in range(num_layers):
-            path = model_config.kv_quant_params_path + f"/layers.{i}.past_kv_scale.{rank}.weight"
-            kv_quant_params = list(np.fromfile(path, dtype=np.float32))
-            kv_quant_params_list.append(kv_quant_params)
-    model_class = _get_model_architecture(model_config.hf_config)
-    torch.set_default_dtype(model_config.dtype)
-    model = model_class(model_config.hf_config, None, model_config.quant_kv_cache, kv_quant_params_list) ## None is for quant config
-    model = model.cuda()
-    return model.eval()
