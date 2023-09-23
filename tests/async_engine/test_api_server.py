@@ -74,8 +74,8 @@ def test_api_server(api_server):
         for result in pool.map(_query_server, prompts):
             assert result
 
-        num_aborted_requests = requests.get(
-            "http://localhost:8000/stats").json()["num_aborted_requests"]
+        stats = requests.get("http://localhost:8000/stats").json()
+        num_aborted_requests = stats["num_aborted_requests"]
         assert num_aborted_requests == 0
 
         # Try with 100 prompts
