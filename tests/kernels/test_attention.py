@@ -7,8 +7,12 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from vllm import attention_ops
+from vllm.utils import get_max_shared_mem_bytes
 
-MAX_SEQ_LEN = 16384
+float_bytes = torch.finfo(torch.float).bits / 8
+# This will change dependning on the compute capability.
+# -7 as it will be padded to 8 anyway, 128 as a buffer
+MAX_SEQ_LEN = int(get_max_shared_mem_bytes() / float_bytes) - 7 - 128
 NUM_BLOCKS = 128  # Arbitrary values for testing
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
