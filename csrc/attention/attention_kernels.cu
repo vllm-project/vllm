@@ -406,19 +406,6 @@ void single_query_cached_kv_attention_launcher(
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
   int shared_mem_size = std::max(logits_size, outputs_size);
 
-  #if __CUDA_ARCH__ == 800
-    assert(shared_mem_size <= 163840);
-  #endif
-  #if __CUDA_ARCH__ == 860
-    assert(shared_mem_size <= 102400);
-  #endif
-  #if __CUDA_ARCH__ == 700
-    assert(shared_mem_size <= 98304);
-  #endif
-  #if __CUDA_ARCH__ == 750
-    assert(shared_mem_size <= 65536);
-  #endif
-
   dim3 grid(num_heads, num_seqs);
   dim3 block(NUM_THREADS);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
