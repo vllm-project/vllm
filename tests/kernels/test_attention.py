@@ -11,7 +11,7 @@ from vllm.utils import get_max_shared_mem_bytes
 
 float_bytes = torch.finfo(torch.float).bits / 8
 # This will change dependning on the compute capability.
-# -7 as it will be padded to 8 anyway, 128 as a buffer
+# -7 as it will be padded to 8 anyway, -512 as a buffer
 MAX_SEQ_LEN = int(get_max_shared_mem_bytes() / float_bytes) - 7 - 512
 NUM_BLOCKS = 128  # Arbitrary values for testing
 
