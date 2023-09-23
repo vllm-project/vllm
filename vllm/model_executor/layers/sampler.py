@@ -10,7 +10,6 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceOutputs
 
-
 LogProbsList = Optional[List[Optional[float]]]
 TopLogProbsList = Optional[List[Optional[Dict[int, float]]]]
 
