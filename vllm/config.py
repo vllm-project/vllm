@@ -135,7 +135,8 @@ class ModelConfig:
         # FIXME(woosuk): This may not be true for all models.
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 
-    def get_num_heads(self, parallel_config: "ParallelConfig") -> int:
+    def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
+        """Returns the number of KV heads per GPU worker."""
         # For GPTBigCode & Falcon:
         # Note: for falcon, when new_decoder_architecture is True, the
         # multi_query flag is ignored and we use n_head_kv for the number of
@@ -147,10 +148,14 @@ class ModelConfig:
         if not new_decoder_arch_falcon and getattr(self.hf_config,
                                                    "multi_query", False):
             # Multi-query attention, only one KV head.
+            # Currently, tensor parallelism is not supported in this case.
             return 1
         # For Falcon:
         if getattr(self.hf_config, "n_head_kv", None) is not None:
             return (self.hf_config.n_head_kv //
+                    parallel_config.tensor_parallel_size)
+        if getattr(self.hf_config, "num_kv_heads", None) is not None:
+            return (self.hf_config.num_kv_heads //
                     parallel_config.tensor_parallel_size)
         # For LLaMA-2:
         if getattr(self.hf_config, "num_key_value_heads", None) is not None:
