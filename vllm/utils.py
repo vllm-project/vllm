@@ -74,8 +74,8 @@ def check_if_can_support_max_seq_len(max_seq_len: int,
     float32_bytes = torch.finfo(torch.float).bits // 8
     padded_max_seq_len = (
         (max_seq_len + block_size - 1) / block_size) * block_size
-    # 128 as a buffer
-    required_shared_mem = (padded_max_seq_len + 128) * float32_bytes
+    # padded_max_seq_len + extra buffer
+    required_shared_mem = (padded_max_seq_len + 512) * float32_bytes
     if padded_max_seq_len * float32_bytes > max_shared_mem:
         raise RuntimeError(
             f"vLLM cannot currently support max_model_len={max_seq_len} "
