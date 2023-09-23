@@ -42,7 +42,11 @@ def _prepare_test(
     return input_tensor, fake_logits, sampler, worker
 
 
-def _test_sampler_all_greedy(seed: int):
+RANDOM_SEEDS = list(range(128))
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_all_greedy(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, worker = _prepare_test(batch_size)
@@ -68,7 +72,8 @@ def _test_sampler_all_greedy(seed: int):
             assert nth_output.output_token == expected[i].item()
 
 
-def _test_sampler_all_random(seed: int):
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_all_random(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, worker = _prepare_test(batch_size)
@@ -99,7 +104,8 @@ def _test_sampler_all_random(seed: int):
             assert nth_output.output_token == i
 
 
-def _test_sampler_all_beam(seed: int):
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_all_beam(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, worker = _prepare_test(batch_size)
@@ -129,7 +135,8 @@ def _test_sampler_all_beam(seed: int):
     # when handling an all-beam search case.
 
 
-def _test_sampler_mixed(seed: int):
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_mixed(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, worker = _prepare_test(batch_size)
@@ -175,26 +182,3 @@ def _test_sampler_mixed(seed: int):
             continue
         for nth_output in sequence_output:
             assert nth_output.output_token in expected_tokens
-
-
-RANDOM_SEEDS = list(range(128))
-
-
-@pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_all_greedy(seed):
-    _test_sampler_all_greedy(seed)
-
-
-@pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_all_random(seed):
-    _test_sampler_all_random(seed)
-
-
-@pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_all_beam(seed):
-    _test_sampler_all_beam(seed)
-
-
-@pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_mixed(seed):
-    _test_sampler_mixed(seed)

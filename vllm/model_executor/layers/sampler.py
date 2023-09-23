@@ -1,5 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -174,7 +174,6 @@ def _apply_penalties(
     frequency_penalties: List[float],
 ) -> torch.Tensor:
     num_seqs, vocab_size = logits.shape
-    can_skip = True
     for i in range(num_seqs):
         if not output_tokens[i]:
             continue
@@ -182,11 +181,9 @@ def _apply_penalties(
         f = frequency_penalties[i]
         if abs(p) < _SAMPLING_EPS and abs(f) < _SAMPLING_EPS:
             continue
-        can_skip = False
         break
-
-    # Return early if all sequences have zero penalties.
-    if can_skip:
+    else:
+        # Return early if all sequences have zero penalties.
         return logits
 
     max_output_len = max(len(tokens) for tokens in output_tokens)
@@ -340,7 +337,7 @@ def _build_sequence_outputs(
 
 def _greedy_sample(
     selected_seq_groups: List[Tuple[List[int], SamplingParams]],
-    logprobs: torch.tensor,
+    logprobs: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
     samples = torch.argmax(logprobs, dim=-1).cpu()
     sample_idx = 0
