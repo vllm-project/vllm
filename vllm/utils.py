@@ -80,7 +80,7 @@ def check_if_can_support_max_seq_len(max_seq_len: int,
     padded_max_seq_len = (
         (max_seq_len + block_size - 1) / block_size) * block_size
     # padded_max_seq_len + extra buffer
-    required_shared_mem = (padded_max_seq_len + 512) * float32_bytes
+    required_shared_mem = (padded_max_seq_len + 1024) * float32_bytes
     if padded_max_seq_len * float32_bytes > max_shared_mem:
         raise RuntimeError(
             f"vLLM cannot currently support max_model_len={max_seq_len} "
