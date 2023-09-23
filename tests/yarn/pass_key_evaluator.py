@@ -1,5 +1,5 @@
 import random
-from typing import Tuple, Iterable
+from typing import Tuple, Iterable, Optional
 
 from base_model import BaseModel
 
@@ -56,23 +56,32 @@ class PassKeyEvaluator:
             yield key_position, prefix_token_count, success_count
 
 
-def evaluate_vllm():
-    from model_llama2_7b_vllm import Model
-    # from model_llama2_7b_yarn import Model
-
-    model = Model()
-
+def evaluate_vllm(model: BaseModel, context_size_limit: Optional[int] = None):
     context_size = model.max_context_size
+    if context_size_limit is not None:
+        context_size = context_size_limit
+
     print(f'Model: {model.model_id}')
     print(f'Model context size: {context_size}')
 
     evaluator = PassKeyEvaluator(model)
-    for result in evaluator.evaluate(context_size, 100, 3):
+    for result in evaluator.evaluate(context_size, 100, 2):
         print(result)
 
 
 def main():
-    evaluate_vllm()
+    # Select the model to test here
+    from model_llama2_7b_vllm import Model
+    # from model_llama2_7b_yarn import Model
+    model = Model()
+
+    # If you run out of VRAM, then pass a smaller context size here
+
+    # Limited to 8k
+    evaluate_vllm(model, 8192)
+
+    # Unlimited
+    # evaluate_vllm(model)
 
 
 if __name__ == '__main__':

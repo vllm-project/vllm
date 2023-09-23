@@ -5,7 +5,8 @@ from base_model import BaseModel
 from vllm import LLM, SamplingParams
 from verification_prompt import PROMPT
 
-MODEL_ID = 'Llama2/Llama-2-7B-fp16'
+# MODEL_ID = 'Llama2/Llama-2-7B-fp16'
+MODEL_ID = 'NousResearch/Yarn-Llama-2-7b-64k'
 MODEL_DIR = os.path.expanduser(f'~/models/{MODEL_ID}')
 
 
@@ -13,7 +14,7 @@ class Model(BaseModel):
     def __init__(self):
         super().__init__()
         self.model_id = MODEL_ID
-        self.llm = LLM(model=MODEL_DIR,
+        self.llm = LLM(model=MODEL_DIR,  # Use MODEL_ID here to download the model using HF
                        # tokenizer='hf-internal-testing/llama-tokenizer',
                        tensor_parallel_size=2,
                        swap_space=8,

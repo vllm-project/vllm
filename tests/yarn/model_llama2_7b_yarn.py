@@ -17,7 +17,7 @@ class Model(BaseModel):
         self.model_id = MODEL_ID
         self.pipeline = transformers.pipeline(
             "text-generation",
-            model=MODEL_DIR,
+            model=MODEL_DIR,  # Use MODEL_ID here to download the model using HF
             torch_dtype=torch.bfloat16,
             device_map="auto",
             trust_remote_code=True,
@@ -25,8 +25,6 @@ class Model(BaseModel):
 
     @property
     def max_context_size(self) -> int:
-        # FIXME: If you run out of VRAM, then limit the context size here
-        # return 8192
         return self.pipeline.model.base_model.config.max_position_embeddings
 
     def generate(self, prompt: str, *, n: int, max_new_tokens: int) -> List[str]:
