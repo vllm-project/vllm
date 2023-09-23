@@ -8,13 +8,14 @@ import pytest
 import requests
 
 
-def _query_server(prompt: str) -> dict:
+def _query_server(prompt: str, params=None) -> dict:
     response = requests.post("http://localhost:8000/generate",
                              json={
                                  "prompt": prompt,
                                  "max_tokens": 100,
                                  "temperature": 0,
-                                 "ignore_eos": True
+                                 "ignore_eos": True,
+                                 **(params or {})
                              })
     response.raise_for_status()
     return response.json()
@@ -48,13 +49,24 @@ def test_api_server(api_server):
     response = _query_server("Hello world")
     assert response, 'Empty response'
 
-    # Test server side validation: Null prompts must be refused by the server
+    # Test server side validation
+
+    # Null prompts must be refused by the server
     try:
         response = _query_server(None)
     except requests.exceptions.HTTPError as e:
         assert e.response.status_code == 400
     else:
         assert False, f'A null prompt should result in 400 Bad Request, but it gives a response: {response!r}'
+
+    # Unknown sampling params must be refused by the server
+    try:
+        response = _query_server('Dummy prompt', params={'unknown_param': 1})
+    except requests.exceptions.HTTPError as e:
+        assert e.response.status_code == 400
+        assert 'unknown_param' in e.response.content.decode('utf-8')
+    else:
+        assert False, f'Passing an unknown sampling param should result in 400 Bad Request, but it gives a response: {response!r}'
 
     # Run parallel requests
     with Pool(32) as pool:
