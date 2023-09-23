@@ -1,17 +1,17 @@
 # vllm 自定义项目
 
-该项目fork自[vllm-project/vllm](https://github.com/vllm-project),  目前主要实现了对chatglm2的多卡支持
-注意：由于glm2的GQA的group_num=2, 所以目前多卡只支持2卡。
+	该项目fork自[vllm-project/vllm](https://github.com/vllm-project),  目前主要实现了对chatglm2的多卡支持
+	注意：由于glm2的GQA的group_num=2, 所以目前多卡只支持2卡。
 
 ## 安装
 
-- git clone https://github.com/David-webb/vllm-custom.git
-- cd vllm-custom
+- git clone https://github.com/David-webb/vllm.git -b vllm4chatglm
+- cd vllm
 - pip install -e .
 
 ## 使用
 
-custom_launch_scripts/目录下:
+vllm/custom_launch_scripts/目录下:
 
 - vllm_launch.sh   用于启动服务
 - try_vllm.py    提供了vllm的访问接口模板（流式/非流式）
