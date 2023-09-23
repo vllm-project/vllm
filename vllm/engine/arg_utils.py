@@ -29,6 +29,7 @@ class EngineArgs:
     max_num_seqs: int = 256
     disable_log_stats: bool = False
     revision: Optional[str] = None
+    tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
 
     def __post_init__(self):
@@ -56,6 +57,13 @@ class EngineArgs:
             type=str,
             default=None,
             help='the specific model version to use. It can be a branch '
+            'name, a tag name, or a commit id. If unspecified, will use '
+            'the default version.')
+        parser.add_argument(
+            '--tokenizer-revision',
+            type=str,
+            default=None,
+            help='the specific tokenizer version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
         parser.add_argument('--tokenizer-mode',
@@ -176,6 +184,7 @@ class EngineArgs:
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
                                    self.dtype, self.seed, self.revision,
+                                   self.tokenizer_revision,
                                    self.max_model_len, self.quantization)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,

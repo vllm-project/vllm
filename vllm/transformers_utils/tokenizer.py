@@ -16,6 +16,7 @@ def get_tokenizer(
     *args,
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
+    tokenizer_revision: Optional[str] = None,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
@@ -37,6 +38,7 @@ def get_tokenizer(
             tokenizer_name,
             *args,
             trust_remote_code=trust_remote_code,
+            tokenizer_revision=tokenizer_revision,
             **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments.
