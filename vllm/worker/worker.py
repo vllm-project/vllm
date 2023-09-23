@@ -13,7 +13,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
-from vllm.utils import get_gpu_memory
+from vllm.utils import get_gpu_memory, check_if_can_support_max_seq_len
 
 
 class Worker:
@@ -136,6 +136,10 @@ class Worker:
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
         self.block_size = cache_config.block_size
+
+        check_if_can_support_max_seq_len(self.scheduler_config.max_model_len,
+                                         self.block_size)
+
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.cache_events = self.cache_engine.events
