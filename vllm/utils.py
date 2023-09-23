@@ -46,6 +46,7 @@ def in_wsl() -> bool:
 
 
 def get_max_shared_mem_bytes() -> int:
+    """Gets the max optin shared memory per block for the current GPU."""
     libnames = ("libcuda.so", "libcuda.dylib", "nvcuda.dll", "cuda.dll")
     for libname in libnames:
         try:
@@ -62,7 +63,11 @@ def get_max_shared_mem_bytes() -> int:
 
     cuda.cuDeviceGet(ctypes.byref(device), torch.cuda.current_device())
     cuda.cuInit(0)
-    assert not cuda.cuDeviceGetAttribute(ctypes.byref(smem_size), 97, device)
+    # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
+    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97  # pylint: disable=invalid-name
+    assert not cuda.cuDeviceGetAttribute(
+        ctypes.byref(smem_size), cudaDevAttrMaxSharedMemoryPerBlockOptin,
+        device)
     return smem_size.value
 
 
