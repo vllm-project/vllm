@@ -44,6 +44,19 @@ def test_api_server(api_server):
     multiple requests at the same time, and that it can handle requests
     being cancelled without crashing.
     """
+    # Run a simple request
+    response = _query_server("Hello world")
+    assert response, 'Empty response'
+
+    # Test server side validation: Null prompts must be refused by the server
+    try:
+        response = _query_server(None)
+    except requests.exceptions.HTTPError as e:
+        assert e.response.status_code == 400
+    else:
+        assert False, f'A null prompt should result in 400 Bad Request, but it gives a response: {response!r}'
+
+    # Run parallel requests
     with Pool(32) as pool:
         # Wait until the server is ready
         prompts = ["Hello world"] * 1
