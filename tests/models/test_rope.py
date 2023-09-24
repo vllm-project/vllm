@@ -1,6 +1,7 @@
 import torch
 from typing import Optional
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, LinearScalingRotaryEmbedding
+import pytest
 
 
 class RefRotaryEmbedding(torch.nn.Module):
@@ -84,7 +85,9 @@ class RefLinearScalingRotaryEmbedding(RefRotaryEmbedding):
                              persistent=False)
 
 
-def test_rope():
+@pytest.mark.parametrize("dim", [128, 256])
+@pytest.mark.parametrize("max_position_embeddings", [1024, 2048])
+def test_rope(dim: int, max_position_embeddings: int):
 
     def ref_rope(dim: int, max_position_embeddings: int):
         emb = RefRotaryEmbedding(dim, max_position_embeddings, device='cuda')
@@ -96,12 +99,14 @@ def test_rope():
         emb = RotaryEmbedding(dim, max_position_embeddings)
         return emb.cos_sin_cache
 
-    dim, max_position_embeddings = 128, 2048
     assert torch.allclose(ref_rope(dim, max_position_embeddings),
                           vllm_rope(dim, max_position_embeddings))
 
 
-def test_linear_rope():
+@pytest.mark.parametrize("dim", [128, 256])
+@pytest.mark.parametrize("max_position_embeddings", [1024, 2048])
+@pytest.mark.parametrize("scaling_factor", [1.0, 2.0, 4.0, 8.0])
+def test_linear_rope(dim, max_position_embeddings, scaling_factor):
 
     def ref_rope(dim: int, max_position_embeddings: int,
                  scaling_factor: float):
@@ -123,11 +128,6 @@ def test_linear_rope():
                                            scaling_factor=scaling_factor)
         return emb.cos_sin_cache
 
-    dim, max_position_embeddings, scaling_factor = 128, 2048, 8.0
     assert torch.allclose(
         ref_rope(dim, max_position_embeddings, scaling_factor),
         vllm_rope(dim, max_position_embeddings, scaling_factor))
-
-
-test_rope()
-test_linear_rope()

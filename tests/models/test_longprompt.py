@@ -2,14 +2,11 @@ from vllm import LLM, SamplingParams
 from fastchat.model import get_conversation_template, load_model
 import json
 import re
-import os
-import argparse
+import pytest
 
 
 def load_test_cases():
-    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "data/prompt.json")
-    with open(data_path, 'r') as f:
+    with open("data/prompt.json", 'r') as f:
         objs = json.load(f)
     return objs
 
@@ -23,7 +20,7 @@ def parse_response_num(output):
         response_number = -1
     return response_number
 
-
+@pytest.mark.parametrize("model_name_or_path", ["lmsys/longchat-7b-16k"])
 def test_long_prompt(model_name_or_path):
 
     def prepare_prompt(test_case):
@@ -76,14 +73,3 @@ def test_long_prompt(model_name_or_path):
         else:
             correct += 1
     print(f"Correct: {correct}/{len(test_cases)}")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model-name-or-path",
-                        type=str,
-                        help="model path",
-                        default="lmsys/longchat-7b-16k")
-    args = parser.parse_args()
-
-    test_long_prompt(args.model_name_or_path)
