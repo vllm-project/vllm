@@ -623,5 +623,5 @@ if __name__ == "__main__":
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,
-                log_level="info",
+                log_level="warning",
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
