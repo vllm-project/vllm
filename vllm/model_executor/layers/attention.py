@@ -11,8 +11,7 @@ from vllm import attention_ops
 from vllm import cache_ops
 from vllm import pos_encoding_ops
 from vllm.model_executor.layers.rotary_embedding import (
-    RotaryEmbedding, LinearScalingRotaryEmbedding,
-    DynamicNTKScalingRotaryEmbedding)
+    RotaryEmbedding, LinearScalingRotaryEmbedding)
 
 from vllm.model_executor.input_metadata import InputMetadata
 
@@ -272,9 +271,6 @@ class PagedAttentionWithRoPE(PagedAttention):
             self.rotary_emb = RotaryEmbedding(rotary_dim, max_position, base)
         elif rope_scaling["type"] == "linear":
             self.rotary_emb = LinearScalingRotaryEmbedding(
-                rotary_dim, max_position, base, rope_scaling["factor"])
-        elif rope_scaling["type"] == "dynamic":
-            self.rotary_emb = DynamicNTKScalingRotaryEmbedding(
                 rotary_dim, max_position, base, rope_scaling["factor"])
         else:
             raise ValueError(rope_scaling)

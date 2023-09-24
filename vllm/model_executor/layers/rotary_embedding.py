@@ -33,7 +33,9 @@ class RotaryEmbedding(nn.Module):
 
     def _set_cos_sin_cache(self, seq_len: int):
         self.max_seq_len_cached = seq_len
-        t = torch.arange(self.max_seq_len_cached, device="cuda")
+        t = torch.arange(self.max_seq_len_cached,
+                         dtype=torch.float,
+                         device="cuda")
         self._set_cache(t)
 
     # Unlink HF or TGI, we do not dynamically set the cos_sin_cache
@@ -58,32 +60,4 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
         t = torch.arange(self.max_seq_len_cached,
                          dtype=torch.float,
                          device="cuda") / self.scaling_factor
-        self._set_cache(t)
-
-
-class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
-
-    def __init__(self,
-                 rotary_dim: int,
-                 max_position_embeddings: int = 2048,
-                 base: int = 10000,
-                 scaling_factor: float = 1.0):
-        self.scaling_factor = scaling_factor
-        super().__init__(rotary_dim, max_position_embeddings, base)
-
-    def _set_cos_sin_cache(self, seq_len: int):
-        self.max_seq_len_cached = seq_len * self.scaling_factor
-        if seq_len > self.max_position_embeddings:
-            base = self.base * (
-                (self.scaling_factor * seq_len / self.max_position_embeddings)
-                - (self.scaling_factor - 1))**(self.rotary_dim /
-                                               (self.rotary_dim - 2))
-
-            inv_freq = 1.0 / \
-                (base **
-                 (torch.arange(
-                     0, self.rotary_dim, 2).float() / self.rotary_dim))
-            self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        t = torch.arange(self.max_seq_len_cached).float()
         self._set_cache(t)
