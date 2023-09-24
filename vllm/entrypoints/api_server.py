@@ -35,8 +35,12 @@ async def generate(request: Request) -> Response:
         return Response(status_code=400, content="Missing prompt")
     try:
         sampling_params = SamplingParams(**request_dict)
-    except Exception as e:
-        return Response(status_code=400, content=f'Invalid sampling parameter(s): {e}')
+    except TypeError as e:
+        return Response(status_code=400,
+                        content=f"Unknown sampling parameter(s): {e}")
+    except (ValueError, KeyError) as e:
+        return Response(status_code=400,
+                        content=f"Invalid sampling parameter(s): {e}")
 
     request_id = random_uuid()
     results_generator = engine.generate(prompt, sampling_params, request_id)
