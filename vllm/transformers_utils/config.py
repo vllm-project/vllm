@@ -47,10 +47,7 @@ def get_config(model: str,
     try:
         _rope_scaling_validation()
         config = AutoConfig.from_pretrained(
-            model,
-            trust_remote_code=trust_remote_code,
-            rope_scaling=rope_scaling,
-            revision=revision)
+            model, trust_remote_code=trust_remote_code, revision=revision)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):

@@ -173,33 +173,7 @@ class ModelConfig:
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
     def get_max_model_len(self) -> int:
-        if self.max_model_len is not None:
-            return self.max_model_len
-        max_model_len = float("inf")
-        possible_keys = [
-            # OPT
-            "max_position_embeddings",
-            # GPT-2
-            "n_positions",
-            # MPT
-            "max_seq_len",
-            # Others
-            "max_sequence_length",
-            "max_seq_length",
-            "seq_len",
-        ]
-        for key in possible_keys:
-            max_len_key = getattr(self.hf_config, key, None)
-            if max_len_key is not None:
-                max_model_len = min(max_model_len, max_len_key)
-        rope_scaling = getattr(self.hf_config, "rope_scaling", None)
-        if rope_scaling is not None:
-            scale_factor = rope_scaling["factor"] if rope_scaling else 1.0
-            max_position_embeddings = getattr(self.hf_config,
-                                              "max_position_embeddings", None)
-            assert max_position_embeddings is not None
-            max_model_len = max_position_embeddings * scale_factor
-        return max_model_len
+        return self.max_model_len
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_config.num_hidden_layers
@@ -384,6 +358,16 @@ def _get_and_verify_max_len(
         max_len_key = getattr(hf_config, key, None)
         if max_len_key is not None:
             derived_max_model_len = min(derived_max_model_len, max_len_key)
+
+    rope_scaling = getattr(hf_config, "rope_scaling", None)
+    if rope_scaling is not None:
+        max_position_embeddings = getattr(hf_config, "max_position_embeddings",
+                                          None)
+        if max_position_embeddings is None:
+            raise ValueError(
+                "If using srope_scaling, "
+                "please include max_position_embeddings in config.json")
+        derived_max_model_len = rope_scaling["factor"] * max_position_embeddings
 
     if max_model_len is None:
         max_model_len = derived_max_model_len
