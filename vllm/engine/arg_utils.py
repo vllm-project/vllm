@@ -31,6 +31,7 @@ class EngineArgs:
     disable_log_stats: bool = False
     rope_scaling: Optional[dict] = None
     revision: Optional[str] = None
+    quantization: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -90,12 +91,13 @@ class EngineArgs:
             'a numpy cache to speed up the loading. '
             '"dummy" will initialize the weights with random values, '
             'which is mainly for profiling.')
-        # TODO(woosuk): Support FP32.
         parser.add_argument(
             '--dtype',
             type=str,
             default=EngineArgs.dtype,
-            choices=['auto', 'half', 'bfloat16', 'float'],
+            choices=[
+                'auto', 'half', 'float16', 'bfloat16', 'float', 'float32'
+            ],
             help='data type for model weights and activations. '
             'The "auto" option will use FP16 precision '
             'for FP32 and FP16 models, and BF16 precision '
@@ -152,6 +154,13 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+        # Quantization settings.
+        parser.add_argument('--quantization',
+                            '-q',
+                            type=str,
+                            choices=['awq', None],
+                            default=None,
+                            help='Method used to quantize the weights')
         parser.add_argument('--rope-scaling',
                             default=None,
                             type=json.loads,
@@ -169,12 +178,11 @@ class EngineArgs:
     def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
-        # Initialize the configs.
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
                                    self.dtype, self.seed, self.rope_scaling,
-                                   self.revision, self.max_model_len)
+                                   self.revision, self.max_model_len, self.quantization)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)

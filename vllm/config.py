@@ -49,6 +49,8 @@ class ModelConfig:
             version.
         max_model_len: Maximum length of a sequence (including prompt and
             output). If None, will be derived from the model.
+        quantization: Quantization method that was used to quantize the model
+            weights. If None, we assume the model weights are not quantized.
     """
 
     def __init__(
@@ -62,8 +64,9 @@ class ModelConfig:
         dtype: str,
         seed: int,
         rope_sclaing: Optional[dict],
-        revision: Optional[str],
+        revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
+        quantization: Optional[str] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -73,22 +76,16 @@ class ModelConfig:
         self.load_format = load_format
         self.seed = seed
         self.revision = revision
+        self.quantization = quantization
 
         self.hf_config = get_config(model, trust_remote_code, rope_sclaing,
                                     revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
+        self.max_model_len = _get_and_verify_max_len(self.hf_config,
+                                                     max_model_len)
         self._verify_load_format()
         self._verify_tokenizer_mode()
-        self.max_model_len = None
-        if max_model_len is not None:
-            derived_max_model_len = self.get_max_model_len()
-            if max_model_len > derived_max_model_len:
-                logger.warning(
-                    f"User-specified max_model_len ({max_model_len}) is "
-                    f"greater than the derived max_model_len "
-                    f"({derived_max_model_len}). Make sure the value is "
-                    "correct and within the model context size.")
-        self.max_model_len = max_model_len
+        self._verify_quantization()
 
     def _verify_load_format(self) -> None:
         load_format = self.load_format.lower()
@@ -107,6 +104,17 @@ class ModelConfig:
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
+
+    def _verify_quantization(self) -> None:
+        supported_quantization = ["awq"]
+        if self.quantization is None:
+            return
+        quantization = self.quantization.lower()
+        if quantization not in supported_quantization:
+            raise ValueError(
+                f"Unknown quantization: {self.quantization}. Must be one of "
+                f"{supported_quantization}.")
+        self.quantization = quantization
 
     def verify_with_parallel_config(
         self,
@@ -135,7 +143,8 @@ class ModelConfig:
         # FIXME(woosuk): This may not be true for all models.
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 
-    def get_num_heads(self, parallel_config: "ParallelConfig") -> int:
+    def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
+        """Returns the number of KV heads per GPU worker."""
         # For GPTBigCode & Falcon:
         # Note: for falcon, when new_decoder_architecture is True, the
         # multi_query flag is ignored and we use n_head_kv for the number of
@@ -147,10 +156,14 @@ class ModelConfig:
         if not new_decoder_arch_falcon and getattr(self.hf_config,
                                                    "multi_query", False):
             # Multi-query attention, only one KV head.
+            # Currently, tensor parallelism is not supported in this case.
             return 1
         # For Falcon:
         if getattr(self.hf_config, "n_head_kv", None) is not None:
             return (self.hf_config.n_head_kv //
+                    parallel_config.tensor_parallel_size)
+        if getattr(self.hf_config, "num_kv_heads", None) is not None:
+            return (self.hf_config.num_kv_heads //
                     parallel_config.tensor_parallel_size)
         # For LLaMA-2:
         if getattr(self.hf_config, "num_key_value_heads", None) is not None:
@@ -347,3 +360,38 @@ def _get_and_verify_dtype(
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "
                 f"{compute_capability[0]}.{compute_capability[1]}.")
     return torch_dtype
+
+
+def _get_and_verify_max_len(
+    hf_config: PretrainedConfig,
+    max_model_len: Optional[int],
+) -> int:
+    """Get and verify the model's maximum length."""
+    derived_max_model_len = float("inf")
+    possible_keys = [
+        # OPT
+        "max_position_embeddings",
+        # GPT-2
+        "n_positions",
+        # MPT
+        "max_seq_len",
+        # Others
+        "max_sequence_length",
+        "max_seq_length",
+        "seq_len",
+    ]
+    for key in possible_keys:
+        max_len_key = getattr(hf_config, key, None)
+        if max_len_key is not None:
+            derived_max_model_len = min(derived_max_model_len, max_len_key)
+
+    if max_model_len is None:
+        max_model_len = derived_max_model_len
+    elif max_model_len > derived_max_model_len:
+        raise ValueError(
+            f"User-specified max_model_len ({max_model_len}) is greater than "
+            f"the derived max_model_len ({max_len_key}={derived_max_model_len}"
+            " in model's config.json). This may lead to incorrect model "
+            "outputs or CUDA errors. Make sure the value is correct and "
+            "within the model context size.")
+    return max_model_len
