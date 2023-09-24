@@ -37,7 +37,7 @@ _default_handler = None
 
 
 def _get_default_logging_level():
-    verbosity = os.getenv("VLLM_VERBOSITY", "warning").lower()
+    verbosity = os.getenv("VLLM_VERBOSITY", "info").lower()
     
     try:
         return log_levels[verbosity]
