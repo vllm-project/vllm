@@ -130,6 +130,8 @@ async def check_length(
         input_ids = tokenizer(prompt).input_ids
     token_num = len(input_ids)
 
+    if request.max_tokens is None:
+        request.max_tokens = max_model_len - token_num
     if token_num + request.max_tokens > max_model_len:
         return input_ids, create_error_response(
             HTTPStatus.BAD_REQUEST,
