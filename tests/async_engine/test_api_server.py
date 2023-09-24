@@ -9,13 +9,16 @@ import requests
 
 
 def _query_server(prompt: str, params=None) -> dict:
+    if params is None:
+        params = {}
+
     response = requests.post("http://localhost:8000/generate",
                              json={
                                  "prompt": prompt,
                                  "max_tokens": 100,
                                  "temperature": 0,
                                  "ignore_eos": True,
-                                 **(params or {})
+                                 **params
                              })
     response.raise_for_status()
     return response.json()
