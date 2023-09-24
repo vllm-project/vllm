@@ -11,7 +11,7 @@ def load_test_cases():
     return objs
 
 
-def parse_response_num(output):
+def parse_response_num(output: str) -> int:
     response_number = re.findall("\d+", output)
     if response_number is not None and len(response_number) > 0:
         response_number = int(response_number[-1])
@@ -20,8 +20,9 @@ def parse_response_num(output):
         response_number = -1
     return response_number
 
+
 @pytest.mark.parametrize("model_name_or_path", ["lmsys/longchat-7b-16k"])
-def test_long_prompt(model_name_or_path):
+def test_long_prompt(model_name_or_path: str):
 
     def prepare_prompt(test_case):
         conv = get_conversation_template("vicuna")

@@ -10,7 +10,7 @@ class RefRotaryEmbedding(torch.nn.Module):
                  dim: int,
                  max_position_embeddings: int = 2048,
                  base: int = 10000,
-                 device=None):
+                 device=None) -> None:
         super().__init__()
 
         self.dim = dim
@@ -26,7 +26,7 @@ class RefRotaryEmbedding(torch.nn.Module):
                                 dtype=torch.get_default_dtype())
 
     def _set_cos_sin_cache(self, seq_len: int, device: torch.device,
-                           dtype: torch.dtype):
+                           dtype: torch.dtype) -> None:
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached,
                          device=device,
@@ -42,7 +42,9 @@ class RefRotaryEmbedding(torch.nn.Module):
                              emb.sin()[None, None, :, :].to(dtype),
                              persistent=False)
 
-    def forward(self, x: torch.tensor, seq_len: Optional[int] = None):
+    def forward(self,
+                x: torch.tensor,
+                seq_len: Optional[int] = None) -> torch.Tensor:
         # x: [bs, num_attention_heads, seq_len, head_size]
         if seq_len > self.max_seq_len_cached:
             self._set_cos_sin_cache(seq_len=seq_len,
@@ -63,11 +65,11 @@ class RefLinearScalingRotaryEmbedding(RefRotaryEmbedding):
                  max_position_embeddings: int = 2048,
                  base: int = 10000,
                  device: Optional[torch.device] = None,
-                 scaling_factor: Optional[float] = 1.0):
+                 scaling_factor: Optional[float] = 1.0) -> None:
         self.scaling_factor = scaling_factor
         super().__init__(dim, max_position_embeddings, base, device)
 
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
+    def _set_cos_sin_cache(self, seq_len, device, dtype) -> None:
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached,
                          device=device,
@@ -89,13 +91,13 @@ class RefLinearScalingRotaryEmbedding(RefRotaryEmbedding):
 @pytest.mark.parametrize("max_position_embeddings", [1024, 2048])
 def test_rope(dim: int, max_position_embeddings: int):
 
-    def ref_rope(dim: int, max_position_embeddings: int):
+    def ref_rope(dim: int, max_position_embeddings: int) -> torch.Tensor:
         emb = RefRotaryEmbedding(dim, max_position_embeddings, device='cuda')
         return torch.cat((emb.cos_cached.squeeze()[:, :dim // 2],
                           emb.sin_cached.squeeze()[:, :dim // 2]),
                          dim=-1)
 
-    def vllm_rope(dim: int, max_position_embeddings: int):
+    def vllm_rope(dim: int, max_position_embeddings: int) -> torch.Tensor:
         emb = RotaryEmbedding(dim, max_position_embeddings)
         return emb.cos_sin_cache
 
@@ -109,7 +111,7 @@ def test_rope(dim: int, max_position_embeddings: int):
 def test_linear_rope(dim, max_position_embeddings, scaling_factor):
 
     def ref_rope(dim: int, max_position_embeddings: int,
-                 scaling_factor: float):
+                 scaling_factor: float) -> torch.Tensor:
         emb = RefLinearScalingRotaryEmbedding(dim,
                                               max_position_embeddings,
                                               scaling_factor=scaling_factor,
@@ -122,7 +124,7 @@ def test_linear_rope(dim, max_position_embeddings, scaling_factor):
                          dim=-1)
 
     def vllm_rope(dim: int, max_position_embeddings: int,
-                  scaling_factor: float):
+                  scaling_factor: float) -> torch.Tensor:
         emb = LinearScalingRotaryEmbedding(dim,
                                            max_position_embeddings,
                                            scaling_factor=scaling_factor)

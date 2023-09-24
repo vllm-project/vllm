@@ -19,7 +19,7 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._set_cos_sin_cache(seq_len=max_position_embeddings)
 
-    def _set_cache(self, t: torch.Tensor):
+    def _set_cache(self, t: torch.Tensor) -> None:
         freqs = torch.einsum("i,j -> ij", t, self.inv_freq)
         cos = freqs.cos()
         sin = freqs.sin()
@@ -31,7 +31,7 @@ class RotaryEmbedding(nn.Module):
         cache = cache.to(torch_dtype)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
-    def _set_cos_sin_cache(self, seq_len: int):
+    def _set_cos_sin_cache(self, seq_len: int) -> None:
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached,
                          dtype=torch.float,
@@ -51,11 +51,11 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
                  rotary_dim: int,
                  max_position_embeddings: int = 2048,
                  base: int = 10000,
-                 scaling_factor: float = 1.0):
+                 scaling_factor: float = 1.0) -> None:
         self.scaling_factor = scaling_factor
         super().__init__(rotary_dim, max_position_embeddings, base)
 
-    def _set_cos_sin_cache(self, seq_len: int):
+    def _set_cos_sin_cache(self, seq_len: int) -> None:
         self.max_seq_len_cached = seq_len * self.scaling_factor
         t = torch.arange(self.max_seq_len_cached,
                          dtype=torch.float,
