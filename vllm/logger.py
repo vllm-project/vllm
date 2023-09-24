@@ -1,14 +1,24 @@
 # Adapted from
 # https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
 """Logging configuration for vLLM."""
+import os
 import logging
 import sys
+
+
+log_levels = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+}
 
 _FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 
-class NewLineFormatter(logging.Formatter):
+class _NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
 
     def __init__(self, fmt, datefmt=None):
@@ -26,15 +36,23 @@ _root_logger = logging.getLogger("vllm")
 _default_handler = None
 
 
+def _get_default_logging_level():
+    verbosity = os.getenv("VLLM_VERBOSITY", "warning").lower()
+    
+    try:
+        return log_levels[verbosity]
+    except KeyError:
+        raise ValueError(f"Unknown log level: {verbosity}")
+
 def _setup_logger():
-    _root_logger.setLevel(logging.DEBUG)
+    _root_logger.setLevel(_get_default_logging_level())
     global _default_handler
     if _default_handler is None:
         _default_handler = logging.StreamHandler(sys.stdout)
         _default_handler.flush = sys.stdout.flush  # type: ignore
-        _default_handler.setLevel(logging.INFO)
+        _default_handler.setLevel(logging.DEBUG)
         _root_logger.addHandler(_default_handler)
-    fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
+    fmt = _NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
     _default_handler.setFormatter(fmt)
     # Setting this will avoid the message
     # being propagated to the parent logger.
