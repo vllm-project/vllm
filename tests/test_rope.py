@@ -1,13 +1,14 @@
 import torch
+from typing import Optional
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, LinearScalingRotaryEmbedding, DynamicNTKScalingRotaryEmbedding
 
 
-class RefLlamaRotaryEmbedding(torch.nn.Module):
+class RefRotaryEmbedding(torch.nn.Module):
 
     def __init__(self,
-                 dim,
-                 max_position_embeddings=2048,
-                 base=10000,
+                 dim: int,
+                 max_position_embeddings: int=2048,
+                 base: int=10000,
                  device=None):
         super().__init__()
 
@@ -23,7 +24,10 @@ class RefLlamaRotaryEmbedding(torch.nn.Module):
                                 device=self.inv_freq.device,
                                 dtype=torch.get_default_dtype())
 
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
+    def _set_cos_sin_cache(self, 
+                           seq_len: int, 
+                           device: torch.device, 
+                           dtype: torch.dtype):
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached,
                          device=device,
@@ -39,7 +43,9 @@ class RefLlamaRotaryEmbedding(torch.nn.Module):
                              emb.sin()[None, None, :, :].to(dtype),
                              persistent=False)
 
-    def forward(self, x, seq_len=None):
+    def forward(self,
+                x: torch.tensor,
+                seq_len: Optional[int]=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
         if seq_len > self.max_seq_len_cached:
             self._set_cos_sin_cache(seq_len=seq_len,
@@ -52,15 +58,15 @@ class RefLlamaRotaryEmbedding(torch.nn.Module):
         )
 
 
-class RefLlamaLinearScalingRotaryEmbedding(RefLlamaRotaryEmbedding):
+class RefLinearScalingRotaryEmbedding(RefRotaryEmbedding):
     """LlamaRotaryEmbedding extended with linear scaling. Credits to the Reddit user /u/kaiokendev"""
 
     def __init__(self,
-                 dim,
-                 max_position_embeddings=2048,
-                 base=10000,
-                 device=None,
-                 scaling_factor=1.0):
+                 dim: int,
+                 max_position_embeddings: int=2048,
+                 base:int=10000,
+                 device:Optional[torch.device]=None,
+                 scaling_factor:Optional[float]=1.0):
         self.scaling_factor = scaling_factor
         super().__init__(dim, max_position_embeddings, base, device)
 
@@ -82,19 +88,22 @@ class RefLlamaLinearScalingRotaryEmbedding(RefLlamaRotaryEmbedding):
                              persistent=False)
 
 
-class RefLlamaDynamicNTKScalingRotaryEmbedding(RefLlamaRotaryEmbedding):
+class RefDynamicNTKScalingRotaryEmbedding(RefRotaryEmbedding):
     """LlamaRotaryEmbedding extended with Dynamic NTK scaling. Credits to the Reddit users /u/bloc97 and /u/emozilla"""
 
     def __init__(self,
-                 dim,
-                 max_position_embeddings=2048,
-                 base=10000,
-                 device=None,
-                 scaling_factor=1.0):
+                 dim:int,
+                 max_position_embeddings:int=2048,
+                 base:int=10000,
+                 device:Optional[torch.device]=None,
+                 scaling_factor:Optional[float]=1.0):
         self.scaling_factor = scaling_factor
         super().__init__(dim, max_position_embeddings, base, device)
 
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
+    def _set_cos_sin_cache(self, 
+                           seq_len:int, 
+                           device:torch.device,
+                           dtype:torch.dtype):
         self.max_seq_len_cached = seq_len
 
         if seq_len > self.max_position_embeddings:
@@ -123,13 +132,13 @@ class RefLlamaDynamicNTKScalingRotaryEmbedding(RefLlamaRotaryEmbedding):
 
 def test_rope():
 
-    def ref_rope(dim, max_position_embeddings):
-        emb = RefLlamaRotaryEmbedding(dim, max_position_embeddings)
+    def ref_rope(dim: int, max_position_embeddings: int):
+        emb = RefRotaryEmbedding(dim, max_position_embeddings)
         return torch.cat((emb.cos_cached.squeeze()[:, :dim // 2],
                           emb.sin_cached.squeeze()[:, :dim // 2]),
                          dim=-1).cuda()
 
-    def vllm_rope(dim, max_position_embeddings):
+    def vllm_rope(dim: int, max_position_embeddings: int):
         emb = RotaryEmbedding(dim, max_position_embeddings)
         return emb.cos_sin_cache
 
@@ -140,14 +149,14 @@ def test_rope():
 
 def test_linear_rope():
 
-    def ref_rope(dim, max_position_embeddings, scaling_factor):
-        emb = RefLlamaLinearScalingRotaryEmbedding(
+    def ref_rope(dim: int, max_position_embeddings: int, scaling_factor: float):
+        emb = RefLinearScalingRotaryEmbedding(
             dim, max_position_embeddings, scaling_factor=scaling_factor)
         return torch.cat((emb.cos_cached.squeeze()[:, :dim // 2],
                           emb.sin_cached.squeeze()[:, :dim // 2]),
                          dim=-1).cuda()
 
-    def vllm_rope(dim, max_position_embeddings, scaling_factor):
+    def vllm_rope(dim: int, max_position_embeddings: int, scaling_factor: float):
         emb = LinearScalingRotaryEmbedding(dim,
                                                 max_position_embeddings,
                                                 scaling_factor=scaling_factor)
@@ -161,14 +170,14 @@ def test_linear_rope():
 
 def test_ntk_rope():
 
-    def ref_rope(dim, max_position_embeddings, scaling_factor):
-        emb = RefLlamaDynamicNTKScalingRotaryEmbedding(
+    def ref_rope(dim: int, max_position_embeddings: int, scaling_factor: float):
+        emb = RefDynamicNTKScalingRotaryEmbedding(
             dim, max_position_embeddings, scaling_factor=scaling_factor)
         return torch.cat((emb.cos_cached.squeeze()[:, :dim // 2],
                           emb.sin_cached.squeeze()[:, :dim // 2]),
                          dim=-1).cuda()
 
-    def vllm_rope(dim, max_position_embeddings, scaling_factor):
+    def vllm_rope(dim: int, max_position_embeddings: int, scaling_factor: float):
         emb = DynamicNTKScalingRotaryEmbedding(
             dim, max_position_embeddings, scaling_factor=scaling_factor)
         return emb.cos_sin_cache

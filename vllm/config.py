@@ -63,7 +63,7 @@ class ModelConfig:
         load_format: str,
         dtype: str,
         seed: int,
-        rope_sclaing: Optional[dict],
+        rope_scaling: Optional[dict],
         revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -78,7 +78,7 @@ class ModelConfig:
         self.revision = revision
         self.quantization = quantization
 
-        self.hf_config = get_config(model, trust_remote_code, rope_sclaing,
+        self.hf_config = get_config(model, trust_remote_code, rope_scaling,
                                     revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_config,

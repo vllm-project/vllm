@@ -1,5 +1,3 @@
-from typing import Optional
-
 from transformers import AutoConfig, PretrainedConfig
 from typing import Optional
 
