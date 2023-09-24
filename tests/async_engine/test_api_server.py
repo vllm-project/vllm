@@ -11,8 +11,6 @@ import requests
 def _query_server(prompt: str, params=None) -> dict:
     if params is None:
         params = {}
-    if params is None:
-        params = {}
 
     response = requests.post("http://localhost:8000/generate",
                              json={
