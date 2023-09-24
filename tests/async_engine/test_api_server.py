@@ -105,8 +105,8 @@ def test_api_server(api_server):
         pool.join()
 
         # check cancellation stats
-        num_aborted_requests = requests.get(
-            "http://localhost:8000/stats").json()["num_aborted_requests"]
+        stats = requests.get("http://localhost:8000/stats").json()
+        num_aborted_requests = stats["num_aborted_requests"]
         assert num_aborted_requests > 0
 
     # check that server still runs after cancellations
