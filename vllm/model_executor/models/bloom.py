@@ -85,14 +85,12 @@ class BloomAttention(nn.Module):
             3 * self.hidden_size,
             bias=True,
             gather_output=False,
-            perform_initialization=False,
         )
         self.dense = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
             input_is_parallel=True,
-            perform_initialization=False,
         )
 
         # Create the alibi slopes and slice them.
@@ -129,15 +127,17 @@ class BloomMLP(nn.Module):
     def __init__(self, config: BloomConfig):
         super().__init__()
         hidden_size = config.hidden_size
-        self.dense_h_to_4h = ColumnParallelLinear(hidden_size,
-                                                  4 * hidden_size,
-                                                  gather_output=False,
-                                                  perform_initialization=False)
+        self.dense_h_to_4h = ColumnParallelLinear(
+            hidden_size,
+            4 * hidden_size,
+            gather_output=False,
+        )
         self.act = get_act_fn("gelu")
-        self.dense_4h_to_h = RowParallelLinear(4 * hidden_size,
-                                               hidden_size,
-                                               input_is_parallel=True,
-                                               perform_initialization=False)
+        self.dense_4h_to_h = RowParallelLinear(
+            4 * hidden_size,
+            hidden_size,
+            input_is_parallel=True,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.dense_h_to_4h(x)
@@ -208,7 +208,9 @@ class BloomModel(nn.Module):
 
         # Embedding + LN Embedding
         self.word_embeddings = VocabParallelEmbedding(
-            config.vocab_size, self.embed_dim, perform_initialization=False)
+            config.vocab_size,
+            self.embed_dim,
+        )
         self.word_embeddings_layernorm = nn.LayerNorm(
             self.embed_dim, eps=config.layer_norm_epsilon)
 

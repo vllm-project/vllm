@@ -62,29 +62,31 @@ class GPTBigCodeAttention(nn.Module):
         if self.multi_query:
             self.num_kv_heads = 1
             self.kv_dim = self.head_dim
-            self.c_attn_q = ColumnParallelLinear(self.hidden_size,
-                                                 self.hidden_size,
-                                                 bias=True,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
+            self.c_attn_q = ColumnParallelLinear(
+                self.hidden_size,
+                self.hidden_size,
+                bias=True,
+                gather_output=False,
+            )
             self.c_attn_kv = nn.Linear(self.hidden_size,
                                        2 * self.kv_dim,
                                        bias=True)
         else:
             self.num_kv_heads = self.num_heads
             self.kv_dim = self.num_kv_heads * self.head_dim
-            self.c_attn = ColumnParallelLinear(self.hidden_size,
-                                               self.hidden_size +
-                                               2 * self.kv_dim,
-                                               bias=True,
-                                               gather_output=False,
-                                               perform_initialization=False)
+            self.c_attn = ColumnParallelLinear(
+                self.hidden_size,
+                self.hidden_size + 2 * self.kv_dim,
+                bias=True,
+                gather_output=False,
+            )
 
-        self.c_proj = RowParallelLinear(self.hidden_size,
-                                        self.hidden_size,
-                                        bias=True,
-                                        input_is_parallel=True,
-                                        perform_initialization=False)
+        self.c_proj = RowParallelLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=True,
+            input_is_parallel=True,
+        )
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    scale=self.scale,
@@ -124,16 +126,18 @@ class GPTBigMLP(nn.Module):
     ):
         super().__init__()
         hidden_size = config.hidden_size
-        self.c_fc = ColumnParallelLinear(hidden_size,
-                                         intermediate_size,
-                                         bias=True,
-                                         gather_output=False,
-                                         perform_initialization=False)
-        self.c_proj = RowParallelLinear(intermediate_size,
-                                        hidden_size,
-                                        bias=True,
-                                        input_is_parallel=True,
-                                        perform_initialization=False)
+        self.c_fc = ColumnParallelLinear(
+            hidden_size,
+            intermediate_size,
+            bias=True,
+            gather_output=False,
+        )
+        self.c_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=True,
+            input_is_parallel=True,
+        )
         self.act = get_act_fn(config.activation_function)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

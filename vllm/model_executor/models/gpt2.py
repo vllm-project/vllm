@@ -56,16 +56,18 @@ class GPT2Attention(nn.Module):
         self.head_dim = self.hidden_size // total_num_heads
         self.scale = self.head_dim**-0.5
 
-        self.c_attn = ColumnParallelLinear(self.hidden_size,
-                                           3 * self.hidden_size,
-                                           bias=True,
-                                           gather_output=False,
-                                           perform_initialization=False)
-        self.c_proj = RowParallelLinear(self.hidden_size,
-                                        self.hidden_size,
-                                        bias=True,
-                                        input_is_parallel=True,
-                                        perform_initialization=False)
+        self.c_attn = ColumnParallelLinear(
+            self.hidden_size,
+            3 * self.hidden_size,
+            bias=True,
+            gather_output=False,
+        )
+        self.c_proj = RowParallelLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=True,
+            input_is_parallel=True,
+        )
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    scale=self.scale)
@@ -95,16 +97,18 @@ class GPT2MLP(nn.Module):
     ):
         super().__init__()
         hidden_size = config.hidden_size
-        self.c_fc = ColumnParallelLinear(hidden_size,
-                                         intermediate_size,
-                                         bias=True,
-                                         gather_output=False,
-                                         perform_initialization=False)
-        self.c_proj = RowParallelLinear(intermediate_size,
-                                        hidden_size,
-                                        bias=True,
-                                        input_is_parallel=True,
-                                        perform_initialization=False)
+        self.c_fc = ColumnParallelLinear(
+            hidden_size,
+            intermediate_size,
+            bias=True,
+            gather_output=False,
+        )
+        self.c_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=True,
+            input_is_parallel=True,
+        )
         self.act = get_act_fn(config.activation_function)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

@@ -53,14 +53,12 @@ class QWenMLP(nn.Module):
             2 * intermediate_size,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
         )
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
         )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -99,14 +97,12 @@ class QWenAttention(nn.Module):
             3 * hidden_size,
             bias=True,
             gather_output=False,
-            perform_initialization=False,
         )
         self.c_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
         )
         self.scaling = self.head_dim**-0.5
         self.attn = PagedAttentionWithRoPE(
@@ -189,9 +185,10 @@ class QWenModel(nn.Module):
         self.vocab_size = config.vocab_size
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.wte = VocabParallelEmbedding(vocab_size,
-                                          config.n_embd,
-                                          perform_initialization=False)
+        self.wte = VocabParallelEmbedding(
+            vocab_size,
+            config.n_embd,
+        )
         self.h = nn.ModuleList(
             [QWenBlock(config) for _ in range(config.num_hidden_layers)])
         self.ln_f = RMSNorm(config.n_embd, eps=config.layer_norm_epsilon)
@@ -234,7 +231,6 @@ class QWenLMHeadModel(nn.Module):
             vocab_size,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
         )
         self.sampler = Sampler(config.vocab_size)
 

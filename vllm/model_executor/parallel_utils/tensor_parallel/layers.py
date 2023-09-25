@@ -8,60 +8,20 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
-import torch.nn.init as init
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from .mappings import (
-    gather_from_tensor_model_parallel_region,
-    reduce_from_tensor_model_parallel_region,
-    scatter_to_tensor_model_parallel_region,
-)
+from.communication_op import (tenosr_model_parallel_all_reduce,
+                              tensor_model_parallel_all_gather)
 
 from .utils import (
     divide,
     VocabUtility,
+    split_tensor_along_last_dim,
 )
-
-_MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {'tensor_model_parallel': False,
-                                      'partition_dim': -1,
-                                      'partition_stride': 1}
-
-def param_is_not_tensor_parallel_duplicate(param):
-    return (hasattr(param, 'tensor_model_parallel') and
-            param.tensor_model_parallel) or (
-                get_tensor_model_parallel_rank() == 0)
-
-
-def set_tensor_model_parallel_attributes(tensor, is_parallel, dim, stride):
-    # Make sure the attributes are not set.
-    for attribute in _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS:
-        assert not hasattr(tensor, attribute)
-    # Set the attributes.
-    setattr(tensor, 'tensor_model_parallel', is_parallel)
-    setattr(tensor, 'partition_dim', dim)
-    setattr(tensor, 'partition_stride', stride)
-
-
-def set_defaults_if_not_set_tensor_model_parallel_attributes(tensor):
-    def maybe_set(attribute, value):
-        if not hasattr(tensor, attribute):
-            setattr(tensor, attribute, value)
-    for attribute in _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS:
-        maybe_set(attribute, _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS[attribute])
-
-
-def copy_tensor_model_parallel_attributes(destination_tensor, source_tensor):
-    def maybe_copy(attribute):
-        if hasattr(source_tensor, attribute):
-            setattr(destination_tensor, attribute,
-                    getattr(source_tensor, attribute))
-    for attribute in _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS:
-        maybe_copy(attribute)
-
 
 class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
@@ -71,22 +31,12 @@ class VocabParallelEmbedding(torch.nn.Module):
     Arguments:
         num_embeddings: vocabulary size.
         embedding_dim: size of hidden state.
-
-    Keyword Arguments:
-        init_method: method to initialize weights.
-        params_dtype
-        use_cpu_initialization
-        perform_initialization
+        params_dtype: type of the parameters.
     """
 
-    def __init__(self, num_embeddings: int, embedding_dim: int, *,
-                 init_method=init.xavier_normal_,
-                 params_dtype: torch.dtype=None,
-                 use_cpu_initialization: bool=False,
-                 perform_initialization: bool=False):
-        super(VocabParallelEmbedding, self).__init__()
-        assert not perform_initialization
-        assert not use_cpu_initialization
+    def __init__(self, num_embeddings: int, embedding_dim: int,
+                 params_dtype: torch.dtype=None):
+        super().__init__()
 
         # Keep the input dimensions.
         self.num_embeddings = num_embeddings
@@ -94,46 +44,36 @@ class VocabParallelEmbedding(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
-        # Set the defaults for compatibility.
-        self.padding_idx = None
-        self.max_norm = None
-        self.norm_type = 2.
-        self.scale_grad_by_freq = False
-        self.sparse = False
-        self._weight = None
-        self.tensor_model_parallel_size = get_tensor_model_parallel_world_size()
+        self.tp_size = get_tensor_model_parallel_world_size()
         # Divide the weight matrix along the vocaburaly dimension.
-        self.vocab_start_index, self.vocab_end_index = \
+        self.vocab_start_index, self.vocab_end_index = (
             VocabUtility.vocab_range_from_global_vocab_size(
                 self.num_embeddings, get_tensor_model_parallel_rank(),
-                self.tensor_model_parallel_size)
-        self.num_embeddings_per_partition = self.vocab_end_index - \
-            self.vocab_start_index
+                self.tp_size))
+        self.num_embeddings_per_partition = (self.vocab_end_index -
+            self.vocab_start_index)
 
         self.weight = Parameter(torch.empty(
             self.num_embeddings_per_partition, self.embedding_dim,
             device=torch.cuda.current_device(), dtype=params_dtype))
 
     def forward(self, input_):
-        if self.tensor_model_parallel_size > 1:
+        if self.tp_size > 1:
             # Build the mask.
-            input_mask = (input_ < self.vocab_start_index) | \
-                         (input_ >= self.vocab_end_index)
+            input_mask = ((input_ < self.vocab_start_index) |
+                         (input_ >= self.vocab_end_index))
             # Mask the input.
             masked_input = input_.clone() - self.vocab_start_index
             masked_input[input_mask] = 0
         else:
             masked_input = input_
             # Get the embeddings.
-        output_parallel = F.embedding(masked_input, self.weight,
-                                      self.padding_idx, self.max_norm,
-                                      self.norm_type, self.scale_grad_by_freq,
-                                      self.sparse)
+        output_parallel = F.embedding(masked_input, self.weight)
         # Mask the output embedding.
-        if self.tensor_model_parallel_size > 1:
+        if self.tp_size > 1:
             output_parallel[input_mask, :] = 0.0
         # Reduce across all the model parallel GPUs.
-        output = reduce_from_tensor_model_parallel_region(output_parallel)
+        output = tenosr_model_parallel_all_reduce(output_parallel)
         return output
 
 
@@ -154,30 +94,23 @@ class ColumnParallelLinear(torch.nn.Module):
                        which is Y_i = XA_i
         init_method: method to initialize weights. Note that bias is always set
                      to zero.
-        stride: For the strided linear layers.
         keep_master_weight_for_test: This was added for testing and should be
                                      set to False. It returns the master weights
                                      used for initialization.
         skip_bias_add: This was added to enable performance optimations where bias
                        can be fused with other elementwise operations. we skip
                        adding bias but instead return it.
-        params_dtype:
-        use_cpu_initialization:
+        params_dtype: Data type for the parameters.
+        quant_config: Quantization configuration.
     """
 
     def __init__(self, input_size, output_size, *,
                  bias=True, gather_output=True,
-                 init_method=init.xavier_normal_, stride=1,
-                 keep_master_weight_for_test=False,
                  skip_bias_add=False,
                  params_dtype=None,
-                 use_cpu_initialization=False,
-                 perform_initialization=False,
                  quant_config=None,
                  ):
-        super(ColumnParallelLinear, self).__init__()
-        assert not perform_initialization
-        assert not use_cpu_initialization
+        super().__init__()
 
         # Keep input parameters
         self.input_size = input_size
@@ -202,10 +135,6 @@ class ColumnParallelLinear(torch.nn.Module):
                 self.output_size_per_partition,
                 device=torch.cuda.current_device(),
                 dtype=params_dtype))
-            set_tensor_model_parallel_attributes(self.bias, True, 0, stride)
-            # Always initialize bias to zero.
-            with torch.no_grad():
-                self.bias.zero_()
         else:
             self.register_parameter('bias', None)
 
@@ -238,7 +167,7 @@ class ColumnParallelLinear(torch.nn.Module):
         output_parallel = self.apply_weights(input_parallel, bias)
         if self.gather_output:
             # All-gather across the partitions.
-            output = gather_from_tensor_model_parallel_region(output_parallel)
+            output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
@@ -266,36 +195,21 @@ class RowParallelLinear(torch.nn.Module):
         input_is_parallel: If true, we assume that the input is already
                            split across the GPUs and we do not split
                            again.
-        init_method: method to initialize weights. Note that bias is always set
-                     to zero.
-        stride: For the strided linear layers.
-        keep_master_weight_for_test: This was added for testing and should be
-                                     set to False. It returns the master weights
-                                     used for initialization.
         skip_bias_add: This was added to enable performance optimization where bias
                        can be fused with other elementwise operations. We skip
                        adding bias but instead return it.
-        params_dtype:
-        use_cpu_initialization:
-        perform_initialization:
-        reduce_results:
+        params_dtype: Data type for the parameters.
+        quant_config: Quantization configuration.
     """
 
     def __init__(self, input_size, output_size, *,
                  bias=True, input_is_parallel=False,
-                 init_method=init.xavier_normal_, stride=1,
-                 keep_master_weight_for_test=False,
                  skip_bias_add=False,
                  params_dtype=None,
-                 use_cpu_initialization=False,
-                 perform_initialization=False,
                  reduce_results=True,
                  quant_config=None,
                  ):
         super(RowParallelLinear, self).__init__()
-        assert not perform_initialization
-        assert not use_cpu_initialization
-
         # Keep input parameters
         self.input_size = input_size
         self.output_size = output_size
@@ -349,11 +263,15 @@ class RowParallelLinear(torch.nn.Module):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            input_parallel = scatter_to_tensor_model_parallel_region(input_)
+            # TODO: simplify code below
+            tp_rank = get_tensor_model_parallel_rank()
+            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.world_size)
+            input_parallel = splitted_input[tp_rank].contiguous()
+
         # Matrix multiply.
         output_parallel = self.apply_weights(input_parallel)
         if self.reduce_results and self.world_size > 1:
-            output_ = reduce_from_tensor_model_parallel_region(output_parallel)
+            output_ = tenosr_model_parallel_all_reduce(output_parallel)
         else:
             output_ = output_parallel
 

@@ -49,16 +49,18 @@ class GPTJAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.total_num_heads
 
-        self.qkv_proj = ColumnParallelLinear(config.hidden_size,
-                                             3 * config.hidden_size,
-                                             bias=False,
-                                             gather_output=False,
-                                             perform_initialization=False)
-        self.out_proj = RowParallelLinear(config.hidden_size,
-                                          config.hidden_size,
-                                          bias=False,
-                                          input_is_parallel=True,
-                                          perform_initialization=False)
+        self.qkv_proj = ColumnParallelLinear(
+            config.hidden_size,
+            3 * config.hidden_size,
+            bias=False,
+            gather_output=False,
+        )
+        self.out_proj = RowParallelLinear(
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            input_is_parallel=True,
+        )
 
         tp_world_size = get_tensor_model_parallel_world_size()
         assert self.total_num_heads % tp_world_size == 0
@@ -102,14 +104,16 @@ class GPTJMLP(nn.Module):
     def __init__(self, intermediate_size: int, config: GPTJConfig):
         super().__init__()
         hidden_size = config.n_embd
-        self.fc_in = ColumnParallelLinear(hidden_size,
-                                          intermediate_size,
-                                          gather_output=False,
-                                          perform_initialization=False)
-        self.fc_out = RowParallelLinear(intermediate_size,
-                                        hidden_size,
-                                        input_is_parallel=True,
-                                        perform_initialization=False)
+        self.fc_in = ColumnParallelLinear(
+            hidden_size,
+            intermediate_size,
+            gather_output=False,
+        )
+        self.fc_out = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            input_is_parallel=True,
+        )
         self.act = get_act_fn(config.activation_function)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -159,9 +163,10 @@ class GPTJModel(nn.Module):
         super().__init__()
         self.config = config
         self.embed_dim = config.n_embd
-        self.wte = VocabParallelEmbedding(config.vocab_size,
-                                          self.embed_dim,
-                                          perform_initialization=False)
+        self.wte = VocabParallelEmbedding(
+            config.vocab_size,
+            self.embed_dim,
+        )
         self.h = nn.ModuleList(
             [GPTJBlock(config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
@@ -199,10 +204,11 @@ class GPTJForCausalLM(nn.Module):
         self.config = config
         assert not config.tie_word_embeddings
         self.transformer = GPTJModel(config)
-        self.lm_head = ColumnParallelLinear(config.n_embd,
-                                            config.vocab_size,
-                                            gather_output=False,
-                                            perform_initialization=False)
+        self.lm_head = ColumnParallelLinear(
+            config.n_embd,
+            config.vocab_size,
+            gather_output=False,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(

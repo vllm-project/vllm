@@ -59,11 +59,12 @@ class GPTNeoXAttention(nn.Module):
             config.hidden_size,
             3 * config.hidden_size,
             gather_output=False,
-            perform_initialization=False)
-        self.dense = RowParallelLinear(config.hidden_size,
-                                       config.hidden_size,
-                                       input_is_parallel=True,
-                                       perform_initialization=False)
+        )
+        self.dense = RowParallelLinear(
+            config.hidden_size,
+            config.hidden_size,
+            input_is_parallel=True,
+        )
 
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
@@ -100,14 +101,16 @@ class GPTNeoXMLP(nn.Module):
 
     def __init__(self, config: GPTNeoXConfig):
         super().__init__()
-        self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
-                                                  config.intermediate_size,
-                                                  gather_output=False,
-                                                  perform_initialization=False)
-        self.dense_4h_to_h = RowParallelLinear(config.intermediate_size,
-                                               config.hidden_size,
-                                               input_is_parallel=True,
-                                               perform_initialization=False)
+        self.dense_h_to_4h = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            gather_output=False,
+        )
+        self.dense_4h_to_h = RowParallelLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            input_is_parallel=True,
+        )
         self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states):
@@ -169,9 +172,10 @@ class GPTNeoXModel(nn.Module):
         super().__init__()
         self.config = config
 
-        self.embed_in = VocabParallelEmbedding(config.vocab_size,
-                                               config.hidden_size,
-                                               perform_initialization=False)
+        self.embed_in = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+        )
         self.layers = nn.ModuleList(
             [GPTNeoXLayer(config) for _ in range(config.num_hidden_layers)])
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,
@@ -209,11 +213,12 @@ class GPTNeoXForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.gpt_neox = GPTNeoXModel(config)
-        self.embed_out = ColumnParallelLinear(config.hidden_size,
-                                              config.vocab_size,
-                                              bias=False,
-                                              gather_output=False,
-                                              perform_initialization=False)
+        self.embed_out = ColumnParallelLinear(
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
+            gather_output=False,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
