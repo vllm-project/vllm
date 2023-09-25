@@ -102,9 +102,24 @@ class LlamaAttention(nn.Module):
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
-        assert max(self.total_num_kv_heads, tp_size)% min(self.total_num_kv_heads, tp_size) == 0
+        #it pertains to the execution of the Llama2-70b model on 16 or more GPUs.
+        # According to the configuration,
+        # we have a total of 8 kv-heads and 64 heads for the Llama2-70b model.
+        # Each kv-head is shared among 8 query-heads.
+        #When we shard the model based on the heads dimension to avoid
+        # duplicate computations, it’s natural to replicate kv-heads.
+        # This allows us to support up to 64 GPUs.
+        # Explicit replication isn’t necessary;
+        # we only need to remap the GPU rank to read the appropriate weights.
+        #For instance,
+        # GPUs 0 and 1 are remapped to 0,
+        # GPUs 2 and 3 are remapped to 1, and so on.
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        repeat_num = max(1, tp_size//self.total_num_kv_heads)
+        num_kv_heads_replicas = max(1, tp_size // self.total_num_kv_heads)
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -114,7 +129,9 @@ class LlamaAttention(nn.Module):
 
         self.qkv_proj = ParallelLinear.column(
             hidden_size,
-            (self.total_num_heads + 2 * self.total_num_kv_heads * repeat_num) * #### repeate KV
+            (self.total_num_heads +
+             2 * self.total_num_kv_heads * num_kv_heads_replicas)
+            *  #### to make (2 * self.total_num_kv_heads * num_kv_heads_replicas)%world_size == 0
             self.head_dim,
             bias=False,
             gather_output=False,
@@ -322,10 +339,11 @@ class LlamaForCausalLM(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         q_proj_shard_size = (self.config.hidden_size // tp_size)
-        repeat_num = max(1, tp_size//self.config.num_key_value_heads)
-        kv_proj_shard_size = (self.config.hidden_size //
-                              self.config.num_attention_heads *
-                              max(1,self.config.num_key_value_heads // tp_size))
+        num_kv_heads_replicas = max(1,
+                                    tp_size // self.config.num_key_value_heads)
+        kv_proj_shard_size = (
+            self.config.hidden_size // self.config.num_attention_heads *
+            max(1, self.config.num_key_value_heads // tp_size))
         attention_weight_specs = [
             # (weight_name, shard_size, offset)
             ("q_proj", q_proj_shard_size, 0),
@@ -362,7 +380,7 @@ class LlamaForCausalLM(nn.Module):
                     offset //= self.quant_config.pack_factor
 
                 if weight_name != "q_proj":
-                    tensor_model_parallel_rank_remap = tensor_model_parallel_rank//repeat_num
+                    tensor_model_parallel_rank_remap = tensor_model_parallel_rank // num_kv_heads_replicas
                 else:
                     tensor_model_parallel_rank_remap = tensor_model_parallel_rank
                 loaded_weight = loaded_weight[
