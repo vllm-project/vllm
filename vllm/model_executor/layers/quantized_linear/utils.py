@@ -4,7 +4,7 @@ import torch
 
 from vllm import quantization_ops
 from vllm.model_executor.layers.quantized_linear.gptq import (
-    GPTQColumnParallelLinear, GPTQRowParallelLinear)
+    GPTQColumnParallelLinear, GPTQRowParallelLinear, GPTQLinear)
 
 
 def quant_post_init(model, max_input_length: Optional[int] = None):
@@ -17,8 +17,9 @@ def quant_post_init(model, max_input_length: Optional[int] = None):
     model_uses_exllama = False
     use_act_order = False
     for _, submodule in model.named_modules():
-        if isinstance(submodule,
-                      (GPTQColumnParallelLinear, GPTQRowParallelLinear)):
+        if isinstance(
+                submodule,
+            (GPTQColumnParallelLinear, GPTQRowParallelLinear, GPTQLinear)):
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:
@@ -31,9 +32,8 @@ def quant_post_init(model, max_input_length: Optional[int] = None):
                 device_to_buffers_size[device]["max_dq_buffer_size"],
                 submodule.qweight.numel() * 8)
 
-            in_features = submodule.input_size if isinstance(
-                submodule, GPTQColumnParallelLinear
-            ) else submodule.input_size_per_partition
+            in_features = submodule.input_size_per_partition if isinstance(
+                submodule, GPTQRowParallelLinear) else submodule.input_size
             out_features = submodule.output_size_per_partition if isinstance(
                 submodule, GPTQColumnParallelLinear) else submodule.output_size
             if submodule.quant_config.desc_act:
@@ -84,8 +84,9 @@ def quant_post_init(model, max_input_length: Optional[int] = None):
         # The buffers need to have been initialized first before calling
         # make_q4.
         for _, submodule in model.named_modules():
-            if isinstance(submodule,
-                          (GPTQColumnParallelLinear, GPTQRowParallelLinear)):
+            if isinstance(
+                    submodule,
+                (GPTQColumnParallelLinear, GPTQRowParallelLinear, GPTQLinear)):
                 submodule.post_init()
 
         torch.cuda.empty_cache()

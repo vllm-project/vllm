@@ -18,21 +18,21 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.quantized_linear import ParallelLinear
+from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor,
     hf_model_weights_iterator,
     load_padded_tensor_parallel_vocab,
     load_tensor_parallel_weights,
+    get_parallel_weight,
 )
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding,
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
+    VocabParallelEmbedding, )
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.qwen import QWenConfig
 
@@ -46,21 +46,24 @@ class QWenMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str = "silu",
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(
+        self.gate_up_proj = ParallelLinear.column(
             hidden_size,
             2 * intermediate_size,
             bias=False,
             gather_output=False,
             perform_initialization=False,
+            quant_config=quant_config,
         )
-        self.c_proj = RowParallelLinear(
+        self.c_proj = ParallelLinear.row(
             intermediate_size,
             hidden_size,
             bias=False,
             input_is_parallel=True,
             perform_initialization=False,
+            quant_config=quant_config,
         )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -76,8 +79,14 @@ class QWenMLP(nn.Module):
 
 class QWenAttention(nn.Module):
 
-    def __init__(self, hidden_size: int, num_heads: int,
-                 max_position_embeddings: int):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        max_position_embeddings: int,
+        rope_theta: float = 10000,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
@@ -89,19 +98,21 @@ class QWenAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
 
         # pylint: disable=invalid-name
-        self.c_attn = ColumnParallelLinear(
+        self.c_attn = ParallelLinear.column(
             hidden_size,
             3 * hidden_size,
             bias=True,
             gather_output=False,
             perform_initialization=False,
+            quant_config=quant_config,
         )
-        self.c_proj = RowParallelLinear(
+        self.c_proj = ParallelLinear.row(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             input_is_parallel=True,
             perform_initialization=False,
+            quant_config=quant_config,
         )
         self.scaling = self.head_dim**-0.5
         self.attn = PagedAttentionWithRoPE(
@@ -109,6 +120,7 @@ class QWenAttention(nn.Module):
             self.head_dim,
             self.scaling,
             rotary_dim=self.head_dim,
+            base=rope_theta,
             max_position=max_position_embeddings,
         )
 
@@ -133,16 +145,26 @@ class QWenAttention(nn.Module):
 
 class QWenBlock(nn.Module):
 
-    def __init__(self, config: QWenConfig):
+    def __init__(self,
+                 config: QWenConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.ln_1 = RMSNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
-        self.attn = QWenAttention(config.n_embd, config.num_attention_heads,
-                                  config.max_position_embeddings)
+        rope_theta = getattr(config, "rope_theta", 10000)
+        self.attn = QWenAttention(config.n_embd,
+                                  config.num_attention_heads,
+                                  config.max_position_embeddings,
+                                  rope_theta=rope_theta,
+                                  quant_config=quant_config)
 
         self.ln_2 = RMSNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
-        self.mlp = QWenMLP(config.n_embd, config.ffn_hidden_size // 2)
+        self.mlp = QWenMLP(
+            config.n_embd,
+            config.ffn_hidden_size // 2,
+            quant_config=quant_config,
+        )
 
     def forward(
         self,
@@ -174,7 +196,9 @@ class QWenBlock(nn.Module):
 
 class QWenModel(nn.Module):
 
-    def __init__(self, config: QWenConfig):
+    def __init__(self,
+                 config: QWenConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -183,8 +207,10 @@ class QWenModel(nn.Module):
         self.wte = VocabParallelEmbedding(vocab_size,
                                           config.n_embd,
                                           perform_initialization=False)
-        self.h = nn.ModuleList(
-            [QWenBlock(config) for _ in range(config.num_hidden_layers)])
+        self.h = nn.ModuleList([
+            QWenBlock(config, quant_config)
+            for _ in range(config.num_hidden_layers)
+        ])
         self.ln_f = RMSNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -215,17 +241,21 @@ class QWenModel(nn.Module):
 
 class QWenLMHeadModel(nn.Module):
 
-    def __init__(self, config: QWenConfig):
+    def __init__(self,
+                 config: QWenConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.transformer = QWenModel(config)
+        self.quant_config = quant_config
+        self.transformer = QWenModel(config, quant_config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.lm_head = ColumnParallelLinear(
+        self.lm_head = ParallelLinear.column(
             config.n_embd,
             vocab_size,
             bias=False,
             gather_output=False,
             perform_initialization=False,
+            quant_config=None,
         )
         self.sampler = Sampler(config.vocab_size)
 
@@ -243,8 +273,8 @@ class QWenLMHeadModel(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = []
-    _row_parallel_weights = ["c_proj.weight"]
+    column_parallel_layers = []
+    row_parallel_layers = ["c_proj"]
 
     def load_weights(
         self,
@@ -253,6 +283,8 @@ class QWenLMHeadModel(nn.Module):
         load_format: str = "auto",
         revision: Optional[str] = None,
     ):
+        (column_parallel_weights, row_parallel_weights,
+         ignore_weight_suffixes) = get_parallel_weight(self)
         tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
@@ -261,33 +293,41 @@ class QWenLMHeadModel(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
+            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
+                continue
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
 
-            if "c_attn" in name:
+            is_transposed = False
+            if self.quant_config is not None:
+                is_transposed = self.quant_config.is_transposed(name)
+            if is_transposed:
+                loaded_weight = loaded_weight.T
+
+            if "c_attn" in name and "g_idx" not in name:
                 total_num_heads = self.config.num_attention_heads
-                hidden_size = self.config.hidden_size
-                head_size = hidden_size // total_num_heads
                 num_heads = total_num_heads // tp_world_size
                 head_start = tp_rank * num_heads
                 head_end = (tp_rank + 1) * num_heads
 
-                if "weight" in name:
-                    loaded_weight = loaded_weight.view(3, total_num_heads,
-                                                       head_size, hidden_size)
-                    loaded_weight = loaded_weight[:, head_start:head_end, :, :]
-                    loaded_weight = loaded_weight.reshape(-1, hidden_size)
-                elif "bias" in name:
-                    loaded_weight = loaded_weight.view(3, total_num_heads,
-                                                       head_size)
-                    loaded_weight = loaded_weight[:, head_start:head_end, :]
-                    loaded_weight = loaded_weight.reshape(-1)
+                weight_shape = loaded_weight.shape
+                loaded_weight = loaded_weight.view(3, total_num_heads, -1,
+                                                   *weight_shape[1:])
+                loaded_weight = loaded_weight[:, head_start:head_end]
+                loaded_weight = loaded_weight.reshape(-1, *weight_shape[1:])
 
             is_gate_up_weight = False
             for stride_id, weight_name in enumerate(["w2", "w1"]):
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
+                name = name.replace(weight_name, "gate_up_proj")
+                if "g_idx" in name:
+                    break
+                if name not in state_dict:
+                    continue
+                param = state_dict[name]
+                if is_transposed:
+                    param = param.T
                 shard_size = param.shape[0] // 2
                 loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
                                               (tp_rank + 1)]
@@ -300,7 +340,11 @@ class QWenLMHeadModel(nn.Module):
             if is_gate_up_weight:
                 continue
 
+            if name not in state_dict:
+                continue
             param = state_dict[name]
+            if is_transposed:
+                param = param.T
 
             if "wte" in name or "lm_head" in name:
                 load_padded_tensor_parallel_vocab(param, loaded_weight,
@@ -311,7 +355,7 @@ class QWenLMHeadModel(nn.Module):
                 param,
                 loaded_weight,
                 name,
-                self._column_parallel_weights,
-                self._row_parallel_weights,
+                column_parallel_weights,
+                row_parallel_weights,
                 tp_rank,
             )

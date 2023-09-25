@@ -35,7 +35,13 @@ _MODEL_REGISTRY = {
 # FIXME(woosuk): Remove this once all models support quantization.
 _MODEL_CLASSES_SUPPORT_QUANTIZATION = {
     "awq": [LlamaForCausalLM],
-    "gptq": [LlamaForCausalLM],
+    "gptq": [
+        LlamaForCausalLM, QWenLMHeadModel, BaiChuanForCausalLM,
+        BaichuanForCausalLM, BloomForCausalLM, GPT2LMHeadModel,
+        GPTJForCausalLM, GPTNeoXForCausalLM, GPTBigCodeForCausalLM,
+        InternLMForCausalLM, FalconForCausalLM, AquilaForCausalLM,
+        OPTForCausalLM, MPTForCausalLM
+    ],
 }
 
 
@@ -72,6 +78,14 @@ def get_model(model_config: ModelConfig, max_tokens: int) -> nn.Module:
                                         model_config.model,
                                         model_config.hf_config,
                                         model_config.download_dir)
+        capability = torch.cuda.get_device_capability()
+        capability = capability[0] * 10 + capability[1]
+        if capability < quant_config.get_min_capability():
+            raise ValueError(
+                f"The quantization method {model_config.quantization} is not "
+                "supported for the current GPU. "
+                f"Minimum capability: {quant_config.get_min_capability()}. "
+                f"Current capability: {capability}.")
         supported_dtypes = quant_config.get_supported_act_dtypes()
         if model_config.dtype not in supported_dtypes:
             raise ValueError(

@@ -30,12 +30,16 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.quantized_linear import ParallelLinear
+from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
+                                              load_tensor_parallel_weights,
+                                              convert_pyslice_to_tensor,
+                                              get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
+    VocabParallelEmbedding)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -43,7 +47,9 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 class GPTNeoXAttention(nn.Module):
 
-    def __init__(self, config: GPTNeoXConfig):
+    def __init__(self,
+                 config: GPTNeoXConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
@@ -55,21 +61,31 @@ class GPTNeoXAttention(nn.Module):
         self.num_heads = (self.total_num_heads //
                           tensor_model_parallel_world_size)
 
-        self.query_key_value = ColumnParallelLinear(
+        self.query_key_value = ParallelLinear.column(
             config.hidden_size,
             3 * config.hidden_size,
             gather_output=False,
-            perform_initialization=False)
-        self.dense = RowParallelLinear(config.hidden_size,
-                                       config.hidden_size,
-                                       input_is_parallel=True,
-                                       perform_initialization=False)
+            perform_initialization=False,
+            quant_config=quant_config)
+        self.dense = ParallelLinear.row(config.hidden_size,
+                                        config.hidden_size,
+                                        input_is_parallel=True,
+                                        perform_initialization=False,
+                                        quant_config=quant_config)
 
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0
-        self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_size,
-                                           scaling, rotary_dim)
+        rope_theta = getattr(config, "rope_theta", 10000)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_size,
+            scaling,
+            rotary_dim,
+            base=rope_theta,
+            max_position=max_position_embeddings)
 
     def forward(
         self,
@@ -90,16 +106,23 @@ class GPTNeoXAttention(nn.Module):
 
 class GPTNeoXMLP(nn.Module):
 
-    def __init__(self, config: GPTNeoXConfig):
+    def __init__(
+        self,
+        config: GPTNeoXConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
-        self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
-                                                  config.intermediate_size,
-                                                  gather_output=False,
-                                                  perform_initialization=False)
-        self.dense_4h_to_h = RowParallelLinear(config.intermediate_size,
-                                               config.hidden_size,
-                                               input_is_parallel=True,
-                                               perform_initialization=False)
+        self.dense_h_to_4h = ParallelLinear.column(
+            config.hidden_size,
+            config.intermediate_size,
+            gather_output=False,
+            perform_initialization=False,
+            quant_config=quant_config)
+        self.dense_4h_to_h = ParallelLinear.row(config.intermediate_size,
+                                                config.hidden_size,
+                                                input_is_parallel=True,
+                                                perform_initialization=False,
+                                                quant_config=quant_config)
         self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states):
@@ -111,15 +134,17 @@ class GPTNeoXMLP(nn.Module):
 
 class GPTNeoXLayer(nn.Module):
 
-    def __init__(self, config: GPTNeoXConfig):
+    def __init__(self,
+                 config: GPTNeoXConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.use_parallel_residual = config.use_parallel_residual
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
                                                      eps=config.layer_norm_eps)
-        self.attention = GPTNeoXAttention(config)
-        self.mlp = GPTNeoXMLP(config)
+        self.attention = GPTNeoXAttention(config, quant_config)
+        self.mlp = GPTNeoXMLP(config, quant_config)
 
     def forward(
         self,
@@ -157,15 +182,19 @@ class GPTNeoXLayer(nn.Module):
 
 class GPTNeoXModel(nn.Module):
 
-    def __init__(self, config: GPTNeoXConfig):
+    def __init__(self,
+                 config: GPTNeoXConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
 
         self.embed_in = VocabParallelEmbedding(config.vocab_size,
                                                config.hidden_size,
                                                perform_initialization=False)
-        self.layers = nn.ModuleList(
-            [GPTNeoXLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([
+            GPTNeoXLayer(config, quant_config)
+            for _ in range(config.num_hidden_layers)
+        ])
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,
                                              eps=config.layer_norm_eps)
 
@@ -197,15 +226,17 @@ class GPTNeoXModel(nn.Module):
 
 class GPTNeoXForCausalLM(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, quant_config=None):
         super().__init__()
         self.config = config
-        self.gpt_neox = GPTNeoXModel(config)
-        self.embed_out = ColumnParallelLinear(config.hidden_size,
-                                              config.vocab_size,
-                                              bias=False,
-                                              gather_output=False,
-                                              perform_initialization=False)
+        self.quant_config = quant_config
+        self.gpt_neox = GPTNeoXModel(config, quant_config)
+        self.embed_out = ParallelLinear.column(config.hidden_size,
+                                               config.vocab_size,
+                                               bias=False,
+                                               gather_output=False,
+                                               perform_initialization=False,
+                                               quant_config=None)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -222,17 +253,19 @@ class GPTNeoXForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = [
-        "embed_in.weight", "embed_out.weight", "dense_h_to_4h.weight",
-        "dense_h_to_4h.bias"
-    ]
-    _row_parallel_weights = ["dense.weight", "dense_4h_to_h.weight"]
+    column_parallel_layers = ["dense_h_to_4h"]
+    row_parallel_layers = ["dense", "dense_4h_to_h"]
+    parallel_vocab_layers = ["embed_in", "embed_out"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
+        (column_parallel_weights, row_parallel_weights,
+         ignore_weight_suffixes) = get_parallel_weight(self)
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
+        )
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
@@ -240,8 +273,22 @@ class GPTNeoXForCausalLM(nn.Module):
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
                 continue
+            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
+                continue
+
+            is_transposed = False
+            if self.quant_config is not None:
+                is_transposed = self.quant_config.is_transposed(name)
+            if is_transposed:
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                loaded_weight = loaded_weight.T
+
+            if name not in state_dict:
+                continue
             param = state_dict[name]
-            if "query_key_value" in name:
+            if is_transposed:
+                param = param.T
+            if "query_key_value" in name and "g_idx" not in name:
                 # NOTE(woosuk): GPT-NeoX's fused QKV has the shape of
                 # [num_heads * 3 * head_size, hidden_size], while the
                 # required shape is [3 * num_heads * head_size, hidden_size].
@@ -251,21 +298,14 @@ class GPTNeoXForCausalLM(nn.Module):
                     shard_size * tensor_model_parallel_rank:shard_size *
                     (tensor_model_parallel_rank + 1)]
 
-                num_heads = self.config.num_attention_heads
-                hidden_size = self.config.hidden_size
-                head_size = hidden_size // num_heads
-                if "query_key_value.weight" in name:
-                    loaded_weight = loaded_weight.view(-1, 3, head_size,
-                                                       hidden_size)
-                    loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1, hidden_size)
-                elif "query_key_value.bias" in name:
-                    loaded_weight = loaded_weight.view(-1, 3, head_size)
-                    loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1)
-                else:
-                    raise ValueError(f"Unexpected weight name: {name}")
+                num_heads = (self.config.num_attention_heads //
+                             tensor_model_parallel_world_size)
+                weight_shape = loaded_weight.shape
+                loaded_weight = loaded_weight.view(num_heads, 3, -1,
+                                                   *weight_shape[1:])
+                loaded_weight = loaded_weight.transpose(0, 1)
+                loaded_weight = loaded_weight.reshape(-1, *weight_shape[1:])
             load_tensor_parallel_weights(param, loaded_weight, name,
-                                         self._column_parallel_weights,
-                                         self._row_parallel_weights,
+                                         column_parallel_weights,
+                                         row_parallel_weights,
                                          tensor_model_parallel_rank)

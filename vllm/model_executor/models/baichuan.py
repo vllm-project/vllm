@@ -34,13 +34,16 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import (PagedAttentionWithRoPE,
                                                   PagedAttentionWithALiBi)
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.quantized_linear import ParallelLinear
+from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
-    load_padded_tensor_parallel_vocab, load_tensor_parallel_weights)
+    load_padded_tensor_parallel_vocab, load_tensor_parallel_weights,
+    get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
+    VocabParallelEmbedding)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
 
@@ -79,18 +82,21 @@ class BaiChuanMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                 2 * intermediate_size,
-                                                 bias=False,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           input_is_parallel=True,
-                                           perform_initialization=False)
+        self.gate_up_proj = ParallelLinear.column(hidden_size,
+                                                  2 * intermediate_size,
+                                                  bias=False,
+                                                  gather_output=False,
+                                                  perform_initialization=False,
+                                                  quant_config=quant_config)
+        self.down_proj = ParallelLinear.row(intermediate_size,
+                                            hidden_size,
+                                            bias=False,
+                                            input_is_parallel=True,
+                                            perform_initialization=False,
+                                            quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -111,6 +117,9 @@ class BaiChuanAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         position_embedding: str,
+        rope_theta: float = 10000,
+        max_position_embeddings: int = 8192,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -122,21 +131,25 @@ class BaiChuanAttention(nn.Module):
                           tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
         self.postion_embedding = position_embedding
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
 
         # pylint: disable=invalid-name
-        self.W_pack = ColumnParallelLinear(
+        self.W_pack = ParallelLinear.column(
             hidden_size,
             3 * hidden_size,
             bias=False,
             gather_output=False,
             perform_initialization=False,
+            quant_config=quant_config,
         )
-        self.o_proj = RowParallelLinear(
+        self.o_proj = ParallelLinear.row(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             input_is_parallel=True,
             perform_initialization=False,
+            quant_config=quant_config,
         )
         # Create the alibi slopes and slice them.
         if self.postion_embedding == "ALIBI":
@@ -151,10 +164,13 @@ class BaiChuanAttention(nn.Module):
                                                 scaling, alibi_slopes)
         else:
             self.scaling = self.head_dim**-0.5
-            self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                               self.head_dim,
-                                               self.scaling,
-                                               rotary_dim=self.head_dim)
+            self.attn = PagedAttentionWithRoPE(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                rotary_dim=self.head_dim,
+                base=self.rope_theta,
+                max_position=self.max_position_embeddings)
 
     def forward(
         self,
@@ -180,18 +196,28 @@ class BaiChuanAttention(nn.Module):
 
 class BaiChuanDecoderLayer(nn.Module):
 
-    def __init__(self, config: BaiChuanConfig, position_embedding: str):
+    def __init__(self,
+                 config: BaiChuanConfig,
+                 position_embedding: str,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.hidden_size = config.hidden_size
+        rope_theta = getattr(config, "rope_theta", 10000)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         self.self_attn = BaiChuanAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             position_embedding=position_embedding,
+            rope_theta=rope_theta,
+            max_position_embeddings=max_position_embeddings,
+            quant_config=quant_config,
         )
         self.mlp = BaiChuanMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
+            quant_config=quant_config,
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -228,7 +254,10 @@ class BaiChuanDecoderLayer(nn.Module):
 
 class BaiChuanModel(nn.Module):
 
-    def __init__(self, config: BaiChuanConfig, position_embedding: str):
+    def __init__(self,
+                 config: BaiChuanConfig,
+                 position_embedding: str,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -239,7 +268,7 @@ class BaiChuanModel(nn.Module):
             config.hidden_size,
             perform_initialization=False)
         self.layers = nn.ModuleList([
-            BaiChuanDecoderLayer(config, position_embedding)
+            BaiChuanDecoderLayer(config, position_embedding, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -272,15 +301,20 @@ class BaiChuanModel(nn.Module):
 
 class BaiChuanBaseForCausalLM(nn.Module):
 
-    def __init__(self, config, position_embedding: str):
+    def __init__(self,
+                 config,
+                 position_embedding: str,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.model = BaiChuanModel(config, position_embedding)
-        self.lm_head = ColumnParallelLinear(config.hidden_size,
-                                            config.vocab_size,
-                                            bias=False,
-                                            gather_output=False,
-                                            perform_initialization=False)
+        self.quant_config = quant_config
+        self.model = BaiChuanModel(config, position_embedding, quant_config)
+        self.lm_head = ParallelLinear.column(config.hidden_size,
+                                             config.vocab_size,
+                                             bias=False,
+                                             gather_output=False,
+                                             perform_initialization=False,
+                                             quant_config=None)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -297,14 +331,16 @@ class BaiChuanBaseForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = []
-    _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
+    column_parallel_layers = []
+    row_parallel_layers = ["o_proj", "down_proj"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
+        (column_parallel_weights, row_parallel_weights,
+         ignore_weight_suffixes) = get_parallel_weight(self)
         tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
@@ -313,27 +349,39 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
+            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
+                continue
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
 
-            if "W_pack" in name:
+            is_transposed = False
+            if self.quant_config is not None:
+                is_transposed = self.quant_config.is_transposed(name)
+            if is_transposed:
+                loaded_weight = loaded_weight.T
+
+            if "W_pack" in name and "g_idx" not in name:
+                weight_shape = loaded_weight.shape
                 total_num_heads = self.config.num_attention_heads
-                hidden_size = self.config.hidden_size
-                head_size = hidden_size // total_num_heads
                 num_heads = total_num_heads // tp_world_size
                 head_start = tp_rank * num_heads
                 head_end = (tp_rank + 1) * num_heads
 
-                loaded_weight = loaded_weight.view(3, total_num_heads,
-                                                   head_size, hidden_size)
-                loaded_weight = loaded_weight[:, head_start:head_end, :, :]
-                loaded_weight = loaded_weight.reshape(-1, hidden_size)
+                loaded_weight = loaded_weight.view(3, total_num_heads, -1,
+                                                   *weight_shape[1:])
+                loaded_weight = loaded_weight[:, head_start:head_end]
+                loaded_weight = loaded_weight.reshape(-1, *weight_shape[1:])
 
             is_gate_up_weight = False
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
+                name = name.replace(weight_name, "gate_up_proj")
+                if "g_idx" in name or name not in state_dict:
+                    break
+                param = state_dict[name]
+                if is_transposed:
+                    param = param.T
                 shard_size = param.shape[0] // 2
                 loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
                                               (tp_rank + 1)]
@@ -346,7 +394,11 @@ class BaiChuanBaseForCausalLM(nn.Module):
             if is_gate_up_weight:
                 continue
 
+            if name not in state_dict:
+                continue
             param = state_dict[name]
+            if is_transposed:
+                param = param.T
 
             if "embed_tokens" in name or "lm_head" in name:
                 load_padded_tensor_parallel_vocab(param, loaded_weight,
@@ -357,19 +409,19 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 param,
                 loaded_weight,
                 name,
-                self._column_parallel_weights,
-                self._row_parallel_weights,
+                column_parallel_weights,
+                row_parallel_weights,
                 tp_rank,
             )
 
 
 class BaichuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 13b
 
-    def __init__(self, config):
-        super().__init__(config, "ALIBI")
+    def __init__(self, config, quant_config=None):
+        super().__init__(config, "ALIBI", quant_config)
 
 
 class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 7b
 
-    def __init__(self, config):
-        super().__init__(config, "ROPE")
+    def __init__(self, config, quant_config=None):
+        super().__init__(config, "ROPE", quant_config)

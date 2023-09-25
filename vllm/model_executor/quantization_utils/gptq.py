@@ -41,6 +41,11 @@ class GPTQConfig(QuantizationConfig):
         return [torch.half]
 
     @classmethod
+    # Need to figure it out
+    def get_min_capability(cls) -> int:
+        return 60
+
+    @classmethod
     def get_config_filenames(cls) -> List[str]:
         return [
             "quant_config.json",

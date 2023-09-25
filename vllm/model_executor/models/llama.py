@@ -43,8 +43,9 @@ from vllm.model_executor.parallel_utils.tensor_parallel import (
     VocabParallelEmbedding)
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
+    convert_pyslice_to_tensor, hf_model_weights_iterator,
     load_tensor_parallel_weights, load_padded_tensor_parallel_vocab,
-    hf_model_weights_iterator, convert_pyslice_to_tensor)
+    get_parallel_weight)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -92,6 +93,7 @@ class LlamaAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
+        max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -108,6 +110,7 @@ class LlamaAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = ParallelLinear.column(
             hidden_size,
@@ -126,12 +129,14 @@ class LlamaAttention(nn.Module):
             perform_initialization=False,
             quant_config=quant_config,
         )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           base=self.rope_theta,
-                                           rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            base=self.rope_theta,
+            max_position=self.max_position_embeddings,
+            rotary_dim=self.head_dim,
+            num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -161,11 +166,14 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
+            max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
         )
         self.mlp = LlamaMLP(
@@ -289,34 +297,16 @@ class LlamaForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_layers = []
-    _row_parallel_layers = ["o_proj", "down_proj"]
+    column_parallel_layers = []
+    row_parallel_layers = ["o_proj", "down_proj"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        if self.quant_config is None:
-            column_weight_suffixes = ["weight", "bias"]
-            row_weight_suffixes = ["weight"]
-            ignore_weight_suffixes = []
-        else:
-            column_weight_suffixes = self.quant_config.get_column_tp_tensor_names(
-            )
-            row_weight_suffixes = self.quant_config.get_row_tp_tensor_names()
-            ignore_weight_suffixes = self.quant_config.get_ignore_tensor_names(
-            )
-
-        column_parallel_weights: List[str] = []
-        for layer in self._column_parallel_layers:
-            for suffix in column_weight_suffixes:
-                column_parallel_weights.append(f"{layer}.{suffix}")
-        row_parallel_weights: List[str] = []
-        for layer in self._row_parallel_layers:
-            for suffix in row_weight_suffixes:
-                row_parallel_weights.append(f"{layer}.{suffix}")
-
+        (column_parallel_weights, row_parallel_weights,
+         ignore_weight_suffixes) = get_parallel_weight(self)
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         q_proj_shard_size = (self.config.hidden_size // tp_size)
@@ -345,15 +335,16 @@ class LlamaForCausalLM(nn.Module):
                 is_packed = self.quant_config.is_packed(name)
                 is_transposed = self.quant_config.is_transposed(name)
             if is_transposed:
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight).T
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                loaded_weight = loaded_weight.T
 
             is_attention_weight = False
             for weight_name, shard_size, offset in attention_weight_specs:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, "qkv_proj")
-                if name not in state_dict:
-                    continue
+                if name not in state_dict or "g_idx" in name:
+                    break
                 param = state_dict[name]
                 if is_transposed:
                     param = param.T
@@ -362,8 +353,6 @@ class LlamaForCausalLM(nn.Module):
                     shard_size //= self.quant_config.pack_factor
                     offset //= self.quant_config.pack_factor
 
-                if "g_idx" in name:
-                    break
                 loaded_weight = loaded_weight[
                     shard_size * tensor_model_parallel_rank:shard_size *
                     (tensor_model_parallel_rank + 1)]
@@ -381,14 +370,11 @@ class LlamaForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, "gate_up_proj")
-                if name not in state_dict:
-                    continue
+                if "g_idx" in name or name not in state_dict:
+                    break
                 param = state_dict[name]
                 if is_transposed:
                     param = param.T
-
-                if "g_idx" in name:
-                    break
 
                 shard_size = param.shape[0] // 2
                 loaded_weight = loaded_weight[

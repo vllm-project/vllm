@@ -41,6 +41,11 @@ class AWQConfig(QuantizationConfig):
         return [torch.half]
 
     @classmethod
+    def get_min_capability(cls) -> int:
+        # The AWQ kernel only supports Ampere or newer GPUs.
+        return 80
+
+    @classmethod
     def get_config_filenames(cls) -> List[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq

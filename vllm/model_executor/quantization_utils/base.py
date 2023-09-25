@@ -16,6 +16,16 @@ class QuantizationConfig:
         raise NotImplementedError
 
     @classmethod
+    def get_min_capability(cls) -> int:
+        """Minimum GPU capability to support the quantization method.
+
+        E.g., 70 for Volta, 75 for Turing, 80 for Ampere.
+        This requirement is due to the custom CUDA kernels used by the
+        quantization method.
+        """
+        raise NotImplementedError
+
+    @classmethod
     def get_config_filenames(cls) -> List[str]:
         """List of filenames to search for in the model directory."""
         raise NotImplementedError
