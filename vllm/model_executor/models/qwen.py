@@ -28,7 +28,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.layers import (
     VocabParallelEmbedding,
     ColumnParallelLinear,
     RowParallelLinear,

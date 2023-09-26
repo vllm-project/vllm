@@ -31,13 +31,11 @@ class MockEngine:
     def stop_generating(self):
         self.request_id = None
 
-    def add_request(self, **kwargs):
+    def add_request(self, **kwargs):  # pylint: disable=unused-argument
         self.add_request_calls += 1
-        return
 
-    def abort_request(self, request_id):
+    def abort_request(self, request_id):  # pylint: disable=unused-argument
         self.abort_request_calls += 1
-        return
 
 
 class MockAsyncLLMEngine(AsyncLLMEngine):

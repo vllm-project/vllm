@@ -12,8 +12,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
+                                                       RowParallelLinear,
+                                                       VocabParallelEmbedding)
 from vllm.model_executor.weight_utils import (
     hf_model_weights_iterator, load_padded_tensor_parallel_vocab,
     load_tensor_parallel_weights)

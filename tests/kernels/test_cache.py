@@ -106,14 +106,14 @@ def test_reshape_and_cache(
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.int, device='cuda')
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.int, device="cuda")
 
     qkv = torch.randn(num_tokens,
                       3,
                       num_heads,
                       head_size,
                       dtype=dtype,
-                      device='cuda')
+                      device="cuda")
     _, key, value = qkv.unbind(dim=1)
 
     # Create the KV caches.
@@ -132,7 +132,7 @@ def test_reshape_and_cache(
 
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
-    block_indicies = torch.div(slot_mapping, block_size, rounding_mode='floor')
+    block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")
     block_indicies = block_indicies.cpu().tolist()
     block_offsets = slot_mapping % block_size
     block_offsets = block_offsets.cpu().tolist()

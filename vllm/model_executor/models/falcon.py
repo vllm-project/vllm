@@ -36,9 +36,10 @@ from vllm.model_executor.weight_utils import (convert_pyslice_to_tensor,
                                               load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.model_executor.parallel_utils.tensor_parallel.communication_op import (
+from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
+                                                       ColumnParallelLinear,
+                                                       RowParallelLinear)
+from vllm.model_executor.parallel_utils.communication_op import (
     tenosr_model_parallel_all_reduce)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
