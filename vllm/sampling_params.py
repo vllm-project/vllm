@@ -60,6 +60,7 @@ class SamplingParams:
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
+        keep_special_tokens: Whether to keep special tokens in the output
     """
 
     def __init__(
@@ -79,6 +80,7 @@ class SamplingParams:
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
+        keep_special_tokens: bool = False,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -103,6 +105,7 @@ class SamplingParams:
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs
+        self.keep_special_tokens = keep_special_tokens
 
         self._verify_args()
         if self.use_beam_search:
@@ -196,4 +199,5 @@ class SamplingParams:
                 f"stop={self.stop}, "
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
-                f"logprobs={self.logprobs})")
+                f"logprobs={self.logprobs}, "
+                f"keep_special_tokens={self.keep_special_tokens})")
