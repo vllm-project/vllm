@@ -233,3 +233,35 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, Float8_>(const Float8_ &
     b.w = vec_conversion<__nv_bfloat162, float2>(a.w);
     return b;
 }
+
+static inline __device__ int8_t float_to_int8_rn(float x)
+{
+    uint32_t dst;
+    asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=r"(dst) : "f"(x));
+    return reinterpret_cast<const int8_t&>(dst);
+}
+
+template<typename T>
+inline __device__ T ldg(const T* val) {
+    return __ldg(val);
+}
+
+#if ENABLE_BF16
+template<>
+inline __device__ __nv_bfloat162 ldg(const __nv_bfloat162* val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    return val[0];
+#else
+    return __ldg(val);
+#endif
+}
+
+template<>
+inline __device__ __nv_bfloat16 ldg(const __nv_bfloat16* val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    return val[0];
+#else
+    return __ldg(val);
+#endif
+}
+#endif // ENABLE_BF16
