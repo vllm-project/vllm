@@ -1,3 +1,4 @@
+import asyncio
 import argparse
 import json
 from typing import AsyncGenerator
@@ -36,13 +37,17 @@ async def generate(request: Request) -> Response:
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output in results_generator:
-            prompt = request_output.prompt
-            text_outputs = [
-                prompt + output.text for output in request_output.outputs
-            ]
-            ret = {"text": text_outputs}
-            yield (json.dumps(ret) + "\0").encode("utf-8")
+        try:
+            async for request_output in results_generator:
+                prompt = request_output.prompt
+                text_outputs = [
+                    prompt + output.text for output in request_output.outputs
+                ]
+                ret = {"text": text_outputs}
+                yield (json.dumps(ret) + "\0").encode("utf-8")
+                await asyncio.sleep(0)
+        except asyncio.CancelledError as e:
+            await engine.abort(request_id)
 
     if stream:
         return StreamingResponse(stream_results())
