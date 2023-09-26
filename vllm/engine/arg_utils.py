@@ -18,6 +18,7 @@ class EngineArgs:
     load_format: str = 'auto'
     dtype: str = 'auto'
     seed: int = 0
+    max_model_len: Optional[int] = None
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
@@ -27,6 +28,8 @@ class EngineArgs:
     max_num_batched_tokens: int = 2560
     max_num_seqs: int = 256
     disable_log_stats: bool = False
+    revision: Optional[str] = None
+    quantization: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -48,6 +51,13 @@ class EngineArgs:
             type=str,
             default=EngineArgs.tokenizer,
             help='name or path of the huggingface tokenizer to use')
+        parser.add_argument(
+            '--revision',
+            type=str,
+            default=None,
+            help='the specific model version to use. It can be a branch '
+            'name, a tag name, or a commit id. If unspecified, will use '
+            'the default version.')
         parser.add_argument('--tokenizer-mode',
                             type=str,
                             default=EngineArgs.tokenizer_mode,
@@ -79,16 +89,22 @@ class EngineArgs:
             'a numpy cache to speed up the loading. '
             '"dummy" will initialize the weights with random values, '
             'which is mainly for profiling.')
-        # TODO(woosuk): Support FP32.
         parser.add_argument(
             '--dtype',
             type=str,
             default=EngineArgs.dtype,
-            choices=['auto', 'half', 'bfloat16', 'float'],
+            choices=[
+                'auto', 'half', 'float16', 'bfloat16', 'float', 'float32'
+            ],
             help='data type for model weights and activations. '
             'The "auto" option will use FP16 precision '
             'for FP32 and FP16 models, and BF16 precision '
             'for BF16 models.')
+        parser.add_argument('--max-model-len',
+                            type=int,
+                            default=None,
+                            help='model context length. If unspecified, '
+                            'will be automatically derived from the model.')
         # Parallel arguments
         parser.add_argument('--worker-use-ray',
                             action='store_true',
@@ -136,6 +152,13 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+        # Quantization settings.
+        parser.add_argument('--quantization',
+                            '-q',
+                            type=str,
+                            choices=['awq', None],
+                            default=None,
+                            help='Method used to quantize the weights')
         return parser
 
     @classmethod
@@ -149,11 +172,11 @@ class EngineArgs:
     def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
-        # Initialize the configs.
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
-                                   self.dtype, self.seed)
+                                   self.dtype, self.seed, self.revision,
+                                   self.max_model_len, self.quantization)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space)
@@ -171,6 +194,7 @@ class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
     engine_use_ray: bool = False
     disable_log_requests: bool = False
+    max_log_len: Optional[int] = None
 
     @staticmethod
     def add_cli_args(
@@ -183,4 +207,10 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='disable logging requests')
+        parser.add_argument('--max-log-len',
+                            type=int,
+                            default=None,
+                            help='max number of prompt characters or prompt '
+                            'ID numbers being printed in log. '
+                            'Default: unlimited.')
         return parser

@@ -68,8 +68,16 @@ class GPTNeoXAttention(nn.Module):
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0
-        self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_size,
-                                           scaling, rotary_dim)
+        rope_theta = getattr(config, "rope_theta", 10000)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_size,
+            scaling,
+            rotary_dim,
+            base=rope_theta,
+            max_position=max_position_embeddings)
 
     def forward(
         self,
@@ -231,11 +239,12 @@ class GPTNeoXForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     load_format: str = "auto"):
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format):
+                model_name_or_path, cache_dir, load_format, revision):
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
                 continue

@@ -67,11 +67,17 @@ class GPTJAttention(nn.Module):
         scaling = self.head_size**-0.5
         assert getattr(config, "rotary", True)
         assert config.rotary_dim % 2 == 0
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_size,
-                                           scaling,
-                                           config.rotary_dim,
-                                           is_neox_style=False)
+        rope_theta = getattr(config, "rope_theta", 10000)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_size,
+            scaling,
+            config.rotary_dim,
+            base=rope_theta,
+            max_position=max_position_embeddings,
+            is_neox_style=False)
         self.warmup = False
 
     def forward(
@@ -222,11 +228,12 @@ class GPTJForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     load_format: str = "auto"):
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format):
+                model_name_or_path, cache_dir, load_format, revision):
             if "attn.bias" in name or "attn.masked_bias" in name:
                 continue
 

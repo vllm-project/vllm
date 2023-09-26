@@ -10,7 +10,7 @@ from typing import AsyncGenerator, Dict, List, Optional, Tuple, Union
 
 import fastapi
 import uvicorn
-from fastapi import BackgroundTasks, Request
+from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -130,6 +130,8 @@ async def check_length(
         input_ids = tokenizer(prompt).input_ids
     token_num = len(input_ids)
 
+    if request.max_tokens is None:
+        request.max_tokens = max_model_len - token_num
     if token_num + request.max_tokens > max_model_len:
         return input_ids, create_error_response(
             HTTPStatus.BAD_REQUEST,
@@ -196,7 +198,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     if error_check_ret is not None:
         return error_check_ret
 
-    if request.logit_bias is not None:
+    if request.logit_bias is not None and len(request.logit_bias) > 0:
         # TODO: support logit_bias in vLLM engine.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "logit_bias is not currently supported")
@@ -217,6 +219,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             temperature=request.temperature,
             top_p=request.top_p,
             stop=request.stop,
+            stop_token_ids=request.stop_token_ids,
             max_tokens=request.max_tokens,
             best_of=request.best_of,
             top_k=request.top_k,
@@ -228,9 +231,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
     result_generator = engine.generate(prompt, sampling_params, request_id,
                                        token_ids)
-
-    async def abort_request() -> None:
-        await engine.abort(request_id)
 
     def create_stream_response_json(
         index: int,
@@ -291,19 +291,15 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
     # Streaming response
     if request.stream:
-        background_tasks = BackgroundTasks()
-        # Abort the request if the client disconnects.
-        background_tasks.add_task(abort_request)
         return StreamingResponse(completion_stream_generator(),
-                                 media_type="text/event-stream",
-                                 background=background_tasks)
+                                 media_type="text/event-stream")
 
     # Non-streaming response
     final_res: RequestOutput = None
     async for res in result_generator:
         if await raw_request.is_disconnected():
             # Abort the request if the client disconnects.
-            await abort_request()
+            await engine.abort(request_id)
             return create_error_response(HTTPStatus.BAD_REQUEST,
                                          "Client disconnected")
         final_res = res
@@ -379,7 +375,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "suffix is not currently supported")
 
-    if request.logit_bias is not None:
+    if request.logit_bias is not None and len(request.logit_bias) > 0:
         # TODO: support logit_bias in vLLM engine.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "logit_bias is not currently supported")
@@ -425,6 +421,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             top_p=request.top_p,
             top_k=request.top_k,
             stop=request.stop,
+            stop_token_ids=request.stop_token_ids,
             ignore_eos=request.ignore_eos,
             max_tokens=request.max_tokens,
             logprobs=request.logprobs,
@@ -447,9 +444,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     stream = (request.stream
               and (request.best_of is None or request.n == request.best_of)
               and not request.use_beam_search)
-
-    async def abort_request() -> None:
-        await engine.abort(request_id)
 
     def create_stream_response_json(
         index: int,
@@ -510,19 +504,15 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
     # Streaming response
     if stream:
-        background_tasks = BackgroundTasks()
-        # Abort the request if the client disconnects.
-        background_tasks.add_task(abort_request)
         return StreamingResponse(completion_stream_generator(),
-                                 media_type="text/event-stream",
-                                 background=background_tasks)
+                                 media_type="text/event-stream")
 
     # Non-streaming response
     final_res: RequestOutput = None
     async for res in result_generator:
         if await raw_request.is_disconnected():
             # Abort the request if the client disconnects.
-            await abort_request()
+            await engine.abort(request_id)
             return create_error_response(HTTPStatus.BAD_REQUEST,
                                          "Client disconnected")
         final_res = res

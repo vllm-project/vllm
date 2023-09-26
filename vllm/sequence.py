@@ -114,13 +114,18 @@ class Sequence:
 
         self.data = SequenceData(prompt_token_ids)
         self.output_logprobs: List[Dict[int, float]] = []
-        self.output_tokens: List[str] = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
         self._append_tokens_to_blocks(prompt_token_ids)
         self.status = SequenceStatus.WAITING
+
+        # Used for incremental detokenization
+        self.prefix_offset = 0
+        self.read_offset = 0
+        # Input + output tokens
+        self.tokens: Optional[List[str]] = None
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
@@ -245,8 +250,8 @@ class SequenceGroup:
                 # generation stage, we will have `best_of` sequences running.
                 return self.sampling_params.best_of
             # At sampling stages, return the number of actual sequences
-            # running.
-            return self.num_seqs(status=SequenceStatus.RUNNING)
+            # that are not finished yet.
+            return self.num_unfinished_seqs()
 
     def get_seqs(
         self,
@@ -259,11 +264,22 @@ class SequenceGroup:
                 seq for seq in self.seqs_dict.values() if seq.status == status
             ]
 
+    def get_unfinished_seqs(self) -> List[Sequence]:
+        return [
+            seq for seq in self.seqs_dict.values() if not seq.is_finished()
+        ]
+
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
+
+    def num_unfinished_seqs(self) -> int:
+        return len(self.get_unfinished_seqs())
+
+    def num_finished_seqs(self) -> int:
+        return len(self.get_finished_seqs())
 
     def find(self, seq_id: int) -> Sequence:
         if seq_id not in self.seqs_dict:
@@ -345,7 +361,7 @@ class SequenceOutputs:
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
-            return NotImplementedError()
+            raise NotImplementedError()
         return (self.parent_seq_id == other.parent_seq_id
                 and self.output_token == other.output_token
                 and self.logprobs == other.logprobs)
