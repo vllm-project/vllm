@@ -65,7 +65,7 @@ class SmoothQuantConfig(QuantizationConfig):
 
     @classmethod
     def get_transposed_tensor_names(cls) -> List[str]:
-        return ["weight", "bias"]
+        return []
 
     @classmethod
     def get_tp_tensor_names(cls) -> List[str]:
