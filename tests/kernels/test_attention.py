@@ -11,8 +11,8 @@ from vllm.utils import get_max_shared_mem_bytes
 
 float_bytes = torch.finfo(torch.float).bits / 8
 # This will change dependning on the compute capability.
-# -7 as it will be padded to 8 anyway, -512 as a buffer
-MAX_SEQ_LEN = int(get_max_shared_mem_bytes() / float_bytes) - 7 - 512
+# - 512 as a buffer
+MAX_SEQ_LEN = int(get_max_shared_mem_bytes() / float_bytes) - 512
 NUM_BLOCKS = 128  # Arbitrary values for testing
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -139,7 +139,7 @@ def test_single_query_cached_kv_attention(
                                    device="cuda")
 
     context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
-    context_lens[-1] = MAX_SEQ_LEN - 1
+    context_lens[-1] = MAX_SEQ_LEN
     max_context_len = max(context_lens)
     context_lens = torch.tensor(context_lens, dtype=torch.int, device="cuda")
 
@@ -248,7 +248,7 @@ def test_multi_query_kv_attention(
     torch.cuda.manual_seed(seed)
 
     seq_lens = random.sample(range(1, MAX_SEQ_LEN), num_seqs)
-    seq_lens[-1] = MAX_SEQ_LEN - 1
+    seq_lens[-1] = MAX_SEQ_LEN
     num_tokens = sum(seq_lens)
 
     scale = float(1.0 / (head_size**0.5))
