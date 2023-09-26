@@ -61,7 +61,9 @@ class LlamaMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        if quant_config is not None and quant_config.get_name() == "smoothquant":
+        self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
+
+        if self.use_int8:
             self.gate_up_proj = W8A8BFP32OFP32Linear(hidden_size,
                                                   2 * intermediate_size)
             self.down_proj = W8A8BFP32OFP32LinearWithSFactor(intermediate_size,
@@ -79,14 +81,15 @@ class LlamaMLP(nn.Module):
                                                 input_is_parallel=True,
                                                 perform_initialization=False,
                                                 quant_config=quant_config)
+        
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
+                            "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        gate_up = gate_up.half()
+        # FIXME: currently gate up share same scale, plan to use seperate scales 
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         x = x.half()
@@ -162,8 +165,9 @@ class LlamaAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
+        self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
 
-        if quant_config is not None and quant_config.get_name() == "smoothquant":
+        if self.use_int8:
             self.qkv_proj = W8A8BFP32OFP32Linear(
                 hidden_size,
                 (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim)
@@ -205,6 +209,7 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         qkv = qkv.half()
+        # FIXME: currently qkv share same scale, plan to use seperate scales 
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
@@ -561,7 +566,6 @@ class LlamaForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
-            print(f"{name} origin weight shape: {loaded_weight.shape}")
             # bias is useless for llama
             if "bias" in name:
                 continue
@@ -580,14 +584,15 @@ class LlamaForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 param = state_dict[name.replace(weight_name, "qkv_proj")]
-                # if is_transposed:
-                #     param = param.T
+                if is_transposed:
+                    param = param.T
 
                 if is_packed:
                     shard_size //= self.quant_config.pack_factor
                     offset //= self.quant_config.pack_factor
                 
-                if "proj.a" in name:
+                # share use same scale in quantizatin
+                if "proj.a" in name or "proj.inscale" in name:
                     param.copy_(loaded_weight)
                     is_attention_weight = True
                     continue
@@ -596,7 +601,6 @@ class LlamaForCausalLM(nn.Module):
                     shard_size * tensor_model_parallel_rank:shard_size *
                     (tensor_model_parallel_rank + 1)]
                 param_slice = param.data[offset:offset + shard_size]
-                print(f"{name}  param shape: {param.shape}  param_slice shape:{param_slice.shape} weight shape:{loaded_weight.shape}")
                 assert param_slice.shape == loaded_weight.shape
 
                 param_slice.copy_(loaded_weight)
@@ -610,10 +614,11 @@ class LlamaForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 param = state_dict[name.replace(weight_name, "gate_up_proj")]
-                # if is_transposed:
-                #     loaded_weight = loaded_weight.T
+                if is_transposed:
+                    loaded_weight = loaded_weight.T
 
-                if "proj.a" in name:
+                # share use same scale in quantizatin
+                if "proj.a" in name or "proj.inscale" in name:
                     param.copy_(loaded_weight)
                     is_gate_up_weight = True
                     continue
@@ -622,11 +627,8 @@ class LlamaForCausalLM(nn.Module):
                 loaded_weight = loaded_weight[
                     shard_size * tensor_model_parallel_rank:shard_size *
                     (tensor_model_parallel_rank + 1)]
-                if is_transposed:
-                    loaded_weight = loaded_weight.T
                 param_slice = param.data[shard_size * stride_id:shard_size *
                                          (stride_id + 1)]
-                print(f"{name}  param shape: {param.shape}  param_slice shape:{param_slice.shape} weight shape:{loaded_weight.shape}")
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_gate_up_weight = True
@@ -637,11 +639,6 @@ class LlamaForCausalLM(nn.Module):
             param = state_dict[name]
             if is_transposed:
                 param = param.T
-
-            #copy down and out pro
-            if "proj.a" in name or "bias" in name or "inscale" in name:
-                param.copy_(loaded_weight)
-                continue
 
             if "embed_tokens" in name or "lm_head" in name:
                 load_padded_tensor_parallel_vocab(param, loaded_weight,
