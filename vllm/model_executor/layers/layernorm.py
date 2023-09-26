@@ -48,13 +48,16 @@ class I8RMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.empty_like(x)
-        layernorm_ops.rms_norm(
-            out,
-            x,
-            self.weight.data,
-            self.variance_epsilon,
-        )
-        # TODO: kernel fusion
-        q_out = out.round().clamp(-128, 127).to(torch.int8)
-        return q_out
+        # out = torch.empty_like(x)
+        # layernorm_ops.rms_norm(
+        #     out,
+        #     x,
+        #     self.weight.data,
+        #     self.variance_epsilon,
+        # )
+        # # TODO: kernel fusion
+        # q_out = out.round().clamp(-128, 127).to(torch.int8)
+        # return q_out
+        out = torch.empty_like(x, dtype=torch.int8)
+        layernorm_ops.invoke_rms_norm_quant(out, x, self.weight.data, self.variance_epsilon)
+        return out
