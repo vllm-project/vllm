@@ -9,6 +9,9 @@ On the server side, run one of the following commands:
     (TGI backend)
     ./launch_tgi_server.sh <your_model>
 
+    (Triton backend)
+    ./launch_triton_server.sh <your_model>
+
 On the client side, run:
     python benchmarks/benchmark_serving.py \
         --backend <backend> \
