@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 from typing import List, Set
+import warnings
 
 from packaging.version import parse, Version
 import setuptools
@@ -101,6 +102,9 @@ if nvcc_cuda_version < Version("11.8"):
         # the previous versions of CUDA 11 and targeting compute capability 8.0.
         # Therefore, if CUDA 11.8 is not available, we target compute capability 8.0
         # instead of 8.9.
+        warnings.warn(
+            "CUDA 11.8 or higher is required for compute capability 8.9. "
+            "Targeting compute capability 8.0 instead.")
         compute_capabilities = set(cc for cc in compute_capabilities
                                    if not cc.startswith("8.9"))
         compute_capabilities.add("8.0+PTX")
