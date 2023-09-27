@@ -86,6 +86,8 @@ class LLMEngine:
 
         self.model_config = model_config
         self.cache_config = cache_config
+        assert self.cache_config.sliding_window == getattr(
+            self.model_config.hf_config, "sliding_window", None)
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
@@ -660,7 +662,7 @@ class LLMEngine:
             return
 
         # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
+        if seq.get_output_len() >= sampling_params.max_tokens:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
