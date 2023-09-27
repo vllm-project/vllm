@@ -63,11 +63,10 @@ def initialize_cluster(
             the default Ray cluster address.
 
     Returns:
-        A tuple of (`distributed_init_method`, `all_stage_devices`). The
+        A tuple of (`distributed_init_method`, `placement_group`). The
         `distributed_init_method` is the address for initializing the
-        distributed backend. `all_stage_devices` includes device IDs for
-        each worker in each pipeline stage. Each device ID is a tuple of
-        (rank, node resource, device id).
+        distributed backend. `placement_group` includes the specification
+        of the resources for each distributed worker.
     """
     if parallel_config.worker_use_ray or engine_use_ray:
         if ray is None:
