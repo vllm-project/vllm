@@ -16,37 +16,8 @@ _CONFIG_REGISTRY = {
 
 def get_config(model: str,
                trust_remote_code: bool,
-               rope_scaling: Optional[dict],
                revision: Optional[str] = None) -> PretrainedConfig:
-
-    def _rope_scaling_validation():
-        """
-        Validate the `rope_scaling` configuration.
-        """
-        if rope_scaling is None:
-            return
-
-        if not isinstance(rope_scaling, dict) or len(rope_scaling) != 2:
-            raise ValueError(
-                "`rope_scaling` must be a dictionary with",
-                "with two fields, `type` and `factor`, "
-                f"got {rope_scaling}")
-        rope_scaling_type = rope_scaling.get("type", None)
-        rope_scaling_factor = rope_scaling.get("factor", None)
-        if rope_scaling_type is None or rope_scaling_type not in [
-                "linear", "dynamic"
-        ]:
-            raise ValueError(
-                "`rope_scaling`'s name field must be one ",
-                f"of ['linear', 'dynamic'], got {rope_scaling_type}")
-        if rope_scaling_factor is None or not isinstance(
-                rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
-            raise ValueError(
-                "`rope_scaling`'s factor field must be an float > 1,",
-                f" got {rope_scaling_factor}")
-
     try:
-        _rope_scaling_validation()
         config = AutoConfig.from_pretrained(
             model, trust_remote_code=trust_remote_code, revision=revision)
     except ValueError as e:
