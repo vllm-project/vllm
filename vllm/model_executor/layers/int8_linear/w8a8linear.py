@@ -231,7 +231,7 @@ class W8A8BFP32OFP32LinearWithSFactor(torch.nn.Module):
         return int8_module
 
 # use ftgemm a8w8o8
-class W8A8BFP32OFP32LinearWithSFactorCublas(torch.nn.Module):
+class W8A8OFP32LinearWithSFactorCublas(torch.nn.Module):
     # For fc2 and out_proj
     def __init__(self, in_features, out_features, alpha=1.0, inscale=1.0):
         super().__init__()
@@ -269,32 +269,16 @@ class W8A8BFP32OFP32LinearWithSFactorCublas(torch.nn.Module):
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
         # quant activation
-        x = (x / self.inscale).clamp(-128, 127).to(torch.int8)
-        # self.bias = self.bias.to(torch.float32)
-        y = torch.empty((x.shape[0], self.out_features), dtype=torch.int8, device=x.device)
-        ftgemm.linear_a8_w8_o8_(x, self.weight, y, self.a.item())
-        # y = i8gemm.linear_a8_w8_bfp32_ofp32(
-        #     x, self.weight, self.bias, self.a.item(), 1)
-        # int8 to float32
-        y = y.to(torch.float32)
+        x = (x / self.inscale).round().clamp(-128, 127).to(torch.int8)
+        y = torch.empty((x.shape[0], self.out_features), dtype=torch.int32, device=x.device)
+        ftgemm.linear_a8_w8_o32_(x, self.weight, y)
+        y = y * self.a.item()
         y = y.view(*x_shape[:-1], -1)
         return y, None
 
-    @staticmethod
-    def from_float(module: torch.nn.Linear, input_scale):
-        int8_module = W8A8BFP32OFP32LinearWithSFactorCublas(
-            module.in_features, module.out_features)
-        int8_weight, weight_scale = quantize_per_tensor_absmax(module.weight)
-        alpha = input_scale * weight_scale
-        int8_module.weight = int8_weight
-        mockbias = torch.zeros((1, module.out_features), dtype=torch.float, requires_grad=False)
-        int8_module.bias = mockbias.to(torch.float32)
-        int8_module.a = alpha
-        int8_module.inscale = torch.tensor(input_scale)
-        return int8_module
 
 # use ftgemm a8w8o8
-class W8A8BFP32OFP32LinearCublas(torch.nn.Module):
+class W8A8O32LinearCublas(torch.nn.Module):
     # For fc2 and out_proj
     def __init__(self, in_features, out_features, alpha=1.0, beta=1.0):
         super().__init__()
@@ -325,26 +309,8 @@ class W8A8BFP32OFP32LinearCublas(torch.nn.Module):
     def forward(self, x):
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
-        # self.bias = self.bias.to(torch.float32)
-        y = torch.empty((x.shape[0], self.out_features), dtype=torch.int8, device=x.device)
-        ftgemm.linear_a8_w8_o8_(x, self.weight, y, self.a.item())
-        # y = i8gemm.linear_a8_w8_bfp32_ofp32(
-        #     x, self.weight, self.bias, self.a.item(), 1)
-        # int8 to float32
-        y = y.to(torch.float32)
+        y = torch.empty((x.shape[0], self.out_features), dtype=torch.int32, device=x.device)
+        ftgemm.linear_a8_w8_o32_(x, self.weight, y)
+        y = y * self.a.item()
         y = y.view(*x_shape[:-1], -1)
         return y, None
-
-    @staticmethod
-    def from_float(module: torch.nn.Linear, input_scale):
-        int8_module = W8A8BFP32OFP32LinearCublas(
-            module.in_features, module.out_features)
-        int8_weight, weight_scale = quantize_per_tensor_absmax(module.weight)
-        alpha = input_scale * weight_scale
-        int8_module.weight = int8_weight
-        mockbias = torch.zeros((1, module.out_features), dtype=torch.float, requires_grad=False)
-        int8_module.bias = mockbias.to(torch.float32)
-        int8_module.a = alpha
-        int8_module.input_scale = input_scale
-        int8_module.weight_scale = weight_scale
-        return int8_module
