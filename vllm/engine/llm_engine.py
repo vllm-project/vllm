@@ -103,6 +103,7 @@ class LLMEngine:
             self._init_workers_ray(placement_group)
         else:
             self._init_workers(distributed_init_method)
+        # TODO self._init_workers_rpyc
 
         # Profile the memory usage and initialize the cache.
         self._init_cache()
@@ -145,8 +146,10 @@ class LLMEngine:
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
+        # note (TODO delete) I'm assuming this process 
+
         self.workers: List[Worker] = []
-        for bundle in placement_group.bundle_specs:
+        for bundle in placement_group.bundle_specs:  # probably creates N workers or something idk
             if not bundle.get("GPU", 0):
                 continue
             worker = ray.remote(
@@ -160,7 +163,7 @@ class LLMEngine:
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
-        init_torch_dist_process_group(self.workers, backend="nccl")
+        init_torch_dist_process_group(self.workers, backend="nccl")  # TODO: replace with manually setting rank/url/port/etc. for rpyc
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
@@ -177,6 +180,12 @@ class LLMEngine:
             "init_model",
             get_all_outputs=True,
         )
+
+    def _init_workers_rpyc(self, todo_rpyc_args):
+        # set rank/url/port/etc. for rpyc workers
+        # use mp to run the workers
+        # note: parallel_config controls whether we're using ray or not
+        pass
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
