@@ -238,13 +238,15 @@ class ParallelConfig:
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
         worker_use_ray: bool,
+        worker_use_rpyc: bool,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
+        self.worker_use_rpyc = worker_use_rpyc
 
         self.world_size = pipeline_parallel_size * tensor_parallel_size
-        if self.world_size > 1:
+        if self.world_size > 1 and not worker_use_rpyc:  # TODO messy handling of ray/rpyc
             self.worker_use_ray = True
         self._verify_args()
 

@@ -258,13 +258,17 @@ class AsyncLLMEngine:
     def __init__(self,
                  worker_use_ray: bool,
                  engine_use_ray: bool,
+                 engine_use_rpyc: bool,
                  *args,
                  log_requests: bool = True,
                  max_log_len: Optional[int] = None,
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
+        assert not (engine_use_ray and engine_use_rpyc), (
+            "Only one of engine_use_ray and engine_use_rpyc can be True.")
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
+        self.engine_use_rpyc = engine_use_rpyc
         self.log_requests = log_requests
         self.max_log_len = max_log_len
         self.engine = self._init_engine(*args, **kwargs)
@@ -297,8 +301,10 @@ class AsyncLLMEngine:
 
     def _init_engine(self, *args,
                      **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
-        if not self.engine_use_ray:
+        if not self.engine_use_ray and not self.engine_use_rpyc:
             engine_class = self._engine_class
+        elif self.engine_use_rpyc:
+            raise NotImplementedError("RPyC is not supported yet.")
         elif self.worker_use_ray:
             engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
         else:
@@ -318,6 +324,8 @@ class AsyncLLMEngine:
             # TODO: Maybe add add_request_batch to reduce Ray overhead
             if self.engine_use_ray:
                 await self.engine.add_request.remote(**new_request)
+            elif self.engine_use_rpyc:
+                raise NotImplementedError("RPyC is not supported yet.")
             else:
                 self.engine.add_request(**new_request)
 
@@ -326,6 +334,8 @@ class AsyncLLMEngine:
 
         if self.engine_use_ray:
             request_outputs = await self.engine.step.remote()
+        elif self.engine_use_rpyc:
+            raise NotImplementedError("RPyC is not supported yet.")
         else:
             request_outputs = await self.engine.step_async()
 
@@ -339,6 +349,8 @@ class AsyncLLMEngine:
     async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
             await self.engine.abort_request.remote(request_ids)
+        elif self.engine_use_rpyc:
+            raise NotImplementedError("RPyC is not supported yet.")
         else:
             self.engine.abort_request(request_ids)
 
@@ -468,6 +480,8 @@ class AsyncLLMEngine:
         """Get the model configuration of the vLLM engine."""
         if self.engine_use_ray:
             return await self.engine.get_model_config.remote()
+        elif self.engine_use_rpyc:
+            raise NotImplementedError("RPyC is not supported yet.")
         else:
             return self.engine.get_model_config()
 
@@ -485,6 +499,7 @@ class AsyncLLMEngine:
         # Create the async LLM engine.
         engine = cls(engine_args.worker_use_ray,
                      engine_args.engine_use_ray,
+                     engine_args.engine_use_rpyc,
                      *engine_configs,
                      distributed_init_method,
                      placement_group,

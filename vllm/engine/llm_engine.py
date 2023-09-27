@@ -146,7 +146,7 @@ class LLMEngine:
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
-        # note (TODO delete) I'm assuming this process 
+        # note (TODO delete) I'm assuming this process launches the workers 
 
         self.workers: List[Worker] = []
         for bundle in placement_group.bundle_specs:  # probably creates N workers or something idk

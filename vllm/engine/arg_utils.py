@@ -20,6 +20,7 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
+    worker_use_rpyc: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     block_size: int = 16
@@ -110,6 +111,7 @@ class EngineArgs:
                             action='store_true',
                             help='use Ray for distributed serving, will be '
                             'automatically set when using more than 1 GPU')
+        parser.add_argument('--worker-use-rpyc', action='store_true', help='use rpyc for distributed serving, todo this is kinda hacked in')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -182,7 +184,8 @@ class EngineArgs:
                                    self.swap_space)
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
-                                         self.worker_use_ray)
+                                         self.worker_use_ray,
+                                         self.worker_use_rpyc)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.get_max_model_len())
@@ -193,6 +196,7 @@ class EngineArgs:
 class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
     engine_use_ray: bool = False
+    engine_use_rpyc: bool = False
     disable_log_requests: bool = False
     max_log_len: Optional[int] = None
 
@@ -204,6 +208,7 @@ class AsyncEngineArgs(EngineArgs):
                             action='store_true',
                             help='use Ray to start the LLM engine in a '
                             'separate process as the server process.')
+        parser.add_argument('--engine-use-rpyc', action='store_true', help='use rpyc to start the LLM engine in a separate process as the server process.')
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='disable logging requests')
