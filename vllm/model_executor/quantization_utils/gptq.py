@@ -48,7 +48,7 @@ class GPTQConfig(QuantizationConfig):
     @classmethod
     def get_config_filenames(cls) -> List[str]:
         return [
-            "quant_config.json",
+            "quantize_config.json",
         ]
 
     @classmethod

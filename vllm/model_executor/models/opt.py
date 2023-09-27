@@ -286,7 +286,7 @@ class OPTModel(nn.Module):
 
 class OPTForCausalLM(nn.Module):
 
-    def __init__(self, config, quant_config):
+    def __init__(self, config, quant_config=None):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
