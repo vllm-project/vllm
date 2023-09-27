@@ -195,6 +195,17 @@ quantization_extension = CUDAExtension(
 )
 ext_modules.append(quantization_extension)
 
+# Misc. CUDA utils.
+cuda_utils_extension = CUDAExtension(
+    name="vllm.cuda_utils",
+    sources=["csrc/cuda_utils.cpp", "csrc/cuda_utils_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(cuda_utils_extension)
+
 
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
