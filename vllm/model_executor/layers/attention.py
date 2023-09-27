@@ -268,6 +268,15 @@ class PagedAttentionWithRoPE(PagedAttention):
         self.is_neox_style = is_neox_style
 
         if rope_scaling is None:
+        # NOTE(woosuk): The HF implementation uses `torch.arange(...).float()`.
+        # However, we use `torch.arange(..., dtype=torch.float)` instead to
+        # avoid numerical issues with large base values (e.g., 10000000).
+        # This may cause a slight numerical difference between the HF
+        # implementation and ours.
+        # NOTE(woosuk): To exactly match the HF implementation, we need to
+        # use CPU to compute the cache and then move it to GPU. However, we
+        # create the cache on GPU for faster initialization. This may cause
+        # a slight numerical difference between the HF implementation and ours.
             self.rotary_emb = RotaryEmbedding(rotary_dim, max_position, base)
         elif rope_scaling["type"] == "linear":
             self.rotary_emb = LinearScalingRotaryEmbedding(
@@ -275,11 +284,24 @@ class PagedAttentionWithRoPE(PagedAttention):
         else:
             raise ValueError(rope_scaling)
 
-    def forward(self, positions: torch.Tensor, query: torch.Tensor,
-                key: torch.Tensor, value: torch.Tensor,
-                key_cache: torch.Tensor, value_cache: torch.Tensor,
-                input_metadata: InputMetadata,
-                cache_event: Optional[torch.cuda.Event]) -> torch.Tensor:
+        # FIXME(woosuk): This assumes that we configure the default dtype when
+        # initializing the model.
+        torch_dtype = torch.get_default_dtype()
+        cache = cache.to(torch_dtype)
+        # Embedding size: [max_position, rotary_dim]
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
+    ) -> torch.Tensor:
         """ PagedAttention forward pass with rotary embedding.
 
         Args:
