@@ -266,11 +266,35 @@ class SchedulerConfig:
             and generated text).
     """
 
-    def __init__(self, max_num_batched_tokens: int, max_num_seqs: int,
-                 max_model_len: int) -> None:
-        self.max_num_batched_tokens = max_num_batched_tokens
+    def __init__(
+        self,
+        max_num_batched_tokens: Optional[int],
+        max_num_seqs: int,
+        max_model_len: int,
+    ) -> None:
+        if max_num_batched_tokens is not None:
+            self.max_num_batched_tokens = max_num_batched_tokens
+        else:
+            self.max_num_batched_tokens = max_model_len
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
+        self._verify_args()
+
+    def _verify_args(self) -> None:
+        if self.max_num_batched_tokens < self.max_model_len:
+            # Some users do not want to utilize the full model length.
+            # Therefore, we only warn here.
+            logger.warning(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
+                f"smaller than max_model_len ({self.max_model_len}). "
+                "This effectively limits the maximum sequence length to "
+                "max_num_batched_tokens and makes vLLM reject longer "
+                "sequences. Consider increasing max_num_batched_tokens.")
+        if self.max_num_batched_tokens < self.max_num_seqs:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
+                "be greater than or equal to max_num_seqs "
+                f"({self.max_num_seqs}).")
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
