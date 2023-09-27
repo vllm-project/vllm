@@ -46,4 +46,5 @@ You can also build and install vLLM from source:
     .. code-block:: console
 
         $ # Pull the Docker image with CUDA 11.8.
-        $ docker run --gpus all -it --rm --shm-size=8g nvcr.io/nvidia/pytorch:22.12-py3
+        $ # Use `--ipc=host` to make sure the shared memory is large enough.
+        $ docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:22.12-py3

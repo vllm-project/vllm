@@ -1,7 +1,15 @@
 """Sampling parameters for text generation."""
+from enum import IntEnum
+from functools import cached_property
 from typing import List, Optional, Union
 
 _SAMPLING_EPS = 1e-5
+
+
+class SamplingType(IntEnum):
+    GREEDY = 0
+    RANDOM = 1
+    BEAM = 2
 
 
 class SamplingParams:
@@ -45,6 +53,9 @@ class SamplingParams:
             (canonical beam search algorithm).
         stop: List of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
+        stop_token_ids: List of tokens that stop the generation when they are
+            generated. The returned output will contain the stop tokens unless
+            the stop tokens are sepcial tokens.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
@@ -64,6 +75,7 @@ class SamplingParams:
         length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
         stop: Union[None, str, List[str]] = None,
+        stop_token_ids: List[int] = None,
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
@@ -84,6 +96,10 @@ class SamplingParams:
             self.stop = [stop]
         else:
             self.stop = list(stop)
+        if stop_token_ids is None:
+            self.stop_token_ids = []
+        else:
+            self.stop_token_ids = list(stop_token_ids)
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs
@@ -157,6 +173,14 @@ class SamplingParams:
             raise ValueError("top_p must be 1 when using greedy sampling.")
         if self.top_k != -1:
             raise ValueError("top_k must be -1 when using greedy sampling.")
+
+    @cached_property
+    def sampling_type(self) -> SamplingType:
+        if self.use_beam_search:
+            return SamplingType.BEAM
+        if self.temperature < _SAMPLING_EPS:
+            return SamplingType.GREEDY
+        return SamplingType.RANDOM
 
     def __repr__(self) -> str:
         return (f"SamplingParams(n={self.n}, "
