@@ -1,5 +1,5 @@
 """Multi-head attention."""
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -9,11 +9,10 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 
 from vllm import attention_ops
 from vllm import cache_ops
-from vllm import pos_encoding_ops
-from vllm.model_executor.layers.rotary_embedding import (
-    RotaryEmbedding, LinearScalingRotaryEmbedding)
-
 from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.layers.rotary_embedding import (
+    DynamicNTKScalingRotaryEmbedding, LinearScalingRotaryEmbedding,
+    RotaryEmbedding)
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 
@@ -260,36 +259,28 @@ class PagedAttentionWithRoPE(PagedAttention):
         rotary_dim: int,
         max_position: int = 8192,
         base: int = 10000,
-        rope_scaling: Optional[dict] = None,
         num_kv_heads: Optional[int] = None,
         is_neox_style: bool = True,
+        rope_scaling: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
-        self.is_neox_style = is_neox_style
-
         if rope_scaling is None:
-        # NOTE(woosuk): The HF implementation uses `torch.arange(...).float()`.
-        # However, we use `torch.arange(..., dtype=torch.float)` instead to
-        # avoid numerical issues with large base values (e.g., 10000000).
-        # This may cause a slight numerical difference between the HF
-        # implementation and ours.
-        # NOTE(woosuk): To exactly match the HF implementation, we need to
-        # use CPU to compute the cache and then move it to GPU. However, we
-        # create the cache on GPU for faster initialization. This may cause
-        # a slight numerical difference between the HF implementation and ours.
-            self.rotary_emb = RotaryEmbedding(rotary_dim, max_position, base)
-        elif rope_scaling["type"] == "linear":
-            self.rotary_emb = LinearScalingRotaryEmbedding(
-                rotary_dim, max_position, base, rope_scaling["factor"])
+            self.rotary_emb = RotaryEmbedding(head_size, rotary_dim,
+                                              max_position, base,
+                                              is_neox_style)
         else:
-            raise ValueError(rope_scaling)
-
-        # FIXME(woosuk): This assumes that we configure the default dtype when
-        # initializing the model.
-        torch_dtype = torch.get_default_dtype()
-        cache = cache.to(torch_dtype)
-        # Embedding size: [max_position, rotary_dim]
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+            scaling_type = rope_scaling["type"]
+            scaling_factor = rope_scaling["factor"]
+            if scaling_type == "linear":
+                self.rotary_emb = LinearScalingRotaryEmbedding(
+                    head_size, rotary_dim, max_position, base, is_neox_style,
+                    scaling_factor)
+            elif scaling_type == "dynamic":
+                self.rotary_emb = DynamicNTKScalingRotaryEmbedding(
+                    head_size, rotary_dim, max_position, base, is_neox_style,
+                    scaling_factor)
+            else:
+                raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
     def forward(
         self,
@@ -306,7 +297,7 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         Args:
             positions: shape = [num_tokens]
-                        query: shape = [num_tokens, num_heads * head_size]
+            query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
@@ -322,12 +313,7 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
-        cos_sin_cache = self.rotary_emb()
-
-        pos_encoding_ops.rotary_embedding(positions, query, key,
-                                          self.head_size, cos_sin_cache,
-                                          self.is_neox_style)
-
+        query, key = self.rotary_emb(positions, query, key)
         return super().forward(
             query,
             key,
