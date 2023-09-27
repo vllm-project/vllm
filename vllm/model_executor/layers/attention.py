@@ -249,7 +249,7 @@ class PagedAttention(nn.Module):
 
 
 class PagedAttentionWithRoPE(PagedAttention):
-    """PagedAttention with GPT-NeoX style rotary embedding."""
+    """PagedAttention with rotary positional embedding."""
 
     def __init__(
         self,
