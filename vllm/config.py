@@ -63,7 +63,6 @@ class ModelConfig:
         load_format: str,
         dtype: str,
         seed: int,
-        rope_scaling: Optional[dict],
         revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
