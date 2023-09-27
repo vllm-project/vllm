@@ -7,9 +7,8 @@ from .quantization import (
     fake_quantize_activation_per_tensor_absmax,
     fake_quantize_activation_per_token_absmax,
 )
-from vllm.ftgemm import FTGEMM
-ftgemm = FTGEMM()
-
+from vllm.i8cugemm import I8CUGEMM
+i8cugemm = I8CUGEMM()
 
 class W8A8B8O8Linear(torch.nn.Module):
     # For qkv_proj
@@ -230,7 +229,7 @@ class W8A8BFP32OFP32LinearWithSFactor(torch.nn.Module):
         int8_module.inscale = torch.tensor(input_scale)
         return int8_module
 
-# use ftgemm a8w8o8
+# use cublasgemm a8w8o8
 class W8A8OFP32LinearWithSFactorCublas(torch.nn.Module):
     # For fc2 and out_proj
     def __init__(self, in_features, out_features, alpha=1.0, inscale=1.0):
@@ -271,13 +270,13 @@ class W8A8OFP32LinearWithSFactorCublas(torch.nn.Module):
         # quant activation
         x = (x / self.inscale).round().clamp(-128, 127).to(torch.int8)
         y = torch.empty((x.shape[0], self.out_features), dtype=torch.int32, device=x.device)
-        ftgemm.linear_a8_w8_o32_(x, self.weight, y)
+        i8cugemm.linear_a8_w8_o32_(x, self.weight, y)
         y = y * self.a.item()
         y = y.view(*x_shape[:-1], -1)
         return y, None
 
 
-# use ftgemm a8w8o8
+# use cublasgemm a8w8o8
 class W8A8O32LinearCublas(torch.nn.Module):
     # For fc2 and out_proj
     def __init__(self, in_features, out_features, alpha=1.0, beta=1.0):
@@ -310,7 +309,7 @@ class W8A8O32LinearCublas(torch.nn.Module):
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
         y = torch.empty((x.shape[0], self.out_features), dtype=torch.int32, device=x.device)
-        ftgemm.linear_a8_w8_o32_(x, self.weight, y)
+        i8cugemm.linear_a8_w8_o32_(x, self.weight, y)
         y = y * self.a.item()
         y = y.view(*x_shape[:-1], -1)
         return y, None

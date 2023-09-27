@@ -95,12 +95,12 @@ ext_modules = []
 i8gemm_extension = CUDAExtension(
     name='vllm.i8gemm',
     sources=[
-        'csrc/int8gemm/linear.cu',
-        'csrc/int8gemm/bmm.cu',
-        'csrc/int8gemm/fused.cu',
-        'csrc/int8gemm/bindings.cpp',
+        'csrc/int8gemm/cutlass/linear.cu',
+        'csrc/int8gemm/cutlass/bmm.cu',
+        'csrc/int8gemm/cutlass/fused.cu',
+        'csrc/int8gemm/cutlass/bindings.cpp',
     ],
-    include_dirs=['csrc/int8gemm/include'],
+    include_dirs=['csrc/int8gemm/cutlass/include'],
     extra_link_args=['-lcublas_static', '-lcublasLt_static',
                         '-lculibos', '-lcudart', '-lcudart_static',
                         '-lrt', '-lpthread', '-ldl', '-L/usr/lib/x86_64-linux-gnu/'],
@@ -109,23 +109,23 @@ i8gemm_extension = CUDAExtension(
 )
 ext_modules.append(i8gemm_extension)
 
-# FTGEMM(cutlass required)
-ftgemm_extension = CUDAExtension(
-    name='vllm.ftgemm',
+# int8gemm(cutlass required)
+i8cugemm_extension = CUDAExtension(
+    name='vllm.i8cugemm',
     sources=[
-        'csrc/ftgemm/bindings.cpp',
-        'csrc/ftgemm/cublasAlgoMap.cc',
-        'csrc/ftgemm/cublasINT8MMWrapper.cc',
-        'csrc/ftgemm/cublasMMWrapper.cc',
-        'csrc/ftgemm/cuda_utils.cc',
-        'csrc/ftgemm/transform_layout.cu'
+        'csrc/int8gemm/cublas/bindings.cpp',
+        'csrc/int8gemm/cublas/cublasAlgoMap.cc',
+        'csrc/int8gemm/cublas/cublasINT8MMWrapper.cc',
+        'csrc/int8gemm/cublas/cublasMMWrapper.cc',
+        'csrc/int8gemm/cublas/cuda_utils.cc',
+        'csrc/int8gemm/cublas/transform_layout.cu'
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,
         "nvcc": NVCC_FLAGS,
     },
 )
-ext_modules.append(ftgemm_extension)
+ext_modules.append(i8cugemm_extension)
 
 # Cache operations.
 cache_extension = CUDAExtension(
