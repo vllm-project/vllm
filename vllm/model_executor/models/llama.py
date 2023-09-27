@@ -37,7 +37,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm, I8RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.quantized_linear import ParallelLinear
-from vllm.model_executor.layers.int8_linear.w8a8linear import W8A8BFP32OFP32LinearWithSFactor, W8A8BFP32OFP32Linear
+from vllm.model_executor.layers.int8_linear.w8a8linear import (
+    W8A8OFP32LinearWithSFactorCublas,
+    W8A8O32LinearCublas)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
@@ -64,9 +66,9 @@ class LlamaMLP(nn.Module):
         self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
 
         if self.use_int8:
-            self.gate_up_proj = W8A8BFP32OFP32Linear(hidden_size,
-                                                  2 * intermediate_size)
-            self.down_proj = W8A8BFP32OFP32LinearWithSFactor(intermediate_size,
+            self.gate_up_proj = W8A8O32LinearCublas(hidden_size,
+                                            2 * intermediate_size)
+            self.down_proj = W8A8OFP32LinearWithSFactorCublas(intermediate_size,
                                                     hidden_size)
         else:
             self.gate_up_proj = ParallelLinear.column(hidden_size,
@@ -168,10 +170,10 @@ class LlamaAttention(nn.Module):
         self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
 
         if self.use_int8:
-            self.qkv_proj = W8A8BFP32OFP32Linear(
+            self.qkv_proj = W8A8O32LinearCublas(
                 hidden_size,
                 (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim)
-            self.o_proj = W8A8BFP32OFP32LinearWithSFactor(
+            self.o_proj = W8A8OFP32LinearWithSFactorCublas(
                 self.total_num_heads * self.head_dim,
                 hidden_size)
         else:
