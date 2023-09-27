@@ -8,9 +8,8 @@ logger = init_logger(__name__)
 
 try:
     import ray
-    from ray.air.util.torch_dist import TorchDistributedWorker
 
-    class RayWorker(TorchDistributedWorker):
+    class RayWorker:
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
         lazliy initialized after Ray sets CUDA_VISIBLE_DEVICES."""
 
