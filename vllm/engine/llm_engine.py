@@ -54,8 +54,8 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         distributed_init_method: The initialization method for distributed
             execution. See `torch.distributed.init_process_group` for details.
-        stage_devices: The list of devices for each stage. Each stage is a list
-            of (rank, node_resource, device) tuples.
+        placement_group: Ray placement group for distributed execution.
+            Required for distributed execution.
         log_stats: Whether to log statistics.
     """
 
