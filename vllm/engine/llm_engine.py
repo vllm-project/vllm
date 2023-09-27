@@ -101,9 +101,10 @@ class LLMEngine:
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
             self._init_workers_ray(placement_group)
+        elif self.parallel_config.worker_use_rpyc:
+            self.init_workers_rpyc("todo")
         else:
             self._init_workers(distributed_init_method)
-        # TODO self._init_workers_rpyc
 
         # Profile the memory usage and initialize the cache.
         self._init_cache()
@@ -185,7 +186,7 @@ class LLMEngine:
         # set rank/url/port/etc. for rpyc workers
         # use mp to run the workers
         # note: parallel_config controls whether we're using ray or not
-        pass
+        raise NotImplementedError("rpyc not implemented yet")
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
