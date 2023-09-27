@@ -6,12 +6,13 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-from vllm import attention_ops, cuda_utils
+from vllm import attention_ops
+from vllm.utils import get_max_shared_memory_bytes
 
-float_bytes = torch.finfo(torch.float).bits / 8
+FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
-MAX_SEQ_LEN = int(cuda_utils.get_max_shared_mem_bytes() / float_bytes) - 512
+MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 NUM_BLOCKS = 128  # Arbitrary values for testing
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]

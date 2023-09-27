@@ -5,7 +5,6 @@ from typing import Dict, List, Tuple, Optional
 import torch
 import torch.distributed
 
-from vllm import cuda_utils
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import get_model, InputMetadata, set_random_seed
@@ -14,7 +13,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
-from vllm.utils import get_gpu_memory
+from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
 
 
 class Worker:
@@ -358,11 +357,7 @@ def _check_if_can_support_max_seq_len(max_seq_len: int,
                                       block_size: int) -> None:
     # Follows the logic in
     # attention_kernels.cu::single_query_cached_kv_attention_launcher
-
-    # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
-    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97  # pylint: disable=invalid-name
-    max_shared_mem = cuda_utils.get_device_attribute(
-        cudaDevAttrMaxSharedMemoryPerBlockOptin, torch.cuda.current_device())
+    max_shared_mem = get_max_shared_memory_bytes()
     float32_bytes = torch.finfo(torch.float).bits // 8
     padded_max_seq_len = (
         (max_seq_len + block_size - 1) / block_size) * block_size
