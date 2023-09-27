@@ -10,3 +10,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &get_device_attribute,
     "Gets the specified device attribute.");
 }
+
