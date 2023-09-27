@@ -275,7 +275,9 @@ class SchedulerConfig:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
-            self.max_num_batched_tokens = max_model_len
+            # If max_model_len is too short, use 2048 as the default value for
+            # higher throughput.
+            self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self._verify_args()
