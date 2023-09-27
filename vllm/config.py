@@ -284,14 +284,13 @@ class SchedulerConfig:
 
     def _verify_args(self) -> None:
         if self.max_num_batched_tokens < self.max_model_len:
-            # Some users do not want to utilize the full model length.
-            # Therefore, we only warn here.
-            logger.warning(
+            raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
                 f"smaller than max_model_len ({self.max_model_len}). "
                 "This effectively limits the maximum sequence length to "
                 "max_num_batched_tokens and makes vLLM reject longer "
-                "sequences. Consider increasing max_num_batched_tokens.")
+                "sequences. Please increase max_num_batched_tokens or "
+                "decrease max_model_len.")
         if self.max_num_batched_tokens < self.max_num_seqs:
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
