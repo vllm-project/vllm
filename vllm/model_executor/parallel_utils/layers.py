@@ -1,5 +1,6 @@
 # Copyright 2023 The vLLM team.
-# Adapted from https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/layers.py
+# Adapted from
+# https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/layers.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 # Parts of the code here are adapted from PyTorch
@@ -14,14 +15,15 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from.communication_op import (tenosr_model_parallel_all_reduce,
-                              tensor_model_parallel_all_gather)
+from .communication_op import (tenosr_model_parallel_all_reduce,
+                               tensor_model_parallel_all_gather)
 
 from .utils import (
     divide,
     VocabUtility,
     split_tensor_along_last_dim,
 )
+
 
 class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
@@ -34,8 +36,10 @@ class VocabParallelEmbedding(torch.nn.Module):
         params_dtype: type of the parameters.
     """
 
-    def __init__(self, num_embeddings: int, embedding_dim: int,
-                 params_dtype: torch.dtype=None):
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_dim: int,
+                 params_dtype: torch.dtype = None):
         super().__init__()
 
         # Keep the input dimensions.
@@ -51,17 +55,19 @@ class VocabParallelEmbedding(torch.nn.Module):
                 self.num_embeddings, get_tensor_model_parallel_rank(),
                 self.tp_size))
         self.num_embeddings_per_partition = (self.vocab_end_index -
-            self.vocab_start_index)
+                                             self.vocab_start_index)
 
-        self.weight = Parameter(torch.empty(
-            self.num_embeddings_per_partition, self.embedding_dim,
-            device=torch.cuda.current_device(), dtype=params_dtype))
+        self.weight = Parameter(
+            torch.empty(self.num_embeddings_per_partition,
+                        self.embedding_dim,
+                        device=torch.cuda.current_device(),
+                        dtype=params_dtype))
 
     def forward(self, input_):
         if self.tp_size > 1:
             # Build the mask.
             input_mask = ((input_ < self.vocab_start_index) |
-                         (input_ >= self.vocab_end_index))
+                          (input_ >= self.vocab_end_index))
             # Mask the input.
             masked_input = input_.clone() - self.vocab_start_index
             masked_input[input_mask] = 0
@@ -97,19 +103,24 @@ class ColumnParallelLinear(torch.nn.Module):
         keep_master_weight_for_test: This was added for testing and should be
                                      set to False. It returns the master weights
                                      used for initialization.
-        skip_bias_add: This was added to enable performance optimations where bias
-                       can be fused with other elementwise operations. we skip
-                       adding bias but instead return it.
+        skip_bias_add: This was added to enable performance optimizations where
+                       bias can be fused with other element-wise operations. we
+                       skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configuration.
     """
 
-    def __init__(self, input_size, output_size, *,
-                 bias=True, gather_output=True,
-                 skip_bias_add=False,
-                 params_dtype=None,
-                 quant_config=None,
-                 ):
+    def __init__(
+        self,
+        input_size,
+        output_size,
+        *,
+        bias=True,
+        gather_output=True,
+        skip_bias_add=False,
+        params_dtype=None,
+        quant_config=None,
+    ):
         super().__init__()
 
         # Keep input parameters
@@ -117,8 +128,8 @@ class ColumnParallelLinear(torch.nn.Module):
         self.output_size = output_size
         self.gather_output = gather_output
         # Divide the weight matrix along the last dimension.
-        self.world_size = get_tensor_model_parallel_world_size()
-        self.output_size_per_partition = divide(output_size, self.world_size)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.output_size_per_partition = divide(output_size, self.tp_size)
         self.skip_bias_add = skip_bias_add
         self.quant_config = quant_config
 
@@ -131,17 +142,19 @@ class ColumnParallelLinear(torch.nn.Module):
         self.create_weights(params_dtype)
 
         if bias:
-            self.bias = Parameter(torch.empty(
-                self.output_size_per_partition,
-                device=torch.cuda.current_device(),
-                dtype=params_dtype))
+            self.bias = Parameter(
+                torch.empty(self.output_size_per_partition,
+                            device=torch.cuda.current_device(),
+                            dtype=params_dtype))
         else:
             self.register_parameter('bias', None)
 
     def create_weights(self, dtype: torch.dtype) -> None:
-        self.weight = Parameter(torch.empty(
-            self.output_size_per_partition, self.input_size,
-            device=torch.cuda.current_device(), dtype=dtype))
+        self.weight = Parameter(
+            torch.empty(self.output_size_per_partition,
+                        self.input_size,
+                        device=torch.cuda.current_device(),
+                        dtype=dtype))
 
     def apply_weights(
         self,
@@ -154,7 +167,7 @@ class ColumnParallelLinear(torch.nn.Module):
         """Forward of ColumnParallelLinear
 
         Args:
-            input_: 3D tensor whose order of dimension is [sequence, batch, hidden]
+            input_: Tensor whose last dimension is `input_size`.
 
         Returns:
             - output
@@ -195,21 +208,26 @@ class RowParallelLinear(torch.nn.Module):
         input_is_parallel: If true, we assume that the input is already
                            split across the GPUs and we do not split
                            again.
-        skip_bias_add: This was added to enable performance optimization where bias
-                       can be fused with other elementwise operations. We skip
-                       adding bias but instead return it.
+        skip_bias_add: This was added to enable performance optimization where
+                       bias can be fused with other element-wise operations.
+                       We skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configuration.
     """
 
-    def __init__(self, input_size, output_size, *,
-                 bias=True, input_is_parallel=False,
-                 skip_bias_add=False,
-                 params_dtype=None,
-                 reduce_results=True,
-                 quant_config=None,
-                 ):
-        super(RowParallelLinear, self).__init__()
+    def __init__(
+        self,
+        input_size,
+        output_size,
+        *,
+        bias=True,
+        input_is_parallel=False,
+        skip_bias_add=False,
+        params_dtype=None,
+        reduce_results=True,
+        quant_config=None,
+    ):
+        super().__init__()
         # Keep input parameters
         self.input_size = input_size
         self.output_size = output_size
@@ -219,21 +237,22 @@ class RowParallelLinear(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
 
         # Divide the weight matrix along the last dimension.
-        self.world_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, self.world_size)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.input_size_per_partition = divide(input_size, self.tp_size)
         self.skip_bias_add = skip_bias_add
         self.quant_config = quant_config
 
         self.create_weights(params_dtype)
 
         if not reduce_results and (bias and not skip_bias_add):
-            raise ValueError("When not reduce the results, adding bias to the "
-                             "results can lead to incorrect results")
+            raise ValueError('When not reduce the results, adding bias to the '
+                             'results can lead to incorrect results')
 
         if bias:
-            self.bias = Parameter(torch.empty(
-                self.output_size, device=torch.cuda.current_device(),
-                dtype=params_dtype))
+            self.bias = Parameter(
+                torch.empty(self.output_size,
+                            device=torch.cuda.current_device(),
+                            dtype=params_dtype))
 
             # Always initialize bias to zero.
             with torch.no_grad():
@@ -242,9 +261,11 @@ class RowParallelLinear(torch.nn.Module):
             self.register_parameter('bias', None)
 
     def create_weights(self, dtype: torch.dtype) -> None:
-        self.weight = Parameter(torch.empty(
-                self.output_size, self.input_size_per_partition,
-                device=torch.cuda.current_device(), dtype=dtype))
+        self.weight = Parameter(
+            torch.empty(self.output_size,
+                        self.input_size_per_partition,
+                        device=torch.cuda.current_device(),
+                        dtype=dtype))
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight)
@@ -253,7 +274,9 @@ class RowParallelLinear(torch.nn.Module):
         """Forward of RowParallelLinear
 
         Args:
-            input_: 3D tensor whose order of dimension is [sequence, batch, hidden]
+            input_: tensor whose last dimension is `input_size`. If
+                    `input_is_parallel` is set, then the last dimension
+                    is `input_size // tp_size`.
 
         Returns:
             - output
@@ -265,12 +288,13 @@ class RowParallelLinear(torch.nn.Module):
         else:
             # TODO: simplify code below
             tp_rank = get_tensor_model_parallel_rank()
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.world_size)
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[tp_rank].contiguous()
 
         # Matrix multiply.
         output_parallel = self.apply_weights(input_parallel)
-        if self.reduce_results and self.world_size > 1:
+        if self.reduce_results and self.tp_size > 1:
             output_ = tenosr_model_parallel_all_reduce(output_parallel)
         else:
             output_ = output_parallel
