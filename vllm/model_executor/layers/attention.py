@@ -87,8 +87,9 @@ class PagedAttention(nn.Module):
             # Already set by a previous layer.
             return
         prompt_lens = input_metadata.prompt_lens
-        attn_bias = BlockDiagonalMask.from_seqlens(
-            prompt_lens).make_local_attention(self.sliding_window)
+        attn_bias = BlockDiagonalMask.from_seqlens(prompt_lens)
+        if self.sliding_window is not None:
+            attn_bias = attn_bias.make_local_attention(self.sliding_window)
         input_metadata.attn_bias.append(attn_bias)
 
     def multi_query_kv_attention(
