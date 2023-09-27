@@ -102,7 +102,7 @@ class LLMEngine:
         if self.parallel_config.worker_use_ray:
             self._init_workers_ray(placement_group)
         elif self.parallel_config.worker_use_rpyc:
-            self.init_workers_rpyc("todo")
+            self._init_workers_rpyc("todo")
         else:
             self._init_workers(distributed_init_method)
 
