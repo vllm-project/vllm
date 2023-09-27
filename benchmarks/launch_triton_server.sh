@@ -16,7 +16,7 @@ set -e
 mkdir -p triton && \
     cd triton && \
     rm -rf tutorials
-git clone git@github.com:triton-inference-server/tutorials.git && \
+git clone https://github.com/triton-inference-server/tutorials.git && \
     cd tutorials/Quick_Deploy/vLLM && \
     docker build -t tritonserver_vllm .
 
