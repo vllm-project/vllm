@@ -1,6 +1,5 @@
 import argparse
 import dataclasses
-import json
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -26,10 +25,9 @@ class EngineArgs:
     block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
-    max_num_batched_tokens: int = 40960
+    max_num_batched_tokens: int = 2560
     max_num_seqs: int = 256
     disable_log_stats: bool = False
-    rope_scaling: Optional[dict] = None
     revision: Optional[str] = None
     quantization: Optional[str] = None
 
@@ -161,10 +159,6 @@ class EngineArgs:
                             choices=['awq', None],
                             default=None,
                             help='Method used to quantize the weights')
-        parser.add_argument('--rope-scaling',
-                            default=None,
-                            type=json.loads,
-                            help='RoPE scaling configuration')
         return parser
 
     @classmethod
