@@ -109,6 +109,24 @@ i8gemm_extension = CUDAExtension(
 )
 ext_modules.append(i8gemm_extension)
 
+# FTGEMM(cutlass required)
+ftgemm_extension = CUDAExtension(
+    name='vllm.ftgemm',
+    sources=[
+        'csrc/ftgemm/bindings.cpp',
+        'csrc/ftgemm/cublasAlgoMap.cc',
+        'csrc/ftgemm/cublasINT8MMWrapper.cc',
+        'csrc/ftgemm/cublasMMWrapper.cc',
+        'csrc/ftgemm/cuda_utils.cc',
+        'csrc/ftgemm/transform_layout.cu'
+    ],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(ftgemm_extension)
+
 # Cache operations.
 cache_extension = CUDAExtension(
     name="vllm.cache_ops",
