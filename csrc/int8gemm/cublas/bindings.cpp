@@ -1,18 +1,21 @@
+/*
+  gemm methods are adapted from ft
+*/
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 #include "cublasAlgoMap.h"
 #include "cublasINT8MMWrapper.h"
 #include "transform_layout.h"
 
-class FTGEMM {
+class I8CUGEMM {
 private:
   cublasINT8MMWrapper *int8_gemm_wrapper = nullptr;
   // const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
 public:
-  FTGEMM();
-  ~FTGEMM();
+  I8CUGEMM();
+  ~I8CUGEMM();
 
   void linear_a8_w8_o32(torch::Tensor &input, torch::Tensor &weight,
                         torch::Tensor &output);
@@ -30,7 +33,7 @@ public:
   void transform_row_to_turing(torch::Tensor &input, torch::Tensor &out);
 
 };
-FTGEMM::FTGEMM() {
+I8CUGEMM::I8CUGEMM() {
   // cublasAlgoMap *cublas_algo_map = new cublasAlgoMap("igemm_config.in");
   cublasAlgoMap *cublas_algo_map = new cublasAlgoMap();
   std::mutex *cublas_wrapper_mutex = new std::mutex();
@@ -47,9 +50,9 @@ FTGEMM::FTGEMM() {
                               cublas_wrapper_mutex, use_ORDER_COL32_2R_4R4);
 }
 
-FTGEMM::~FTGEMM() {}
+I8CUGEMM::~I8CUGEMM() {}
 
-void FTGEMM::linear_a8_w8_o32(torch::Tensor &input,  // INT8
+void I8CUGEMM::linear_a8_w8_o32(torch::Tensor &input,  // INT8
                               torch::Tensor &weight, // INT8
                               torch::Tensor &out // INT32
 ) {
@@ -66,7 +69,7 @@ void FTGEMM::linear_a8_w8_o32(torch::Tensor &input,  // INT8
                           weight_ptr);
 }
 
-void FTGEMM::linear_a8_w8_o32_(torch::Tensor &input,  // INT8
+void I8CUGEMM::linear_a8_w8_o32_(torch::Tensor &input,  // INT8
                               torch::Tensor &weight, // INT8
                               torch::Tensor &out // INT32
 ) {
@@ -83,7 +86,7 @@ void FTGEMM::linear_a8_w8_o32_(torch::Tensor &input,  // INT8
                           weight_ptr);
 }
 
-void FTGEMM::linear_a8_w8_o8(torch::Tensor &input,  // INT8
+void I8CUGEMM::linear_a8_w8_o8(torch::Tensor &input,  // INT8
                              torch::Tensor &weight, // INT8
                              torch::Tensor &out,    // INT8
                              float alpha // FP32
@@ -101,7 +104,7 @@ void FTGEMM::linear_a8_w8_o8(torch::Tensor &input,  // INT8
                           weight_ptr);
 }
 
-void FTGEMM::linear_a8_w8_o8_(torch::Tensor &input,  // INT8
+void I8CUGEMM::linear_a8_w8_o8_(torch::Tensor &input,  // INT8
                              torch::Tensor &weight, // INT8
                              torch::Tensor &out,    // INT8
                              float alpha // FP32
@@ -119,7 +122,7 @@ void FTGEMM::linear_a8_w8_o8_(torch::Tensor &input,  // INT8
                           weight_ptr);
 }
 
-void FTGEMM::linear_a8_w8_ofp32(torch::Tensor &input,  // INT8
+void I8CUGEMM::linear_a8_w8_ofp32(torch::Tensor &input,  // INT8
                              torch::Tensor &weight, // INT8
                              torch::Tensor &out,    // INT8
                              float alpha // FP32
@@ -137,7 +140,7 @@ void FTGEMM::linear_a8_w8_ofp32(torch::Tensor &input,  // INT8
                           weight_ptr);
 }
 
-void FTGEMM::transform_row_to_col32(torch::Tensor &input, torch::Tensor &out) {
+void I8CUGEMM::transform_row_to_col32(torch::Tensor &input, torch::Tensor &out) {
   int m = input.size(0);
   int n = input.size(1);
   int m_ = out.size(0);
@@ -152,7 +155,7 @@ void FTGEMM::transform_row_to_col32(torch::Tensor &input, torch::Tensor &out) {
   // invokeRowMajorToCOL32(out_ptr, input_ptr, m, n, stream);
 }
 
-void FTGEMM::transform_col32_to_row(torch::Tensor &input, torch::Tensor &out) {
+void I8CUGEMM::transform_col32_to_row(torch::Tensor &input, torch::Tensor &out) {
   int m = input.size(0);
   int n = input.size(1);
   int m_ = out.size(0);
@@ -167,7 +170,7 @@ void FTGEMM::transform_col32_to_row(torch::Tensor &input, torch::Tensor &out) {
   // invokeCOL32ToRowMajor(out_ptr, input_ptr, m, n, stream);
 }
 
-void FTGEMM::transform_row_to_ampere(torch::Tensor &input, torch::Tensor &out) {
+void I8CUGEMM::transform_row_to_ampere(torch::Tensor &input, torch::Tensor &out) {
   int m = input.size(0);
   int n = input.size(1);
   int m_ = out.size(0);
@@ -182,7 +185,7 @@ void FTGEMM::transform_row_to_ampere(torch::Tensor &input, torch::Tensor &out) {
   // invokeCOL32ToRowMajor(out_ptr, input_ptr, m, n, stream);
 }
 
-void FTGEMM::transform_row_to_turing(torch::Tensor &input, torch::Tensor &out) {
+void I8CUGEMM::transform_row_to_turing(torch::Tensor &input, torch::Tensor &out) {
   int m = input.size(0);
   int n = input.size(1);
   int m_ = out.size(0);
@@ -198,15 +201,15 @@ void FTGEMM::transform_row_to_turing(torch::Tensor &input, torch::Tensor &out) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  pybind11::class_<FTGEMM>(m, "FTGEMM")
+  pybind11::class_<I8CUGEMM>(m, "I8CUGEMM")
       .def(pybind11::init<>())
-      .def("linear_a8_w8_o32", &FTGEMM::linear_a8_w8_o32)
-      .def("linear_a8_w8_o8", &FTGEMM::linear_a8_w8_o8)
-      .def("linear_a8_w8_o8_", &FTGEMM::linear_a8_w8_o8_)
-      .def("linear_a8_w8_o32_", &FTGEMM::linear_a8_w8_o32_)
-      .def("linear_a8_w8_ofp32", &FTGEMM::linear_a8_w8_ofp32)
-      .def("transform_row_to_col32", &FTGEMM::transform_row_to_col32)
-      .def("transform_col32_to_row", &FTGEMM::transform_col32_to_row)
-      .def("transform_row_to_ampere", &FTGEMM::transform_row_to_ampere)
-      .def("transform_row_to_turing", &FTGEMM::transform_row_to_turing);
+      .def("linear_a8_w8_o32", &I8CUGEMM::linear_a8_w8_o32)
+      .def("linear_a8_w8_o8", &I8CUGEMM::linear_a8_w8_o8)
+      .def("linear_a8_w8_o8_", &I8CUGEMM::linear_a8_w8_o8_)
+      .def("linear_a8_w8_o32_", &I8CUGEMM::linear_a8_w8_o32_)
+      .def("linear_a8_w8_ofp32", &I8CUGEMM::linear_a8_w8_ofp32)
+      .def("transform_row_to_col32", &I8CUGEMM::transform_row_to_col32)
+      .def("transform_col32_to_row", &I8CUGEMM::transform_col32_to_row)
+      .def("transform_row_to_ampere", &I8CUGEMM::transform_row_to_ampere)
+      .def("transform_row_to_turing", &I8CUGEMM::transform_row_to_turing);
 }
