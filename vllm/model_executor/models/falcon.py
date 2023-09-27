@@ -161,12 +161,17 @@ class FalconAttention(nn.Module):
             "Rotary and alibi are mutually exclusive.")
 
         if self.use_rotary:
-            # TODO(zhuohan): Pass in correct `max_position``
-            self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                               self.head_dim,
-                                               self.inv_norm_factor,
-                                               rotary_dim=self.head_dim,
-                                               num_kv_heads=self.num_kv_heads)
+            rope_theta = getattr(config, "rope_theta", 10000)
+            max_position_embeddings = getattr(config,
+                                              "max_position_embeddings", 8192)
+            self.attn = PagedAttentionWithRoPE(
+                self.num_heads,
+                self.head_dim,
+                self.inv_norm_factor,
+                base=rope_theta,
+                max_position=max_position_embeddings,
+                rotary_dim=self.head_dim,
+                num_kv_heads=self.num_kv_heads)
         elif self.use_alibi:
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
