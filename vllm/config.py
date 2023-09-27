@@ -375,14 +375,14 @@ def _get_and_verify_max_len(
         max_len_key = getattr(hf_config, key, None)
         if max_len_key is not None:
             derived_max_model_len = min(derived_max_model_len, max_len_key)
+    if derived_max_model_len == float("inf"):
+        raise ValueError(
+            "The model's config.json must contain one of the following keys "
+            "to determine the original maximum length of the model: "
+            f"{possible_keys}")
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     if rope_scaling is not None:
-        if derived_max_model_len == float("inf"):
-            raise ValueError(
-                "When using rope_scaling, the model's config.json must "
-                "contain one of the following keys to determine the original "
-                f"maximum length of the model: {possible_keys}")
         assert "factor" in rope_scaling
         scaling_factor = rope_scaling["factor"]
         derived_max_model_len *= scaling_factor
@@ -396,4 +396,4 @@ def _get_and_verify_max_len(
             " in model's config.json). This may lead to incorrect model "
             "outputs or CUDA errors. Make sure the value is correct and "
             "within the model context size.")
-    return max_model_len
+    return int(max_model_len)
