@@ -6,8 +6,6 @@ from torch.nn.parameter import Parameter
 from vllm import quantization_ops
 from vllm.model_executor.parallel_utils.tensor_parallel.layers import (
     ColumnParallelLinear, RowParallelLinear)
-from vllm.model_executor.parallel_utils.tensor_parallel.mappings import (
-    gather_from_tensor_model_parallel_region)
 
 
 class GPTQLinear(torch.nn.Module):
@@ -22,6 +20,7 @@ class GPTQLinear(torch.nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.quant_config = quant_config
+        self.use_exllama = True
         group_size = self.quant_config.group_size if (
             self.quant_config.group_size != -1) else self.input_size
         self.qweight = Parameter(
@@ -103,6 +102,7 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
         assert self.input_size % self.quant_config.pack_factor == 0
         assert (self.output_size_per_partition %
                 self.quant_config.pack_factor == 0)
+        self.use_exllama = True
         group_size = self.quant_config.group_size if (
             self.quant_config.group_size != -1) else self.input_size
 
@@ -179,15 +179,16 @@ class GPTQRowParallelLinear(RowParallelLinear):
         assert (self.input_size_per_partition %
                 self.quant_config.pack_factor == 0)
         assert self.output_size % self.quant_config.pack_factor == 0
-        # Ignore tensor parallel when group_size != -1 and desc_act
-        if self.quant_config.desc_act and self.quant_config.group_size != -1:
-            self.input_size_per_partition = self.input_size
-            self.parallel = False
-        else:
-            self.parallel = True
         group_size = self.quant_config.group_size if (
             self.quant_config.group_size != -1
         ) else self.input_size_per_partition
+        if self.world_size > 1 and (self.quant_config.desc_act
+                                    and self.quant_config.group_size != -1):
+            group_number = self.input_size // group_size
+            self.use_exllama = False
+        else:
+            group_number = self.input_size_per_partition // group_size
+            self.use_exllama = True
         self.qweight = Parameter(
             torch.empty(
                 self.input_size_per_partition // self.quant_config.pack_factor,
@@ -199,7 +200,7 @@ class GPTQRowParallelLinear(RowParallelLinear):
         )
         self.qzeros = Parameter(
             torch.empty(
-                self.input_size_per_partition // group_size,
+                group_number,
                 self.output_size // self.quant_config.pack_factor,
                 device="cuda",
                 dtype=torch.int32,
@@ -208,7 +209,7 @@ class GPTQRowParallelLinear(RowParallelLinear):
         )
         self.scales = Parameter(
             torch.empty(
-                self.input_size_per_partition // group_size,
+                group_number,
                 self.output_size,
                 device="cuda",
                 dtype=dtype,
@@ -228,6 +229,8 @@ class GPTQRowParallelLinear(RowParallelLinear):
         )
 
     def post_init(self):
+        if not self.use_exllama:
+            return
         assert self.qweight.device.type == "cuda"
         assert self.qweight.device.index is not None
 
@@ -244,26 +247,19 @@ class GPTQRowParallelLinear(RowParallelLinear):
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
-        output = torch.empty((x.shape[0], self.qweight.shape[-1]),
-                             dtype=torch.float16,
-                             device=x.device)
-        quantization_ops.gptq_q4_matmul(reshaped_x, self.q4, output)
-        return output.reshape(out_shape)
 
-    def forward(self, input_):
-        # Set up backprop all-reduce.
-        if self.parallel:
-            return super().forward(input_)
-        if self.input_is_parallel:
-            input_ = gather_from_tensor_model_parallel_region(input_)
-        output_ = self.apply_weights(input_)
-        if not self.reduce_results and self.world_size > 1:
-            output_ = output_ / self.world_size
-
-        if not self.skip_bias_add:
-            output = output_ + self.bias if self.bias is not None else output_
-            output_bias = None
+        if self.use_exllama:
+            output = torch.empty((x.shape[0], self.qweight.shape[-1]),
+                                 dtype=torch.float16,
+                                 device=x.device)
+            quantization_ops.gptq_q4_matmul(reshaped_x, self.q4, output)
         else:
-            output = output_
-            output_bias = self.bias
-        return output, output_bias
+            output = torch.zeros((x.shape[0], self.qweight.shape[-1]),
+                                 dtype=torch.float32,
+                                 device=x.device)
+            quantization_ops.gptq_descact_matmul(reshaped_x.float(),
+                                                 self.qweight, output,
+                                                 self.scales.float(),
+                                                 self.qzeros, self.g_idx)
+            output = output.half()
+        return output.reshape(out_shape)

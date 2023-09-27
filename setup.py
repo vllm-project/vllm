@@ -155,7 +155,9 @@ quantization_extension = CUDAExtension(
         "csrc/quantization/gptq/cuda_buffers.cu",
         "csrc/quantization/gptq/cuda_func/column_remap.cu",
         "csrc/quantization/gptq/cuda_func/q4_matmul.cu",
-        "csrc/quantization/gptq/cuda_func/q4_matrix.cu"
+        "csrc/quantization/gptq/cuda_func/q4_matrix.cu",
+        "csrc/quantization/gptq/old_matmul.cpp",
+        "csrc/quantization/gptq/old_matmul_kernel.cu"
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,

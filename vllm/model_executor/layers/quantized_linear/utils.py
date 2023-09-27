@@ -17,9 +17,9 @@ def quant_post_init(model, max_input_length: Optional[int] = None):
     model_uses_exllama = False
     use_act_order = False
     for _, submodule in model.named_modules():
-        if isinstance(
-                submodule,
-            (GPTQColumnParallelLinear, GPTQRowParallelLinear, GPTQLinear)):
+        if isinstance(submodule,
+                      (GPTQColumnParallelLinear, GPTQRowParallelLinear,
+                       GPTQLinear)) and submodule.use_exllama:
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:

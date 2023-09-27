@@ -288,10 +288,15 @@ def load_tensor_parallel_weights(
             break
     for p in row_parallel_weight_names:
         if p in param_name:
-            shard_size = param.shape[1]
+            shard_size = param.shape[-1]
             start_idx = tensor_model_parallel_rank * shard_size
             end_idx = (tensor_model_parallel_rank + 1) * shard_size
-            loaded_weight = loaded_weight[:, start_idx:end_idx]
+            if isinstance(loaded_weight, torch.Tensor):
+                loaded_weight = loaded_weight[..., start_idx:end_idx]
+            else:
+                index = [slice(None)] * (len(loaded_weight.get_shape()) -
+                                         1) + [slice(start_idx, end_idx)]
+                loaded_weight = loaded_weight[index]
             break
 
     loaded_weight = convert_pyslice_to_tensor(loaded_weight)

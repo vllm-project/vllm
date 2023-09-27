@@ -68,9 +68,9 @@ class GPTQConfig(QuantizationConfig):
 
     def get_row_tp_tensor_names(self) -> List[str]:
         if self.desc_act and self.group_size != -1:
-            return []
-        if self.group_size == -1:
             return ["qweight", "g_idx"]
+        if self.group_size == -1:
+            return ["qweight"]
         return ["qweight", "qzeros", "scales"]
 
     def get_column_tp_tensor_names(self) -> List[str]:
