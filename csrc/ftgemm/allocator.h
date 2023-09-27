@@ -41,8 +41,6 @@
 #include <memory>
 #endif
 
-// #include "src/fastertransformer/utils/logger.h"
-
 #if defined(CUDART_VERSION) && CUDART_VERSION < 11020
 #define CUDA_MEMORY_POOL_DISABLED
 #endif

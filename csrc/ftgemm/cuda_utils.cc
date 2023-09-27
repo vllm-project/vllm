@@ -49,11 +49,6 @@ template void print_to_file(const float *result, const int size,
 template void print_to_file(const half *result, const int size,
                             const char *file, cudaStream_t stream,
                             std::ios::openmode open_mode);
-// #ifdef ENABLE_BF16
-// template void print_to_file(
-//     const __nv_bfloat16* result, const int size, const char* file,
-//     cudaStream_t stream, std::ios::openmode open_mode);
-// #endif
 
 template <typename T>
 void print_abs_mean(const T *buf, uint size, cudaStream_t stream,
@@ -97,18 +92,12 @@ template void print_abs_mean(const float *buf, uint size, cudaStream_t stream,
                              std::string name);
 template void print_abs_mean(const half *buf, uint size, cudaStream_t stream,
                              std::string name);
-// #ifdef ENABLE_BF16
-// template void print_abs_mean(const __nv_bfloat16* buf, uint size,
-// cudaStream_t stream, std::string name); #endif
 template void print_abs_mean(const int *buf, uint size, cudaStream_t stream,
                              std::string name);
 template void print_abs_mean(const uint *buf, uint size, cudaStream_t stream,
                              std::string name);
 template void print_abs_mean(const int8_t *buf, uint size, cudaStream_t stream,
                              std::string name);
-// #ifdef ENABLE_FP8
-// template void print_abs_mean(const __nv_fp8_e4m3* buf, uint size,
-// cudaStream_t stream, std::string name); #endif
 
 template <typename T> void print_to_screen(const T *result, const int size) {
   if (result == nullptr) {
@@ -126,15 +115,10 @@ template <typename T> void print_to_screen(const T *result, const int size) {
 
 template void print_to_screen(const float *result, const int size);
 template void print_to_screen(const half *result, const int size);
-// #ifdef ENABLE_BF16
-// template void print_to_screen(const __nv_bfloat16* result, const int size);
-// #endif
 template void print_to_screen(const int *result, const int size);
 template void print_to_screen(const uint *result, const int size);
 template void print_to_screen(const bool *result, const int size);
-// #ifdef ENABLE_FP8
-// template void print_to_screen(const __nv_fp8_e4m3* result, const int size);
-// #endif
+
 
 template <typename T>
 void printMatrix(T *ptr, int m, int k, int stride, bool is_device_ptr) {
@@ -174,9 +158,6 @@ template void printMatrix(float *ptr, int m, int k, int stride,
                           bool is_device_ptr);
 template void printMatrix(half *ptr, int m, int k, int stride,
                           bool is_device_ptr);
-// #ifdef ENABLE_BF16
-// template void printMatrix(__nv_bfloat16* ptr, int m, int k, int stride, bool
-// is_device_ptr); #endif
 
 void printMatrix(unsigned long long *ptr, int m, int k, int stride,
                  bool is_device_ptr) {
@@ -297,9 +278,6 @@ template <typename T> void check_max_val(const T *result, const int size) {
 
 template void check_max_val(const float *result, const int size);
 template void check_max_val(const half *result, const int size);
-// #ifdef ENABLE_BF16
-// template void check_max_val(const __nv_bfloat16* result, const int size);
-// #endif
 
 template <typename T> void check_abs_mean_val(const T *result, const int size) {
   T *tmp = new T[size];
@@ -314,9 +292,6 @@ template <typename T> void check_abs_mean_val(const T *result, const int size) {
 
 template void check_abs_mean_val(const float *result, const int size);
 template void check_abs_mean_val(const half *result, const int size);
-// #ifdef ENABLE_BF16
-// template void check_abs_mean_val(const __nv_bfloat16* result, const int
-// size); #endif
 
 /* ***************************** common utils ****************************** */
 
@@ -347,35 +322,5 @@ cudaError_t getSetDevice(int i_device, int *o_device) {
 
   return cudaSuccess;
 }
-
-// FtCudaDataType getModelFileType(std::string ini_file, std::string
-// section_name)
-// {
-//     FtCudaDataType model_file_type;
-//     INIReader      reader = INIReader(ini_file);
-//     if (reader.ParseError() < 0) {
-//         FT_LOG_WARNING("Can't load %s. Use FP32 as default",
-//         ini_file.c_str()); model_file_type = FtCudaDataType::FP32;
-//     }
-//     else {
-//         std::string weight_data_type_str =
-//         std::string(reader.Get(section_name, "weight_data_type")); if
-//         (weight_data_type_str.find("fp32") != std::string::npos) {
-//             model_file_type = FtCudaDataType::FP32;
-//         }
-//         else if (weight_data_type_str.find("fp16") != std::string::npos) {
-//             model_file_type = FtCudaDataType::FP16;
-//         }
-//         else if (weight_data_type_str.find("bf16") != std::string::npos) {
-//             model_file_type = FtCudaDataType::BF16;
-//         }
-//         else {
-//             FT_LOG_WARNING("Invalid type %s. Use FP32 as default",
-//             weight_data_type_str.c_str()); model_file_type =
-//             FtCudaDataType::FP32;
-//         }
-//     }
-//     return model_file_type;
-// }
 
 /* ************************** end of common utils ************************** */
