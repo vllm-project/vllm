@@ -44,6 +44,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`LlamaForCausalLM`
     - LLaMA, LLaMA-2, Vicuna, Alpaca, Koala, Guanaco
     - :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, etc.
+  * - :code:`MistralForCausalLM`
+    - Mistral, Mistral-Instruct
+    - :code:`mistralai/Mistral-7B-v0.1`, :code:`mistralai/Mistral-7B-Instruct-v0.1`, etc.
   * - :code:`MPTForCausalLM`
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
