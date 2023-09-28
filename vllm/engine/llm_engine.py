@@ -8,6 +8,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
+from vllm.engine.rpyc_utils import init_rpyc_env
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -189,6 +190,21 @@ class LLMEngine:
 
         # uh probably create a Worker on each process, behind a rpyc server-thing that exposes the Worker's methods
         # and call the _run_workers init_worker + init_model probably idk
+
+        from multiprocessing import Process
+        import rpyc
+
+        self.workers = []  # TODO type
+        for i in range(self.parallel_config.world_size):
+            # TODO spawn a process with a Worker and rpyc server, stick it in the mp
+            port = 1234 # TODO obvs don't just default it
+            p = Process(target=init_rpyc_env, args=(port,))
+            p.start()
+            con = rpyc.connect("localhost", port, config={"allow_pickle": True})  # todo lightllm has retries here, you probably want to as well
+
+            
+            pass
+
 
         raise NotImplementedError("rpyc not implemented yet")
 
