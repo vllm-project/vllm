@@ -186,7 +186,7 @@ def test_reshape_and_cache_quantized(
                       device='cuda')
     _, key, value = qkv.unbind(dim=1)
 
-    x = 16 // torch.tensor([], dtype=dtype).element_size()
+    x = 16 // torch.tensor([], dtype=torch.int8).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
     key_cache = torch.randint(-10, 10, size=key_cache_shape, dtype=torch.int8, device='cuda') ## change to int8
     cloned_key_cache = key_cache.clone()
@@ -201,11 +201,15 @@ def test_reshape_and_cache_quantized(
                                           slot_mapping, k_scale, k_zp, v_scale, v_zp)
     lower_bound, upper_bound = torch.tensor([-128.0], dtype=dtype, device='cuda'), torch.tensor([127.0], dtype=dtype, device='cuda')
     ## quantize and store here
-    reshaped_key = key.reshape(num_tokens, num_heads, head_size // x, x)
-    reshaped_key = torch.maximum(lower_bound, torch.minimum(upper_bound, (reshaped_key - k_zp) / k_scale))
-    reshaped_key = torch.round(reshaped_key)
-    reshaped_key = reshaped_key.to(torch.int8) ## change to int8
-    quantized_value = torch.maximum(lower_bound, torch.minimum(upper_bound, (value - v_zp) / v_scale))
+    ## quantize and store here
+    quantized_key = key.reshape(num_tokens, num_heads, head_size // x, x)
+    quantized_key = quantized_key.to(torch.float32)
+    quantized_key = torch.maximum(lower_bound, torch.minimum(upper_bound, (quantized_key - k_zp) / k_scale))
+    quantized_key = torch.round(quantized_key)
+    quantized_key = quantized_key.to(torch.int8) ## change to int8
+
+    quantized_value = value.to(torch.float32)
+    quantized_value = torch.maximum(lower_bound, torch.minimum(upper_bound, (quantized_value - v_zp) / v_scale))
     quantized_value = torch.round(quantized_value)
     quantized_value = quantized_value.to(torch.int8)
 
@@ -214,7 +218,7 @@ def test_reshape_and_cache_quantized(
                               block_size,
                               rounding_mode='floor')
         block_offset = slot_mapping[i] % block_size
-        cloned_key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
+        cloned_key_cache[block_idx, :, :, block_offset, :] = quantized_key[i]
         cloned_value_cache[block_idx, :, :, block_offset] = quantized_value[i]
 
     assert torch.allclose(key_cache, cloned_key_cache)

@@ -28,7 +28,7 @@ def sample_requests(
     subjects: List[str],
     dataset_template: str = "mmlu",
     is_analyse: bool = False,
-) -> List[Tuple[str, int, int]]:
+) -> Tuple[List[str], List[str], List[int]]:
     # Load the dataset.
     nums_questions = []
     dataset = []
@@ -110,7 +110,7 @@ def evalute(
 
 def main(args: argparse.Namespace):
     subjects = [
-        "abstract_algebra",
+        "college_computer_science",
     ]
     dataset, labels, nums_questions = sample_requests(
         args.dev_data_path,
@@ -130,9 +130,6 @@ def main(args: argparse.Namespace):
         args.use_beam_search,
         args.trust_remote_code,
     )
-    foo = request_outputs[0]
-    print(foo.outputs[0].text)
-    assert False
     sub2acc = evalute(
         request_outputs,
         labels,
@@ -173,7 +170,7 @@ if __name__ == "__main__":
                         help="nums of max token for evaluation outputs")
     parser.add_argument("--kv-cache-dtype",
                         type=str,
-                        default="int8")
+                        default="float16")
     parser.add_argument("--kv-quant-params-path",
                         type=str,
                         default=None)
