@@ -1,6 +1,7 @@
 # TODO maybe wrap in a try except ImportError? idk
 
 import os
+import asyncio as aio
 import rpyc
 from rpyc.utils.server import ThreadedServer
 
@@ -45,18 +46,48 @@ class RPyCWorkerService(rpyc.Service):
 class RPyCWorkerClient:
     def __init__(self, conn):
         self.conn = conn
+        def async_wrap(f):
+            f = rpyc.async_(f)
+            async def _func(*args, **kwargs):
+                ans = f(*args, **kwargs)
+                await aio.to_thread(ans.wait)
+                # raise if exception
+                return ans.value
+            return _func
+        self.async_wrap = async_wrap
+        self._ainit_torch_distributed = self.async_wrap(self.conn.root.init_torch_distributed)
+        self._ainit_worker = self.async_wrap(self.conn.root.init_worker)
+        self._aexecute_method = self.async_wrap(self.conn.root.execute_method)
+        self._init_torch_distributed = self.conn.root.init_torch_distributed
+        self._init_worker = self.conn.root.init_worker
+        self._execute_method = self.conn.root.execute_method
+
 
     def print_debug_msg(self, msg):
         self.conn.root.print_debug_msg(msg)
     
+    async def aprint_debug_msg(self, msg):
+        return await self.async_wrap(self.conn.root.print_debug_msg)(msg)
+
+    # TODO will I end up needing the nonasync fns?
+    
     def init_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
-        self.conn.root.init_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)
+        self._init_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)
 
     def init_worker(self, worker_init_fn):
-        self.conn.root.init_worker(worker_init_fn)
+        self._init_worker(worker_init_fn)
 
     def execute_method(self, method, *args, **kwargs):
-        return self.conn.root.execute_method(method, *args, **kwargs)  # TODO is this right?
+        return self._execute_method(method, *args, **kwargs)  # TODO is this right?
+    
+    async def aexecute_method(self, method, *args, **kwargs):
+        return await self._aexecute_method(method, *args, **kwargs)
+    
+    async def ainit_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
+        return await self._ainit_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)
+    
+    async def ainit_worker(self, worker_init_fn):
+        return await self._ainit_worker(worker_init_fn)
 
 
 

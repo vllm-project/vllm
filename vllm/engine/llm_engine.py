@@ -1,6 +1,7 @@
 import copy
 import time
 from functools import partial
+import asyncio as aio
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -197,7 +198,7 @@ class LLMEngine:
         import rpyc
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
-        self.workers = []  # TODO type
+        self.workers: List[RPyCWorkerClient] = []  # TODO type
         for i in range(self.parallel_config.world_size):
             # TODO spawn a process with a Worker and rpyc server, stick it in the mp
             port = 12345 + i # TODO obvs don't just default it
@@ -740,7 +741,7 @@ class LLMEngine:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             elif self.parallel_config.worker_use_rpyc:
-                raise NotImplementedError("rpyc not implemented yet")
+                executor = partial(worker.execute_method, method)
             else:
                 executor = getattr(worker, method)
 
@@ -750,7 +751,8 @@ class LLMEngine:
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)
         elif self.parallel_config.worker_use_rpyc:
-            raise NotImplementedError("rpyc not implemented yet")
+            # idk is it this? probably
+            all_outputs = aio.run(aio.gather(*all_outputs))
 
         if get_all_outputs:
             return all_outputs
