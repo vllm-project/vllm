@@ -186,6 +186,10 @@ class LLMEngine:
         # set rank/url/port/etc. for rpyc workers
         # use mp to run the workers
         # note: parallel_config controls whether we're using ray or not
+
+        # uh probably create a Worker on each process, behind a rpyc server-thing that exposes the Worker's methods
+        # and call the _run_workers init_worker + init_model probably idk
+
         raise NotImplementedError("rpyc not implemented yet")
 
     def _verify_args(self) -> None:
@@ -692,6 +696,8 @@ class LLMEngine:
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
+            elif self.parallel_config.worker_use_rpyc:
+                raise NotImplementedError("rpyc not implemented yet")
             else:
                 executor = getattr(worker, method)
 
@@ -700,6 +706,8 @@ class LLMEngine:
 
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)
+        elif self.parallel_config.worker_use_rpyc:
+            raise NotImplementedError("rpyc not implemented yet")
 
         if get_all_outputs:
             return all_outputs

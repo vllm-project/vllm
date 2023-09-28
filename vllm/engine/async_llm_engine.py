@@ -257,6 +257,7 @@ class AsyncLLMEngine:
 
     def __init__(self,
                  worker_use_ray: bool,
+                 worker_use_rpyc: bool,
                  engine_use_ray: bool,
                  engine_use_rpyc: bool,
                  *args,
@@ -267,6 +268,7 @@ class AsyncLLMEngine:
         assert not (engine_use_ray and engine_use_rpyc), (
             "Only one of engine_use_ray and engine_use_rpyc can be True.")
         self.worker_use_ray = worker_use_ray
+        self.worker_use_rpyc = worker_use_rpyc
         self.engine_use_ray = engine_use_ray
         self.engine_use_rpyc = engine_use_rpyc
         self.log_requests = log_requests
