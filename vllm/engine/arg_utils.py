@@ -25,7 +25,7 @@ class EngineArgs:
     block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
-    max_num_batched_tokens: int = 2560
+    max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     disable_log_stats: bool = False
     revision: Optional[str] = None
@@ -34,7 +34,6 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
-        self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
 
     @staticmethod
     def add_cli_args(
