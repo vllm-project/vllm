@@ -78,9 +78,8 @@ __global__ void dequant_add_residual_rms_norm_quant_kernel(
 
   float local_var_sum = 0.0f;
   for (int i = tid; i < n; i += blockDim.x) {
-    float diff = (((float)input[blockIdx.x * n + i]) * scale) +
-                 (float)residual[blockIdx.x * n + i];
-    // float diff = (float)(input[blockIdx.x * n + i]);
+    float diff = ((((float)input[blockIdx.x * n + i]) * scale) +
+                  (float)residual[blockIdx.x * n + i]);
     local_var_sum += diff * diff;
   }
   variance = blockReduceSum(local_var_sum);
@@ -91,8 +90,10 @@ __global__ void dequant_add_residual_rms_norm_quant_kernel(
   __syncthreads();
 
   for (int i = tid; i < n; i += blockDim.x) {
-    output[blockIdx.x * n + i] = float_to_int8_rn(
-        (((float)input[blockIdx.x * n + i]) * s_variance) * (float)(gamma[i]));
+    float tmp = ((((float)input[blockIdx.x * n + i]) * scale) +
+                 (float)residual[blockIdx.x * n + i]);
+    output[blockIdx.x * n + i] =
+        float_to_int8_rn((tmp * s_variance) * (float)(gamma[i]));
   }
 }
 

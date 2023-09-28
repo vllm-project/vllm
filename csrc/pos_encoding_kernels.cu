@@ -220,12 +220,13 @@ void invoke_dequant_rotary_embedding(
   int num_kv_heads = key.size(1) / head_size;
   int query_stride = query.stride(0);
   int key_stride = key.stride(0);
-
+  std::cout << rot_dim << std::endl;
+  std::cout << query_stride << std::endl;
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * rot_dim / 2, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
-    query.scalar_type(),
+    query_out.scalar_type(),
     "dequant_rotary_embedding_kernel",
     [&] {
       if (is_neox) {
