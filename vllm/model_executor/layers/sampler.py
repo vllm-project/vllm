@@ -56,7 +56,7 @@ class Sampler(nn.Module):
         assert len(repetition_penalties) == logits.shape[0]
         logits = _apply_penalties(input_metadata, logits, output_tokens,
                                   presence_penalties, frequency_penalties,
-                                  repetition_penalties, self.vocab_size)
+                                  repetition_penalties)
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(input_metadata)
