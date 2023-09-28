@@ -9,9 +9,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Mistral-7B-v0.1 configuration"""
 from transformers.configuration_utils import PretrainedConfig
+
 
 class MistralConfig(PretrainedConfig):
     model_type = "mistral"
