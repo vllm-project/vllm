@@ -91,14 +91,6 @@ def ref_single_query_cached_kv_attention(
         out = out.view(num_query_heads, head_size)
         output[i].copy_(out, non_blocking=True)
 
-
-@pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("use_alibi", USE_ALIBI)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
 def ref_single_query_cached_kv_attention_quantized(
     output: torch.Tensor,
     query: torch.Tensor,
@@ -238,6 +230,13 @@ def ref_multi_query_cached_kv_attention(
     return ref_output
 
 
+@pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("use_alibi", USE_ALIBI)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_single_query_cached_kv_attention(
     kv_cache_factory,
@@ -470,7 +469,42 @@ def run_single_query_cached_kv_attention_quantized(
     # We should use a relaxed tolerance for the test.
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
+def test_single_query_cached_kv_attention_quantized() -> None:
+    # FIXME: set TEST_SEED
+    torch.random.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    for dtype in [
+                  torch.half, 
+                  torch.bfloat16, 
+                  torch.float,
+                  ]:
+        for block_size in [8, 
+                           16,
+                           ]:
+            for head_size in [64, 
+                              80, 
+                              96, 
+                              112,  
+                              128, 
+                              256,
+                              ]:
+                print(f'Testing single_query_cached_kv_attention with '
+                      f'dtype={dtype}, block_size={block_size}, '
+                      f'head_size={head_size}')
+                run_single_query_cached_kv_attention_quantized(
+                    num_tokens=37,
+                    num_heads=3,
+                    head_size=head_size,
+                    block_size=block_size,
+                    num_blocks=1024,
+                    dtype=dtype,
+                )
 
+@pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def run_multi_query_kv_attention(
     num_seqs: int,
@@ -525,57 +559,6 @@ def run_multi_query_kv_attention(
         dtype,
     )
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
-
-
-def test_single_query_cached_kv_attention() -> None:
-    torch.random.manual_seed(TEST_SEED)
-    torch.cuda.manual_seed(TEST_SEED)
-    for dtype in [torch.half, torch.bfloat16, torch.float]:
-        for block_size in [8, 16, 32]:
-            for head_size in [64, 80, 96, 112, 128, 256]:
-                print(f'Testing single_query_cached_kv_attention with '
-                      f'dtype={dtype}, block_size={block_size}, '
-                      f'head_size={head_size}')
-                run_single_query_cached_kv_attention(
-                    num_tokens=37,
-                    num_heads=3,
-                    head_size=head_size,
-                    block_size=block_size,
-                    num_blocks=1024,
-                    dtype=dtype,
-                )
-
-
-def test_single_query_cached_kv_attention_quantized() -> None:
-    torch.random.manual_seed(TEST_SEED)
-    torch.cuda.manual_seed(TEST_SEED)
-    for dtype in [
-                  torch.half, 
-                  torch.bfloat16, 
-                  torch.float,
-                  ]:
-        for block_size in [8, 
-                           16,
-                           ]:
-            for head_size in [64, 
-                              80, 
-                              96, 
-                              112,  
-                              128, 
-                              256,
-                              ]:
-                print(f'Testing single_query_cached_kv_attention with '
-                      f'dtype={dtype}, block_size={block_size}, '
-                      f'head_size={head_size}')
-                run_single_query_cached_kv_attention_quantized(
-                    num_tokens=37,
-                    num_heads=3,
-                    head_size=head_size,
-                    block_size=block_size,
-                    num_blocks=1024,
-                    dtype=dtype,
-                )
-
 
 def test_multi_query_kv_attention() -> None:
     torch.random.manual_seed(TEST_SEED)
