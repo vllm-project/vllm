@@ -29,7 +29,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from vllm.transformers_utils.config.mistral import MistralConfig
+from vllm.transformers_utils.configs.mistral import MistralConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
