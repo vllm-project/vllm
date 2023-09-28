@@ -58,12 +58,14 @@ class PagedAttention(nn.Module):
                  num_heads: int,
                  head_size: int,
                  scale: float,
-                 num_kv_heads: Optional[int] = None) -> None:
+                 num_kv_heads: Optional[int] = None,
+                 sliding_window: Optional[int] = None) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.sliding_window = sliding_window
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -86,6 +88,8 @@ class PagedAttention(nn.Module):
             return
         prompt_lens = input_metadata.prompt_lens
         attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
+        if self.sliding_window is not None:
+            attn_bias = attn_bias.make_local_attention(self.sliding_window)
         input_metadata.attn_bias.append(attn_bias)
 
     def multi_query_kv_attention(
@@ -223,12 +227,20 @@ class PagedAttention(nn.Module):
         if (num_valid_tokens > 0 and key_cache is not None
                 and value_cache is not None):
             # The stride is 3 because the key and value are sliced from qkv.
+            key_to_cache = key[:num_valid_tokens]
+            value_to_cache = value[:num_valid_tokens]
+            slot_mapping = input_metadata.slot_mapping
+            if input_metadata.to_cache is not None:
+                key_to_cache = key_to_cache[input_metadata.to_cache]
+                value_to_cache = value_to_cache[input_metadata.to_cache]
+                slot_mapping = slot_mapping[input_metadata.to_cache]
+
             cache_ops.reshape_and_cache(
-                key[:num_valid_tokens],
-                value[:num_valid_tokens],
+                key_to_cache,
+                value_to_cache,
                 key_cache,
                 value_cache,
-                input_metadata.slot_mapping,
+                slot_mapping,
             )
 
         if input_metadata.num_generation_tokens > 0:
@@ -262,8 +274,13 @@ class PagedAttentionWithRoPE(PagedAttention):
         num_kv_heads: Optional[int] = None,
         is_neox_style: bool = True,
         rope_scaling: Optional[Dict[str, Any]] = None,
+        sliding_window: Optional[int] = None,
     ) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads)
+        super().__init__(num_heads,
+                         head_size,
+                         scale,
+                         num_kv_heads,
+                         sliding_window=sliding_window)
         if rope_scaling is None:
             self.rotary_emb = RotaryEmbedding(head_size, rotary_dim,
                                               max_position, base,
