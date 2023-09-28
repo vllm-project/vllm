@@ -138,6 +138,17 @@ cache_extension = CUDAExtension(
 )
 ext_modules.append(cache_extension)
 
+# Fuse kernels.
+fused_extension = CUDAExtension(
+    name="vllm.fused_kernels",
+    sources=["csrc/fused.cpp", "csrc/fused_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(fused_extension)
+
 # Attention kernels.
 attention_extension = CUDAExtension(
     name="vllm.attention_ops",
