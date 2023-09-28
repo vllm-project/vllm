@@ -375,13 +375,16 @@ def _get_and_verify_max_len(
         if max_len_key is not None:
             derived_max_model_len = min(derived_max_model_len, max_len_key)
     if derived_max_model_len == float("inf"):
+        if max_model_len is not None:
+            # If max_model_len is specified, we use it.
+            return max_model_len
+
         default_max_len = 2048
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
             f"{possible_keys}. Assuming the model's maximum length is "
-            f"{default_max_len}. This will be overwritten by max_model_len "
-            "if it is specified.")
+            f"{default_max_len}.")
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
