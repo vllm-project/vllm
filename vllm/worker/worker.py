@@ -199,9 +199,6 @@ class Worker:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        sliding_window = getattr(self.model_config.hf_config, "sliding_window",
-                                 float("inf"))
-
         # Add generation tokens.
         max_context_len = 0
         max_num_blocks_per_seq = 0
