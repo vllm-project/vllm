@@ -38,7 +38,8 @@ class RPyCWorkerService(rpyc.Service):
         self.worker = worker_init_fn()
 
     def exposed_execute_method(self, method: str, *args, **kwargs):
-        executor = getattr(self.worker, method)  # TODO f"exposed_{method}"?
+        print(f"Running on {os.getpid()}")
+        executor = getattr(self.worker, method)
         return executor(*args, **kwargs)
     
 class RPyCWorkerClient:
