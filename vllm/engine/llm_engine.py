@@ -54,8 +54,8 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         distributed_init_method: The initialization method for distributed
             execution. See `torch.distributed.init_process_group` for details.
-        stage_devices: The list of devices for each stage. Each stage is a list
-            of (rank, node_resource, device) tuples.
+        placement_group: Ray placement group for distributed execution.
+            Required for distributed execution.
         log_stats: Whether to log statistics.
     """
 
@@ -650,6 +650,9 @@ class LLMEngine:
                 seq.output_text = seq.output_text[:-len(stop_str)]
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
+        if seq.get_last_token_id() in sampling_params.stop_token_ids:
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            return
 
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
