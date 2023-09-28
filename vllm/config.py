@@ -376,7 +376,7 @@ def _get_and_verify_max_len(
             derived_max_model_len = min(derived_max_model_len, max_len_key)
     if derived_max_model_len == float("inf"):
         default_max_len = 2048
-        logger.warn(
+        logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
             f"{possible_keys}. Assuming the model's maximum length is "
