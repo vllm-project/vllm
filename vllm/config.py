@@ -381,8 +381,7 @@ def _get_and_verify_max_len(
             "keys to determine the original maximum length of the model: "
             f"{possible_keys}. Assuming the model's maximum length is "
             f"{default_max_len}. This will be overwritten by max_model_len "
-            "if it is specified."
-        )
+            "if it is specified.")
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
