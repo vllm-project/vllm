@@ -24,69 +24,69 @@ NUM_MAPPINGS = [32, 256]  # Arbitrary values for testing
 SEEDS = [0]
 
 
-# @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
-# @pytest.mark.parametrize("num_layers", NUM_LAYERS)
-# @pytest.mark.parametrize("num_heads", NUM_HEADS)
-# @pytest.mark.parametrize("head_size", HEAD_SIZES)
-# @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-# @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
-# @pytest.mark.parametrize("dtype", DTYPES)
-# @pytest.mark.parametrize("seed", SEEDS)
-# @torch.inference_mode()
-# def test_copy_blocks(
-#     kv_cache_factory,
-#     num_mappings: int,
-#     num_layers: int,
-#     num_heads: int,
-#     head_size: int,
-#     block_size: int,
-#     num_blocks: int,
-#     dtype: torch.dtype,
-#     seed: int,
-# ) -> None:
-#     random.seed(seed)
-#     torch.random.manual_seed(seed)
-#     torch.cuda.manual_seed(seed)
+@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
+@pytest.mark.parametrize("num_layers", NUM_LAYERS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_copy_blocks(
+    kv_cache_factory,
+    num_mappings: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
 
-#     # Generate random block mappings where each source block is mapped to two
-#     # destination blocks.
-#     assert 2 * num_mappings <= num_blocks
-#     src_blocks = random.sample(range(num_blocks), num_mappings)
-#     remainig_blocks = list(set(range(num_blocks)) - set(src_blocks))
-#     dst_blocks = random.sample(remainig_blocks, 2 * num_mappings)
-#     block_mapping = {}
-#     for i in range(num_mappings):
-#         src = src_blocks[i]
-#         dst1 = dst_blocks[2 * i]
-#         dst2 = dst_blocks[2 * i + 1]
-#         block_mapping[src] = [dst1, dst2]
+    # Generate random block mappings where each source block is mapped to two
+    # destination blocks.
+    assert 2 * num_mappings <= num_blocks
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    remainig_blocks = list(set(range(num_blocks)) - set(src_blocks))
+    dst_blocks = random.sample(remainig_blocks, 2 * num_mappings)
+    block_mapping = {}
+    for i in range(num_mappings):
+        src = src_blocks[i]
+        dst1 = dst_blocks[2 * i]
+        dst2 = dst_blocks[2 * i + 1]
+        block_mapping[src] = [dst1, dst2]
 
-#     # Create the KV caches.
-#     key_caches, value_caches = kv_cache_factory(num_blocks, block_size,
-#                                                 num_layers, num_heads,
-#                                                 head_size, dtype, seed)
+    # Create the KV caches.
+    key_caches, value_caches = kv_cache_factory(num_blocks, block_size,
+                                                num_layers, num_heads,
+                                                head_size, dtype, seed)
 
-#     # Clone the KV caches.
-#     cloned_key_caches = [key_cache.clone() for key_cache in key_caches]
-#     cloned_value_caches = [value_cache.clone() for value_cache in value_caches]
+    # Clone the KV caches.
+    cloned_key_caches = [key_cache.clone() for key_cache in key_caches]
+    cloned_value_caches = [value_cache.clone() for value_cache in value_caches]
 
-#     # Call the copy blocks kernel.
-#     cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+    # Call the copy blocks kernel.
+    cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
-#     # Run the reference implementation.
-#     for src, dsts in block_mapping.items():
-#         for dst in dsts:
-#             for cloned_key_cache in cloned_key_caches:
-#                 cloned_key_cache[dst] = cloned_key_cache[src]
-#             for cloned_value_cache in cloned_value_caches:
-#                 cloned_value_cache[dst] = cloned_value_cache[src]
+    # Run the reference implementation.
+    for src, dsts in block_mapping.items():
+        for dst in dsts:
+            for cloned_key_cache in cloned_key_caches:
+                cloned_key_cache[dst] = cloned_key_cache[src]
+            for cloned_value_cache in cloned_value_caches:
+                cloned_value_cache[dst] = cloned_value_cache[src]
 
-#     # Compare the results.
-#     for key_cache, cloned_key_cache in zip(key_caches, cloned_key_caches):
-#         assert torch.allclose(key_cache, cloned_key_cache)
-#     for value_cache, cloned_value_cache in zip(value_caches,
-#                                                cloned_value_caches):
-#         assert torch.allclose(value_cache, cloned_value_cache)
+    # Compare the results.
+    for key_cache, cloned_key_cache in zip(key_caches, cloned_key_caches):
+        assert torch.allclose(key_cache, cloned_key_cache)
+    for value_cache, cloned_value_cache in zip(value_caches,
+                                               cloned_value_caches):
+        assert torch.allclose(value_cache, cloned_value_cache)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
