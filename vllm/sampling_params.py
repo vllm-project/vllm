@@ -60,7 +60,8 @@ class SamplingParams:
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
-        skip_special_tokens: Whether to skip special tokens in the output.  Defaults to true.
+        skip_special_tokens: Whether to skip special tokens in the output.
+            Defaults to true.
     """
 
     def __init__(
