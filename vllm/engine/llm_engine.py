@@ -8,7 +8,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
-from vllm.engine.rpyc_utils import init_rpyc_env
+from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -191,19 +191,46 @@ class LLMEngine:
         # uh probably create a Worker on each process, behind a rpyc server-thing that exposes the Worker's methods
         # and call the _run_workers init_worker + init_model probably idk
 
+        # TODO I have no idea if any of this works lmao
+
         from multiprocessing import Process
         import rpyc
+        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
         self.workers = []  # TODO type
         for i in range(self.parallel_config.world_size):
             # TODO spawn a process with a Worker and rpyc server, stick it in the mp
-            port = 1234 # TODO obvs don't just default it
+            port = 12345 + i # TODO obvs don't just default it
             p = Process(target=init_rpyc_env, args=(port,))
             p.start()
-            con = rpyc.connect("localhost", port, config={"allow_pickle": True})  # todo lightllm has retries here, you probably want to as well
+            conn = rpyc.connect("localhost", port, config={"allow_pickle": True})  # todo lightllm has retries here, you probably want to as well
+            self.workers.append(RPyCWorkerClient(conn))
 
+        # Initialize torch distributed process group for the workers.
+        for i, worker_client in enumerate(self.workers):
+            worker_client.print_debug_msg(str(i))
+            worker_client.init_torch_distributed(
+                "localhost",  # TODO
+                12345,  # TODO
+                list(range(self.parallel_config.world_size)),  # TODO
+                self.parallel_config.world_size,
+                i,
+            )
+        for worker_client in self.workers:
+            worker_client.init_worker(
+                lambda: Worker(
+                    self.model_config,
+                    self.parallel_config,
+                    self.scheduler_config,
+                    None,
+                    None,
+                )
+            )
+        self._run_workers(
+            "init_model",
+            get_all_outputs=True,
+        )
             
-            pass
 
 
         raise NotImplementedError("rpyc not implemented yet")
