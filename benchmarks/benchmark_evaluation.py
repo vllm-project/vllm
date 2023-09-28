@@ -57,6 +57,7 @@ def run_vllm(
     n: int = 1,
     use_beam_search: bool = False,
     trust_remote_code: bool = False,
+    quantmethod: str = None,
 ) -> List[RequestOutput]:
     llm = LLM(
         model=model,
@@ -66,6 +67,7 @@ def run_vllm(
         trust_remote_code=trust_remote_code,
         kv_cache_dtype=kv_cache_dtype,
         kv_quant_params_path=kv_quant_params_path,
+        quantization = quantmethod
     )
     for prompt in requests:
         sampling_params = SamplingParams(
@@ -110,7 +112,15 @@ def evalute(
 
 def main(args: argparse.Namespace):
     subjects = [
+        "abstract_algebra",
+        "anatomy",
+        "astronomy",
+        "business_ethics",
+        "clinical_knowledge",
+        "college_biology",
+        "college_chemistry",
         "college_computer_science",
+        "college_mathematics",
     ]
     dataset, labels, nums_questions = sample_requests(
         args.dev_data_path,
@@ -129,6 +139,7 @@ def main(args: argparse.Namespace):
         args.seed, args.n,
         args.use_beam_search,
         args.trust_remote_code,
+        args.quantization
     )
     sub2acc = evalute(
         request_outputs,
@@ -172,6 +183,9 @@ if __name__ == "__main__":
                         type=str,
                         default="float16")
     parser.add_argument("--kv-quant-params-path",
+                        type=str,
+                        default=None)
+    parser.add_argument("--quantization",
                         type=str,
                         default=None)
     args = parser.parse_args()
