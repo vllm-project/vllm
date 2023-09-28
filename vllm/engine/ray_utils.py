@@ -35,7 +35,6 @@ except ImportError as e:
                    "For distributed inference, please install Ray with "
                    "`pip install ray`.")
     ray = None
-    TorchDistributedWorker = None
     RayWorker = None  # pylint: disable=invalid-name
 
 if TYPE_CHECKING:
