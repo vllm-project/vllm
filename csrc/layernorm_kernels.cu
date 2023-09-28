@@ -36,9 +36,10 @@ rms_norm_kernel(scalar_t *__restrict__ out,         // [num_tokens, hidden_size]
 }
 
 template <typename T>
-__global__ void RMSLayerNorm(const T *__restrict input,
-                             const T *__restrict gamma, int8_t *output,
-                             const float layernorm_eps, int m, int n) {
+__global__ void rms_norm_quant_kernel(const T *__restrict__ input,
+                                      const T *__restrict__ gamma,
+                                      int8_t *__restrict__ output,
+                                      const float layernorm_eps, int m, int n) {
   // layernorm module in the T5 style No bias and no subtraction of mean.
   const int tid = threadIdx.x;
 
@@ -59,40 +60,40 @@ __global__ void RMSLayerNorm(const T *__restrict input,
   __syncthreads();
 
   for (int i = tid; i < n; i += blockDim.x) {
-    output[blockIdx.x * n + i] =
-        // float_to_int8_rn((((float)input[blockIdx.x * n + i]) * s_variance) *
-        //                  (float)(ldg(&gamma[i])));
-        float_to_int8_rn((((float)input[blockIdx.x * n + i]) * s_variance) *
-                         (float)(gamma[i]));
+    output[blockIdx.x * n + i] = float_to_int8_rn(
+        (((float)input[blockIdx.x * n + i]) * s_variance) * (float)(gamma[i]));
   }
 }
 
 template <typename T>
-void invokeRMSLayerNorm(int8_t *out, const T *input, const T *gamma,
-                        //   const T*     beta,
-                        const float layernorm_eps, const int m, const int n,
-                        cudaStream_t stream) {
-  // if (beta != nullptr) {
-  //     invokeGeneralLayerNorm(out, input, gamma, beta, layernorm_eps, m, n,
-  //     (float*)nullptr, 0, stream); return;
-  // }
+__global__ void dequant_add_residual_rms_norm_quant_kernel(
+    const int32_t *__restrict__ input, const T *__restrict__ residual,
+    int8_t *__restrict__ output, const T *__restrict__ gamma,
+    const float layernorm_eps, const float scale, int m, int n) {
+  // layernorm module in the T5 style No bias and no subtraction of mean.
+  const int tid = threadIdx.x;
 
-  dim3 grid(m);
-  dim3 block(min(n, 1024));
+  __shared__ float s_variance;
+  float variance = 0.0f;
 
-  /* For general cases, n is equal to hidden_units, e.g., 512/1024.
-      Since we have warp shuffle inside the code, block.x % 32 should be 0.
-  */
-  if (n % 32 != 0) {
-    block.x = 1024;
+  float local_var_sum = 0.0f;
+  for (int i = tid; i < n; i += blockDim.x) {
+    float diff = (((float)input[blockIdx.x * n + i]) * scale) +
+                 (float)residual[blockIdx.x * n + i];
+    // float diff = (float)(input[blockIdx.x * n + i]);
+    local_var_sum += diff * diff;
   }
+  variance = blockReduceSum(local_var_sum);
 
-  block.x =
-      block.x / (4 / sizeof(T)); // if using half, only need half of block.x
+  if (threadIdx.x == 0) {
+    s_variance = rsqrtf(variance / (float)n + layernorm_eps);
+  }
+  __syncthreads();
 
-  /* should pay attention to the rsqrt precision*/
-  RMSLayerNorm<T><<<grid, block, 0, stream>>>(input, gamma, out, layernorm_eps,
-                                              m, n); // For gpt-3
+  for (int i = tid; i < n; i += blockDim.x) {
+    output[blockIdx.x * n + i] = float_to_int8_rn(
+        (((float)input[blockIdx.x * n + i]) * s_variance) * (float)(gamma[i]));
+  }
 }
 
 } // namespace vllm
@@ -124,9 +125,33 @@ void invoke_rms_norm_quant(torch::Tensor &out,   // [num_tokens, hidden_size]
   dim3 block(min(n, 1024));
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "invokeRMSLayerNorm", [&] {
-    vllm::RMSLayerNorm<scalar_t><<<grid, block, 0, stream>>>(
-        input.data_ptr<scalar_t>(), gamma.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-         epsilon, m, n);
-  });
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "rms_norm_quant_kernel", [&] {
+        vllm::rms_norm_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            input.data_ptr<scalar_t>(), gamma.data_ptr<scalar_t>(),
+            out.data_ptr<int8_t>(), epsilon, m, n);
+      });
+}
+
+void invoke_dequant_add_residual_rms_norm_quant(
+    torch::Tensor &out,      // [num_tokens, hidden_size]
+    torch::Tensor &input,    // [num_tokens, hidden_size]
+    torch::Tensor &residual, // [num_tokens, hidden_size]
+    torch::Tensor &gamma,    // [hidden_size]
+    float epsilon, float scale) {
+  int m = input.size(0);
+  int n = input.size(1);
+  dim3 grid(m);
+  dim3 block(min(n, 1024));
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  VLLM_DISPATCH_FLOATING_TYPES(
+      residual.scalar_type(), "dequant_add_residual_rms_norm_quant_kernel",
+      [&] {
+        vllm::dequant_add_residual_rms_norm_quant_kernel<scalar_t>
+            <<<grid, block, 0, stream>>>(
+                input.data_ptr<int32_t>(), residual.data_ptr<scalar_t>(),
+                out.data_ptr<int8_t>(), gamma.data_ptr<scalar_t>(), epsilon,
+                scale, m, n);
+      });
 }
