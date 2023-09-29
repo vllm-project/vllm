@@ -31,6 +31,9 @@ logger = init_logger(__name__)
 
 _LOGGING_INTERVAL_SEC = 5
 
+import os
+print("importing llmengine", os.getpid())
+
 
 class LLMEngine:
     """An LLM engine that receives requests and generates texts.
@@ -200,17 +203,33 @@ class LLMEngine:
 
         import asyncio as aio  # todo doesn't break ray
 
-        from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env, find_free_port  # todo does moving this here cause ray to not break yup
+        from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env, find_free_port, example  # todo does moving this here cause ray to not break? yup
 
         self.workers: List[RPyCWorkerClient] = []  # TODO type
         ports = []
-        set_start_method("spawn")
+        set_start_method("spawn")  # todo what does forkserver do
+        # Try setting here so that the env var gets set on the child process?
+        gpu_ids = list(range(self.parallel_config.world_size))
+        # CUDA_VISIBLE_DEVICES isn't the only thing
+        os.environ["CUDA_VISIBLE_DEVICES"] = ','.join([str(gpu_id) for gpu_id in gpu_ids])
+
+        # TODO remove
+        # import torch.multiprocessing as mp
+        # from vllm.engine.rpyc_utils import example
+
+        # mp.spawn(example, (), 4, False, True)
+        # time.sleep(20)
+        # raise ValueError("terminate quickly ty")
+        # TODO end remove
+
+        # ports = [find_free_ports() for ]
         for i in range(self.parallel_config.world_size):
             print(f">>> spawning child process {i}")
             # TODO spawn a process with a Worker and rpyc server, stick it in the mp
-            port = find_free_port() # TODO obvs don't just default it
+            port = find_free_port()
             # import pdb; pdb.set_trace()
             p = Process(target=init_rpyc_env, args=(port,))
+            # p = Process(target=example, args=(i,))
             p.start()
             ports.append(port)
         time.sleep(2)

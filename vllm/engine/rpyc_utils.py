@@ -10,6 +10,10 @@ import socket
 from datetime import timedelta
 import time
 
+# doesn't work
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+print(">>> importing rpycutils", os.getpid())
+
 
 def find_free_port():
         with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
@@ -50,15 +54,18 @@ class RPyCWorkerService(rpyc.Service):
         os.environ["MASTER_PORT"] = str(master_port)
 
         os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"  # idk what this does
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id for gpu_id in gpu_ids))
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id for gpu_id in gpu_ids))  # TODO wrong type?
         if "NCCL_SOCKET_IFNAME" not in os.environ:
             os.environ["NCCL_SOCKET_IFNAME"] = "^lo,docker,veth"
 
         # TODO debug stuff
-        print("importing torch", time.time())
-        import torch
+        print(os.getpid(), "importing torch", time.time())
+        # import importlib
+        import torch  # this import is fast, which suggests we've already imported it
         import torch.distributed as dist
-        print("done importing torch", time.time())
+        # importlib.reload(torch)  # tried reloading torch/dist, get some error generic_type: cannot initialize type "GradBucket": an object with that name is already defined
+        # importlib.reload(dist)
+        print(os.getpid(), "done importing torch", time.time())
         print("Cuda support:", torch.cuda.is_available(),":", torch.cuda.device_count(), "devices")
 
         # ray makes a call to init process group here
@@ -168,6 +175,13 @@ class RPyCWorkerClient:
 
 def init_rpyc_env(port):
     print(f"init_rpyc_env for port {port}")
+    import torch
+    print("init_rpyc_env cuda support:", torch.cuda.is_available(),":", torch.cuda.device_count(), "devices")
     t = ThreadedServer(RPyCWorkerService(), port=port, protocol_config={"allow_pickle": True})
     t.start()
     return
+
+def example(local_rank):
+    # debug torch cuda
+    import torch
+    print("Example Cuda support:", torch.cuda.is_available(),":", torch.cuda.device_count(), "devices")

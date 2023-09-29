@@ -1,6 +1,11 @@
 from typing import Optional
-
+import time
+import os
+print(">>>importing torch from vllmconfig", time.time(), os.getpid())
+# print("cuda visible devices?", os.environ.get("CUDA_VISIBLE_DEVICES"))
+# print("os.environ", os.environ)
 import torch
+print(">>>done importing torch", time.time(), os.getpid())
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger

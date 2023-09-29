@@ -46,6 +46,9 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
+        # print(os.environ)
+
+
     def init_model(self):
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
