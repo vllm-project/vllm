@@ -61,25 +61,30 @@ class SamplingParams:
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
         get_prompt_logprobs： Whether to output logprobs for the prompt.
+        skip_special_tokens: Whether to skip special tokens in the output.
+            Defaults to true.
     """
 
-    def __init__(self,
-                 n: int = 1,
-                 best_of: Optional[int] = None,
-                 presence_penalty: float = 0.0,
-                 frequency_penalty: float = 0.0,
-                 temperature: float = 1.0,
-                 top_p: float = 1.0,
-                 top_k: int = -1,
-                 use_beam_search: bool = False,
-                 length_penalty: float = 1.0,
-                 early_stopping: Union[bool, str] = False,
-                 stop: Union[None, str, List[str]] = None,
-                 stop_token_ids: List[int] = None,
-                 ignore_eos: bool = False,
-                 max_tokens: int = 16,
-                 logprobs: Optional[int] = None,
-                 get_prompt_logprobs: bool = False) -> None:
+    def __init__(
+        self,
+        n: int = 1,
+        best_of: Optional[int] = None,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = -1,
+        use_beam_search: bool = False,
+        length_penalty: float = 1.0,
+        early_stopping: Union[bool, str] = False,
+        stop: Union[None, str, List[str]] = None,
+        stop_token_ids: List[int] = None,
+        ignore_eos: bool = False,
+        max_tokens: int = 16,
+        logprobs: Optional[int] = None,
+        get_prompt_logprobs: bool = False,
+        skip_special_tokens: bool = True,
+    ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
         self.presence_penalty = presence_penalty
@@ -104,6 +109,7 @@ class SamplingParams:
         self.max_tokens = max_tokens
         self.logprobs = logprobs
         self.get_prompt_logprobs = get_prompt_logprobs
+        self.skip_special_tokens = skip_special_tokens
 
         self._verify_args()
         if self.use_beam_search:
@@ -198,4 +204,5 @@ class SamplingParams:
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
                 f"logprobs={self.logprobs}, "
-                f"get_prompt_logprobs={self.get_prompt_logprobs})")
+                f"get_prompt_logprobs={self.get_prompt_logprobs}, "
+                f"skip_special_tokens={self.skip_special_tokens})")

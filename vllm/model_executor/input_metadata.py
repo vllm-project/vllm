@@ -22,15 +22,18 @@ class InputMetadata:
         Defaults to False.
     """
 
-    def __init__(self,
-                 seq_groups: List[Tuple[List[int], SamplingParams]],
-                 seq_data: Dict[int, SequenceData],
-                 prompt_lens: List[int],
-                 slot_mapping: torch.Tensor,
-                 context_lens: torch.Tensor,
-                 max_context_len: int,
-                 block_tables: torch.Tensor,
-                 get_prompt_logprobs: Optional[List[bool]] = None) -> None:
+    def __init__(
+        self,
+        seq_groups: List[Tuple[List[int], SamplingParams]],
+        seq_data: Dict[int, SequenceData],
+        prompt_lens: List[int],
+        slot_mapping: torch.Tensor,
+        context_lens: torch.Tensor,
+        max_context_len: int,
+        block_tables: torch.Tensor,
+        sliding_window: Optional[int] = None,
+        get_prompt_logprobs: Optional[List[bool]] = None,
+    ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens
@@ -40,6 +43,24 @@ class InputMetadata:
         self.block_tables = block_tables
         self.get_prompt_logprobs = (get_prompt_logprobs if get_prompt_logprobs
                                     is not None else [False] * len(seq_groups))
+
+        self.to_cache = None
+        if sliding_window is not None:
+            # We need to keep the positions of sliding windows within
+            # the key / value tables, this is helpful to know which
+            # elements we need to cache and where
+            to_cache, start_idx = [], 0
+            for prompt_len in self.prompt_lens:
+                to_cache.extend(
+                    range(
+                        start_idx + max(0, prompt_len - sliding_window),
+                        start_idx + prompt_len,
+                    ))
+                start_idx += prompt_len
+            to_cache.extend(range(start_idx, slot_mapping.shape[0]))
+            self.to_cache = torch.tensor(to_cache,
+                                         dtype=torch.int32,
+                                         device=self.slot_mapping.device)
 
         self.num_prompts = len(prompt_lens)
         self.num_prompt_tokens = sum(prompt_lens)
