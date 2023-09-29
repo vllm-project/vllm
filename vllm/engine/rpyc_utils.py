@@ -41,6 +41,8 @@ class RPyCWorkerService(rpyc.Service):
     def exposed_init_worker_doesnt_work(self, worker_init_fn):
         print(f"init_worker running on {os.getpid()}")
         # TODO check that worker_init_fn runs on the worker process
+        # can't pickle worker_init_fn shrug
+        worker_init_fn = obtain(worker_init_fn)
         print(worker_init_fn, type(worker_init_fn))
         self.worker = worker_init_fn()
         print(type(self.worker))
@@ -48,6 +50,10 @@ class RPyCWorkerService(rpyc.Service):
 
     def exposed_init_worker(self, model_config, parallel_config, scheduler_config):
         print(f"in worker {os.getpid()}, {model_config}, {parallel_config}, {scheduler_config}")
+        model_config, parallel_config, scheduler_config = obtain(model_config), obtain(parallel_config), obtain(scheduler_config)
+        print(f"type after serializing/deserializing: {type(parallel_config)}")
+        print(f"idk {parallel_config.tensor_parallel_size}")
+        print(f"ws after serializing/deserializing: {parallel_config.world_size}")
         self.worker = Worker(
             model_config,
             parallel_config,
@@ -80,10 +86,7 @@ class RPyCWorkerClient:
         self._init_torch_distributed = self.conn.root.init_torch_distributed
         self._init_worker = self.conn.root.init_worker
         self._execute_method = self.conn.root.execute_method
-        def obtain(*args, **kwargs):
-            new_args = obtain(args)
-            new_kwargs = obtain(kwargs)
-            return new_args, new_kwargs
+        
 
 
     def print_debug_msg(self, msg):
@@ -97,8 +100,13 @@ class RPyCWorkerClient:
     def init_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
         self._init_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)
 
+    def init_worker_doesnt_work(self, worker_init_fn):
+        self._init_worker(worker_init_fn)
+
     def init_worker(self, model_config, parallel_config, scheduler_config):
         # TODO something to mark as transferable? idk lightllm does this
+        print(f"ws, type before serializing: {parallel_config.world_size}, {type(parallel_config)}")
+        print(f"help: {parallel_config.world_size}")
         self._init_worker(model_config, parallel_config, scheduler_config)
 
     def execute_method(self, method, *args, **kwargs):
