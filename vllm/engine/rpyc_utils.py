@@ -102,7 +102,8 @@ class RPyCWorkerClient:
             f = rpyc.async_(f)
             async def _func(*args, **kwargs):
                 ans = f(*args, **kwargs)
-                ans.set_expiry(3600)  # absurdly long, wait for model to init
+                # ans.set_expiry(3600)  # absurdly long, wait for model to init
+                print(ans._ttl)
                 await aio.to_thread(ans.wait)
                 # raise if exception
                 return ans.value

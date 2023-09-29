@@ -213,7 +213,7 @@ class LLMEngine:
             p = Process(target=init_rpyc_env, args=(port,))
             p.start()
             ports.append(port)
-        aio.run(aio.sleep(2))
+        time.sleep(2)
         for i in range(self.parallel_config.world_size):
             port = ports[i]
             # import pdb; pdb.set_trace()
@@ -224,7 +224,7 @@ class LLMEngine:
                     break
                 except ConnectionRefusedError:
                     print(f"conn refused for worker {i}")
-                    aio.run(aio.sleep(2))  # time.sleep()? why not
+                    time.sleep(2)  # time.sleep()? why not
                     continue
             else:
                 raise ConnectionRefusedError("couldn't connect to workers")
@@ -234,16 +234,22 @@ class LLMEngine:
 
         addr, port = self.workers[0].get_addr_and_port()
 
+        executors = []
+
         for i, worker_client in enumerate(self.workers):
             print(f"printing for process {i}")
             worker_client.print_debug_msg(str(i))
-            worker_client.init_torch_distributed(
+            exec = worker_client.ainit_torch_distributed(
                 addr,  # TODO
                 port,  # TODO
                 list(range(self.parallel_config.world_size)),  # TODO
                 self.parallel_config.world_size,
                 i,
             )
+            executors.append(exec)
+        loop = aio.get_event_loop()
+        loop.run_until_complete(aio.gather(*executors))  # TODO may have to replace aio.run with something else because of some "no current event loop" thing
+
         print("initialized torchdist")
         for worker_client in self.workers:
             worker_client.init_worker(
