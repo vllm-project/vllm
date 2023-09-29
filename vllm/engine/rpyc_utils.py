@@ -5,10 +5,10 @@ import asyncio as aio
 import rpyc
 from rpyc.utils.server import ThreadedServer
 from rpyc.utils.classic import obtain
-import torch.distributed as dist
 from contextlib import closing
 import socket
 from datetime import timedelta
+import time
 
 
 def find_free_port():
@@ -51,7 +51,16 @@ class RPyCWorkerService(rpyc.Service):
 
         os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"  # idk what this does
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id for gpu_id in gpu_ids))
-    
+        if "NCCL_SOCKET_IFNAME" not in os.environ:
+            os.environ["NCCL_SOCKET_IFNAME"] = "^lo,docker,veth"
+
+        # TODO debug stuff
+        print("importing torch", time.time())
+        import torch
+        import torch.distributed as dist
+        print("done importing torch", time.time())
+        print("Cuda support:", torch.cuda.is_available(),":", torch.cuda.device_count(), "devices")
+
         # ray makes a call to init process group here
         dist.init_process_group(backend="nccl", init_method="env://", rank=rank, world_size=world_size, timeout=timedelta(seconds=1800))
 

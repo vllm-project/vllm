@@ -206,7 +206,7 @@ class LLMEngine:
         ports = []
         set_start_method("spawn")
         for i in range(self.parallel_config.world_size):
-            print(f"spawning child process {i}")
+            print(f">>> spawning child process {i}")
             # TODO spawn a process with a Worker and rpyc server, stick it in the mp
             port = find_free_port() # TODO obvs don't just default it
             # import pdb; pdb.set_trace()
@@ -229,7 +229,7 @@ class LLMEngine:
             else:
                 raise ConnectionRefusedError("couldn't connect to workers")
 
-        print("got to initializing workers")
+        print(">>> got to initializing workers")
         # Initialize torch distributed process group for the workers.
 
         addr, port = self.workers[0].get_addr_and_port()
@@ -237,7 +237,7 @@ class LLMEngine:
         executors = []
 
         for i, worker_client in enumerate(self.workers):
-            print(f"printing for process {i}")
+            print(f">>> printing for process {i}")
             worker_client.print_debug_msg(str(i))
             exec = worker_client.ainit_torch_distributed(
                 addr,  # TODO
@@ -250,7 +250,7 @@ class LLMEngine:
         loop = aio.get_event_loop()
         loop.run_until_complete(aio.gather(*executors))  # TODO may have to replace aio.run with something else because of some "no current event loop" thing
 
-        print("initialized torchdist")
+        print(">>> initialized torchdist")
         for worker_client in self.workers:
             worker_client.init_worker(
                 self.model_config, self.parallel_config, self.scheduler_config
