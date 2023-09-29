@@ -328,6 +328,7 @@ def _init_distributed_environment(
             "distributed_init_method must be set if torch.distributed "
             "is not already initialized")
     else:
+        # todo maybe manually init?
         torch.distributed.init_process_group(
             backend="nccl",
             world_size=parallel_config.world_size,

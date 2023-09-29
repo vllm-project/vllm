@@ -5,6 +5,8 @@ import asyncio as aio
 import rpyc
 from rpyc.utils.server import ThreadedServer
 from rpyc.utils.classic import obtain
+import torch.distributed as dist
+from datetime import timedelta
 
 from vllm.worker.worker import Worker
 
@@ -30,7 +32,9 @@ class RPyCWorkerService(rpyc.Service):
 
         os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"  # idk what this does
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id for gpu_id in gpu_ids))
-
+    
+        # ray makes a call to init process group here
+        dist.init_process_group(backend="nccl", init_method="env://", rank=rank, world_size=world_size, timeout=timedelta(seconds=1800))
 
         # running on one node, local_{rank|world_size} is same as {rank|world_size}
         os.environ["WORLD_SIZE"] = str(world_size)
