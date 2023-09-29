@@ -8,7 +8,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
-from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env
+
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -198,6 +198,8 @@ class LLMEngine:
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
         import asyncio as aio  # todo doesn't break ray
+
+        from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env  # todo does moving this here cause ray to not break yup
 
         self.workers: List[RPyCWorkerClient] = []  # TODO type
         set_start_method("spawn")
