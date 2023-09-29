@@ -59,7 +59,7 @@ class RPyCWorkerService(rpyc.Service):
             parallel_config,
             scheduler_config,
             None,
-            f"tcp://{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}",  # TODO ????????? figure this out, goes into torch.dist.init_process_group whatever that does 
+            "env://", # f"tcp://{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}",  # TODO ????????? figure this out, goes into torch.dist.init_process_group whatever that does 
         )
 
     def exposed_execute_method(self, method: str, *args, **kwargs):

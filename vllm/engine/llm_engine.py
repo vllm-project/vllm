@@ -203,12 +203,12 @@ class LLMEngine:
         for i in range(self.parallel_config.world_size):
             print(f"spawning child process {i}")
             # TODO spawn a process with a Worker and rpyc server, stick it in the mp
-            port = 12345 + i # TODO obvs don't just default it
+            port = 32415 + i # TODO obvs don't just default it
             p = Process(target=init_rpyc_env, args=(port,))
             p.start()
         aio.run(aio.sleep(2))
         for i in range(self.parallel_config.world_size):
-            port = 12345 + i
+            port = 32415 + i
             for _ in range(20):
                 try:
                     conn = rpyc.connect("localhost", port, config={"allow_pickle": True})  # todo lightllm has retries here, you probably want to as well
@@ -228,7 +228,7 @@ class LLMEngine:
             worker_client.print_debug_msg(str(i))
             worker_client.init_torch_distributed(
                 "localhost",  # TODO
-                12345,  # TODO
+                32415,  # TODO
                 list(range(self.parallel_config.world_size)),  # TODO
                 self.parallel_config.world_size,
                 i,
