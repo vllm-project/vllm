@@ -6,9 +6,17 @@ import rpyc
 from rpyc.utils.server import ThreadedServer
 from rpyc.utils.classic import obtain
 import torch.distributed as dist
+from contextlib import closing
+import socket
 from datetime import timedelta
 
-from vllm.worker.worker import Worker  # TODO this import breaks lmaooo
+
+def find_free_port():
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+            s.bind(("", 0))
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            return s.getsockname()[1]
+
 
 class RPyCWorkerService(rpyc.Service):
     def on_connect(self, conn):
@@ -20,6 +28,17 @@ class RPyCWorkerService(rpyc.Service):
 
     def exposed_print_debug_msg(self, msg):
         print(f"in service {os.getpid()}:{msg}")
+
+    
+
+    def exposed_get_addr_and_port(self):
+        # equivalent of
+        # addr = ray.util.get_node_ip_address()
+        # port = find_free_port()
+        addr = "127.0.0.1"  # we should be local I think
+        port = find_free_port()
+        return addr, port
+
 
     def exposed_init_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
         # https://github.com/ray-project/ray/blob/7a3ae5ba5dbd6704f435bde8dba91a8a8d207ae4/python/ray/air/util/torch_dist.py#L95
@@ -53,6 +72,10 @@ class RPyCWorkerService(rpyc.Service):
         # dumb hack idk how to get the thing to initialize the worker here so will do it manually
 
     def exposed_init_worker(self, model_config, parallel_config, scheduler_config):
+        # import inside worker process since if not it'll break the engine process
+        # probably same reason as why _init_workers_ray imports this so late?
+        from vllm.worker.worker import Worker
+
         print(f"in worker {os.getpid()}, {model_config}, {parallel_config}, {scheduler_config}")
         model_config, parallel_config, scheduler_config = obtain(model_config), obtain(parallel_config), obtain(scheduler_config)
         print(f"type after serializing/deserializing: {type(parallel_config)}")
@@ -63,7 +86,7 @@ class RPyCWorkerService(rpyc.Service):
             parallel_config,
             scheduler_config,
             None,
-            "env://", # f"tcp://{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}",  # TODO ????????? figure this out, goes into torch.dist.init_process_group whatever that does 
+            None, # f"tcp://{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}",  # TODO ????????? figure this out, goes into torch.dist.init_process_group whatever that does 
         )
 
     def exposed_execute_method(self, method: str, *args, **kwargs):
@@ -79,6 +102,7 @@ class RPyCWorkerClient:
             f = rpyc.async_(f)
             async def _func(*args, **kwargs):
                 ans = f(*args, **kwargs)
+                ans.set_expiry(3600)  # absurdly long, wait for model to init
                 await aio.to_thread(ans.wait)
                 # raise if exception
                 return ans.value
@@ -90,6 +114,7 @@ class RPyCWorkerClient:
         self._init_torch_distributed = self.conn.root.init_torch_distributed
         self._init_worker = self.conn.root.init_worker
         self._execute_method = self.conn.root.execute_method
+        self._get_addr_and_port = self.conn.root.get_addr_and_port
         
 
 
@@ -116,6 +141,9 @@ class RPyCWorkerClient:
     def execute_method(self, method, *args, **kwargs):
         print(f"executing method {method}")
         return self._execute_method(method, *args, **kwargs)  # TODO is this right?
+    
+    def get_addr_and_port(self):
+        return self._get_addr_and_port()
     
     async def aexecute_method(self, method, *args, **kwargs):
         return await self._aexecute_method(method, *args, **kwargs)

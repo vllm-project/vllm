@@ -200,19 +200,23 @@ class LLMEngine:
 
         import asyncio as aio  # todo doesn't break ray
 
-        from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env  # todo does moving this here cause ray to not break yup
+        from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env, find_free_port  # todo does moving this here cause ray to not break yup
 
         self.workers: List[RPyCWorkerClient] = []  # TODO type
+        ports = []
         set_start_method("spawn")
         for i in range(self.parallel_config.world_size):
             print(f"spawning child process {i}")
             # TODO spawn a process with a Worker and rpyc server, stick it in the mp
-            port = 32415 + i # TODO obvs don't just default it
+            port = find_free_port() # TODO obvs don't just default it
+            # import pdb; pdb.set_trace()
             p = Process(target=init_rpyc_env, args=(port,))
             p.start()
+            ports.append(port)
         aio.run(aio.sleep(2))
         for i in range(self.parallel_config.world_size):
-            port = 32415 + i
+            port = ports[i]
+            # import pdb; pdb.set_trace()
             for _ in range(20):
                 try:
                     conn = rpyc.connect("localhost", port, config={"allow_pickle": True})  # todo lightllm has retries here, you probably want to as well
@@ -227,12 +231,15 @@ class LLMEngine:
 
         print("got to initializing workers")
         # Initialize torch distributed process group for the workers.
+
+        addr, port = self.workers[0].get_addr_and_port()
+
         for i, worker_client in enumerate(self.workers):
             print(f"printing for process {i}")
             worker_client.print_debug_msg(str(i))
             worker_client.init_torch_distributed(
-                "localhost",  # TODO
-                32415,  # TODO
+                addr,  # TODO
+                port,  # TODO
                 list(range(self.parallel_config.world_size)),  # TODO
                 self.parallel_config.world_size,
                 i,
