@@ -1,7 +1,6 @@
 import copy
 import time
 from functools import partial
-import asyncio as aio
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -197,6 +196,8 @@ class LLMEngine:
         from multiprocessing import Process, set_start_method
         import rpyc
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+
+        import asyncio as aio  # todo doesn't break ray
 
         self.workers: List[RPyCWorkerClient] = []  # TODO type
         set_start_method("spawn")
