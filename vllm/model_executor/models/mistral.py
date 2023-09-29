@@ -25,11 +25,10 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -46,11 +45,12 @@ from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
     load_tensor_parallel_weights, load_padded_tensor_parallel_vocab)
 from vllm.sequence import SamplerOutput
+from vllm.transformers_utils.configs.mistral import MistralConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class LlamaMLP(nn.Module):
+class MistralMLP(nn.Module):
 
     def __init__(
         self,
@@ -84,18 +84,16 @@ class LlamaMLP(nn.Module):
         return x
 
 
-class LlamaAttention(nn.Module):
+class MistralAttention(nn.Module):
 
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 max_position: int = 4096 * 32,
+                 rope_theta: float = 10000,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 sliding_window: Optional[int] = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -110,7 +108,7 @@ class LlamaAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
+        self.sliding_window = sliding_window
 
         self.qkv_proj = ParallelLinear.column(
             hidden_size,
@@ -129,15 +127,14 @@ class LlamaAttention(nn.Module):
             perform_initialization=False,
             quant_config=quant_config,
         )
-        self.attn = PagedAttentionWithRoPE(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            base=self.rope_theta,
-            max_position=self.max_position_embeddings,
-            rotary_dim=self.head_dim,
-            num_kv_heads=self.num_kv_heads,
-            rope_scaling=rope_scaling)
+        self.attn = PagedAttentionWithRoPE(self.num_heads,
+                                           self.head_dim,
+                                           self.scaling,
+                                           base=self.rope_theta,
+                                           max_position=max_position,
+                                           rotary_dim=self.head_dim,
+                                           num_kv_heads=self.num_kv_heads,
+                                           sliding_window=self.sliding_window)
 
     def forward(
         self,
@@ -156,30 +153,26 @@ class LlamaAttention(nn.Module):
         return output
 
 
-class LlamaDecoderLayer(nn.Module):
+class MistralDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: MistralConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
-        self.self_attn = LlamaAttention(
+        self.self_attn = MistralAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
+            max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
-            max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
-        )
-        self.mlp = LlamaMLP(
+            sliding_window=config.sliding_window)
+        self.mlp = MistralMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -218,11 +211,11 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states
 
 
-class LlamaModel(nn.Module):
+class MistralModel(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: MistralConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -234,7 +227,7 @@ class LlamaModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             vocab_size, config.hidden_size, perform_initialization=False)
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config, quant_config)
+            MistralDecoderLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -265,17 +258,17 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-class LlamaForCausalLM(nn.Module):
+class MistralForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: MistralConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = LlamaModel(config, quant_config)
+        self.model = MistralModel(config, quant_config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         # NOTE: The LM head is not quantized.
         self.lm_head = ParallelLinear.column(config.hidden_size,
