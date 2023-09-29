@@ -38,6 +38,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`GPTNeoXForCausalLM`
     - GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM
     - :code:`EleutherAI/gpt-neox-20b`, :code:`EleutherAI/pythia-12b`, :code:`OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, :code:`databricks/dolly-v2-12b`, :code:`stabilityai/stablelm-tuned-alpha-7b`, etc.
+  * - :code:`GPTRefactForCausalLM`
+    - Refact
+    - :code:`smallcloudai/Refact-1_6B-fim`
   * - :code:`InternLMForCausalLM`
     - InternLM
     - :code:`internlm/internlm-7b`, :code:`internlm/internlm-chat-7b`, etc.
