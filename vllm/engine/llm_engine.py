@@ -23,6 +23,7 @@ if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 

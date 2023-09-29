@@ -8,7 +8,7 @@ from rpyc.utils.classic import obtain
 import torch.distributed as dist
 from datetime import timedelta
 
-from vllm.worker.worker import Worker
+from vllm.worker.worker import Worker  # TODO this import breaks lmaooo
 
 class RPyCWorkerService(rpyc.Service):
     def on_connect(self, conn):
