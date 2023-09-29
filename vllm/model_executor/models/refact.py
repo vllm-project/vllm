@@ -277,12 +277,6 @@ class GPTRefactForCausalLM(nn.Module):
                      revision: Optional[str] = None):
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        kv_proj_size = self.config.hidden_size // self.config.num_attention_heads
-        kv_attention_weight_specs = [
-            # (weight_name, shard_size, offset)
-            ("k.weight", 0),
-            ("v.weight", kv_proj_size),
-        ]
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
@@ -298,38 +292,6 @@ class GPTRefactForCausalLM(nn.Module):
                                          loaded_weight.shape[1])
                 extra_rows = extra_rows.to(loaded_weight)
                 loaded_weight = torch.cat([loaded_weight, extra_rows], dim=0)
-
-            is_kv_weight = False
-            for weight_name, offset in kv_attention_weight_specs:
-                if weight_name not in name:
-                    continue
-                param = state_dict[name.replace(weight_name, "kv.weight")]
-
-                param_slice = param.data[offset: offset + kv_proj_size]
-                assert param_slice.shape == loaded_weight.shape
-
-                param_slice.copy_(loaded_weight)
-                is_kv_weight = True
-                break
-            if is_kv_weight:
-                continue
-
-            is_gate_up_weight = False
-            for stride_id, weight_name in enumerate(["linear_1.weight", "linear_3.weight"]):
-                if weight_name not in name:
-                    continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj.weight")]
-                shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[
-                                shard_size * tensor_model_parallel_rank:shard_size *
-                                                                        (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size * (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_gate_up_weight = True
-                break
-            if is_gate_up_weight:
-                continue
 
             param = state_dict[name]
             load_tensor_parallel_weights(param, loaded_weight, name,
