@@ -25,7 +25,7 @@ Alongside each architecture, we include some popular models that use it.
     - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
   * - :code:`FalconForCausalLM`
     - Falcon
-    - :code:`tiiuae/falcon-7b``, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
+    - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
