@@ -270,8 +270,11 @@ class LLMEngine:
         loop.run_until_complete(aio.gather(*executors))  # TODO may have to replace aio.run with something else because of some "no current event loop" thing
 
         print(">>> initialized torchdist")
+
+        executors = []
+
         for worker_client in self.workers:
-            worker_client.init_worker(
+            exec = worker_client.ainit_worker(
                 self.model_config, self.parallel_config, self.scheduler_config
             )
             # didn't work
@@ -284,6 +287,8 @@ class LLMEngine:
             #         None,
             #     )
             # )
+            executors.append(exec)
+        loop.run_until_complete(aio.gather(*executors))
         print("attempting to init model")
         self._run_workers(
             "init_model",
@@ -799,7 +804,7 @@ class LLMEngine:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             elif self.parallel_config.worker_use_rpyc:
-                executor = partial(worker.execute_method, method)
+                executor = partial(worker.aexecute_method, method)
             else:
                 executor = getattr(worker, method)
 
@@ -810,7 +815,9 @@ class LLMEngine:
             all_outputs = ray.get(all_outputs)
         elif self.parallel_config.worker_use_rpyc:
             # idk is it this? probably
-            all_outputs = aio.run(aio.gather(*all_outputs))
+            import asyncio as aio  # TODO move to top
+            loop = aio.get_event_loop()
+            all_outputs = loop.run_until_complete(aio.gather(*all_outputs))
 
         if get_all_outputs:
             return all_outputs

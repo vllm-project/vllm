@@ -168,8 +168,8 @@ class RPyCWorkerClient:
     async def ainit_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
         return await self._ainit_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)
     
-    async def ainit_worker(self, worker_init_fn):
-        return await self._ainit_worker(worker_init_fn)
+    async def ainit_worker(self, model_config, parallel_config, scheduler_config):
+        return await self._ainit_worker(model_config, parallel_config, scheduler_config)
 
 
 
