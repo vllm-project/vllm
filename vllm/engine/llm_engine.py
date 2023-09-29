@@ -194,21 +194,37 @@ class LLMEngine:
 
         # TODO I have no idea if any of this works lmao
 
-        from multiprocessing import Process
+        from multiprocessing import Process, set_start_method
         import rpyc
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
         self.workers: List[RPyCWorkerClient] = []  # TODO type
+        set_start_method("spawn")
         for i in range(self.parallel_config.world_size):
+            print(f"spawning child process {i}")
             # TODO spawn a process with a Worker and rpyc server, stick it in the mp
             port = 12345 + i # TODO obvs don't just default it
             p = Process(target=init_rpyc_env, args=(port,))
             p.start()
-            conn = rpyc.connect("localhost", port, config={"allow_pickle": True})  # todo lightllm has retries here, you probably want to as well
-            self.workers.append(RPyCWorkerClient(conn))
+        aio.run(aio.sleep(2))
+        for i in range(self.parallel_config.world_size):
+            port = 12345 + i
+            for _ in range(20):
+                try:
+                    conn = rpyc.connect("localhost", port, config={"allow_pickle": True})  # todo lightllm has retries here, you probably want to as well
+                    self.workers.append(RPyCWorkerClient(conn))
+                    break
+                except ConnectionRefusedError:
+                    print(f"conn refused for worker {i}")
+                    aio.run(aio.sleep(2))  # time.sleep()? why not
+                    continue
+            else:
+                raise ConnectionRefusedError("couldn't connect to workers")
 
+        print("got to initializing workers")
         # Initialize torch distributed process group for the workers.
         for i, worker_client in enumerate(self.workers):
+            print(f"printing for process {i}")
             worker_client.print_debug_msg(str(i))
             worker_client.init_torch_distributed(
                 "localhost",  # TODO
@@ -217,16 +233,22 @@ class LLMEngine:
                 self.parallel_config.world_size,
                 i,
             )
+        print("initialized torchdist")
         for worker_client in self.workers:
             worker_client.init_worker(
-                lambda: Worker(
-                    self.model_config,
-                    self.parallel_config,
-                    self.scheduler_config,
-                    None,
-                    None,
-                )
+                self.model_config, self.parallel_config, self.scheduler_config
             )
+            # didn't work
+            # worker_client.init_worker(
+            #     lambda: Worker(
+            #         self.model_config,
+            #         self.parallel_config,
+            #         self.scheduler_config,
+            #         None,
+            #         None,
+            #     )
+            # )
+        print("attempting to init model")
         self._run_workers(
             "init_model",
             get_all_outputs=True,

@@ -306,6 +306,9 @@ class AsyncLLMEngine:
         if not self.engine_use_ray and not self.engine_use_rpyc:
             engine_class = self._engine_class
         elif self.engine_use_rpyc:
+            # import pdb; pdb.set_trace()
+            print("wtf")
+            # What does engine_use_ray even do? do we need a separate 
             raise NotImplementedError("RPyC is not supported yet.")
         elif self.worker_use_ray:
             engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
@@ -494,12 +497,14 @@ class AsyncLLMEngine:
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
+        print(engine_args)
         parallel_config = engine_configs[2]
         # Initialize the cluster.
         distributed_init_method, placement_group = initialize_cluster(
             parallel_config, engine_args.engine_use_ray)
         # Create the async LLM engine.
         engine = cls(engine_args.worker_use_ray,
+                     engine_args.worker_use_rpyc,
                      engine_args.engine_use_ray,
                      engine_args.engine_use_rpyc,
                      *engine_configs,
