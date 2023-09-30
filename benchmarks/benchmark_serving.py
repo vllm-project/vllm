@@ -138,11 +138,9 @@ async def send_request(
             "parameters": params,
         }
     elif backend == "triton":
-        ## TODO: Thoughts: the params are properly being parsed
-        ## Thoughts: the JSON is fine, the timeout is what's making it fail? happens when I do ctrl + C too.
+        ## TODO: Thoughts: the JSON is fine, the timeout is what's making it fail? happens when I do ctrl + C too.
         ## Even after json.loads fails, requests keep being processed
         ## Too many iterators created? See if different approach, like vLLM
-        ## Failing to pass in params... rpc_ok=0 then. And responses still longer than requests.
         params = {
             "n": 1,
             "best_of": best_of,
