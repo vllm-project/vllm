@@ -136,7 +136,10 @@ async def send_request(
         }
     elif backend == "triton":
         assert not use_beam_search
-        params = {}
+        params = {
+            "temperature": 1.0,
+            "top_p": 1.0,
+        }
         pload = {
             "inputs": prompt,
             "parameters": params,
@@ -145,23 +148,62 @@ async def send_request(
         raise ValueError(f"Unknown backend: {backend}")
 
     timeout = aiohttp.ClientTimeout(total=3 * 3600)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        while True:
-            async with session.post(api_url, headers=headers, json=pload) as response:
-                chunks = []
-                async for chunk, _ in response.content.iter_chunks():
-                    chunks.append(chunk)
-            output = b"".join(chunks).decode("utf-8")
-            output = json.loads(output)
+    if backend in ["vllm", "tgi"]:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            while True:
+                async with session.post(api_url, headers=headers, json=pload) as response:
+                    chunks = []
+                    async for chunk, _ in response.content.iter_chunks():
+                        chunks.append(chunk)
+                output = b"".join(chunks).decode("utf-8")
+                output = json.loads(output)
 
-            # Re-send the request if it failed.
-            if "error" not in output:
-                break
+                # Re-send the request if it failed.
+                if "error" not in output:
+                    break
+
+    else if backend == "triton":
+        async with grpcclient.InferenceServerClient(
+            url="localhost:8001"
+        ) as triton_client:
+            # Request iterator that yields the next request
+            async def async_request_iterator():
+                try:
+                        for i, prompt in enumerate(prompts):
+                            prompt_id = 1
+                            results_dict["1"] = []
+                            # TODO: Get tokenizer (model name) for below
+                            # TODO: enable or disable streaming mode [stream]? see results
+                            # TODO: Change code to onlyl send one request
+                            yield create_request(
+                                prompt, stream, prompt_id, params, tokenizer
+                            )
+                except Exception as error:
+                    print(f"caught errror in request iterator:  {error}")
+
+            try:
+                # Start streaming
+                response_iterator = triton_client.stream_infer(
+                    inputs_iterator=async_request_iterator(),
+                    stream_timeout=False,
+                )
+                # Read response from the stream
+                async for response in response_iterator:
+                    result, error = response
+                    # Re-send the request if it failed.
+                    if error:                
+                        print(f"Encountered error while processing: {error}")
+                        break
+                    else:
+                        # TODO: Match vLLM behavior
+                        output = result.decode("utf-8")
+
+            except InferenceServerException as error:
+                print(f"caught error in request iterator:  {error}")
 
     request_end_time = time.time()
     request_latency = request_end_time - request_start_time
     REQUEST_LATENCY.append((prompt_len, output_len, request_latency))
-
 
 async def benchmark(
     backend: str,
