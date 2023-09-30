@@ -25,14 +25,15 @@ def get_text_outputs(request_output: RequestOutput, return_prompt: bool):
     else:
         return [output.text for output in request_output.outputs]
 
+
 @app.post("/generate")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
 
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
-    - return_prompt: whether to return the prompt with the generated text or not.
-    - stream: whether to stream the generated text or not.
+    - return_prompt: whether to return the prompt with the results or not.
+    - stream: whether to stream the results or not.
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
     request_dict = await request.json()
