@@ -13,7 +13,7 @@ On the server side, run one of the following commands:
     ./launch_triton_server.sh <your_model>
 
 On the client side, run:
-    python benchmarks/benchmark_serving.py \
+    python benchmark_serving.py \
         --backend <backend> \
         --tokenizer <your_model> --dataset <target_dataset> \
         --request-rate <request_rate>
@@ -28,6 +28,9 @@ from typing import AsyncGenerator, List, Tuple
 import aiohttp
 import numpy as np
 from transformers import PreTrainedTokenizerBase
+# TODO: Make imports backend-specific
+from tritonclient.utils import InferenceServerException
+import tritonclient.grpc.aio as grpcclient
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # (prompt len, output len, latency)
@@ -135,20 +138,26 @@ async def send_request(
             "parameters": params,
         }
     elif backend == "triton":
-        assert not use_beam_search
+        ## TODO: Thoughts: the params are properly being parsed
+        ## Thoughts: the JSON is fine, the timeout is what's making it fail? happens when I do ctrl + C too.
+        ## Even after json.loads fails, requests keep being processed
+        ## Too many iterators created? See if different approach, like vLLM
+        ## Failing to pass in params... rpc_ok=0 then. And responses still longer than requests.
         params = {
-            "temperature": 1.0,
-            "top_p": 1.0,
-        }
-        pload = {
-            "inputs": prompt,
-            "parameters": params,
+            "n": 1,
+            "best_of": best_of,
+            "use_beam_search": use_beam_search,
+            "temperature": "0.0" if use_beam_search else "1.0",
+            "top_p": "1.0",
+            "max_new_tokens": str(output_len),
+            "max_tokens": str(output_len),
+            "ignore_eos": True,
         }
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    timeout = aiohttp.ClientTimeout(total=3 * 3600)
     if backend in ["vllm", "tgi"]:
+        timeout = aiohttp.ClientTimeout(total=3 * 3600)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             while True:
                 async with session.post(api_url, headers=headers, json=pload) as response:
@@ -162,41 +171,44 @@ async def send_request(
                 if "error" not in output:
                     break
 
-    else if backend == "triton":
+    elif backend == "triton":
         async with grpcclient.InferenceServerClient(
-            url="localhost:8001"
+            url="localhost:8003"
         ) as triton_client:
-            # Request iterator that yields the next request
+
             async def async_request_iterator():
                 try:
-                        for i, prompt in enumerate(prompts):
-                            prompt_id = 1
-                            results_dict["1"] = []
-                            # TODO: Get tokenizer (model name) for below
-                            # TODO: enable or disable streaming mode [stream]? see results
-                            # TODO: Change code to onlyl send one request
-                            yield create_request(
-                                prompt, stream, prompt_id, params, tokenizer
-                            )
+                    yield create_request_triton(
+                        prompt, False, 1, params, "vllm"
+                    )
                 except Exception as error:
-                    print(f"caught errror in request iterator:  {error}")
+                    print(f"caught error in request iterator:  {error}")
 
             try:
-                # Start streaming
-                response_iterator = triton_client.stream_infer(
-                    inputs_iterator=async_request_iterator(),
-                    stream_timeout=False,
-                )
-                # Read response from the stream
-                async for response in response_iterator:
-                    result, error = response
+                while True:
+                    # Start streaming
+                    response_iterator = triton_client.stream_infer(
+                        inputs_iterator=async_request_iterator(),
+                        stream_timeout=None,
+                    )
+                    # Read response from the stream
+                    chunks = []
+                    async for response in response_iterator:
+                        result, error = response
+                        if not error:
+                            for chunk in result.as_numpy("TEXT"):
+                                chunks.append(chunk)
+
+                    output = b"".join(chunks).decode("utf-8")
+                    print("Request:")
+                    print(prompt)
+                    print("Response:")
+                    print(str(output))
+                    output = json.loads(output)
+                    
                     # Re-send the request if it failed.
-                    if error:                
-                        print(f"Encountered error while processing: {error}")
+                    if "error" not in output:
                         break
-                    else:
-                        # TODO: Match vLLM behavior
-                        output = result.decode("utf-8")
 
             except InferenceServerException as error:
                 print(f"caught error in request iterator:  {error}")
@@ -204,6 +216,31 @@ async def send_request(
     request_end_time = time.time()
     request_latency = request_end_time - request_start_time
     REQUEST_LATENCY.append((prompt_len, output_len, request_latency))
+
+def create_request_triton(prompt, stream, request_id, sampling_parameters, model_name):
+    inputs = []
+    prompt_data = np.array([prompt.encode("utf-8")], dtype=np.object_)
+    try:
+        inputs.append(grpcclient.InferInput("PROMPT", [1], "BYTES"))
+        inputs[-1].set_data_from_numpy(prompt_data)
+    except Exception as e:
+        print(f"Encountered an error {e}")
+    stream_data = np.array([stream], dtype=bool)
+    inputs.append(grpcclient.InferInput("STREAM", [1], "BOOL"))
+    inputs[-1].set_data_from_numpy(stream_data)
+
+    # Add requested outputs
+    outputs = []
+    outputs.append(grpcclient.InferRequestedOutput("TEXT"))
+
+    # Issue the asynchronous sequence inference.
+    return {
+        "model_name": model_name,
+        "inputs": inputs,
+        "outputs": outputs,
+        "request_id": str(request_id),
+        "parameters": sampling_parameters,
+    }
 
 async def benchmark(
     backend: str,
@@ -283,3 +320,4 @@ if __name__ == "__main__":
                         help='trust remote code from huggingface')
     args = parser.parse_args()
     main(args)
+
