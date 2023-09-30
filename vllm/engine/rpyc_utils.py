@@ -106,11 +106,12 @@ class RPyCWorkerService(rpyc.Service):
         )
 
     def exposed_execute_method(self, method: str, *args, **kwargs):
-        print(f"execute_method running on {os.getpid()}")
-        print(type(self.worker))
+        # print(f"execute_method running on {os.getpid()}")
+        # print(type(self.worker))
         args, kwargs = obtain(args), obtain(kwargs)
         executor = getattr(self.worker, method)
-        return executor(*args, **kwargs)
+        retval = executor(*args, **kwargs)
+        return retval
     
 class RPyCWorkerClient:
     def __init__(self, conn):
@@ -120,7 +121,7 @@ class RPyCWorkerClient:
             async def _func(*args, **kwargs):
                 ans = f(*args, **kwargs)
                 # ans.set_expiry(3600)  # absurdly long, wait for model to init
-                print(ans._ttl)
+                # print(ans._ttl)
                 await aio.to_thread(ans.wait)
                 # raise if exception
                 return ans.value
@@ -164,8 +165,13 @@ class RPyCWorkerClient:
         return self._get_addr_and_port()
     
     async def aexecute_method(self, method, *args, **kwargs):
+        # t1 = time.time()
         ans = await self._aexecute_method(method, *args, **kwargs)
-        return obtain(ans)  # do we need to check None? probably not?
+        # t2 = time.time()
+        new_ans = obtain(ans)  # seems fast enough
+        # t3 = time.time()
+        # print(t2 - t1, t3 - t2)
+        return new_ans  # do we need to check None? probably not?
     
     async def ainit_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
         return await self._ainit_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)

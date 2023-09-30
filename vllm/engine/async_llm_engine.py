@@ -227,7 +227,7 @@ class _AsyncLLMEngine(LLMEngine):
             return all_outputs
 
         # Make sure all workers have the same results.
-        print(all_outputs)
+        # print(all_outputs)
         # import pdb; pdb.set_trace()
         output = all_outputs[0]  # some "ray objectref" object in ray mode, some list(list(sequence_output)) in one-process mode
         if not self.parallel_config.worker_use_rpyc:
