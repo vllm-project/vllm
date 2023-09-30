@@ -182,19 +182,18 @@ async def send_request(
                     print(f"caught error in request iterator:  {error}")
 
             try:
-                while True:
-                    # Start streaming
-                    response_iterator = triton_client.stream_infer(
-                        inputs_iterator=async_request_iterator(),
-                        stream_timeout=None,
-                    )
-                    # Read response from the stream
-                    async for response in response_iterator:
-                        result, error = response
-                        if error:
-                            raise error
-                        for chunk in result.as_numpy("TEXT"):
-                            final_result = chunk
+                # Start streaming
+                response_iterator = triton_client.stream_infer(
+                    inputs_iterator=async_request_iterator(),
+                    stream_timeout=None,
+                )
+                # Read response from the stream
+                async for response in response_iterator:
+                    result, error = response
+                    if error:
+                        raise error
+                    for chunk in result.as_numpy("TEXT"):
+                        final_result = chunk
 
             except InferenceServerException as error:
                 print(f"caught error in request iterator:  {error}")
