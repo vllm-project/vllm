@@ -164,7 +164,8 @@ class RPyCWorkerClient:
         return self._get_addr_and_port()
     
     async def aexecute_method(self, method, *args, **kwargs):
-        return await self._aexecute_method(method, *args, **kwargs)
+        ans = await self._aexecute_method(method, *args, **kwargs)
+        return obtain(ans)  # do we need to check None? probably not?
     
     async def ainit_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
         return await self._ainit_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)

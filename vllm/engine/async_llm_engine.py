@@ -228,10 +228,12 @@ class _AsyncLLMEngine(LLMEngine):
 
         # Make sure all workers have the same results.
         print(all_outputs)
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         output = all_outputs[0]  # some "ray objectref" object in ray mode, some list(list(sequence_output)) in one-process mode
-        for other_output in all_outputs[1:]:
-            assert output == other_output
+        if not self.parallel_config.worker_use_rpyc:
+            # if we're using rpyc, we are returned coroutines, and we can't assert equality
+            for other_output in all_outputs[1:]:
+                assert output == other_output
         return output
 
 
