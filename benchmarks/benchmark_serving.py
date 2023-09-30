@@ -147,7 +147,6 @@ async def send_request(
             "use_beam_search": use_beam_search,
             "temperature": "0.0" if use_beam_search else "1.0",
             "top_p": "1.0",
-            "max_new_tokens": str(output_len),
             "max_tokens": str(output_len),
             "ignore_eos": True,
         }
@@ -190,23 +189,12 @@ async def send_request(
                         stream_timeout=None,
                     )
                     # Read response from the stream
-                    chunks = []
                     async for response in response_iterator:
                         result, error = response
-                        if not error:
-                            for chunk in result.as_numpy("TEXT"):
-                                chunks.append(chunk)
-
-                    output = b"".join(chunks).decode("utf-8")
-                    print("Request:")
-                    print(prompt)
-                    print("Response:")
-                    print(str(output))
-                    output = json.loads(output)
-                    
-                    # Re-send the request if it failed.
-                    if "error" not in output:
-                        break
+                        if error:
+                            raise error
+                        for chunk in result.as_numpy("TEXT"):
+                            final_result = chunk
 
             except InferenceServerException as error:
                 print(f"caught error in request iterator:  {error}")
