@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 import sys
 import time
@@ -24,6 +25,10 @@ def _query_server(prompt: str, params=None) -> dict:
     return response.json()
 
 
+def _query_server_with_params(args: list) -> dict:
+    return _query_server(*args)
+
+
 @pytest.fixture
 def api_server():
     script_path = Path(__file__).parent.joinpath(
@@ -48,29 +53,6 @@ def test_api_server(api_server):
     multiple requests at the same time, and that it can handle requests
     being cancelled without crashing.
     """
-    # Run a simple request
-    response = _query_server("Hello world")
-    assert response, 'Empty response'
-
-    # Test server side validation
-
-    # Null prompts must be refused by the server
-    try:
-        response = _query_server(None)
-    except requests.exceptions.HTTPError as e:
-        assert e.response.status_code == 400
-    else:
-        assert False, f'A null prompt should result in 400 Bad Request, but it gives a response: {response!r}'
-
-    # Unknown sampling params must be refused by the server
-    try:
-        response = _query_server('Dummy prompt', params={'unknown_param': 1})
-    except requests.exceptions.HTTPError as e:
-        assert e.response.status_code == 400
-        assert 'unknown_param' in e.response.content.decode('utf-8')
-    else:
-        assert False, f'Passing an unknown sampling param should result in 400 Bad Request, but it gives a response: {response!r}'
-
     # Run parallel requests
     with Pool(32) as pool:
         # Wait until the server is ready
@@ -85,10 +67,29 @@ def test_api_server(api_server):
                 time.sleep(1)
 
         # Actual tests start here
+
         # Try with 1 prompt
         for result in pool.map(_query_server, prompts):
-            assert result
+            assert result, "Empty result"
 
+        # Test server side validation
+
+        # Null prompts must be refused by the server
+        try:
+            for response in pool.map(_query_server, [None]):
+                assert False, f'A null prompt should result in 400 Bad Request, but it gives a response: {response!r}'
+        except requests.exceptions.HTTPError as e:
+            assert e.response.status_code == 400
+
+        # Unknown sampling params must be refused by the server
+        try:
+            for response in pool.map(_query_server_with_params, [('Dummy prompt', {'unknown_param': 1})]):
+                assert False, f'Passing an unknown sampling param should result in 400 Bad Request, but it gives a response: {response!r}'
+        except requests.exceptions.HTTPError as e:
+            assert e.response.status_code == 400
+            assert 'unknown_param' in e.response.content.decode('utf-8')
+
+        # Stats
         stats = requests.get("http://localhost:8000/stats").json()
         num_aborted_requests = stats["num_aborted_requests"]
         assert num_aborted_requests == 0
