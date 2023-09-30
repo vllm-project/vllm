@@ -210,6 +210,8 @@ class _AsyncLLMEngine(LLMEngine):
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
+            elif self.parallel_config.worker_use_rpyc:
+                executor = partial(worker.aexecute_method, method)
             else:
                 executor = getattr(worker, method)
 
@@ -218,12 +220,16 @@ class _AsyncLLMEngine(LLMEngine):
 
         if self.parallel_config.worker_use_ray:
             all_outputs = await asyncio.gather(*all_outputs)
+        elif self.parallel_config.worker_use_rpyc:
+            all_outputs = await asyncio.gather(*all_outputs)
 
         if get_all_outputs:
             return all_outputs
 
         # Make sure all workers have the same results.
-        output = all_outputs[0]
+        print(all_outputs)
+        import pdb; pdb.set_trace()
+        output = all_outputs[0]  # some "ray objectref" object in ray mode, some list(list(sequence_output)) in one-process mode
         for other_output in all_outputs[1:]:
             assert output == other_output
         return output

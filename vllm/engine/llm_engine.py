@@ -297,7 +297,7 @@ class LLMEngine:
             
 
 
-        raise NotImplementedError("rpyc not implemented yet")
+        # raise NotImplementedError("rpyc not implemented yet")
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)

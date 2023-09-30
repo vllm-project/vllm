@@ -108,6 +108,7 @@ class RPyCWorkerService(rpyc.Service):
     def exposed_execute_method(self, method: str, *args, **kwargs):
         print(f"execute_method running on {os.getpid()}")
         print(type(self.worker))
+        args, kwargs = obtain(args), obtain(kwargs)
         executor = getattr(self.worker, method)
         return executor(*args, **kwargs)
     
@@ -175,7 +176,11 @@ class RPyCWorkerClient:
 
 def init_rpyc_env(port):
     print(f"init_rpyc_env for port {port}")
+    print(os.getpid(), "importing torch", time.time())
+    # We need to import torch here, otherwise torch won't recognize CUDA devices as available.
+    # Not sure why unfortunately, but I think it's related to some ordering of imports/environment set up
     import torch
+    print(os.getpid(), "done importing torch", time.time())
     print("init_rpyc_env cuda support:", torch.cuda.is_available(),":", torch.cuda.device_count(), "devices")
     t = ThreadedServer(RPyCWorkerService(), port=port, protocol_config={"allow_pickle": True})
     t.start()
