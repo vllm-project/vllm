@@ -42,6 +42,7 @@ class Worker:
         # self.init_cache_engine().
         self.cache_config = None
         self.block_size = None
+        self.sliding_window = None
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
@@ -136,9 +137,14 @@ class Worker:
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
         self.block_size = cache_config.block_size
+        self.sliding_window = cache_config.sliding_window
 
-        _check_if_can_support_max_seq_len(self.scheduler_config.max_model_len,
-                                          self.block_size)
+        if self.sliding_window is None:
+            max_seq_len = self.scheduler_config.max_model_len
+        else:
+            max_seq_len = min(self.scheduler_config.max_model_len,
+                              self.sliding_window)
+        _check_if_can_support_max_seq_len(max_seq_len, self.block_size)
 
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
@@ -211,10 +217,11 @@ class Worker:
 
                 context_len = seq_data.get_len()
                 position = context_len - 1
+                if self.sliding_window is not None:
+                    context_len = min(context_len, self.sliding_window)
                 input_positions.append(position)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
-                generation_block_tables.append(block_table)
 
                 max_context_len = max(max_context_len, context_len)
                 max_num_blocks_per_seq = max(max_num_blocks_per_seq,
@@ -225,6 +232,12 @@ class Worker:
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
+
+                if self.sliding_window is not None:
+                    sliding_window_blocks = (self.sliding_window //
+                                             self.block_size)
+                    block_table = block_table[-sliding_window_blocks:]
+                generation_block_tables.append(block_table)
 
         # Optimization: Pad the input length to be a multiple of 8.
         # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
@@ -264,6 +277,7 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
+            sliding_window=self.sliding_window,
         )
         return tokens_tensor, positions_tensor, input_metadata
 
