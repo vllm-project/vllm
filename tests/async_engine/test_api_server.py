@@ -83,7 +83,10 @@ def test_api_server(api_server):
 
         # Unknown sampling params must be refused by the server
         try:
-            for response in pool.map(_query_server_with_params, [('Dummy prompt', {'unknown_param': 1})]):
+            for response in pool.map(_query_server_with_params,
+                                     [('Dummy prompt', {
+                                         'unknown_param': 1
+                                     })]):
                 assert False, f'Passing an unknown sampling param should result in 400 Bad Request, but it gives a response: {response!r}'
         except requests.exceptions.HTTPError as e:
             assert e.response.status_code == 400
