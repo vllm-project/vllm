@@ -5,7 +5,6 @@ import os
 import logging
 import sys
 
-
 log_levels = {
     "debug": logging.DEBUG,
     "info": logging.INFO,
@@ -38,11 +37,11 @@ _default_handler = None
 
 def _get_default_logging_level():
     verbosity = os.getenv("VLLM_VERBOSITY", "info").lower()
-    
     try:
         return log_levels[verbosity]
-    except KeyError:
-        raise ValueError(f"Unknown log level: {verbosity}")
+    except KeyError as exc:
+        raise ValueError(f"Unknown log level: {verbosity}") from exc
+
 
 def _setup_logger():
     _root_logger.setLevel(_get_default_logging_level())
