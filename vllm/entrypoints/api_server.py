@@ -2,9 +2,9 @@ import argparse
 import json
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
 import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import Response, StreamingResponse
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -14,10 +14,16 @@ from vllm.utils import random_uuid
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
-engine = None
 
 
-@app.post("/generate")
+@app.get("/healthz")
+@app.get("/health")
+def healthcheck():
+    return "OK"
+
+
+@app.post("/predict")
+@app.post("/stream")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
 
@@ -31,25 +37,40 @@ async def generate(request: Request) -> Response:
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
-
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Streaming case
-    async def stream_results() -> AsyncGenerator[bytes, None]:
+    # TODO: vLLM spends a long time decoding text repeatedly, that for every new token `text` is regenerated,
+    # (see detokenize_incrementally) which we should definitely optimize away.
+    async def stream_results() -> AsyncGenerator[str, None]:
+        last_output_text = ""
         async for request_output in results_generator:
-            prompt = request_output.prompt
-            text_outputs = [
-                prompt + output.text for output in request_output.outputs
-            ]
-            ret = {"text": text_outputs}
-            yield (json.dumps(ret) + "\0").encode("utf-8")
+            ret = {
+                "text":
+                request_output.outputs[-1].text[len(last_output_text):],
+                "count_prompt_tokens":
+                len(request_output.prompt_token_ids),
+                "count_output_tokens":
+                len(request_output.outputs[0].token_ids),
+                "log_probs":
+                request_output.outputs[0].logprobs[-1]
+                if sampling_params.logprobs else None,
+                "finished":
+                request_output.finished,
+            }
+            last_output_text = request_output.outputs[-1].text
+            yield f"data:{json.dumps(ret)}\n\n"
 
     if stream:
         return StreamingResponse(stream_results())
 
     # Non-streaming case
     final_output = None
+    tokens = []
+    last_output_text = ""
     async for request_output in results_generator:
+        tokens.append(request_output.outputs[-1].text[len(last_output_text):])
+        last_output_text = request_output.outputs[-1].text
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await engine.abort(request_id)
@@ -58,23 +79,31 @@ async def generate(request: Request) -> Response:
 
     assert final_output is not None
     prompt = final_output.prompt
-    text_outputs = [prompt + output.text for output in final_output.outputs]
-    ret = {"text": text_outputs}
-    return JSONResponse(ret)
+    ret = {
+        "text": final_output.outputs[0].text,
+        "count_prompt_tokens": len(final_output.prompt_token_ids),
+        "count_output_tokens": len(final_output.outputs[0].token_ids),
+        "log_probs": final_output.outputs[0].logprobs,
+        "tokens": tokens,
+    }
+    return Response(content=json.dumps(ret))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", type=str,
+                        default=None)  # None == IPv4 / IPv6 dualstack
+    parser.add_argument("--port", type=int, default=5005)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
-    uvicorn.run(app,
-                host=args.host,
-                port=args.port,
-                log_level="debug",
-                timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="debug",
+        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+    )

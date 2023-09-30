@@ -45,6 +45,7 @@ class ModelConfig:
             output). If None, will be derived from the model.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
+        use_cuda_graph: Whether to capture and replay CUDA graphs.
     """
 
     def __init__(
@@ -60,6 +61,7 @@ class ModelConfig:
         revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        use_cuda_graph: Optional[bool] = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -70,6 +72,7 @@ class ModelConfig:
         self.seed = seed
         self.revision = revision
         self.quantization = quantization
+        self.use_cuda_graph = use_cuda_graph
 
         self.hf_config = get_config(model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
@@ -152,11 +155,9 @@ class ModelConfig:
             return 1
         # For Falcon:
         if getattr(self.hf_config, "n_head_kv", None) is not None:
-            return (self.hf_config.n_head_kv //
-                    parallel_config.tensor_parallel_size)
+            return self.hf_config.n_head_kv // parallel_config.tensor_parallel_size
         if getattr(self.hf_config, "num_kv_heads", None) is not None:
-            return (self.hf_config.num_kv_heads //
-                    parallel_config.tensor_parallel_size)
+            return self.hf_config.num_kv_heads // parallel_config.tensor_parallel_size
         # For LLaMA-2:
         if getattr(self.hf_config, "num_key_value_heads", None) is not None:
             return (self.hf_config.num_key_value_heads //

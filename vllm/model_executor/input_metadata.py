@@ -29,6 +29,7 @@ class InputMetadata:
         context_lens: torch.Tensor,
         max_context_len: int,
         block_tables: torch.Tensor,
+        use_cuda_graph: Optional[bool] = False,
         sliding_window: Optional[int] = None,
     ) -> None:
         self.seq_groups = seq_groups
@@ -38,6 +39,7 @@ class InputMetadata:
         self.context_lens = context_lens
         self.max_context_len = max_context_len
         self.block_tables = block_tables
+        self.use_cuda_graph = use_cuda_graph
 
         self.to_cache = None
         if sliding_window is not None:
@@ -73,14 +75,15 @@ class InputMetadata:
 
     def __repr__(self) -> str:
         # Print only useful metadata.
-        return (f'InputMetadata('
-                f'num_valid_tokens={self.num_valid_tokens}, '
-                f'num_prompt_tokens={self.num_prompt_tokens}, '
-                f'num_prompts={self.num_prompts}, '
-                f'prompt_lens={self.prompt_lens}, '
-                f'num_generation_tokens={self.num_generation_tokens}, '
-                f'context_lens={self.context_lens}, '
-                f'max_context_len={self.max_context_len}), '
-                f'max_num_blocks_per_seq={self.max_num_blocks_per_seq}, '
-                f'block_tables={self.block_tables}), '
-                f'slot_mapping={self.slot_mapping}')
+        return (f"InputMetadata("
+                f"num_valid_tokens={self.num_valid_tokens}, "
+                f"num_prompt_tokens={self.num_prompt_tokens}, "
+                f"num_prompts={self.num_prompts}, "
+                f"prompt_lens={self.prompt_lens}, "
+                f"num_generation_tokens={self.num_generation_tokens}, "
+                f"context_lens={self.context_lens}, "
+                f"max_context_len={self.max_context_len}), "
+                f"max_num_blocks_per_seq={self.max_num_blocks_per_seq}, "
+                f"block_tables={self.block_tables}), "
+                f"slot_mapping={self.slot_mapping}, "
+                f"use_cuda_graph={self.use_cuda_graph})")

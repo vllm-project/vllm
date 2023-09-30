@@ -1,19 +1,17 @@
 """A GPU worker class."""
 import os
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
-from vllm.model_executor import get_model, InputMetadata, set_random_seed
-from vllm.model_executor.parallel_utils.parallel_state import (
-    initialize_model_parallel)
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig
+from vllm.model_executor import InputMetadata, get_model, set_random_seed
+from vllm.model_executor.parallel_utils.parallel_state import initialize_model_parallel
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
+from vllm.worker.cache_engine import CacheEngine
 
 
 class Worker:
@@ -89,8 +87,8 @@ class Worker:
         max_num_seqs = self.scheduler_config.max_num_seqs
         seqs = []
         for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
+            seq_len = max_num_batched_tokens // max_num_seqs + (
+                group_id < max_num_batched_tokens % max_num_seqs)
             seq_data = SequenceData([0] * seq_len)
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
@@ -234,8 +232,7 @@ class Worker:
                 slot_mapping.append(slot)
 
                 if self.sliding_window is not None:
-                    sliding_window_blocks = (self.sliding_window //
-                                             self.block_size)
+                    sliding_window_blocks = self.sliding_window // self.block_size
                     block_table = block_table[-sliding_window_blocks:]
                 generation_block_tables.append(block_table)
 
@@ -258,7 +255,7 @@ class Worker:
                                            dtype=torch.int,
                                            device="cuda")
         padded_block_tables = [
-            _pad_to_max(block_table, max_num_blocks_per_seq)
+            _pad_to_max(block_table, 4096)
             for block_table in generation_block_tables
         ]
         block_tables_tensor = torch.tensor(padded_block_tables,
@@ -277,6 +274,7 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
+            use_cuda_graph=self.model_config.use_cuda_graph,
             sliding_window=self.sliding_window,
         )
         return tokens_tensor, positions_tensor, input_metadata
