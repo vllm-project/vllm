@@ -269,7 +269,7 @@ __global__ void single_query_cached_kv_attention_kernel(
           // See https://github.com/vllm-project/vllm/issues/641#issuecomment-1682544472
           scalar_t* v_vec_ptr = reinterpret_cast<scalar_t*>(&v_vec);
 #pragma unroll
-          for (int j = 0; j <= V_VEC_SIZE; j++) {
+          for (int j = 0; j < V_VEC_SIZE; j++) {
             v_vec_ptr[j] = token_idx + j < context_len ? v_vec_ptr[j] : zero_value;
           }
         }
