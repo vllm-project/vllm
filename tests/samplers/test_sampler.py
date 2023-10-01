@@ -26,7 +26,7 @@ class MockLogitsSampler(Sampler):
 
 
 def _prepare_test(
-        batch_size: int
+    batch_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, Worker]:
     vocab_size = 32000
     input_tensor = torch.rand((batch_size, 1024),
@@ -199,7 +199,9 @@ def test_sampler_constrained(seed: int):
                 request_id=f"test_{i}",
                 is_prompt=True,
                 seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0, allowed_token_ids=allowed_token_ids[i].tolist()),
+                sampling_params=SamplingParams(
+                    temperature=0,
+                    allowed_token_ids=allowed_token_ids[i].tolist()),
                 block_tables={0: [1]},
             ))
 
