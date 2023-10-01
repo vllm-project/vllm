@@ -26,7 +26,7 @@ class MockLogitsSampler(Sampler):
 
 
 def _prepare_test(
-    batch_size: int
+        batch_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, Worker]:
     vocab_size = 32000
     input_tensor = torch.rand((batch_size, 1024),
@@ -182,3 +182,33 @@ def test_sampler_mixed(seed: int):
             continue
         for nth_output in sequence_output:
             assert nth_output.output_token in expected_tokens
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_constrained(seed: int):
+    set_random_seed(seed)
+    batch_size = random.randint(1, 256)
+    input_tensor, fake_logits, sampler, worker = _prepare_test(batch_size)
+
+    allowed_token_ids = torch.randint(0, 32000, (batch_size, 100))
+
+    seq_group_metadata_list = []
+    for i in range(batch_size):
+        seq_group_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=f"test_{i}",
+                is_prompt=True,
+                seq_data={0: SequenceData([1, 2, 3])},
+                sampling_params=SamplingParams(temperature=0, allowed_token_ids=allowed_token_ids[i].tolist()),
+                block_tables={0: [1]},
+            ))
+
+    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    sampler_output = sampler(embedding=None,
+                             hidden_states=input_tensor,
+                             input_metadata=input_metadata)
+    expected = torch.argmax(fake_logits, dim=-1)
+    for i, sequence_output in enumerate(sampler_output):
+        for nth_output in sequence_output:
+            assert nth_output.output_token in allowed_token_ids[i].tolist()
+            assert nth_output.output_token == expected[i].item()
