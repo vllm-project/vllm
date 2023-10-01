@@ -73,7 +73,7 @@ def run_vllm(
         tensor_parallel_size=tensor_parallel_size,
         seed=seed,
         trust_remote_code=trust_remote_code,
-        dtype=dtype
+        dtype=dtype,
     )
 
     # Add the requests to the engine.
@@ -187,7 +187,6 @@ def main(args: argparse.Namespace):
           f"{total_num_tokens / elapsed_time:.2f} tokens/s")
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark the throughput.")
     parser.add_argument("--backend",
@@ -223,16 +222,14 @@ if __name__ == "__main__":
                         action='store_true',
                         help='trust remote code from huggingface')
     parser.add_argument(
-            '--dtype',
-            type=str,
-            default='auto',
-            choices=[
-                'auto', 'half', 'float16', 'bfloat16', 'float', 'float32'
-            ],
-            help='data type for model weights and activations. '
-            'The "auto" option will use FP16 precision '
-            'for FP32 and FP16 models, and BF16 precision '
-            'for BF16 models.')
+        '--dtype',
+        type=str,
+        default='auto',
+        choices=['auto', 'half', 'float16', 'bfloat16', 'float', 'float32'],
+        help='data type for model weights and activations. '
+        'The "auto" option will use FP16 precision '
+        'for FP32 and FP16 models, and BF16 precision '
+        'for BF16 models.')
     args = parser.parse_args()
 
     if args.backend == "vllm":
