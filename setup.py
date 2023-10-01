@@ -50,16 +50,17 @@ def get_torch_arch_list() -> Set[str]:
     # not give the best performance on the newer architectures, it provides
     # forward compatibility.
     valid_arch_strs = SUPPORTED_ARCHS + [s + "+PTX" for s in SUPPORTED_ARCHS]
-    arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST", None)
-    if arch_list is None:
+    env_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST", None)
+    if env_arch_list is None:
         return set()
 
     # List are separated by ; or space.
-    arch_list = arch_list.replace(" ", ";").split(";")
+    arch_list = env_arch_list.replace(" ", ";").split(";")
     for arch in arch_list:
         if arch not in valid_arch_strs:
             raise ValueError(
-                f"Unsupported CUDA arch ({arch}). "
+                f"Unsupported CUDA arch ({arch}) is included in the "
+                f"`TORCH_CUDA_ARCH_LIST` env variable ({env_arch_list}). "
                 f"Valid CUDA arch strings are: {valid_arch_strs}.")
     return set(arch_list)
 
