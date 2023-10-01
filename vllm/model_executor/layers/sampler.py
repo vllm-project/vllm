@@ -290,7 +290,7 @@ def _get_topk_logprobs(
 def _build_sequence_outputs(
     parent_ids: List[int],
     next_token_ids: List[int],
-    selected_token_logprobs: torch.Tensor,
+    selected_token_logprobs: List[float],
     parent_seq_ids: List[int],
     parent_logprobs: torch.Tensor,
     num_output_logprobs: Optional[int],
