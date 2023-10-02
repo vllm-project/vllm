@@ -17,12 +17,12 @@ app = FastAPI()
 engine = None
 
 
-@app.post("/livez")
+@app.get("/livez")
 def livez():
     return ""
 
 
-@app.post("/readyz")
+@app.get("/readyz")
 def readyz():
     return ""
 
