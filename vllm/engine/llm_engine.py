@@ -517,8 +517,10 @@ class LLMEngine:
             self, output: SamplerOutput,
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         # Update the scheduled sequence groups with the model outputs.
+        now = time.monotonic()
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
         for seq_group, samples in zip(scheduled_seq_groups, output):
+            seq_group.on_token_generated(now)
             self._process_sequence_group_samples(seq_group, samples)
 
         # Free the finished sequence groups.

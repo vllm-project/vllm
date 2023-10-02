@@ -1,9 +1,13 @@
 from typing import List
 
+from vllm.config import PolicyConfig
 from vllm.sequence import SequenceGroup
 
 
 class Policy:
+
+    def __init__(self, **kwargs) -> None:
+        pass
 
     def get_priority(
         self,
@@ -11,6 +15,12 @@ class Policy:
         seq_group: SequenceGroup,
     ) -> float:
         raise NotImplementedError
+
+    def can_preempt(
+            self,
+            seq_group: SequenceGroup  # pylint: disable=unused-argument
+    ) -> bool:
+        return True
 
     def sort_by_priority(
         self,
@@ -41,5 +51,6 @@ class PolicyFactory:
     }
 
     @classmethod
-    def get_policy(cls, policy_name: str, **kwargs) -> Policy:
-        return cls._POLICY_REGISTRY[policy_name](**kwargs)
+    def get_policy(cls, policy_config: PolicyConfig) -> Policy:
+        return cls._POLICY_REGISTRY[policy_config.policy](
+            **policy_config.policy_kwargs)

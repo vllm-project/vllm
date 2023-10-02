@@ -235,6 +235,26 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
+        self.first_scheduled_time = None
+        self.first_token_time = None
+        self.time_in_queue = None
+        self.consecutive_iterations = 0
+
+    def on_schedule(self, schedule_time: float) -> None:
+        if self.first_scheduled_time is None:
+            self.first_scheduled_time = schedule_time
+            self.time_in_queue = (schedule_time - self.arrival_time)
+        self.consecutive_iterations += 1
+
+    def on_preempted(
+            self,
+            preempted_time: float  # pylint: disable=unused-argument
+    ) -> None:
+        self.consecutive_iterations = 0
+
+    def on_token_generated(self, generated_time: float):
+        if self.first_token_time is None:
+            self.first_token_time = generated_time
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining

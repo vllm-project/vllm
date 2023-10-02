@@ -253,6 +253,19 @@ class ParallelConfig:
                 "Pipeline parallelism is not supported yet.")
 
 
+class PolicyConfig:
+    """Policy configuration.
+
+    Args:
+        policy: Name of the policy.
+        kwargs: Keyword arguments for the policy.
+    """
+
+    def __init__(self, policy: str, **kwargs) -> None:
+        self.policy = policy
+        self.policy_kwargs = kwargs
+
+
 class SchedulerConfig:
     """Scheduler configuration.
 
@@ -263,14 +276,14 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
+        policy_config: Policy configuration.
     """
 
-    def __init__(
-        self,
-        max_num_batched_tokens: Optional[int],
-        max_num_seqs: int,
-        max_model_len: int,
-    ) -> None:
+    def __init__(self,
+                 max_num_batched_tokens: Optional[int],
+                 max_num_seqs: int,
+                 max_model_len: int,
+                 policy_config: Optional[PolicyConfig] = None) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -279,6 +292,7 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
+        self.policy_config = policy_config or PolicyConfig("fcfs")
         self._verify_args()
 
     def _verify_args(self) -> None:
