@@ -164,9 +164,6 @@ class ModelConfig:
         total_num_attention_heads = self.hf_config.num_attention_heads
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
-    def get_max_model_len(self) -> int:
-        return self.max_model_len
-
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
@@ -187,10 +184,12 @@ class CacheConfig:
         block_size: int,
         gpu_memory_utilization: float,
         swap_space: int,
+        sliding_window: Optional[int] = None,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
+        self.sliding_window = sliding_window
         self._verify_args()
 
         # Will be set after profiling.
@@ -376,10 +375,17 @@ def _get_and_verify_max_len(
         if max_len_key is not None:
             derived_max_model_len = min(derived_max_model_len, max_len_key)
     if derived_max_model_len == float("inf"):
-        raise ValueError(
-            "The model's config.json must contain one of the following keys "
-            "to determine the original maximum length of the model: "
-            f"{possible_keys}")
+        if max_model_len is not None:
+            # If max_model_len is specified, we use it.
+            return max_model_len
+
+        default_max_len = 2048
+        logger.warning(
+            "The model's config.json does not contain any of the following "
+            "keys to determine the original maximum length of the model: "
+            f"{possible_keys}. Assuming the model's maximum length is "
+            f"{default_max_len}.")
+        derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     if rope_scaling is not None:
