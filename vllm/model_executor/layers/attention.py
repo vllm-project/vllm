@@ -1,5 +1,5 @@
 """Multi-head attention."""
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -9,8 +9,10 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 
 from vllm import attention_ops
 from vllm import cache_ops
-from vllm import pos_encoding_ops
 from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.layers.rotary_embedding import (
+    DynamicNTKScalingRotaryEmbedding, LinearScalingRotaryEmbedding,
+    RotaryEmbedding)
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 
@@ -56,12 +58,14 @@ class PagedAttention(nn.Module):
                  num_heads: int,
                  head_size: int,
                  scale: float,
-                 num_kv_heads: Optional[int] = None) -> None:
+                 num_kv_heads: Optional[int] = None,
+                 sliding_window: Optional[int] = None) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.sliding_window = sliding_window
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -84,6 +88,8 @@ class PagedAttention(nn.Module):
             return
         prompt_lens = input_metadata.prompt_lens
         attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
+        if self.sliding_window is not None:
+            attn_bias = attn_bias.make_local_attention(self.sliding_window)
         input_metadata.attn_bias.append(attn_bias)
 
     def multi_query_kv_attention(
@@ -221,12 +227,20 @@ class PagedAttention(nn.Module):
         if (num_valid_tokens > 0 and key_cache is not None
                 and value_cache is not None):
             # The stride is 3 because the key and value are sliced from qkv.
+            key_to_cache = key[:num_valid_tokens]
+            value_to_cache = value[:num_valid_tokens]
+            slot_mapping = input_metadata.slot_mapping
+            if input_metadata.to_cache is not None:
+                key_to_cache = key_to_cache[input_metadata.to_cache]
+                value_to_cache = value_to_cache[input_metadata.to_cache]
+                slot_mapping = slot_mapping[input_metadata.to_cache]
+
             cache_ops.reshape_and_cache(
-                key[:num_valid_tokens],
-                value[:num_valid_tokens],
+                key_to_cache,
+                value_to_cache,
                 key_cache,
                 value_cache,
-                input_metadata.slot_mapping,
+                slot_mapping,
             )
 
         if input_metadata.num_generation_tokens > 0:
@@ -247,7 +261,7 @@ class PagedAttention(nn.Module):
 
 
 class PagedAttentionWithRoPE(PagedAttention):
-    """PagedAttention with rotary embedding."""
+    """PagedAttention with rotary positional embedding."""
 
     def __init__(
         self,
@@ -259,26 +273,31 @@ class PagedAttentionWithRoPE(PagedAttention):
         base: int = 10000,
         num_kv_heads: Optional[int] = None,
         is_neox_style: bool = True,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        sliding_window: Optional[int] = None,
     ) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads)
-        self.is_neox_style = is_neox_style
-
-        # Create the cos and sin cache.
-        inv_freq = 1.0 / (base**(torch.arange(
-            0, rotary_dim, 2, dtype=torch.float, device="cuda") / rotary_dim))
-        t = torch.arange(max_position, dtype=torch.float, device="cuda")
-        freqs = torch.einsum("i,j -> ij", t, inv_freq)
-        cos = freqs.cos()
-        sin = freqs.sin()
-        cache = torch.cat((cos, sin), dim=-1)
-
-        # FIXME(woosuk): This assumes that we configure the default dtype when
-        # initializing the model.
-        # TODO(woosuk): Make it more robust.
-        torch_dtype = torch.get_default_dtype()
-        cache = cache.to(torch_dtype)
-        # Embedding size: [max_position, rotary_dim]
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        super().__init__(num_heads,
+                         head_size,
+                         scale,
+                         num_kv_heads,
+                         sliding_window=sliding_window)
+        if rope_scaling is None:
+            self.rotary_emb = RotaryEmbedding(head_size, rotary_dim,
+                                              max_position, base,
+                                              is_neox_style)
+        else:
+            scaling_type = rope_scaling["type"]
+            scaling_factor = rope_scaling["factor"]
+            if scaling_type == "linear":
+                self.rotary_emb = LinearScalingRotaryEmbedding(
+                    head_size, rotary_dim, max_position, base, is_neox_style,
+                    scaling_factor)
+            elif scaling_type == "dynamic":
+                self.rotary_emb = DynamicNTKScalingRotaryEmbedding(
+                    head_size, rotary_dim, max_position, base, is_neox_style,
+                    scaling_factor)
+            else:
+                raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
     def forward(
         self,
@@ -295,7 +314,7 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         Args:
             positions: shape = [num_tokens]
-                        query: shape = [num_tokens, num_heads * head_size]
+            query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
@@ -311,14 +330,7 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
-        pos_encoding_ops.rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            self.cos_sin_cache,
-            self.is_neox_style,
-        )
+        query, key = self.rotary_emb(positions, query, key)
         return super().forward(
             query,
             key,

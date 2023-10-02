@@ -25,7 +25,7 @@ class EngineArgs:
     block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
-    max_num_batched_tokens: int = 2560
+    max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     disable_log_stats: bool = False
     revision: Optional[str] = None
@@ -34,7 +34,6 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
-        self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
 
     @staticmethod
     def add_cli_args(
@@ -177,15 +176,15 @@ class EngineArgs:
                                    self.download_dir, self.load_format,
                                    self.dtype, self.seed, self.revision,
                                    self.max_model_len, self.quantization)
-        cache_config = CacheConfig(self.block_size,
-                                   self.gpu_memory_utilization,
-                                   self.swap_space)
+        cache_config = CacheConfig(
+            self.block_size, self.gpu_memory_utilization, self.swap_space,
+            getattr(model_config.hf_config, 'sliding_window', None))
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
-                                           model_config.get_max_model_len())
+                                           model_config.max_model_len)
         return model_config, cache_config, parallel_config, scheduler_config
 
 
