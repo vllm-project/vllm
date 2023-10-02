@@ -17,6 +17,15 @@ app = FastAPI()
 engine = None
 
 
+@app.post("/livez")
+def livez():
+    return ""
+
+
+@app.post("/readyz")
+def readyz():
+    return ""
+
 @app.post("/generate")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
