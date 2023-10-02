@@ -232,7 +232,7 @@ class _AsyncLLMEngine(LLMEngine):
             # outputs = await asyncio.gather(*all_outputs)
 
             
-            with ThreadPoolExecutor(max_workers=self.parallel_config.world_size) as tpe:
+            with ThreadPoolExecutor(max_workers=self.parallel_config.world_size) as tpe:  # increasing max_workers to 4 * worldsize doesn't seem to help
                 all_outputs = list(tpe.map(lambda worker: worker.execute_method(method, *args, **kwargs), self.workers))
                 # print(type(all_outputs))
                 # print(type(all_outputs[0]))

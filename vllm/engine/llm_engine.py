@@ -252,6 +252,7 @@ class LLMEngine:
         # Initialize torch distributed process group for the workers.
 
         addr, port = self.workers[0].get_addr_and_port()
+        print(f"addr {addr} port {port}")
 
         executors = []
 
