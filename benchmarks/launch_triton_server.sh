@@ -20,7 +20,6 @@ git clone https://github.com/triton-inference-server/tutorials.git && \
    cd tutorials/Quick_Deploy/vLLM && \
    docker build -t tritonserver_vllm .
 
-cd triton/tutorials/Quick_Deploy/vLLM
 # Replace the model name in the engine arguments
 JSON_FILE="model_repository/vllm/vllm_engine_args.json"
 jq --arg new_model "$MODEL" '.model = $new_model' "$JSON_FILE"
