@@ -65,16 +65,18 @@ def test_scheduler_schedule_simple():
     # Schedule seq groups prompts.
     seq_group_meta, out = scheduler.schedule()
     assert set(out.scheduled_seq_groups) == set(running)
-    assert out.num_batched_tokens == num_seq_group * seq_group.get_seqs(
-    )[0].get_len()
-    assert not out.blocks_to_copy and not out.blocks_to_swap_in and not out.blocks_to_swap_out
+    assert (out.num_batched_tokens == num_seq_group *
+            seq_group.get_seqs()[0].get_len())
+    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
+            and not out.blocks_to_swap_out)
     assert len(seq_group_meta) == num_seq_group
 
     # Schedule seq groups generation.
     seq_group_meta, out = scheduler.schedule()
     assert set(out.scheduled_seq_groups) == set(running)
     assert out.num_batched_tokens == num_seq_group
-    assert not out.blocks_to_copy and not out.blocks_to_swap_in and not out.blocks_to_swap_out
+    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
+            and not out.blocks_to_swap_out)
     assert len(seq_group_meta) == num_seq_group
 
 
@@ -97,7 +99,8 @@ def test_scheduler_schedule_preempt_abort():
     seq_group_meta, out = scheduler.schedule()
     assert out.scheduled_seq_groups == [seq_group_a, seq_group_b]
     assert out.num_batched_tokens == seq_group_a.get_seqs()[0].get_len() * 2
-    assert not out.blocks_to_copy and not out.blocks_to_swap_in and not out.blocks_to_swap_out
+    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
+            and not out.blocks_to_swap_out)
     assert len(seq_group_meta) == 2
     assert scheduler.get_num_unfinished_seq_groups() == 2
 
@@ -105,7 +108,8 @@ def test_scheduler_schedule_preempt_abort():
     seq_group_meta, out = scheduler.schedule()
     assert out.scheduled_seq_groups == [seq_group_a]
     assert out.num_batched_tokens == 1
-    assert not out.blocks_to_copy and not out.blocks_to_swap_in and not out.blocks_to_swap_out
+    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
+            and not out.blocks_to_swap_out)
     assert len(seq_group_meta) == 1
     assert scheduler.get_num_unfinished_seq_groups() == 2
 
@@ -114,6 +118,7 @@ def test_scheduler_schedule_preempt_abort():
     seq_group_meta, out = scheduler.schedule()
     assert out.scheduled_seq_groups == [seq_group_b]
     assert out.num_batched_tokens == seq_group_b.get_seqs()[0].get_len()
-    assert not out.blocks_to_copy and not out.blocks_to_swap_in and not out.blocks_to_swap_out
+    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
+            and not out.blocks_to_swap_out)
     assert len(seq_group_meta) == 1
     assert scheduler.get_num_unfinished_seq_groups() == 1
