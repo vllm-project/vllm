@@ -4,6 +4,7 @@ Run `pytest tests/distributed/test_comm_ops.py --forked`.
 """
 from multiprocessing import Process
 
+import pytest
 import torch
 
 from vllm.config import ParallelConfig
@@ -63,7 +64,13 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
         assert torch.allclose(t, expected)
 
 
-def _test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Need at least 2 GPUs to run the test.")
+@pytest.mark.parametrize("tensor_parallel_size", [2])
+@pytest.mark.parametrize("test_target",
+                         [all_reduce_test_worker, all_gather_test_worker])
+def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
     distributed_init_port = get_open_port()
     processes = []
     for rank in range(tensor_parallel_size):
@@ -74,11 +81,3 @@ def _test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
     for p in processes:
         p.join()
     assert all(p.exitcode == 0 for p in processes)
-
-
-def test_all_reduce():
-    _test_multi_process_tensor_parallel(2, all_reduce_test_worker)
-
-
-def test_all_gather():
-    _test_multi_process_tensor_parallel(2, all_gather_test_worker)
