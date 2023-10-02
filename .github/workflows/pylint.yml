@@ -28,4 +28,4 @@ jobs:
         pip install pylint==2.8.2
     - name: Analysing the code with pylint
       run: |
-        pylint vllm
+        pylint vllm tests

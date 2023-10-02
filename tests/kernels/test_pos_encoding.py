@@ -140,7 +140,7 @@ def test_rotary_embedding(
     cos = freqs.cos()
     sin = freqs.sin()
     cos_sin_cache = torch.cat((cos, sin), dim=-1)
-    cos_sin_cache = cos_sin_cache.to(dtype=dtype, device='cuda')
+    cos_sin_cache = cos_sin_cache.to(dtype=dtype, device="cuda")
 
     # Run the kernel. The kernel is in-place, so we need to clone the inputs.
     out_query = query.clone()
