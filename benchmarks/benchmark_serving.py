@@ -28,7 +28,6 @@ from typing import AsyncGenerator, List, Tuple
 import aiohttp
 import numpy as np
 from transformers import PreTrainedTokenizerBase
-# TODO: Make imports backend-specific
 from tritonclient.utils import InferenceServerException
 import tritonclient.grpc.aio as grpcclient
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -138,9 +137,6 @@ async def send_request(
             "parameters": params,
         }
     elif backend == "triton":
-        ## TODO: Thoughts: the JSON is fine, the timeout is what's making it fail? happens when I do ctrl + C too.
-        ## Even after json.loads fails, requests keep being processed
-        ## Too many iterators created? See if different approach, like vLLM
         params = {
             "n": 1,
             "best_of": best_of,
@@ -170,7 +166,7 @@ async def send_request(
 
     elif backend == "triton":
         async with grpcclient.InferenceServerClient(
-            url="localhost:8003"
+            url="localhost:8001"
         ) as triton_client:
 
             async def async_request_iterator():
