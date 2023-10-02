@@ -4,6 +4,8 @@ from functools import partial
 from typing import (Any, Dict, Iterable, List, Optional, Set, Tuple, Type,
                     Union)
 
+from concurrent.futures import ThreadPoolExecutor
+
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
@@ -11,6 +13,8 @@ from vllm.engine.ray_utils import initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+
+import time
 
 logger = init_logger(__name__)
 
@@ -206,22 +210,33 @@ class _AsyncLLMEngine(LLMEngine):
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
+        print(f"_run_workers_async start {time.time()}")
         all_outputs = []
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             elif self.parallel_config.worker_use_rpyc:
-                executor = partial(worker.aexecute_method, method)
+                # executor = partial(worker.aexecute_method, method)
+                pass
             else:
                 executor = getattr(worker, method)
 
-            output = executor(*args, **kwargs)
-            all_outputs.append(output)
+            if not self.parallel_config.worker_use_rpyc:
+                output = executor(*args, **kwargs)
+                all_outputs.append(output)
 
         if self.parallel_config.worker_use_ray:
             all_outputs = await asyncio.gather(*all_outputs)
         elif self.parallel_config.worker_use_rpyc:
-            all_outputs = await asyncio.gather(*all_outputs)
+            
+            # outputs = await asyncio.gather(*all_outputs)
+
+            
+            with ThreadPoolExecutor(max_workers=self.parallel_config.world_size) as tpe:
+                all_outputs = list(tpe.map(lambda worker: worker.execute_method(method, *args, **kwargs), self.workers))
+                # print(type(all_outputs))
+                # print(type(all_outputs[0]))
+
 
         if get_all_outputs:
             return all_outputs
@@ -234,6 +249,7 @@ class _AsyncLLMEngine(LLMEngine):
             # if we're using rpyc, we are returned coroutines, and we can't assert equality
             for other_output in all_outputs[1:]:
                 assert output == other_output
+        print(f"_run_workers_async end {time.time()}")
         return output
 
 
@@ -275,6 +291,8 @@ class AsyncLLMEngine:
                  **kwargs) -> None:
         assert not (engine_use_ray and engine_use_rpyc), (
             "Only one of engine_use_ray and engine_use_rpyc can be True.")
+        # TODO something similar with worker_use_ray + worker_use_rpyc probably
+        print(f">>> engine use ray: {engine_use_ray}, worker use ray/rpyc/none: {'ray' if worker_use_ray else 'rpyc' if worker_use_rpyc else 'none'}")
         self.worker_use_ray = worker_use_ray
         self.worker_use_rpyc = worker_use_rpyc
         self.engine_use_ray = engine_use_ray

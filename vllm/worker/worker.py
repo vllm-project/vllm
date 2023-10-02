@@ -15,6 +15,8 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory
 
+import time
+
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -274,6 +276,8 @@ class Worker:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
     ) -> SamplerOutput:
+        st = time.time()  # doesn't seem to change when we swap ray for rpyc
+        print(f"st {os.getpid()} {st}")  # the execute_models() do not start at the same time
         # Issue cache operations.
         issued_cache_op = False
         if blocks_to_swap_in:
@@ -310,6 +314,9 @@ class Worker:
             input_metadata=input_metadata,
             cache_events=cache_events,
         )
+        en = time.time()
+        print(f"en {os.getpid()} {en}")
+        print(f"execute_model time: {en - st}, pid {os.getpid()}")
         return output
 
 

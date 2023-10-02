@@ -801,23 +801,37 @@ class LLMEngine:
         """Runs the given method on all workers."""
         all_outputs = []
         for worker in self.workers:
+            # TODO clean up code
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             elif self.parallel_config.worker_use_rpyc:
-                executor = partial(worker.aexecute_method, method)
+                # executor = partial(worker.aexecute_method, method)
+                # executor = partial(worker.execute_method, method)
+                pass
             else:
                 executor = getattr(worker, method)
 
-            output = executor(*args, **kwargs)
-            all_outputs.append(output)
+            if not self.parallel_config.worker_use_rpyc:
+                # If we're using rpyc, call the fns later
+                output = executor(*args, **kwargs)
+                all_outputs.append(output)
 
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)
         elif self.parallel_config.worker_use_rpyc:
             # idk is it this? probably
-            import asyncio as aio  # TODO move to top
-            loop = aio.get_event_loop()
-            all_outputs = loop.run_until_complete(aio.gather(*all_outputs))
+            # TODO I think there's a bug in here where we need to spam the requests out as fast as possible
+            # but we don't
+            # import asyncio as aio  # TODO move to top
+            # loop = aio.get_event_loop()
+            # all_outputs = loop.run_until_complete(aio.gather(*all_outputs))
+
+            # TODO try multithreading/processing instead
+            from concurrent.futures import ThreadPoolExecutor  # TODO move import up
+            with ThreadPoolExecutor(max_workers=self.parallel_config.world_size) as tpe:
+                all_outputs = list(tpe.map(lambda worker: worker.execute_method(method, *args, **kwargs), self.workers))
+                # print(type(all_outputs))
+                # print(type(all_outputs[0]))
 
         if get_all_outputs:
             return all_outputs
