@@ -9,11 +9,11 @@ import torch
 
 from vllm.config import ParallelConfig
 from vllm.engine.ray_utils import get_open_port
-from vllm.worker.worker import _init_distributed_environment
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_all_gather,
 )
+from vllm.worker.worker import _init_distributed_environment
 
 
 def init_test_distributed_environment(pipeline_parallel_size: int,
