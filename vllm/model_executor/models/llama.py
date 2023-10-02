@@ -376,7 +376,7 @@ class LlamaForCausalLM(nn.Module):
                     shard_size //= self.quant_config.pack_factor
                     offset //= self.quant_config.pack_factor
 
-                if weight_name != "q_proj":
+                if weight_name in ["k_proj", "v_proj"]:
                     shard_id = tp_rank // num_kv_heads_replicas
                 else:
                     shard_id = tp_rank
