@@ -64,9 +64,8 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
         assert torch.allclose(t, expected)
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2,
-    reason="Need at least 2 GPUs to run the test.")
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("tensor_parallel_size", [2])
 @pytest.mark.parametrize("test_target",
                          [all_reduce_test_worker, all_gather_test_worker])
