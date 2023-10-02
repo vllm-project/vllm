@@ -2,9 +2,9 @@
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+from typing import List, Sequence
 
 import torch
-from typing import List, Sequence
 
 
 def ensure_divisibility(numerator, denominator):
@@ -57,7 +57,7 @@ class VocabUtility:
 
     @staticmethod
     def vocab_range_from_per_partition_vocab_size(
-            per_partition_vocab_size: int, rank) -> Sequence[int]:
+            per_partition_vocab_size: int, rank: int) -> Sequence[int]:
         index_f = rank * per_partition_vocab_size
         index_l = index_f + per_partition_vocab_size
         return index_f, index_l

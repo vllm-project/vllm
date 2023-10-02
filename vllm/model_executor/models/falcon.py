@@ -40,7 +40,7 @@ from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
                                                        ColumnParallelLinear,
                                                        RowParallelLinear)
 from vllm.model_executor.parallel_utils.communication_op import (
-    tenosr_model_parallel_all_reduce)
+    tensor_model_parallel_all_reduce)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
 
@@ -321,7 +321,7 @@ class FalconDecoderLayer(nn.Module):
             # only one all-reduce operator to reduce the results from
             # both MLP and Attention layers.
             mlp_output += attention_output
-            mlp_output = tenosr_model_parallel_all_reduce(mlp_output)
+            mlp_output = tensor_model_parallel_all_reduce(mlp_output)
             if attention_bias is not None:
                 mlp_output += attention_bias
             if mlp_bias is not None:

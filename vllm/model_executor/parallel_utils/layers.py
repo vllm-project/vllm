@@ -15,10 +15,11 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from .communication_op import (tenosr_model_parallel_all_reduce,
-                               tensor_model_parallel_all_gather)
+from vllm.model_executor.quantization_utils import QuantizationConfig
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather)
 
-from .utils import (
+from vllm.model_executor.parallel_utils.utils import (
     divide,
     VocabUtility,
     split_tensor_along_last_dim,
@@ -39,7 +40,7 @@ class VocabParallelEmbedding(torch.nn.Module):
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
-                 params_dtype: torch.dtype = None):
+                 params_dtype: Optional[torch.dtype] = None):
         super().__init__()
 
         # Keep the input dimensions.
@@ -49,6 +50,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
 
         self.tp_size = get_tensor_model_parallel_world_size()
+        # TODO: Handle vocab padding here.
         # Divide the weight matrix along the vocaburaly dimension.
         self.vocab_start_index, self.vocab_end_index = (
             VocabUtility.vocab_range_from_global_vocab_size(
@@ -79,7 +81,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         if self.tp_size > 1:
             output_parallel[input_mask, :] = 0.0
         # Reduce across all the model parallel GPUs.
-        output = tenosr_model_parallel_all_reduce(output_parallel)
+        output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 
 
@@ -98,11 +100,6 @@ class ColumnParallelLinear(torch.nn.Module):
         gather_output: If true, call all-gather on output and make Y available
                        to all GPUs, otherwise, every GPU will have its output
                        which is Y_i = XA_i
-        init_method: method to initialize weights. Note that bias is always set
-                     to zero.
-        keep_master_weight_for_test: This was added for testing and should be
-                                     set to False. It returns the master weights
-                                     used for initialization.
         skip_bias_add: This was added to enable performance optimizations where
                        bias can be fused with other element-wise operations. we
                        skip adding bias but instead return it.
@@ -112,14 +109,13 @@ class ColumnParallelLinear(torch.nn.Module):
 
     def __init__(
         self,
-        input_size,
-        output_size,
-        *,
-        bias=True,
-        gather_output=True,
-        skip_bias_add=False,
-        params_dtype=None,
-        quant_config=None,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        gather_output: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
 
@@ -217,15 +213,14 @@ class RowParallelLinear(torch.nn.Module):
 
     def __init__(
         self,
-        input_size,
-        output_size,
-        *,
-        bias=True,
-        input_is_parallel=False,
-        skip_bias_add=False,
-        params_dtype=None,
-        reduce_results=True,
-        quant_config=None,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        input_is_parallel: bool = False,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        reduce_results: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         # Keep input parameters
@@ -295,7 +290,7 @@ class RowParallelLinear(torch.nn.Module):
         # Matrix multiply.
         output_parallel = self.apply_weights(input_parallel)
         if self.reduce_results and self.tp_size > 1:
-            output_ = tenosr_model_parallel_all_reduce(output_parallel)
+            output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output_ = output_parallel
 

@@ -31,10 +31,12 @@ class MockEngine:
     def stop_generating(self):
         self.request_id = None
 
-    def add_request(self, **kwargs):  # pylint: disable=unused-argument
+    def add_request(self, **kwargs):
+        del kwargs  # Unused
         self.add_request_calls += 1
 
-    def abort_request(self, request_id):  # pylint: disable=unused-argument
+    def abort_request(self, request_id):
+        del request_id  # Unused
         self.abort_request_calls += 1
 
 

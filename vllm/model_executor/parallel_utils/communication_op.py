@@ -6,7 +6,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 )
 
 
-def tenosr_model_parallel_all_reduce(input_):
+def tensor_model_parallel_all_reduce(input_):
     """All-reduce the input tensor across model parallel group.
 
     Note: This operation is applied in-place on the input tensor.
