@@ -417,6 +417,7 @@ class AsyncLLMEngine:
             request.
         """
         # Preprocess the request.
+        # This should not be used for logging, as it is monotonic time.
         arrival_time = time.monotonic()
 
         try:
