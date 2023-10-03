@@ -119,7 +119,9 @@ class RPyCWorkerService(rpyc.Service):
 class RPyCWorkerClient:
     def __init__(self, conn):
         self.conn = conn
-        print("workerclient.conn type", type(self.conn))
+        # conn is type rpyc.core.protocol.Connection
+        # import pdb; pdb.set_trace()
+        # print("workerclient.conn type", type(self.conn))  # apparently this hangs? wtf
         def async_wrap(f):
             f = rpyc.async_(f)
             async def _func(*args, **kwargs):
