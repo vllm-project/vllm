@@ -277,7 +277,7 @@ class Worker:
         blocks_to_copy: Dict[int, List[int]],
     ) -> SamplerOutput:
         st = time.time()  # doesn't seem to change when we swap ray for rpyc
-        print(f"st {os.getpid()} {st}")  # the execute_models() do not start at the same time
+        # print(f"st {os.getpid()} {st}")  # the execute_models() do not start at the same time
         # Issue cache operations.
         issued_cache_op = False
         if blocks_to_swap_in:
@@ -315,8 +315,8 @@ class Worker:
             cache_events=cache_events,
         )
         en = time.time()
-        print(f"en {os.getpid()} {en}")
-        print(f"execute_model time: {en - st}, pid {os.getpid()}")
+        # print(f"en {os.getpid()} {en}")
+        # print(f"execute_model time: {en - st}, pid {os.getpid()}")
         return output
 
 
