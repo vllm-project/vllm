@@ -18,13 +18,14 @@ engine = None
 
 
 @app.get("/livez")
-def livez():
-    return ""
+def livez() -> Response:
+    return Response()
 
 
 @app.get("/readyz")
-def readyz():
-    return ""
+def readyz() -> Response:
+    return Response()
+
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
