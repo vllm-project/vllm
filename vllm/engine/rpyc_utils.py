@@ -119,6 +119,7 @@ class RPyCWorkerService(rpyc.Service):
 class RPyCWorkerClient:
     def __init__(self, conn):
         self.conn = conn
+        print("workerclient.conn type", type(self.conn))
         def async_wrap(f):
             f = rpyc.async_(f)
             async def _func(*args, **kwargs):
