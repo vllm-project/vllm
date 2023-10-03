@@ -417,7 +417,8 @@ class AsyncLLMEngine:
             request.
         """
         # Preprocess the request.
-        arrival_time = time.time()
+        # This should not be used for logging, as it is monotonic time.
+        arrival_time = time.monotonic()
 
         try:
             stream = await self.add_request(request_id,

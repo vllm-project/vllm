@@ -40,13 +40,13 @@ def main(args: argparse.Namespace):
     def run_to_completion(profile: bool = False):
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         llm.generate(prompt_token_ids=dummy_prompt_token_ids,
                      sampling_params=sampling_params,
                      use_tqdm=False)
 
-        end_time = time.time()
+        end_time = time.perf_counter()
         latency = end_time - start_time
         if profile:
             torch.cuda.cudart().cudaProfilerStop()
