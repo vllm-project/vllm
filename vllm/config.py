@@ -41,6 +41,9 @@ class ModelConfig:
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id. If unspecified, will use the default
             version.
+        tokenizer_revision: The specific tokenizer version to use. It can be a
+            branch name, a tag name, or a commit id. If unspecified, will use
+            the default version.
         max_model_len: Maximum length of a sequence (including prompt and
             output). If None, will be derived from the model.
         quantization: Quantization method that was used to quantize the model
@@ -58,6 +61,7 @@ class ModelConfig:
         dtype: str,
         seed: int,
         revision: Optional[str] = None,
+        tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
     ) -> None:
@@ -69,6 +73,7 @@ class ModelConfig:
         self.load_format = load_format
         self.seed = seed
         self.revision = revision
+        self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
 
         self.hf_config = get_config(model, trust_remote_code, revision)
