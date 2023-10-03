@@ -192,6 +192,7 @@ class _AsyncLLMEngine(LLMEngine):
             return ignored
 
         # Execute the model.
+        # TODO how big are the args even?
         output = await self._run_workers_async(
             "execute_model",
             seq_group_metadata_list=seq_group_metadata_list,
