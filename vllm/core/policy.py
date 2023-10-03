@@ -16,12 +16,6 @@ class Policy:
     ) -> float:
         raise NotImplementedError
 
-    def can_preempt(
-            self,
-            seq_group: SequenceGroup  # pylint: disable=unused-argument
-    ) -> bool:
-        return True
-
     def sort_by_priority(
         self,
         now: float,
