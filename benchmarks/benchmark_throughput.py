@@ -93,10 +93,10 @@ def run_vllm(
             sampling_params=sampling_params,
         )
 
-    start = time.time()
+    start = time.perf_counter()
     # FIXME(woosuk): Do use internal method.
     llm._run_engine(use_tqdm=True)
-    end = time.time()
+    end = time.perf_counter()
     return end - start
 
 
@@ -118,7 +118,7 @@ def run_hf(
     llm = llm.cuda()
 
     pbar = tqdm(total=len(requests))
-    start = time.time()
+    start = time.perf_counter()
     batch: List[str] = []
     max_prompt_len = 0
     max_output_len = 0
@@ -156,7 +156,7 @@ def run_hf(
         batch = []
         max_prompt_len = 0
         max_output_len = 0
-    end = time.time()
+    end = time.perf_counter()
     return end - start
 
 
