@@ -107,7 +107,7 @@ class RPyCWorkerService(rpyc.Service):
 
     def exposed_execute_method(self, method: str, *args, **kwargs):
         # print(f"execute_method running on {os.getpid()}")
-        # print(type(self.worker))
+        # raise ValueError("crashing to view call stack")
         print(os.getpid(), "starthead", time.time())
         args, kwargs = obtain(args), obtain(kwargs)
         executor = getattr(self.worker, method)
