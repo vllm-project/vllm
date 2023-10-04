@@ -25,6 +25,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -330,6 +331,7 @@ class LlamaForCausalLM(nn.Module):
         self._compiled_tensors: Dict[int, Tuple[torch.Tensor,
                                                 torch.Tensor, ], ] = {}
         self._compiled_logits: Dict[int, torch.Tensor] = {}
+        self._compiled_input_metadata: Dict[int, InputMetadata] = {}
 
         # warm up. but why?
         # s = torch.cuda.Stream()
@@ -340,9 +342,11 @@ class LlamaForCausalLM(nn.Module):
         #     _ = self.model.forward(*self._compiled_inputs)
         # torch.cuda.current_stream().wait_stream(s)
 
-        batch_size = input_ids.shape[0]
-        for i in range(batch_size, 0, -8):
+        batch_size = input_metadata.block_tables.shape[0]
+        for i in range(batch_size, 0, -1):
             print("recording for batch size ", i)
+
+            padded_i = math.ceil(i / 8) * 8
             pool = (None if i == batch_size else
                     self._cuda_graph[batch_size].pool())  # reusing memory pool
 
@@ -351,35 +355,33 @@ class LlamaForCausalLM(nn.Module):
             # Need the following tensors from input_metadata:
             # input_metadata.block_tables,
             # input_metadata.context_lens,
-            # input_metadata.max_context_len,
+            # input_metadata.slot_mapping,
+            # input_metadata.max_context_len, # hardcoded to 4096
 
-            self._compiled_input_metadata = InputMetadata(
+            self._compiled_input_metadata[i] = InputMetadata(
                 input_metadata.seq_groups,
                 input_metadata.seq_data,
                 input_metadata.prompt_lens,
-                input_metadata.slot_mapping.clone(),
-                input_metadata.context_lens.clone(),
+                input_metadata.slot_mapping[:i].clone(),
+                input_metadata.context_lens[:i].clone(),
                 input_metadata.max_context_len,
-                input_metadata.block_tables.clone(),
+                input_metadata.block_tables[:i].clone(),
                 input_metadata.use_cuda_graph,
             )
 
-            self._compiled_input_metadata.seq_data = None
-            self._compiled_input_metadata.seq_groups = None
-            self._compiled_input_metadata.prompt_lens = None
-            self._compiled_input_metadata.max_context_len = -1
-            self.num_prompts = -1
-            self.num_prompt_tokens = -1
-            self.num_generation_tokens = -1
-            self.num_valid_tokens = -1
-            self.max_num_blocks_per_seq = -1
-
-            # Set during the execution of the first attention op.
-            self.attn_bias = None
+            # self._compiled_input_metadata.seq_data = None
+            # self._compiled_input_metadata.seq_groups = None
+            # self._compiled_input_metadata.prompt_lens = None
+            # self._compiled_input_metadata.max_context_len = -1
+            # self.num_prompts = -1
+            # self.num_prompt_tokens = -1
+            # self.num_generation_tokens = -1
+            # self.num_valid_tokens = -1
+            # self.max_num_blocks_per_seq = -1
 
             self._compiled_tensors[i] = tuple([
-                input_ids[:i].clone(),
-                positions[:i].clone(),
+                input_ids[:padded_i].clone(),
+                positions[:padded_i].clone(),
             ])
 
             print("warm up before recording")
@@ -387,7 +389,7 @@ class LlamaForCausalLM(nn.Module):
             self._compiled_logits[i] = self.model.forward(
                 *self._compiled_tensors[i],
                 kv_caches=kv_caches,
-                input_metadata=self._compiled_input_metadata,
+                input_metadata=self._compiled_input_metadata[i],
                 cache_events=None,
             )
 
@@ -396,7 +398,7 @@ class LlamaForCausalLM(nn.Module):
                 self._compiled_logits[i] = self.model.forward(
                     *self._compiled_tensors[i],
                     kv_caches=kv_caches,
-                    input_metadata=self._compiled_input_metadata,
+                    input_metadata=self._compiled_input_metadata[i],
                     cache_events=None,
                 )
 
@@ -413,11 +415,11 @@ class LlamaForCausalLM(nn.Module):
             # print("replaying with batch size ", batch_size)
             self._compiled_tensors[batch_size][0].copy_(input_ids)
             self._compiled_tensors[batch_size][1].copy_(positions)
-            self._compiled_input_metadata.block_tables.copy_(
+            self._compiled_input_metadata[batch_size].block_tables.copy_(
                 input_metadata.block_tables)
-            self._compiled_input_metadata.context_lens.copy_(
+            self._compiled_input_metadata[batch_size].context_lens.copy_(
                 input_metadata.context_lens)
-            self._compiled_input_metadata.slot_mapping.copy_(
+            self._compiled_input_metadata[batch_size].slot_mapping.copy_(
                 input_metadata.slot_mapping)
 
             self._cuda_graph[batch_size].replay()
@@ -441,7 +443,7 @@ class LlamaForCausalLM(nn.Module):
                                                       cache_events)
 
         return self.compiled_model(
-            input_ids.shape[0],
+            input_metadata.block_tables.shape[0],
             input_ids,
             positions,
             kv_caches,

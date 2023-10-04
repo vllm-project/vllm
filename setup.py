@@ -18,7 +18,7 @@ SUPPORTED_ARCHS = ["7.0", "7.5", "8.0", "8.6", "8.9", "9.0"]
 # Compiler flags.
 CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
 # TODO(woosuk): Should we use -O3?
-NVCC_FLAGS = ["-O2", "-std=c++17"]
+NVCC_FLAGS = ["-g", "-O2", "-std=c++17"]
 
 ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
@@ -121,7 +121,7 @@ for capability in compute_capabilities:
 
 # Use NVCC threads to parallelize the build.
 if nvcc_cuda_version >= Version("11.2"):
-    num_threads = min(os.cpu_count(), 8)
+    num_threads = max(os.cpu_count(), 8)
     NVCC_FLAGS += ["--threads", str(num_threads)]
 
 ext_modules = []

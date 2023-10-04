@@ -255,7 +255,7 @@ class Worker:
                                            dtype=torch.int,
                                            device="cuda")
         padded_block_tables = [
-            _pad_to_max(block_table, 4096)
+            _pad_to_max(block_table, 64)
             for block_table in generation_block_tables
         ]
         block_tables_tensor = torch.tensor(padded_block_tables,
