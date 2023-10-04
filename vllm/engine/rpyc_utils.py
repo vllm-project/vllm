@@ -109,7 +109,7 @@ class RPyCWorkerService(rpyc.Service):
         # print(f"execute_method running on {os.getpid()}")
         # raise ValueError("crashing to view call stack")
         print(os.getpid(), "starthead", time.time())
-        args, kwargs = obtain(args), obtain(kwargs)
+        args, kwargs = obtain(args), obtain(kwargs)  # is this thing slow?
         executor = getattr(self.worker, method)
         print(os.getpid(), "startexec", time.time())
         retval = executor(*args, **kwargs)
