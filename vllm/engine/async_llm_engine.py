@@ -214,16 +214,19 @@ class _AsyncLLMEngine(LLMEngine):
         st = time.time()
         print(f"_run_workers_async start {st}")
         all_outputs = []
+
+        rpyc_use_tpe = False
+
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             elif self.parallel_config.worker_use_rpyc:
-                # executor = partial(worker.aexecute_method, method)
+                executor = partial(worker.aexecute_method, method)
                 pass
             else:
                 executor = getattr(worker, method)
 
-            if not self.parallel_config.worker_use_rpyc:
+            if not self.parallel_config.worker_use_rpyc or not rpyc_use_tpe:
                 output = executor(*args, **kwargs)
                 all_outputs.append(output)
 
@@ -231,11 +234,11 @@ class _AsyncLLMEngine(LLMEngine):
             all_outputs = await asyncio.gather(*all_outputs)
         elif self.parallel_config.worker_use_rpyc:
             
-            # outputs = await asyncio.gather(*all_outputs)
+            all_outputs = await asyncio.gather(*all_outputs)
 
             
-            with ThreadPoolExecutor(max_workers=self.parallel_config.world_size) as tpe:  # increasing max_workers to 4 * worldsize doesn't seem to help
-                all_outputs = list(tpe.map(lambda worker: worker.execute_method(method, *args, **kwargs), self.workers))
+            # with ThreadPoolExecutor(max_workers=self.parallel_config.world_size) as tpe:  # increasing max_workers to 4 * worldsize doesn't seem to help
+                # all_outputs = list(tpe.map(lambda worker: worker.execute_method(method, *args, **kwargs), self.workers))
                 # print(type(all_outputs))
                 # print(type(all_outputs[0]))
 
