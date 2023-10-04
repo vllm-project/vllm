@@ -5,8 +5,8 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    gather_from_tensor_model_parallel_region)
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_gather)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceOutputs
 
@@ -217,7 +217,7 @@ def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
     logits = torch.matmul(hidden_states, embedding.t())
     if embedding_bias is not None:
         logits += embedding_bias
-    logits = gather_from_tensor_model_parallel_region(logits)
+    logits = tensor_model_parallel_all_gather(logits)
     # Remove paddings in vocab (if any).
     logits = logits[:, :vocab_size]
     return logits
@@ -415,7 +415,7 @@ def _get_topk_logprobs(
 def _build_sequence_outputs(
     parent_ids: List[int],
     next_token_ids: List[int],
-    selected_token_logprobs: torch.Tensor,
+    selected_token_logprobs: List[float],
     parent_seq_ids: List[int],
     parent_logprobs: torch.Tensor,
     num_output_logprobs: Optional[int],
