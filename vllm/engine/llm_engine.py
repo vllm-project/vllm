@@ -557,9 +557,12 @@ class LLMEngine:
         for seq_group_metadata in seq_group_metadata_list:
             sampling_params = seq_group_metadata.sampling_params
             batch_lora_ids.append(sampling_params.lora_id)
+
+        print(f"batch lora id: {batch_lora_ids}")
         for worker in self.workers:
             model = worker.model
             for _, module in model.named_modules():
+                print(f"module {module}")
                 if isinstance(module, BLinear):
                     print(f"set batch lora id {batch_lora_ids}")
                     module.batch_lora_ids = batch_lora_ids
