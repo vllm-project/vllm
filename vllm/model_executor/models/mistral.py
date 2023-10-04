@@ -38,8 +38,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.quantized_linear import ParallelLinear
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
@@ -64,13 +63,11 @@ class MistralMLP(nn.Module):
                                                   2 * intermediate_size,
                                                   bias=False,
                                                   gather_output=False,
-                                                  perform_initialization=False,
                                                   quant_config=quant_config)
         self.down_proj = ParallelLinear.row(intermediate_size,
                                             hidden_size,
                                             bias=False,
                                             input_is_parallel=True,
-                                            perform_initialization=False,
                                             quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -116,7 +113,6 @@ class MistralAttention(nn.Module):
             self.head_dim,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         self.o_proj = ParallelLinear.row(
@@ -124,7 +120,6 @@ class MistralAttention(nn.Module):
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         self.attn = PagedAttentionWithRoPE(self.num_heads,
@@ -225,7 +220,9 @@ class MistralModel(nn.Module):
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
-            vocab_size, config.hidden_size, perform_initialization=False)
+            vocab_size,
+            config.hidden_size,
+        )
         self.layers = nn.ModuleList([
             MistralDecoderLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)
@@ -275,7 +272,6 @@ class MistralForCausalLM(nn.Module):
                                              vocab_size,
                                              bias=False,
                                              gather_output=False,
-                                             perform_initialization=False,
                                              quant_config=None)
         self.sampler = Sampler(config.vocab_size)
 

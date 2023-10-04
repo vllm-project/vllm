@@ -61,7 +61,6 @@ class SamplingParams:
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
         skip_special_tokens: Whether to skip special tokens in the output.
-            Defaults to true.
     """
 
     def __init__(
@@ -76,8 +75,8 @@ class SamplingParams:
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
-        stop: Union[None, str, List[str]] = None,
-        stop_token_ids: List[int] = None,
+        stop: Optional[Union[str, List[str]]] = None,
+        stop_token_ids: Optional[List[int]] = None,
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
