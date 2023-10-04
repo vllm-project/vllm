@@ -44,7 +44,7 @@ class Sampler(nn.Module):
         logits = torch.matmul(hidden_states, embedding.t())
         if embedding_bias is not None:
             logits += embedding_bias
-        logits = gather_from_tensor_model_parallel_region(logits)
+        logits = tensor_model_parallel_all_gather(logits)
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.vocab_size]
         return logits
