@@ -305,7 +305,7 @@ class Worker:
         # Prepare input tensors.
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
-
+        med = time.time()
         # Execute the model.
         output = self.model(
             input_ids=input_tokens,
@@ -316,7 +316,7 @@ class Worker:
         )
         en = time.time()
         # print(f"en {os.getpid()} {en}")
-        print(f"execute_model time: {en - st}, pid {os.getpid()}")
+        print(f"execute_model time: {en - st}, prep inputs: {med - st}, model forward: {en - med}, pid {os.getpid()}")
         return output
 
 
