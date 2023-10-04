@@ -211,7 +211,7 @@ class _AsyncLLMEngine(LLMEngine):
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
-        # print(f"_run_workers_async start {time.time()}")
+        print(f"_run_workers_async start {time.time()}")
         all_outputs = []
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
@@ -250,7 +250,7 @@ class _AsyncLLMEngine(LLMEngine):
             # if we're using rpyc, we are returned coroutines, and we can't assert equality
             for other_output in all_outputs[1:]:
                 assert output == other_output
-        # print(f"_run_workers_async end {time.time()}")
+        print(f"_run_workers_async end {time.time()}")
         return output
 
 

@@ -108,12 +108,12 @@ class RPyCWorkerService(rpyc.Service):
     def exposed_execute_method(self, method: str, *args, **kwargs):
         # print(f"execute_method running on {os.getpid()}")
         # raise ValueError("crashing to view call stack")
-        # print(os.getpid(), "starthead", time.time())
+        print(os.getpid(), "starthead", time.time())
         args, kwargs = obtain(args), obtain(kwargs)
         executor = getattr(self.worker, method)
-        # print(os.getpid(), "startexec", time.time())
+        print(os.getpid(), "startexec", time.time())
         retval = executor(*args, **kwargs)
-        # print(os.getpid(), "stopexec", time.time())
+        print(os.getpid(), "stopexec", time.time())
         return retval
     
 class RPyCWorkerClient:
@@ -164,9 +164,9 @@ class RPyCWorkerClient:
         self._init_worker(model_config, parallel_config, scheduler_config)
 
     def execute_method(self, method, *args, **kwargs):
-        # print(f"executing method {method} at {time.time()}")  # with threadpoolexecutor these prints seem to execute at the same time
+        print(f"executing method {method} at {time.time()}")  # with threadpoolexecutor these prints seem to execute at the same time
         ans = self._execute_method(method, *args, **kwargs)  # TODO is this right?
-        # print(f"finish executing method {method} at {time.time()}")
+        print(f"finish executing method {method} at {time.time()}")
         new_ans = obtain(ans)
         return new_ans
     
@@ -175,7 +175,7 @@ class RPyCWorkerClient:
     
     async def aexecute_method(self, method, *args, **kwargs):
         t1 = time.time()
-        # print(f'started at {t1}')
+        print(f'started at {t1}')
         ans = await self._aexecute_method(method, *args, **kwargs)
         # t2 = time.time()
         new_ans = obtain(ans)  # seems fast enough
