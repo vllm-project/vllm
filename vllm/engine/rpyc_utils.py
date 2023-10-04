@@ -108,12 +108,12 @@ class RPyCWorkerService(rpyc.Service):
     def exposed_execute_method(self, method: str, *args, **kwargs):
         # print(f"execute_method running on {os.getpid()}")
         # raise ValueError("crashing to view call stack")
-        print(os.getpid(), "starthead", time.time())
+        # print(os.getpid(), "starthead", time.time())
         args, kwargs = obtain(args), obtain(kwargs)  # is this thing slow?
         executor = getattr(self.worker, method)
-        print(os.getpid(), "startexec", time.time())
+        # print(os.getpid(), "startexec", time.time())
         retval = executor(*args, **kwargs)
-        print(os.getpid(), "stopexec", time.time())
+        # print(os.getpid(), "stopexec", time.time())
         return retval
     
 class RPyCWorkerClient:
@@ -175,7 +175,7 @@ class RPyCWorkerClient:
     
     async def aexecute_method(self, method, *args, **kwargs):
         t1 = time.time()
-        print(f'started at {t1}')
+        # print(f'started at {t1}')
         ans = await self._aexecute_method(method, *args, **kwargs)
         # t2 = time.time()
         new_ans = obtain(ans)  # seems fast enough
