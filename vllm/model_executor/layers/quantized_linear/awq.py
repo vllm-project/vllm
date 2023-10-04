@@ -4,8 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import quantization_ops
-from vllm.model_executor.parallel_utils.tensor_parallel.layers import (
-    ColumnParallelLinear, RowParallelLinear)
+from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
+                                                       RowParallelLinear)
 
 
 class AWQColumnParallelLinear(ColumnParallelLinear):

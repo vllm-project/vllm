@@ -75,6 +75,7 @@ class LLMEngine:
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"revision={model_config.revision}, "
+            f"tokenizer_revision={model_config.tokenizer_revision}, "
             f"trust_remote_code={model_config.trust_remote_code}, "
             f"dtype={model_config.dtype}, "
             f"max_seq_len={model_config.max_model_len}, "
@@ -98,6 +99,7 @@ class LLMEngine:
             model_config.tokenizer,
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code,
+            tokenizer_revision=model_config.tokenizer_revision,
             revision=model_config.revision)
         self.seq_counter = Counter()
 
@@ -254,10 +256,10 @@ class LLMEngine:
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
-                the current time.
+                the current monotonic time.
         """
         if arrival_time is None:
-            arrival_time = time.time()
+            arrival_time = time.monotonic()
         if prompt_token_ids is None:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
@@ -566,7 +568,7 @@ class LLMEngine:
         prompt_run: bool,
         num_batched_tokens: int,
     ) -> None:
-        now = time.time()
+        now = time.monotonic()
         # Log the number of batched input tokens.
         if prompt_run:
             self.num_prompt_tokens.append((now, num_batched_tokens))
