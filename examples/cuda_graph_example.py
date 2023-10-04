@@ -52,12 +52,13 @@ def main(args: argparse.Namespace):
     # Warm up
     make_predictions(engine, test_prompts, sampling_params)
 
-    start = time.time()
+    for i in range(5):
+        start = time.time()
 
-    # with profile(record_shapes=True) as prof:
-    print("start profiling")
-    make_predictions(engine, test_prompts, sampling_params)
-    print(f"Time taken: {time.time() - start:.2f} seconds")
+        # with profile(record_shapes=True) as prof:
+        print("start profiling")
+        make_predictions(engine, test_prompts, sampling_params)
+        print(f"Time taken: {time.time() - start:.2f} seconds")
 
     # prof.export_chrome_trace("trace.json")
 

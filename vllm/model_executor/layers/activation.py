@@ -2,8 +2,13 @@
 import torch
 import torch.nn as nn
 
+from typing import Dict, Tuple
+
 from vllm import activation_ops
 
+import traceback
+
+_cached_tensor: Dict[Tuple, torch.Tensor] = {}
 
 class SiluAndMul(nn.Module):
     """An activation function for SwiGLU.
@@ -15,9 +20,17 @@ class SiluAndMul(nn.Module):
         return: (num_tokens, d)
     """
 
+    def get_cached_tensor(self, num_tokens, d, dtype, device) -> torch.Tensor:
+        global _cached_tensor
+        if (num_tokens, d, dtype, device) not in _cached_tensor:
+            _cached_tensor[(num_tokens, d, dtype, device)] = torch.empty(
+                num_tokens, d, dtype=dtype, device=device)
+        return _cached_tensor[(num_tokens, d, dtype, device)]
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         num_tokens = x.shape[0]
         d = x.shape[1] // 2
+        # out = self.get_cached_tensor(num_tokens, d, x.dtype, x.device)
         out = torch.empty(num_tokens, d, dtype=x.dtype, device=x.device)
         activation_ops.silu_and_mul(out, x)
         return out

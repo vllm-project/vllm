@@ -257,13 +257,6 @@ class LlamaModel(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        # print("in llama forward")
-        # print(f"{input_ids=}")
-        # print(f"{positions=}")
-        # print(
-        #     f"{[(kvcache[0].data_ptr(), kvcache[1].data_ptr()) if kvcache[0] is not None else () for kvcache in kv_caches]=}"
-        # )
-        # print(f"{input_metadata=}")
         hidden_states = self.embed_tokens(input_ids)
         for i in range(len(self.layers)):
             if cache_events is None:
@@ -412,7 +405,7 @@ class LlamaForCausalLM(nn.Module):
             input_metadata: InputMetadata,
             cache_events: Optional[List[torch.cuda.Event]],
         ):
-            # print("replaying with batch size ", batch_size)
+            print("replaying with batch size ", batch_size)
             self._compiled_tensors[batch_size][0].copy_(input_ids)
             self._compiled_tensors[batch_size][1].copy_(positions)
             self._compiled_input_metadata[batch_size].block_tables.copy_(
