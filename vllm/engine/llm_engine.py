@@ -563,6 +563,7 @@ class LLMEngine:
             model = worker.model
             for _, module in model.named_modules():
                 print(f"module {module}")
+                print(f"isinstance {isinstance(module, BLinear)}")
                 if isinstance(module, BLinear):
                     print(f"set batch lora id {batch_lora_ids}")
                     module.batch_lora_ids = batch_lora_ids
