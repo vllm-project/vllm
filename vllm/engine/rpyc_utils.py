@@ -58,15 +58,8 @@ class RPyCWorkerService(rpyc.Service):
         if "NCCL_SOCKET_IFNAME" not in os.environ:
             os.environ["NCCL_SOCKET_IFNAME"] = "^lo,docker,veth"
 
-        # TODO debug stuff
-        print(os.getpid(), "importing torch", time.time())
-        # import importlib
         import torch  # this import is fast, which suggests we've already imported it
         import torch.distributed as dist
-        # importlib.reload(torch)  # tried reloading torch/dist, get some error generic_type: cannot initialize type "GradBucket": an object with that name is already defined
-        # importlib.reload(dist)
-        print(os.getpid(), "done importing torch", time.time())
-        print("Cuda support:", torch.cuda.is_available(),":", torch.cuda.device_count(), "devices")
 
         # ray makes a call to init process group here
         dist.init_process_group(backend="nccl", init_method="env://", rank=rank, world_size=world_size, timeout=timedelta(seconds=1800))
@@ -77,17 +70,9 @@ class RPyCWorkerService(rpyc.Service):
         os.environ["RANK"] = str(rank)
         os.environ["LOCAL_RANK"] = str(rank)
 
-    def exposed_init_worker_doesnt_work(self, worker_init_fn):
-        print(f"init_worker running on {os.getpid()}")
-        # TODO check that worker_init_fn runs on the worker process
-        # can't pickle worker_init_fn shrug
-        worker_init_fn = obtain(worker_init_fn)
-        print(worker_init_fn, type(worker_init_fn))
-        self.worker = worker_init_fn()
-        print(type(self.worker))
-        # dumb hack idk how to get the thing to initialize the worker here so will do it manually
-
     def exposed_init_worker(self, model_config, parallel_config, scheduler_config):
+        # we import worker explicitly here as opposed to provide some generic init_worker_fn() api
+        # since the init_worker_fn() can't be pickled and sent over.
         # import inside worker process since if not it'll break the engine process
         # probably same reason as why _init_workers_ray imports this so late?
         from vllm.worker.worker import Worker
@@ -149,9 +134,6 @@ class RPyCWorkerClient:
     
     def init_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
         self._init_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)
-
-    def init_worker_doesnt_work(self, worker_init_fn):
-        self._init_worker(worker_init_fn)
 
     def init_worker(self, model_config, parallel_config, scheduler_config):
         # we run obtain() on the worker to send {model|parallel|scheduler}_config to the workers
