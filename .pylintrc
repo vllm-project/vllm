@@ -8,7 +8,7 @@
 [MASTER]
 
 # Files or directories to be skipped. They should be base names, not paths.
-ignore=docs,parallel_utils
+ignore=docs
 
 # Files or directories matching the regex patterns are skipped. The regex
 # matches against base names, not paths.

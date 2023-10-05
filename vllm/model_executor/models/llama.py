@@ -25,7 +25,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -39,8 +39,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.quantized_linear import ParallelLinear
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
@@ -64,13 +63,11 @@ class LlamaMLP(nn.Module):
                                                   2 * intermediate_size,
                                                   bias=False,
                                                   gather_output=False,
-                                                  perform_initialization=False,
                                                   quant_config=quant_config)
         self.down_proj = ParallelLinear.row(intermediate_size,
                                             hidden_size,
                                             bias=False,
                                             input_is_parallel=True,
-                                            perform_initialization=False,
                                             quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -92,6 +89,7 @@ class LlamaAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
@@ -102,8 +100,16 @@ class LlamaAttention(nn.Module):
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
-        assert self.total_num_kv_heads % tp_size == 0
-        self.num_kv_heads = self.total_num_kv_heads // tp_size
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        num_kv_heads_replicas = max(1, tp_size // self.total_num_kv_heads)
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -113,11 +119,11 @@ class LlamaAttention(nn.Module):
 
         self.qkv_proj = ParallelLinear.column(
             hidden_size,
-            (self.total_num_heads + 2 * self.total_num_kv_heads) *
+            (self.total_num_heads +
+             2 * self.total_num_kv_heads * num_kv_heads_replicas) *
             self.head_dim,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         self.o_proj = ParallelLinear.row(
@@ -125,7 +131,6 @@ class LlamaAttention(nn.Module):
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         self.attn = PagedAttentionWithRoPE(
@@ -135,7 +140,8 @@ class LlamaAttention(nn.Module):
             base=self.rope_theta,
             max_position=self.max_position_embeddings,
             rotary_dim=self.head_dim,
-            num_kv_heads=self.num_kv_heads)
+            num_kv_heads=self.num_kv_heads,
+            rope_scaling=rope_scaling)
 
     def forward(
         self,
@@ -165,6 +171,7 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
+        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         self.self_attn = LlamaAttention(
@@ -172,6 +179,7 @@ class LlamaDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
         )
@@ -228,7 +236,9 @@ class LlamaModel(nn.Module):
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
-            vocab_size, config.hidden_size, perform_initialization=False)
+            vocab_size,
+            config.hidden_size,
+        )
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)
@@ -287,7 +297,6 @@ class LlamaForCausalLM(nn.Module):
                                              vocab_size,
                                              bias=False,
                                              gather_output=False,
-                                             perform_initialization=False,
                                              quant_config=None)
         self.sampler = Sampler(config.vocab_size)
 
@@ -333,11 +342,15 @@ class LlamaForCausalLM(nn.Module):
                 row_parallel_weights.append(f"{layer}.{suffix}")
 
         tp_size = get_tensor_model_parallel_world_size()
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+        tp_rank = get_tensor_model_parallel_rank()
         q_proj_shard_size = (self.config.hidden_size // tp_size)
+        num_kv_heads_replicas = max(1,
+                                    tp_size // self.config.num_key_value_heads)
+        num_kv_heads_per_gpu = max(1,
+                                   self.config.num_key_value_heads // tp_size)
         kv_proj_shard_size = (self.config.hidden_size //
                               self.config.num_attention_heads *
-                              self.config.num_key_value_heads // tp_size)
+                              num_kv_heads_per_gpu)
         attention_weight_specs = [
             # (weight_name, shard_size, offset)
             ("q_proj", q_proj_shard_size, 0),
@@ -373,9 +386,13 @@ class LlamaForCausalLM(nn.Module):
                     shard_size //= self.quant_config.pack_factor
                     offset //= self.quant_config.pack_factor
 
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
+                if weight_name in ["k_proj", "v_proj"]:
+                    shard_id = tp_rank // num_kv_heads_replicas
+                else:
+                    shard_id = tp_rank
+                loaded_weight = loaded_weight[shard_size *
+                                              shard_id:shard_size *
+                                              (shard_id + 1)]
                 param_slice = param.data[offset:offset + shard_size]
                 assert param_slice.shape == loaded_weight.shape
 
@@ -394,9 +411,8 @@ class LlamaForCausalLM(nn.Module):
                     param = param.T
 
                 shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
+                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
+                                              (tp_rank + 1)]
                 param_slice = param.data[shard_size * stride_id:shard_size *
                                          (stride_id + 1)]
                 assert param_slice.shape == loaded_weight.shape
@@ -412,13 +428,12 @@ class LlamaForCausalLM(nn.Module):
 
             if "embed_tokens" in name or "lm_head" in name:
                 load_padded_tensor_parallel_vocab(param, loaded_weight,
-                                                  tensor_model_parallel_rank)
+                                                  tp_rank)
                 continue
 
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          column_parallel_weights,
-                                         row_parallel_weights,
-                                         tensor_model_parallel_rank)
+                                         row_parallel_weights, tp_rank)
 
     def get_input_embeddings(self):
         return self.model.embed_tokens

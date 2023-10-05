@@ -56,8 +56,8 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         distributed_init_method: The initialization method for distributed
             execution. See `torch.distributed.init_process_group` for details.
-        stage_devices: The list of devices for each stage. Each stage is a list
-            of (rank, node_resource, device) tuples.
+        placement_group: Ray placement group for distributed execution.
+            Required for distributed execution.
         log_stats: Whether to log statistics.
     """
 
@@ -77,8 +77,10 @@ class LLMEngine:
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"revision={model_config.revision}, "
+            f"tokenizer_revision={model_config.tokenizer_revision}, "
             f"trust_remote_code={model_config.trust_remote_code}, "
             f"dtype={model_config.dtype}, "
+            f"max_seq_len={model_config.max_model_len}, "
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
@@ -88,6 +90,8 @@ class LLMEngine:
 
         self.model_config = model_config
         self.cache_config = cache_config
+        assert self.cache_config.sliding_window == getattr(
+            self.model_config.hf_config, "sliding_window", None)
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
@@ -97,6 +101,7 @@ class LLMEngine:
             model_config.tokenizer,
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code,
+            tokenizer_revision=model_config.tokenizer_revision,
             revision=model_config.revision)
         self.seq_counter = Counter()
 
@@ -254,10 +259,10 @@ class LLMEngine:
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
-                the current time.
+                the current monotonic time.
         """
         if arrival_time is None:
-            arrival_time = time.time()
+            arrival_time = time.monotonic()
 
         # When prompt_embeds is set, prompt_token_ids is filled with -1
         if prompt_embeds is not None:
@@ -400,7 +405,7 @@ class LLMEngine:
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            self._decode_sequence(seq)
+            self._decode_sequence(seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
@@ -576,7 +581,7 @@ class LLMEngine:
         prompt_run: bool,
         num_batched_tokens: int,
     ) -> None:
-        now = time.time()
+        now = time.monotonic()
         # Log the number of batched input tokens.
         if prompt_run:
             self.num_prompt_tokens.append((now, num_batched_tokens))
@@ -634,7 +639,8 @@ class LLMEngine:
                     f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         self.last_logging_time = now
 
-    def _decode_sequence(self, seq: Sequence) -> None:
+    def _decode_sequence(self, seq: Sequence,
+                         sampling_params: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
@@ -645,7 +651,7 @@ class LLMEngine:
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
-             skip_special_tokens=True,
+             skip_special_tokens=sampling_params.skip_special_tokens,
          )
         if seq.tokens is None:
             seq.tokens = new_tokens

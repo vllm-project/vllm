@@ -16,6 +16,15 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
+**The First vLLM Bay Area Meetup (Oct 5th 6pm-8pm PT)**
+
+We are excited to invite you to the first vLLM meetup!
+The vLLM team will share recent updates and roadmap.
+We will also have vLLM users and contributors coming up to the stage to share their experiences.
+Please register [here](https://lu.ma/first-vllm-meetup) and join us!
+
+---
+
 *Latest News* 🔥
 - [2023/09] We created our [Discord server](https://discord.gg/jz7wjKhh6g)! Join us to discuss vLLM and LLM serving! We will also post the latest announcements and updates there.
 - [2023/09] We released our [PagedAttention paper](https://arxiv.org/abs/2309.06180) on arXiv!
@@ -55,6 +64,7 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - GPT-NeoX (`EleutherAI/gpt-neox-20b`, `databricks/dolly-v2-12b`, `stabilityai/stablelm-tuned-alpha-7b`, etc.)
 - InternLM (`internlm/internlm-7b`, `internlm/internlm-chat-7b`, etc.)
 - LLaMA & LLaMA-2 (`meta-llama/Llama-2-70b-hf`, `lmsys/vicuna-13b-v1.3`, `young-geng/koala`, `openlm-research/open_llama_13b`, etc.)
+- Mistral (`mistralai/Mistral-7B-v0.1`, `mistralai/Mistral-7B-Instruct-v0.1`, etc.)
 - MPT (`mosaicml/mpt-7b`, `mosaicml/mpt-30b`, etc.)
 - OPT (`facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc.)
 - Qwen (`Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.)
