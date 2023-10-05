@@ -405,7 +405,6 @@ class LlamaForCausalLM(nn.Module):
             input_metadata: InputMetadata,
             cache_events: Optional[List[torch.cuda.Event]],
         ):
-            print("replaying with batch size ", batch_size)
             self._compiled_tensors[batch_size][0].copy_(input_ids)
             self._compiled_tensors[batch_size][1].copy_(positions)
             self._compiled_input_metadata[batch_size].block_tables.copy_(

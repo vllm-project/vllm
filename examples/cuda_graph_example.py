@@ -8,7 +8,6 @@ from torch.profiler import profile, ProfilerActivity
 
 def make_predictions(engine: LLMEngine, prompts: list, sampling_params: SamplingParams):
     for index, (prompt, sampling_params) in enumerate(prompts):
-        print(f"Request {index}: {prompt}")
         engine.add_request(str(index), prompt, sampling_params)
 
     # Run the engine by calling `engine.step()` manually.
@@ -31,23 +30,23 @@ def main(args: argparse.Namespace):
 
     # Test the following prompts.
     test_prompts = [
-        ("A robot may not injure a human being", sampling_params),
-        ("To be or not to be,", sampling_params),
-        ("What is the meaning of life?", sampling_params),
-        ("It is only with the heart that one can see rightly", sampling_params),
-        ("A robot may not injure a human being", sampling_params),
-        ("To be or not to be,", sampling_params),
-        ("A robot may not injure a human being", sampling_params),
-        ("To be or not to be,", sampling_params),
-        ("What is the meaning of life?", sampling_params),
-        ("It is only with the heart that one can see rightly", sampling_params),
-        ("A robot may not injure a human being", sampling_params),
-        ("To be or not to be,", sampling_params),
+        # ("A robot may not injure a human being", sampling_params),
+        # ("To be or not to be,", sampling_params),
+        # ("What is the meaning of life?", sampling_params),
+        # ("It is only with the heart that one can see rightly", sampling_params),
+        # ("A robot may not injure a human being", sampling_params),
+        # ("To be or not to be,", sampling_params),
+        # ("A robot may not injure a human being", sampling_params),
+        # ("To be or not to be,", sampling_params),
+        # ("What is the meaning of life?", sampling_params),
+        # ("It is only with the heart that one can see rightly", sampling_params),
+        # ("A robot may not injure a human being", sampling_params),
+        ("San Francisco is a", sampling_params),
     ]
 
     # Prevent hanging from profiler. See https://github.com/pytorch/pytorch/issues/60158
-    with profile() as profiler:
-        pass
+    # with profile() as profiler:
+    #     pass
 
     # Warm up
     make_predictions(engine, test_prompts, sampling_params)
@@ -58,7 +57,7 @@ def main(args: argparse.Namespace):
         # with profile(record_shapes=True) as prof:
         print("start profiling")
         make_predictions(engine, test_prompts, sampling_params)
-        print(f"Time taken: {time.time() - start:.2f} seconds")
+        print(f"Time taken: {time.time() - start} seconds")
 
     # prof.export_chrome_trace("trace.json")
 

@@ -13,7 +13,6 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
 from vllm.worker.cache_engine import CacheEngine
 
-
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
 
@@ -254,13 +253,23 @@ class Worker:
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device="cuda")
-        padded_block_tables = [
-            _pad_to_max(block_table, 64)
-            for block_table in generation_block_tables
-        ]
-        block_tables_tensor = torch.tensor(padded_block_tables,
-                                           dtype=torch.int,
-                                           device="cuda")
+
+        if self.model_config.use_cuda_graph:
+            block_tables_tensor = torch.zeros((len(generation_block_tables), 4096),
+                                            dtype=torch.int,
+                                            device="cuda")
+            for i, block_table in enumerate(generation_block_tables):
+                tensor = torch.tensor(block_table)
+                block_tables_tensor[i, :len(block_table)] = tensor
+        else:
+            padded_block_tables = [
+                _pad_to_max(block_table, max_num_blocks_per_seq)
+                for block_table in generation_block_tables
+            ]
+            block_tables_tensor = torch.tensor(padded_block_tables,
+                                            dtype=torch.int,
+                                            device="cuda")
+
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
