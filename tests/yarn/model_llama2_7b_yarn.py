@@ -7,7 +7,6 @@ import torch
 from verification_prompt import PROMPT
 
 MODEL_ID = 'NousResearch/Yarn-Llama-2-7b-64k'
-MODEL_DIR = os.path.expanduser(f'~/models/{MODEL_ID}')
 
 
 class Model(BaseModel):
@@ -17,7 +16,7 @@ class Model(BaseModel):
         self.model_id = MODEL_ID
         self.pipeline = transformers.pipeline(
             "text-generation",
-            model=MODEL_DIR,  # Use MODEL_ID here to download the model using HF
+            model=MODEL_ID,  # Use MODEL_ID here to download the model using HF
             torch_dtype=torch.bfloat16,
             device_map="auto",
             trust_remote_code=True,
@@ -27,7 +26,8 @@ class Model(BaseModel):
     def max_context_size(self) -> int:
         return self.pipeline.model.base_model.config.max_position_embeddings
 
-    def generate(self, prompt: str, *, n: int, max_new_tokens: int) -> List[str]:
+    def generate(self, prompt: str, *, n: int,
+                 max_new_tokens: int) -> List[str]:
         sequences = self.pipeline(
             prompt,
             do_sample=True,
