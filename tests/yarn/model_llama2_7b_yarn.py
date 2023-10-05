@@ -6,7 +6,7 @@ import torch
 
 from verification_prompt import PROMPT
 
-MODEL_ID = 'NousResearch/Yarn-Llama-2-7b-64k'
+MODEL_ID = "NousResearch/Yarn-Llama-2-7b-64k"
 
 
 class Model(BaseModel):
@@ -38,7 +38,7 @@ class Model(BaseModel):
             max_new_tokens=max_new_tokens,
             temperature=0.5,
         )
-        return [seq['generated_text'] for seq in sequences]
+        return [seq["generated_text"] for seq in sequences]
 
     def count_tokens(self, text: str) -> int:
         return len(self.pipeline.tokenizer.tokenize(text))
@@ -46,15 +46,15 @@ class Model(BaseModel):
 
 def main():
     model = Model()
-    print(f'Maximum context size: {model.max_context_size}')
-    print(f'The prompt has {model.count_tokens(PROMPT)} tokens:')
+    print(f"Maximum context size: {model.max_context_size}")
+    print(f"The prompt has {model.count_tokens(PROMPT)} tokens:")
     print(PROMPT)
     print()
     for output in model.generate(PROMPT, n=1, max_new_tokens=50):
-        print(f'This output has {model.count_tokens(output)} tokens:')
+        print(f"This output has {model.count_tokens(output)} tokens:")
         print(output)
         print()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

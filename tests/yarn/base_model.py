@@ -2,7 +2,7 @@ from typing import List
 
 
 class BaseModel:
-    model_id: str = ''
+    model_id: str = ""
 
     @property
     def max_context_size(self) -> int:
