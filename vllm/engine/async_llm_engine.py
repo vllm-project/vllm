@@ -229,7 +229,8 @@ class _AsyncLLMEngine(LLMEngine):
             if not self.parallel_config.worker_use_rpyc or not rpyc_use_tpe:
                 output = executor(*args, **kwargs)
                 all_outputs.append(output)
-
+        m1 = time.time()
+        print(f"_run_workers_async prep executors {m1}")
         if self.parallel_config.worker_use_ray:
             all_outputs = await asyncio.gather(*all_outputs)
         elif self.parallel_config.worker_use_rpyc:
@@ -242,7 +243,8 @@ class _AsyncLLMEngine(LLMEngine):
                 # print(type(all_outputs))
                 # print(type(all_outputs[0]))
 
-
+        m2 = time.time()
+        print(f"_run_workers_async wait for gather, {m2}")
         if get_all_outputs:
             return all_outputs
 
