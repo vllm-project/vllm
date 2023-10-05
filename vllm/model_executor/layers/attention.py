@@ -297,7 +297,9 @@ class PagedAttentionWithRoPE(PagedAttention):
                     head_size, rotary_dim, max_position, base, is_neox_style,
                     scaling_factor)
             elif scaling_type == "yarn":
-                max_position = rope_scaling["original_max_position_embeddings"]
+                new_max_position = rope_scaling[
+                    "original_max_position_embeddings"]
+                assert max_position == new_max_position * scaling_factor
                 extra_kwargs = {
                     k: v
                     for k, v in rope_scaling.items()
@@ -305,8 +307,8 @@ class PagedAttentionWithRoPE(PagedAttention):
                              "beta_fast", "beta_slow")
                 }
                 self.rotary_emb = YaRNScalingRotaryEmbedding(
-                    head_size, rotary_dim, max_position, base, is_neox_style,
-                    scaling_factor, **extra_kwargs)
+                    head_size, rotary_dim, new_max_position, base,
+                    is_neox_style, scaling_factor, **extra_kwargs)
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 

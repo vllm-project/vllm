@@ -263,7 +263,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
-        t = torch.arange(self.max_position_embeddings,
+        t = torch.arange(self.max_position_embeddings * self.scaling_factor,
                          device="cuda",
                          dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
