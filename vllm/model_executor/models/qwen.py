@@ -324,3 +324,6 @@ class QWenLMHeadModel(nn.Module):
                 self._row_parallel_weights,
                 tp_rank,
             )
+
+    def get_input_embeddings(self):
+        return self.transformer.wte

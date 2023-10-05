@@ -298,3 +298,6 @@ class GPT2LMHeadModel(nn.Module):
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
                                          tensor_model_parallel_rank)
+
+    def get_input_embeddings(self):
+        return self.transformer.wte

@@ -374,6 +374,9 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 tp_rank,
             )
 
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
 
 class BaichuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 13b
 

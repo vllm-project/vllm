@@ -323,3 +323,6 @@ class BloomForCausalLM(nn.Module):
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights, tp_rank)
+
+    def get_input_embeddings(self):
+        return self.transformer.word_embeddings

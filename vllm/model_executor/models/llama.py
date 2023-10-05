@@ -405,3 +405,6 @@ class LlamaForCausalLM(nn.Module):
                                          column_parallel_weights,
                                          row_parallel_weights,
                                          tensor_model_parallel_rank)
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
