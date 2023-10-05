@@ -73,37 +73,53 @@ def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
     return slopes
 
 
-class BaiChuanMLP(nn.Module):
+# class BaiChuanMLP(nn.Module):
 
+#     def __init__(
+#         self,
+#         hidden_size: int,
+#         intermediate_size: int,
+#         hidden_act: str,
+#     ):
+#         super().__init__()
+#         self.gate_up_proj = ColumnParallelLinear(
+#             hidden_size,
+#             2 * intermediate_size,
+#             bias=False,
+#             gather_output=False,
+#         )
+#         self.down_proj = RowParallelLinear(
+#             intermediate_size,
+#             hidden_size,
+#             bias=False,
+#             input_is_parallel=True,
+#         )
+#         if hidden_act != "silu":
+#             raise ValueError(f"Unsupported activation: {hidden_act}. "
+#                              "Only silu is supported for now.")
+        # self.act_fn = SiluAndMul()
+
+#     def forward(self, x):
+#         gate_up, _ = self.gate_up_proj(x)
+#         x = self.act_fn(gate_up)
+#         x, _ = self.down_proj(x)
+#         return x
+from transformers.activations import ACT2FN
+class BaiChuanMLP(torch.nn.Module):
     def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
+            self,
+            hidden_size: int,
+            intermediate_size: int,
+            hidden_act: str,
     ):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(
-            hidden_size,
-            2 * intermediate_size,
-            bias=False,
-            gather_output=False,
-        )
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            input_is_parallel=True,
-        )
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+        self.gate_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = torch.nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.up_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.act_fn = ACT2FN[hidden_act]
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class BaiChuanAttention(nn.Module):

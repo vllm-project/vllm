@@ -552,7 +552,7 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
                 
-        # todo set batch lora id
+        # Set batch lora id
         batch_lora_ids = []
         for seq_group_metadata in seq_group_metadata_list:
             sampling_params = seq_group_metadata.sampling_params
