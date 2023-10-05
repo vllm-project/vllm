@@ -3,6 +3,8 @@ import copy
 import enum
 from typing import Dict, List, Optional, Union
 
+import torch
+
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
 
@@ -50,6 +52,8 @@ class SequenceData:
 
     Attributes:
         prompt_token_ids: The token IDs of the prompt.
+        prompt_embeds: The embeddings of the prompt
+            (If set, it takes priority over prompt_token_ids)
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
     """
@@ -57,8 +61,10 @@ class SequenceData:
     def __init__(
         self,
         prompt_token_ids: List[int],
+        prompt_embeds: Optional[torch.Tensor] = None,
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_embeds = prompt_embeds
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
 
@@ -78,14 +84,22 @@ class SequenceData:
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
 
+    def get_output_token_ids(self) -> List[int]:
+        return self.output_token_ids
+
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
+            assert not self.has_prompt_embeds_forwarding()
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
+
+    def has_prompt_embeds_forwarding(self) -> bool:
+        return self.prompt_embeds is not None
 
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
+                f"prompt_embeds={self.prompt_embeds}, "
                 f"output_token_ids={self.output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob})")
 
@@ -99,20 +113,24 @@ class Sequence:
         prompt_token_ids: The token IDs of the prompt.
         block_size: The block size of the sequence. Should be the same as the
             block size used by the block manager and cache engine.
+        prompt_embeds: The embeddings of the prompt
+            (If set, it takes priority over prompt_token_ids)
     """
 
-    def __init__(
-        self,
-        seq_id: int,
-        prompt: str,
-        prompt_token_ids: List[int],
-        block_size: int,
-    ) -> None:
+    def __init__(self,
+                 seq_id: int,
+                 prompt: str,
+                 prompt_token_ids: List[int],
+                 block_size: int,
+                 prompt_embeds: Optional[torch.Tensor] = None) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
         self.block_size = block_size
 
-        self.data = SequenceData(prompt_token_ids)
+        self.data = SequenceData(
+            prompt_token_ids,
+            prompt_embeds=prompt_embeds,
+        )
         self.output_logprobs: List[Dict[int, float]] = []
         self.output_text = ""
 

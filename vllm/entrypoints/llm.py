@@ -3,6 +3,8 @@ from typing import List, Optional, Union
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+import torch
+
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
@@ -105,6 +107,7 @@ class LLM:
         sampling_params: Optional[SamplingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
+        prompt_embeds: Optional[List[torch.FloatTensor]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -119,14 +122,19 @@ class LLM:
             prompt_token_ids: A list of token IDs for the prompts. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.
+            prompt_embeds: A list of embeddings for the prompts. If set, we
+                directly pass the embeddings instead of passing
+                `prompt_token_ids`.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
             completions in the same order as the input prompts.
         """
-        if prompts is None and prompt_token_ids is None:
-            raise ValueError("Either prompts or prompt_token_ids must be "
-                             "provided.")
+        if (prompts is None and prompt_token_ids is None
+                and prompt_embeds is None):
+            raise ValueError(
+                "Either prompts, prompt_token_ids or prompt_token_embeds "
+                "must be provided.")
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
@@ -141,15 +149,25 @@ class LLM:
         # Add requests to the engine.
         if prompts is not None:
             num_requests = len(prompts)
-        else:
+        elif prompt_token_ids is not None:
             num_requests = len(prompt_token_ids)
+        elif prompt_embeds is not None:
+            num_requests = len(prompt_embeds)
+
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             if prompt_token_ids is None:
                 token_ids = None
             else:
                 token_ids = prompt_token_ids[i]
-            self._add_request(prompt, sampling_params, token_ids)
+            if prompt_embeds is None:
+                embeds = None
+            else:
+                embeds = prompt_embeds[i]
+            self._add_request(prompt,
+                              sampling_params,
+                              token_ids,
+                              prompt_embeds=embeds)
         return self._run_engine(use_tqdm)
 
     def _add_request(
@@ -157,10 +175,16 @@ class LLM:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]],
+        prompt_embeds: Optional[torch.Tensor] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
-        self.llm_engine.add_request(request_id, prompt, sampling_params,
-                                    prompt_token_ids)
+        self.llm_engine.add_request(
+            request_id,
+            prompt,
+            sampling_params,
+            prompt_token_ids=prompt_token_ids,
+            prompt_embeds=prompt_embeds,
+        )
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.

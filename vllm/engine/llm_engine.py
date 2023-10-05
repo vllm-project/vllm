@@ -3,6 +3,8 @@ import time
 from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
+import torch
+
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
@@ -236,6 +238,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -255,14 +258,24 @@ class LLMEngine:
         """
         if arrival_time is None:
             arrival_time = time.time()
-        if prompt_token_ids is None:
+
+        # When prompt_embeds is set, prompt_token_ids is filled with -1
+        if prompt_embeds is not None:
+            prompt_token_ids = [-1] * prompt_embeds.size(0)
+        elif prompt_token_ids is None:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
-        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
+        seq = Sequence(
+            seq_id,
+            prompt,
+            prompt_token_ids,
+            block_size,
+            prompt_embeds=prompt_embeds,
+        )
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
@@ -626,7 +639,9 @@ class LLMEngine:
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
              self.tokenizer,
-             all_input_ids=seq.get_token_ids(),
+             all_input_ids=seq.get_token_ids()
+             if seq.data.has_prompt_embeds_forwarding() is None else
+             seq.get_output_token_ids(),
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,

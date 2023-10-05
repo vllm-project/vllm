@@ -100,18 +100,17 @@ class Worker:
             )
             seqs.append(seq)
 
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
-            seqs)
+        (input_tokens, input_positions, inputs_embeds,
+         input_metadata) = self._prepare_inputs(seqs)
 
         # Execute the model.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        self.model(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=[(None, None)] * num_layers,
-            input_metadata=input_metadata,
-            cache_events=None,
-        )
+        self.model(input_ids=input_tokens,
+                   positions=input_positions,
+                   kv_caches=[(None, None)] * num_layers,
+                   input_metadata=input_metadata,
+                   cache_events=None,
+                   inputs_embeds=inputs_embeds)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -148,6 +147,7 @@ class Worker:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        input_embeds: List[torch.Tensor] = []
         slot_mapping: List[int] = []
 
         # Add prompt tokens.
@@ -169,6 +169,14 @@ class Worker:
             prompt_lens.append(prompt_len)
 
             input_tokens.extend(prompt_tokens)
+            if seq_data.has_prompt_embeds_forwarding():
+                input_embeds.append(seq_data.prompt_embeds)
+            else:
+                input_embeds.append(
+                    torch.zeros(
+                        len(prompt_tokens),
+                        self.model.get_input_embeddings().embedding_dim,
+                        device="cuda"))
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(range(len(prompt_tokens)))
@@ -204,6 +212,11 @@ class Worker:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
+                input_embeds.append(
+                    torch.zeros(
+                        1,
+                        self.model.get_input_embeddings().embedding_dim,
+                        device="cuda"))
 
                 context_len = seq_data.get_len()
                 position = context_len - 1
@@ -226,6 +239,17 @@ class Worker:
         # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
         input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
         input_positions = _pad_to_alignment(input_positions, multiple_of=8)
+
+        #
+        input_embeds = torch.cat(input_embeds, dim=0)
+        input_embeds = torch.cat([input_embeds] + [
+            torch.zeros(1,
+                        self.model.get_input_embeddings().embedding_dim,
+                        device="cuda")
+        ] * ((-input_embeds.shape[0]) % 8),
+                                 dim=0)
+        embeds_tensor = input_embeds.to(dtype=self.model_config.dtype,
+                                        device="cuda")
 
         # Convert to tensors.
         tokens_tensor = torch.tensor(input_tokens,
@@ -261,7 +285,7 @@ class Worker:
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
         )
-        return tokens_tensor, positions_tensor, input_metadata
+        return tokens_tensor, positions_tensor, embeds_tensor, input_metadata
 
     @torch.inference_mode()
     def execute_model(
@@ -296,13 +320,14 @@ class Worker:
             return {}
 
         # Prepare input tensors.
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
-            seq_group_metadata_list)
+        (input_tokens, input_positions, inputs_embeds,
+         input_metadata) = self._prepare_inputs(seq_group_metadata_list)
 
         # Execute the model.
         output = self.model(
             input_ids=input_tokens,
             positions=input_positions,
+            inputs_embeds=inputs_embeds,
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
             cache_events=cache_events,
