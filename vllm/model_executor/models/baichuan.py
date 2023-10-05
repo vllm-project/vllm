@@ -359,22 +359,22 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 loaded_weight = loaded_weight[:, head_start:head_end, :, :]
                 loaded_weight = loaded_weight.reshape(-1, hidden_size)
 
-            is_gate_up_weight = False
-            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
-                if weight_name not in name:
-                    continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
-                shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
-                                              (tp_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_gate_up_weight = True
-                break
-            if is_gate_up_weight:
-                continue
+            # is_gate_up_weight = False
+            # for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+            #     if weight_name not in name:
+            #         continue
+            #     param = state_dict[name.replace(weight_name, "gate_up_proj")]
+            #     shard_size = param.shape[0] // 2
+            #     loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
+            #                                   (tp_rank + 1)]
+            #     param_slice = param.data[shard_size * stride_id:shard_size *
+            #                              (stride_id + 1)]
+            #     assert param_slice.shape == loaded_weight.shape
+            #     param_slice.copy_(loaded_weight)
+            #     is_gate_up_weight = True
+            #     break
+            # if is_gate_up_weight:
+            #     continue
 
             param = state_dict[name]
 
