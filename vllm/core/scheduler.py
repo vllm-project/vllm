@@ -217,9 +217,7 @@ class Scheduler:
         preempted: List[SequenceGroup] = []
         while self.running:
             seq_group = self.running.pop(0)
-            while self.policy.can_preempt(
-                    seq_group
-            ) and not self.block_manager.can_append_slot(seq_group):
+            while not self.block_manager.can_append_slot(seq_group):
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop(-1)
