@@ -228,9 +228,7 @@ class OPTDecoder(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = torch.zeros(input_ids.size(0),
                                         self.embed_tokens.embedding_dim)
-
         inputs_ids_indices = (input_ids != -1).nonzero().flatten()
-
         inputs_ids_embeds = self.embed_tokens(
             torch.index_select(input_ids, 0, inputs_ids_indices))
         inputs_embeds[inputs_ids_indices] = inputs_ids_embeds
