@@ -91,18 +91,13 @@ class RPyCWorkerService(rpyc.Service):
         # import inside worker process since if not it'll break the engine process
         # probably same reason as why _init_workers_ray imports this so late?
         from vllm.worker.worker import Worker
-
-        print(f"in worker {os.getpid()}, {model_config}, {parallel_config}, {scheduler_config}")
         model_config, parallel_config, scheduler_config = obtain(model_config), obtain(parallel_config), obtain(scheduler_config)
-        print(f"type after serializing/deserializing: {type(parallel_config)}")
-        print(f"idk {parallel_config.tensor_parallel_size}")
-        print(f"ws after serializing/deserializing: {parallel_config.world_size}")
         self.worker = Worker(
             model_config,
             parallel_config,
             scheduler_config,
             None,
-            None, # f"tcp://{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}",  # TODO ????????? figure this out, goes into torch.dist.init_process_group whatever that does 
+            None,
         )
 
     def exposed_execute_method(self, method: str, *args, **kwargs):
@@ -159,9 +154,7 @@ class RPyCWorkerClient:
         self._init_worker(worker_init_fn)
 
     def init_worker(self, model_config, parallel_config, scheduler_config):
-        # TODO something to mark as transferable? idk lightllm does this
-        print(f"ws, type before serializing: {parallel_config.world_size}, {type(parallel_config)}")
-        print(f"help: {parallel_config.world_size}")
+        # we run obtain() on the worker to send {model|parallel|scheduler}_config to the workers
         self._init_worker(model_config, parallel_config, scheduler_config)
 
     def execute_method(self, method, *args, **kwargs):
@@ -193,13 +186,9 @@ class RPyCWorkerClient:
 
 
 def init_rpyc_env(port):
-    print(f"init_rpyc_env for port {port}")
-    print(os.getpid(), "importing torch", time.time())
     # We need to import torch here, otherwise torch won't recognize CUDA devices as available.
     # Not sure why unfortunately, but I think it's related to some ordering of imports/environment set up
     import torch
-    print(os.getpid(), "done importing torch", time.time())
-    print("init_rpyc_env cuda support:", torch.cuda.is_available(),":", torch.cuda.device_count(), "devices")
     t = ThreadedServer(RPyCWorkerService(), port=port, protocol_config={"allow_pickle": True})
     t.start()
     return
