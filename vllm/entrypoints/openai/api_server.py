@@ -80,7 +80,8 @@ async def get_gen_prompt(request) -> str:
             f"fastchat version is low. Current version: {fastchat.__version__} "
             "Please upgrade fastchat to use: `$ pip install -U fschat`")
 
-    conv = get_conversation_template(request.model)
+    template = request.template if request.template else request.model
+    conv = get_conversation_template(template)
     conv = Conversation(
         name=conv.name,
         system_template=conv.system_template,

@@ -66,6 +66,7 @@ class ChatCompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
     # Additional parameters supported by vLLM
+    template: Optional[str] = None
     best_of: Optional[int] = None
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
@@ -93,6 +94,7 @@ class CompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
     # Additional parameters supported by vLLM
+    template: Optional[str] = None
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
