@@ -369,7 +369,7 @@ def _gen_alibi_mask(n_head, max_pos, slopes):
     alibi = alibi.view(n_head, 1, max_pos)
     # print(alibi)
     alibi_mask = torch.triu(
-        _fill_with_neg_inf(torch.zeros([max_pos, max_pos])), 1
+        _fill_with_neg_inf(torch.zeros([max_pos, max_pos],device=slopes.device)), 1
     )
     # print(alibi.shape)
     # print(alibi_mask.unsqueeze(0).shape)
