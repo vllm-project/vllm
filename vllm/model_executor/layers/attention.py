@@ -376,7 +376,7 @@ def _gen_alibi_mask(n_head, max_pos, slopes):
     # print(alibi_mask.unsqueeze(0))
     alibi_mask = alibi_mask.unsqueeze(0) + alibi
     # print(alibi_mask.shape)
-    return alibi_mask
+    return alibi_mask.unsqueeze(0)
 
 
 class PagedAttentionWithALiBi(PagedAttention):
@@ -423,7 +423,7 @@ class PagedAttentionWithALiBi(PagedAttention):
                 device=self.alibi_slopes.device,
                 dtype=dtype,
             )[:, :, :, :prompt_len].copy_(bias)
-            bias.mul_(self.alibi_slopes[:, None, None])
+            # bias.mul_(self.alibi_slopes[:, None, None])
             attn_bias = LowerTriangularMaskWithTensorBias(bias)
             input_metadata.attn_bias.append(attn_bias)
 
