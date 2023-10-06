@@ -35,7 +35,7 @@ class SequenceStatus(enum.Enum):
         elif status == SequenceStatus.FINISHED_ABORTED:
             finish_reason = "abort"
         elif status == SequenceStatus.FINISHED_IGNORED:
-            finish_reason = "length"
+            finish_reason = "ignore"
         else:
             finish_reason = None
         return finish_reason
