@@ -107,7 +107,7 @@ class SamplingParams:
           # assert as start of the string
           "\A" +
           # Translate ["a", "b", "cde"] into "(a)|(b)|(edc)"
-          "(" + ")|(".join([x[::-1] for x in self.stop]) + ")"
+          "(" + ")|(".join([re.escape(x[::-1]) for x in self.stop]) + ")"
 
         self.reverse_stop_regex = re.compile(reverse_stop_regex_string)
 
