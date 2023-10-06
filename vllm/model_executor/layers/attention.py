@@ -341,42 +341,42 @@ class PagedAttentionWithRoPE(PagedAttention):
             cache_event,
         )
 
-import math
-def _get_interleave(n):
-    def _get_interleave_power_of_2(n):
-        start = (2 ** (-2 ** -(math.log2(n) - 3)))
-        ratio = start
-        return [start * ratio ** i for i in range(n)]
+# import math
+# def _get_interleave(n):
+#     def _get_interleave_power_of_2(n):
+#         start = (2 ** (-2 ** -(math.log2(n) - 3)))
+#         ratio = start
+#         return [start * ratio ** i for i in range(n)]
 
-    if math.log2(n).is_integer():
-        return _get_interleave_power_of_2(n)
-    else:
-        closest_power_of_2 = 2 ** math.floor(math.log2(n))
-        return _get_interleave_power_of_2(closest_power_of_2) + \
-               _get_interleave(2 * closest_power_of_2)[0::2][:n - closest_power_of_2]
-
-
-def _fill_with_neg_inf(t):
-    """FP16-compatible function that fills a tensor with -inf."""
-    return t.float().fill_(float("-inf")).type_as(t)
+#     if math.log2(n).is_integer():
+#         return _get_interleave_power_of_2(n)
+#     else:
+#         closest_power_of_2 = 2 ** math.floor(math.log2(n))
+#         return _get_interleave_power_of_2(closest_power_of_2) + \
+#                _get_interleave(2 * closest_power_of_2)[0::2][:n - closest_power_of_2]
 
 
-def _gen_alibi_mask(n_head, max_pos, slopes):
-    """used in inference only"""
-    alibi = slopes.unsqueeze(1).unsqueeze(1) * torch.arange(max_pos, device=slopes.device).unsqueeze(0).unsqueeze(0).expand(
-        n_head, -1, -1)
-    # print(alibi)
-    alibi = alibi.view(n_head, 1, max_pos)
-    # print(alibi)
-    alibi_mask = torch.triu(
-        _fill_with_neg_inf(torch.zeros([max_pos, max_pos],device=slopes.device)), 1
-    )
-    # print(alibi.shape)
-    # print(alibi_mask.unsqueeze(0).shape)
-    # print(alibi_mask.unsqueeze(0))
-    alibi_mask = alibi_mask.unsqueeze(0) + alibi
-    # print(alibi_mask.shape)
-    return alibi_mask.unsqueeze(0)
+# def _fill_with_neg_inf(t):
+#     """FP16-compatible function that fills a tensor with -inf."""
+#     return t.float().fill_(float("-inf")).type_as(t)
+
+
+# def _gen_alibi_mask(n_head, max_pos, slopes):
+#     """used in inference only"""
+#     alibi = slopes.unsqueeze(1).unsqueeze(1) * torch.arange(max_pos, device=slopes.device).unsqueeze(0).unsqueeze(0).expand(
+#         n_head, -1, -1)
+#     # print(alibi)
+#     alibi = alibi.view(n_head, 1, max_pos)
+#     # print(alibi)
+#     alibi_mask = torch.triu(
+#         _fill_with_neg_inf(torch.zeros([max_pos, max_pos],device=slopes.device)), 1
+#     )
+#     # print(alibi.shape)
+#     # print(alibi_mask.unsqueeze(0).shape)
+#     # print(alibi_mask.unsqueeze(0))
+#     alibi_mask = alibi_mask.unsqueeze(0) + alibi
+#     # print(alibi_mask.shape)
+#     return alibi_mask.unsqueeze(0)
 
 
 class PagedAttentionWithALiBi(PagedAttention):
@@ -391,8 +391,8 @@ class PagedAttentionWithALiBi(PagedAttention):
         super().__init__(num_heads, head_size, scale, num_kv_heads)
         assert len(slopes) == num_heads
 
-        #slopes = torch.tensor(slopes, dtype=torch.float32)
-        slopes = torch.tensor(_get_interleave(num_heads),dtype=torch.float32)
+        slopes = torch.tensor(slopes, dtype=torch.float32)
+        # slopes = torch.tensor(_get_interleave(num_heads),dtype=torch.float32)
         self.register_buffer("alibi_slopes", slopes, persistent=False)
 
     def set_attn_bias(self, input_metadata: InputMetadata,
@@ -402,14 +402,14 @@ class PagedAttentionWithALiBi(PagedAttention):
             return
         # Generates ALiBi mask for each prompt.
         for prompt_len in input_metadata.prompt_lens:
-            # bias = torch.arange(prompt_len, dtype=dtype)
+            bias = torch.arange(prompt_len, dtype=dtype)
             # Note(zhuohan): HF uses
             #     `bias = bias[None, :].repeat(prompt_len, 1)`
             # here. We find that both biases give the same results, but
             # the bias below more accurately follows the original ALiBi
             # paper.
-            # bias = bias[None, :] - bias[:, None]
-            bias = _gen_alibi_mask(self.num_heads, prompt_len, self.alibi_slopes)
+            bias = bias[None, :] - bias[:, None]
+            # bias = _gen_alibi_mask(self.num_heads, prompt_len, self.alibi_slopes)
             bias = bias.to(self.alibi_slopes.device)
 
             # When using custom attention bias, xformers requires the bias to
@@ -423,7 +423,7 @@ class PagedAttentionWithALiBi(PagedAttention):
                 device=self.alibi_slopes.device,
                 dtype=dtype,
             )[:, :, :, :prompt_len].copy_(bias)
-            # bias.mul_(self.alibi_slopes[:, None, None])
+            bias.mul_(self.alibi_slopes[:, None, None])
             attn_bias = LowerTriangularMaskWithTensorBias(bias)
             input_metadata.attn_bias.append(attn_bias)
 
