@@ -232,6 +232,24 @@ class LLMEngine:
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
+    def compile_cuda_graphs(self) -> None:
+        """Compiles CUDA graphs up to max sequence num.
+
+        This function is required when running with `use_cuda_graph=True`.
+        """
+        if not self.model_config.use_cuda_graph:
+            return
+
+        for i in range(self.scheduler_config.max_num_seqs):
+            self.add_request(str(i), "a",
+                             SamplingParams(temperature=0.0, max_tokens=2))
+
+        self.step()
+        self.step()
+
+        for i in range(self.scheduler_config.max_num_seqs):
+            self.abort_request(str(i))
+
     def add_request(
         self,
         request_id: str,
