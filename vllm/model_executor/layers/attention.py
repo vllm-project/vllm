@@ -411,7 +411,6 @@ class PagedAttentionWithALiBi(PagedAttention):
             bias = bias[None, :] - bias[:, None]
             # bias = _gen_alibi_mask(self.num_heads, prompt_len, self.alibi_slopes)
             bias = bias.to(self.alibi_slopes.device)
-            bias.mul_(self.alibi_slopes[:, None, None])
             # When using custom attention bias, xformers requires the bias to
             # be sliced from a tensor whose length is a multiple of 8.
             padded_len = (prompt_len + 7) // 8 * 8
@@ -423,7 +422,7 @@ class PagedAttentionWithALiBi(PagedAttention):
                 device=self.alibi_slopes.device,
                 dtype=dtype,
             )[:, :, :, :prompt_len].copy_(bias)
-            # bias.mul_(self.alibi_slopes[:, None, None])
+            bias.mul_(self.alibi_slopes[:, None, None])
             attn_bias = LowerTriangularMaskWithTensorBias(bias)
             input_metadata.attn_bias.append(attn_bias)
 
