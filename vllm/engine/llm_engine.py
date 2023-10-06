@@ -649,13 +649,13 @@ class LLMEngine:
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:
         """Stop the finished sequences."""
-        for stop_str in sampling_params.stop:
-            if seq.output_text.endswith(stop_str):
-                # Truncate the output text so that the stop string is
-                # not included in the output.
-                seq.output_text = seq.output_text[:-len(stop_str)]
-                seq.status = SequenceStatus.FINISHED_STOPPED
-                return
+        reversed_output_text = seq.output_text[::-1]
+        matched = sampling_params.reverse_stop_regex.match(reversed_output_text)
+        if matched:
+            matched_len = len(matched.string)
+            seq.output_text = seq.output_text[:-matched_len]
+            seq.status = SequenceStatus.FINISHED_STOPPED
+
         if seq.get_last_token_id() in sampling_params.stop_token_ids:
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
