@@ -62,6 +62,7 @@ class SamplingParams:
             the stop tokens are sepcial tokens.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
+        logit_bias: Bias adjustment for different logits
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
             Note that the implementation follows the OpenAI API: The return
@@ -92,6 +93,7 @@ class SamplingParams:
         stop_token_ids: Optional[List[int]] = None,
         ignore_eos: bool = False,
         max_tokens: int = 16,
+        logit_bias: float = [],
         logprobs: Optional[int] = None,
         prompt_logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
@@ -122,6 +124,7 @@ class SamplingParams:
         self.max_tokens = max_tokens
         self.logprobs = logprobs
         self.prompt_logprobs = prompt_logprobs
+        self.logit_bias = logit_bias
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
 

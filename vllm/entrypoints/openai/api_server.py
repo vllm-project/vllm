@@ -199,9 +199,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return error_check_ret
 
     if request.logit_bias is not None and len(request.logit_bias) > 0:
+        pass
         # TODO: support logit_bias in vLLM engine.
-        return create_error_response(HTTPStatus.BAD_REQUEST,
-                                     "logit_bias is not currently supported")
+        #return create_error_response(HTTPStatus.BAD_REQUEST,
+        #                             "logit_bias is not currently supported")
 
     prompt = await get_gen_prompt(request)
     token_ids, error_check_ret = await check_length(request, prompt=prompt)
@@ -228,6 +229,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             use_beam_search=request.use_beam_search,
             skip_special_tokens=request.skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
+            logit_bias=request.logit_bias
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))

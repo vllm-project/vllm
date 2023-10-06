@@ -44,7 +44,7 @@ class Sampler(nn.Module):
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
 
         # Get the logits for the next tokens.
-        logits = _get_logits(hidden_states, embedding, embedding_bias,
+        logits = _get_logits(hidden_states, embedding, embedding_bias if embedding_bias is not None else _get_logit_bias(input_metadata),
                              self.vocab_size)
 
         # Apply presence and frequency penalties.
@@ -217,6 +217,11 @@ def _apply_penalties(
     logits -= presence_penalties.unsqueeze(dim=1) * mask
     return logits
 
+def _get_logit_bias(input_metadata: InputMetadata) -> any:
+    logit_biases: any = []
+    for seq_group in input_metadata.seq_groups:
+        set_ids, sampling_params = seq_group
+        logit_biases += [sampling_params.logit_bias]
 
 def _get_temperatures(input_metadata: InputMetadata) -> List[float]:
     # Collect the temperatures for the logits.
