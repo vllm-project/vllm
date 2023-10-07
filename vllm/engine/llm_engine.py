@@ -233,10 +233,7 @@ class LLMEngine:
         return engine
 
     def compile_cuda_graphs(self) -> None:
-        """Compiles CUDA graphs up to max sequence num.
-
-        This function is required when running with `use_cuda_graph=True`.
-        """
+        """Compiles CUDA graphs up to max sequence num."""
         if not self.model_config.use_cuda_graph:
             return
 

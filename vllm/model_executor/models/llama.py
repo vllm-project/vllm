@@ -302,9 +302,7 @@ class LlamaForCausalLM(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
     ):
         assert (self._cuda_graph is None and self._compiled_tensors is None and
-                self._compiled_logits is None), "Already compiled the model"
-
-        print("recording CUDA graph")
+                self._compiled_logits is None and self._compiled_input_metadata is None), "Already compiled the model"
 
         self._cuda_graph: Dict[int, torch.cuda.CUDAGraph] = {}
         self._compiled_tensors: Dict[int, Tuple[torch.Tensor,
@@ -312,18 +310,8 @@ class LlamaForCausalLM(nn.Module):
         self._compiled_logits: Dict[int, torch.Tensor] = {}
         self._compiled_input_metadata: Dict[int, InputMetadata] = {}
 
-        # warm up. but why?
-        # s = torch.cuda.Stream()
-        # print(f"{s.device=}")
-        # print(f"{torch.cuda.current_stream().device=}")
-        # s.wait_stream(torch.cuda.current_stream())
-        # with torch.cuda.stream(s):
-        #     _ = self.model.forward(*self._compiled_inputs)
-        # torch.cuda.current_stream().wait_stream(s)
-
         batch_size = input_metadata.block_tables.shape[0]
         for i in range(batch_size, 0, -1):
-            print("recording for batch size ", i)
 
             padded_i = math.ceil(i / 8) * 8
             pool = (None if i == batch_size else
@@ -332,10 +320,10 @@ class LlamaForCausalLM(nn.Module):
             self._cuda_graph[i] = torch.cuda.CUDAGraph()
 
             # Need the following tensors from input_metadata:
-            # input_metadata.block_tables,
+            # input_metadata.block_tables, # shape[1] hardcoded to model_config.max_model_len
             # input_metadata.context_lens,
             # input_metadata.slot_mapping,
-            # input_metadata.max_context_len, # hardcoded to 4096
+            # input_metadata.max_context_len, # hardcoded to model_config.max_model_len
 
             self._compiled_input_metadata[i] = InputMetadata(
                 input_metadata.seq_groups,
@@ -360,8 +348,6 @@ class LlamaForCausalLM(nn.Module):
                     input_metadata=self._compiled_input_metadata[i],
                     cache_events=None,
                 )
-
-        print("record fininshed")
 
         def replay(
             batch_size: int,
@@ -422,6 +408,7 @@ class LlamaForCausalLM(nn.Module):
             hidden_states = self.model(input_ids, positions, kv_caches,
                                        input_metadata, cache_events)
         else:
+            # TODO: support cache_events
             assert cache_events is None, "cache_events not supported yet"
             hidden_states = self.compile_and_call_model(
                 input_ids, positions, kv_caches, input_metadata, cache_events)
