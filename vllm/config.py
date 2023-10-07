@@ -155,9 +155,11 @@ class ModelConfig:
             return 1
         # For Falcon:
         if getattr(self.hf_config, "n_head_kv", None) is not None:
-            return self.hf_config.n_head_kv // parallel_config.tensor_parallel_size
+            return (self.hf_config.n_head_kv //
+                    parallel_config.tensor_parallel_size)
         if getattr(self.hf_config, "num_kv_heads", None) is not None:
-            return self.hf_config.num_kv_heads // parallel_config.tensor_parallel_size
+            return (self.hf_config.num_kv_heads //
+                    parallel_config.tensor_parallel_size)
         # For LLaMA-2:
         if getattr(self.hf_config, "num_key_value_heads", None) is not None:
             return (self.hf_config.num_key_value_heads //
