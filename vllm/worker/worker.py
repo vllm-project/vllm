@@ -234,7 +234,8 @@ class Worker:
                 slot_mapping.append(slot)
 
                 if self.sliding_window is not None:
-                    sliding_window_blocks = self.sliding_window // self.block_size
+                    sliding_window_blocks = (self.sliding_window //
+                                             self.block_size)
                     block_table = block_table[-sliding_window_blocks:]
                 generation_block_tables.append(block_table)
 

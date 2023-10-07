@@ -72,9 +72,7 @@ def run_vllm(
         tensor_parallel_size=tensor_parallel_size,
         seed=seed,
         trust_remote_code=trust_remote_code,
-        # use_cuda_graph=True,
     )
-    # llm.llm_engine.compile_cuda_graphs()
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:

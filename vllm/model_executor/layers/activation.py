@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from vllm import activation_ops
 
+
 class SiluAndMul(nn.Module):
     """An activation function for SwiGLU.
 
@@ -17,7 +18,6 @@ class SiluAndMul(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         num_tokens = x.shape[0]
         d = x.shape[1] // 2
-        # out = self.get_cached_tensor(num_tokens, d, x.dtype, x.device)
         out = torch.empty(num_tokens, d, dtype=x.dtype, device=x.device)
         activation_ops.silu_and_mul(out, x)
         return out

@@ -159,11 +159,10 @@ class EngineArgs:
                             choices=['awq', None],
                             default=None,
                             help='Method used to quantize the weights')
-        parser.add_argument(
-            "--use-cuda-graph",
-            action="store_true",
-            default=False,
-            help="Whether to use CUDA graph for inference",
+        parser.add_argument('--use-cuda-graph',
+                            action="store_true",
+                            default=False,
+                            help="Whether to use CUDA graph for inference",
         )
         return parser
 

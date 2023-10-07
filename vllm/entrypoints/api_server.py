@@ -2,9 +2,9 @@ import argparse
 import json
 from typing import AsyncGenerator
 
-import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+import uvicorn
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -14,6 +14,7 @@ from vllm.utils import random_uuid
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
+engine = None
 
 
 @app.get("/healthz")
