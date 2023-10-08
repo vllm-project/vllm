@@ -39,7 +39,7 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.layers import (
     VocabParallelEmbedding)
 from vllm.sequence import SamplerOutput
 
@@ -82,13 +82,11 @@ class OPTAttention(nn.Module):
                                               3 * embed_dim,
                                               bias=bias,
                                               gather_output=False,
-                                              perform_initialization=False,
                                               quant_config=quant_config)
         self.out_proj = ParallelLinear.row(embed_dim,
                                            embed_dim,
                                            bias=bias,
                                            input_is_parallel=True,
-                                           perform_initialization=False,
                                            quant_config=quant_config)
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
@@ -134,13 +132,11 @@ class OPTDecoderLayer(nn.Module):
                                          config.ffn_dim,
                                          bias=config.enable_bias,
                                          gather_output=False,
-                                         perform_initialization=False,
                                          quant_config=quant_config)
         self.fc2 = ParallelLinear.row(config.ffn_dim,
                                       self.embed_dim,
                                       bias=config.enable_bias,
                                       input_is_parallel=True,
-                                      perform_initialization=False,
                                       quant_config=quant_config)
         self.final_layer_norm = nn.LayerNorm(
             self.embed_dim,
@@ -196,7 +192,7 @@ class OPTDecoder(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.word_embed_proj_dim,
-            perform_initialization=False)
+        )
         # Positional embeddings are replicated (not sharded).
         self.embed_positions = OPTLearnedPositionalEmbedding(
             config.max_position_embeddings, config.hidden_size)

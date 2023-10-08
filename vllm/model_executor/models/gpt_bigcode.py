@@ -40,7 +40,7 @@ from vllm.model_executor.weight_utils import (
     get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.layers import (
     VocabParallelEmbedding)
 from vllm.sequence import SamplerOutput
 
@@ -71,7 +71,6 @@ class GPTBigCodeAttention(nn.Module):
                                                   self.hidden_size,
                                                   bias=True,
                                                   gather_output=False,
-                                                  perform_initialization=False,
                                                   quant_config=quant_config)
             self.c_attn_kv = Linear.linear(self.hidden_size,
                                            2 * self.kv_dim,
@@ -85,14 +84,12 @@ class GPTBigCodeAttention(nn.Module):
                                                 2 * self.kv_dim,
                                                 bias=True,
                                                 gather_output=False,
-                                                perform_initialization=False,
                                                 quant_config=quant_config)
 
         self.c_proj = ParallelLinear.row(self.hidden_size,
                                          self.hidden_size,
                                          bias=True,
                                          input_is_parallel=True,
-                                         perform_initialization=False,
                                          quant_config=quant_config)
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
@@ -136,13 +133,11 @@ class GPTBigMLP(nn.Module):
                                           intermediate_size,
                                           bias=True,
                                           gather_output=False,
-                                          perform_initialization=False,
                                           quant_config=quant_config)
         self.c_proj = ParallelLinear.row(intermediate_size,
                                          hidden_size,
                                          bias=True,
                                          input_is_parallel=True,
-                                         perform_initialization=False,
                                          quant_config=quant_config)
         self.act = get_act_fn(config.activation_function)
 

@@ -18,7 +18,7 @@ from vllm.model_executor.weight_utils import (convert_pyslice_to_tensor,
                                               get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.layers import (
     VocabParallelEmbedding)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.mpt import MPTConfig
@@ -58,7 +58,6 @@ class MPTAttention(nn.Module):
             3 * self.d_model,
             bias=not config.no_bias,
             gather_output=False,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         if self.qk_ln:
@@ -69,7 +68,6 @@ class MPTAttention(nn.Module):
             self.d_model,
             bias=not config.no_bias,
             input_is_parallel=True,
-            perform_initialization=False,
             quant_config=quant_config,
         )
 
@@ -126,14 +124,12 @@ class MPTMLP(nn.Module):
                                              intermediate_size,
                                              bias=not config.no_bias,
                                              gather_output=False,
-                                             perform_initialization=False,
                                              quant_config=quant_config)
         self.act = get_act_fn("gelu")
         self.down_proj = ParallelLinear.row(intermediate_size,
                                             hidden_size,
                                             bias=not config.no_bias,
                                             input_is_parallel=True,
-                                            perform_initialization=False,
                                             quant_config=quant_config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -187,9 +183,10 @@ class MPTModel(nn.Module):
         assert config.embedding_fraction == 1.0
         assert config.norm_type == "low_precision_layernorm"
 
-        self.wte = VocabParallelEmbedding(config.vocab_size,
-                                          config.d_model,
-                                          perform_initialization=False)
+        self.wte = VocabParallelEmbedding(
+            config.vocab_size,
+            config.d_model,
+        )
         self.blocks = nn.ModuleList(
             [MPTBlock(config, quant_config) for _ in range(config.n_layers)])
         self.norm_f = nn.LayerNorm(config.d_model)

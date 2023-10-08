@@ -38,7 +38,7 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.layers import (
     VocabParallelEmbedding)
 from vllm.sequence import SamplerOutput
 
@@ -55,18 +55,20 @@ class GPTJAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.total_num_heads
 
-        self.qkv_proj = ParallelLinear.column(config.hidden_size,
-                                              3 * config.hidden_size,
-                                              bias=False,
-                                              gather_output=False,
-                                              perform_initialization=False,
-                                              quant_config=quant_config)
-        self.out_proj = ParallelLinear.row(config.hidden_size,
-                                           config.hidden_size,
-                                           bias=False,
-                                           input_is_parallel=True,
-                                           perform_initialization=False,
-                                           quant_config=quant_config)
+        self.qkv_proj = ParallelLinear.column(
+            config.hidden_size,
+            3 * config.hidden_size,
+            bias=False,
+            gather_output=False,
+            quant_config=quant_config,
+        )
+        self.out_proj = ParallelLinear.row(
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            input_is_parallel=True,
+            quant_config=quant_config,
+        )
 
         tp_world_size = get_tensor_model_parallel_world_size()
         assert self.total_num_heads % tp_world_size == 0
@@ -113,16 +115,18 @@ class GPTJMLP(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         hidden_size = config.n_embd
-        self.fc_in = ParallelLinear.column(hidden_size,
-                                           intermediate_size,
-                                           gather_output=False,
-                                           perform_initialization=False,
-                                           quant_config=quant_config)
-        self.fc_out = ParallelLinear.row(intermediate_size,
-                                         hidden_size,
-                                         input_is_parallel=True,
-                                         perform_initialization=False,
-                                         quant_config=quant_config)
+        self.fc_in = ParallelLinear.column(
+            hidden_size,
+            intermediate_size,
+            gather_output=False,
+            quant_config=quant_config,
+        )
+        self.fc_out = ParallelLinear.row(
+            intermediate_size,
+            hidden_size,
+            input_is_parallel=True,
+            quant_config=quant_config,
+        )
         self.act = get_act_fn(config.activation_function)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -176,9 +180,10 @@ class GPTJModel(nn.Module):
         super().__init__()
         self.config = config
         self.embed_dim = config.n_embd
-        self.wte = VocabParallelEmbedding(config.vocab_size,
-                                          self.embed_dim,
-                                          perform_initialization=False)
+        self.wte = VocabParallelEmbedding(
+            config.vocab_size,
+            self.embed_dim,
+        )
         self.h = nn.ModuleList(
             [GPTJBlock(config, quant_config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
@@ -219,11 +224,12 @@ class GPTJForCausalLM(nn.Module):
         self.quant_config = quant_config
         assert not config.tie_word_embeddings
         self.transformer = GPTJModel(config, quant_config)
-        self.lm_head = ParallelLinear.column(config.n_embd,
-                                             config.vocab_size,
-                                             gather_output=False,
-                                             perform_initialization=False,
-                                             quant_config=None)
+        self.lm_head = ParallelLinear.column(
+            config.n_embd,
+            config.vocab_size,
+            gather_output=False,
+            quant_config=None,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(

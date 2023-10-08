@@ -39,7 +39,7 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.layers import (
     VocabParallelEmbedding)
 from vllm.sequence import SamplerOutput
 
@@ -93,7 +93,6 @@ class BloomAttention(nn.Module):
             3 * self.hidden_size,
             bias=True,
             gather_output=False,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         self.dense = ParallelLinear.row(
@@ -101,7 +100,6 @@ class BloomAttention(nn.Module):
             self.hidden_size,
             bias=True,
             input_is_parallel=True,
-            perform_initialization=False,
             quant_config=quant_config,
         )
 
@@ -147,14 +145,15 @@ class BloomMLP(nn.Module):
             hidden_size,
             4 * hidden_size,
             gather_output=False,
-            perform_initialization=False,
-            quant_config=quant_config)
+            quant_config=quant_config,
+        )
         self.act = get_act_fn("gelu")
-        self.dense_4h_to_h = ParallelLinear.row(4 * hidden_size,
-                                                hidden_size,
-                                                input_is_parallel=True,
-                                                perform_initialization=False,
-                                                quant_config=quant_config)
+        self.dense_4h_to_h = ParallelLinear.row(
+            4 * hidden_size,
+            hidden_size,
+            input_is_parallel=True,
+            quant_config=quant_config,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.dense_h_to_4h(x)
@@ -229,7 +228,9 @@ class BloomModel(nn.Module):
 
         # Embedding + LN Embedding
         self.word_embeddings = VocabParallelEmbedding(
-            config.vocab_size, self.embed_dim, perform_initialization=False)
+            config.vocab_size,
+            self.embed_dim,
+        )
         self.word_embeddings_layernorm = nn.LayerNorm(
             self.embed_dim, eps=config.layer_norm_epsilon)
 

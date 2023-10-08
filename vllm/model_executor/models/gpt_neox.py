@@ -38,7 +38,7 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.layers import (
     VocabParallelEmbedding)
 from vllm.sequence import SamplerOutput
 
@@ -65,14 +65,12 @@ class GPTNeoXAttention(nn.Module):
             config.hidden_size,
             3 * config.hidden_size,
             gather_output=False,
-            perform_initialization=False,
             quant_config=quant_config)
-        self.dense = ParallelLinear.row(config.hidden_size,
-                                        config.hidden_size,
-                                        input_is_parallel=True,
-                                        perform_initialization=False,
-                                        quant_config=quant_config)
-
+        self.dense = ParallelLinear.row(
+            config.hidden_size,
+            config.hidden_size,
+            input_is_parallel=True,
+            quant_config=quant_config)
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0
@@ -116,13 +114,14 @@ class GPTNeoXMLP(nn.Module):
             config.hidden_size,
             config.intermediate_size,
             gather_output=False,
-            perform_initialization=False,
-            quant_config=quant_config)
-        self.dense_4h_to_h = ParallelLinear.row(config.intermediate_size,
-                                                config.hidden_size,
-                                                input_is_parallel=True,
-                                                perform_initialization=False,
-                                                quant_config=quant_config)
+            quant_config=quant_config
+        )
+        self.dense_4h_to_h = ParallelLinear.row(
+            config.intermediate_size,
+            config.hidden_size,
+            input_is_parallel=True,
+            quant_config=quant_config,
+        )
         self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states):
@@ -188,9 +187,10 @@ class GPTNeoXModel(nn.Module):
         super().__init__()
         self.config = config
 
-        self.embed_in = VocabParallelEmbedding(config.vocab_size,
-                                               config.hidden_size,
-                                               perform_initialization=False)
+        self.embed_in = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+        )
         self.layers = nn.ModuleList([
             GPTNeoXLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)
@@ -235,7 +235,6 @@ class GPTNeoXForCausalLM(nn.Module):
                                                config.vocab_size,
                                                bias=False,
                                                gather_output=False,
-                                               perform_initialization=False,
                                                quant_config=None)
         self.sampler = Sampler(config.vocab_size)
 

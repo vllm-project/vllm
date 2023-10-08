@@ -42,7 +42,7 @@ from vllm.model_executor.weight_utils import (
     get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.layers import (
     VocabParallelEmbedding)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
@@ -85,18 +85,20 @@ class BaiChuanMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.gate_up_proj = ParallelLinear.column(hidden_size,
-                                                  2 * intermediate_size,
-                                                  bias=False,
-                                                  gather_output=False,
-                                                  perform_initialization=False,
-                                                  quant_config=quant_config)
-        self.down_proj = ParallelLinear.row(intermediate_size,
-                                            hidden_size,
-                                            bias=False,
-                                            input_is_parallel=True,
-                                            perform_initialization=False,
-                                            quant_config=quant_config)
+        self.gate_up_proj = ParallelLinear.column(
+            hidden_size,
+            2 * intermediate_size,
+            bias=False,
+            gather_output=False,
+            quant_config=quant_config,
+        )
+        self.down_proj = ParallelLinear.row(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+            quant_config=quant_config,
+        )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -140,7 +142,6 @@ class BaiChuanAttention(nn.Module):
             3 * hidden_size,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         self.o_proj = ParallelLinear.row(
@@ -148,7 +149,6 @@ class BaiChuanAttention(nn.Module):
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         # Create the alibi slopes and slice them.
@@ -266,7 +266,7 @@ class BaiChuanModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            perform_initialization=False)
+        )
         self.layers = nn.ModuleList([
             BaiChuanDecoderLayer(config, position_embedding, quant_config)
             for _ in range(config.num_hidden_layers)
@@ -309,12 +309,13 @@ class BaiChuanBaseForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = BaiChuanModel(config, position_embedding, quant_config)
-        self.lm_head = ParallelLinear.column(config.hidden_size,
-                                             config.vocab_size,
-                                             bias=False,
-                                             gather_output=False,
-                                             perform_initialization=False,
-                                             quant_config=None)
+        self.lm_head = ParallelLinear.column(
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
+            gather_output=False,
+            quant_config=None,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
