@@ -53,13 +53,16 @@ class PassKeyEvaluator:
     def evaluate(self,
                  max_tokens: int,
                  resolution: int = 100,
-                 n: int = 10) -> Iterable[Tuple[int, int, int]]:
+                 n: int = 10,
+                 headroom: int = 8) -> Iterable[Tuple[int, int, int]]:
         assert max_tokens > 0
         assert resolution > 1
 
-        garbage_count = max_tokens // self.model.count_tokens(self.garbage)
+        garbage_count = (max_tokens - headroom) // self.model.count_tokens(
+            self.garbage)
         while (garbage_count and self.model.count_tokens(
-                self.format_prompt(garbage_count, 0)[0]) > max_tokens):
+                self.format_prompt(garbage_count, 0)[0]) >
+               max_tokens - headroom):
             garbage_count -= 1
         assert garbage_count
 

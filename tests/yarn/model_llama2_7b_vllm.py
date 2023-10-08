@@ -19,6 +19,7 @@ class Model(BaseModel):
             max_model_len=8192,
             max_num_batched_tokens=8192,
             seed=42,
+            trust_remote_code=True,
         )
 
     @property
