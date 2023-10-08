@@ -16,16 +16,8 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
-**The First vLLM Bay Area Meetup (Oct 5th 6pm-8pm PT)**
-
-We are excited to invite you to the first vLLM meetup!
-The vLLM team will share recent updates and roadmap.
-We will also have vLLM users and contributors coming up to the stage to share their experiences.
-Please register [here](https://lu.ma/first-vllm-meetup) and join us!
-
----
-
 *Latest News* 🔥
+- [2023/10] We hosted [the first vLLM meetup](https://lu.ma/first-vllm-meetup) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit?usp=sharing).
 - [2023/09] We created our [Discord server](https://discord.gg/jz7wjKhh6g)! Join us to discuss vLLM and LLM serving! We will also post the latest announcements and updates there.
 - [2023/09] We released our [PagedAttention paper](https://arxiv.org/abs/2309.06180) on arXiv!
 - [2023/08] We would like to express our sincere gratitude to [Andreessen Horowitz](https://a16z.com/2023/08/30/supporting-the-open-source-ai-community/) (a16z) for providing a generous grant to support the open-source development and research of vLLM.
