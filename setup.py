@@ -56,7 +56,7 @@ def get_torch_arch_list() -> Set[str]:
 
     # List are separated by ; or space.
     arch_list = arch_list.replace(" ", ";").split(";")
-    filtered_arch_list = set(valid_arch_strs) - set(arch_list)
+    filtered_arch_list = set(valid_arch_strs).intersection(set(arch_list))
     return filtered_arch_list
 
 
