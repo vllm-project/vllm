@@ -31,9 +31,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.parallel_utils.layers import (
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.qwen import QWenConfig
 
@@ -77,13 +75,16 @@ class QWenMLP(nn.Module):
 
 
 class QWenAttention(nn.Module):
-    def __init__(self,
-                 hidden_size: int,
-                 num_heads: int,
-                 max_position_embeddings: int,
-                 rope_theta: float = 10000,
-                 rope_scaling: Optional[Dict[str, Any]] = None,
-                 quant_config: Optional[QuantizationConfig] = None,):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        max_position_embeddings: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
@@ -252,7 +253,7 @@ class QWenLMHeadModel(nn.Module):
             vocab_size,
             bias=False,
             gather_output=False,
-            quant_config=None
+            quant_config=None,
         )
         self.sampler = Sampler(config.vocab_size)
 

@@ -42,7 +42,8 @@ from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
-    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab)
+    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab,
+    get_parallel_weight)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.mistral import MistralConfig
 
@@ -289,28 +290,16 @@ class MistralForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_layers = []
-    _row_parallel_layers = ["o_proj", "down_proj"]
+    column_parallel_layers = []
+    row_parallel_layers = ["o_proj", "down_proj"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        if self.quant_config is None:
-            weight_suffixes = ["weight"]
-        else:
-            weight_suffixes = self.quant_config.get_tp_tensor_names()
-
-        column_parallel_weights: List[str] = []
-        for layer in self._column_parallel_layers:
-            for suffix in weight_suffixes:
-                column_parallel_weights.append(f"{layer}.{suffix}")
-        row_parallel_weights: List[str] = []
-        for layer in self._row_parallel_layers:
-            for suffix in weight_suffixes:
-                row_parallel_weights.append(f"{layer}.{suffix}")
-
+        (column_parallel_weights, row_parallel_weights,
+         ignore_weight_suffixes) = get_parallel_weight(self)
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         q_proj_shard_size = (self.config.hidden_size // tp_size)
@@ -330,6 +319,8 @@ class MistralForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
+            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
+                continue
 
             is_packed = False
             is_transposed = False
@@ -344,7 +335,10 @@ class MistralForCausalLM(nn.Module):
             for weight_name, shard_size, offset in attention_weight_specs:
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "qkv_proj")]
+                name = name.replace(weight_name, "qkv_proj")
+                if name not in state_dict or "g_idx" in name:
+                    break
+                param = state_dict[name]
                 if is_transposed:
                     param = param.T
 
@@ -368,7 +362,10 @@ class MistralForCausalLM(nn.Module):
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
+                name = name.replace(weight_name, "gate_up_proj")
+                if "g_idx" in name or name not in state_dict:
+                    break
+                param = state_dict[name]
                 if is_transposed:
                     param = param.T
 
@@ -385,6 +382,8 @@ class MistralForCausalLM(nn.Module):
             if is_gate_up_weight:
                 continue
 
+            if name not in state_dict:
+                continue
             param = state_dict[name]
             if is_transposed:
                 param = param.T

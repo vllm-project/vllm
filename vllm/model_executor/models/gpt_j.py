@@ -38,8 +38,7 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import (
-    VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]

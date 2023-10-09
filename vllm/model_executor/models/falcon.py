@@ -39,8 +39,7 @@ from vllm.model_executor.weight_utils import (convert_pyslice_to_tensor,
                                               get_parallel_weight)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import (
-    VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.sequence import SamplerOutput
@@ -246,7 +245,8 @@ class FalconMLP(nn.Module):
             bias=config.bias,
             gather_output=False,
             skip_bias_add=True,
-            quant_config=quant_config)
+            quant_config=quant_config,
+        )
         self.act = nn.GELU()
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)

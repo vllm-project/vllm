@@ -37,11 +37,21 @@ _MODEL_REGISTRY = {
 _MODEL_CLASSES_SUPPORT_QUANTIZATION = {
     "awq": [LlamaForCausalLM],
     "gptq": [
-        LlamaForCausalLM, QWenLMHeadModel, BaiChuanForCausalLM,
-        BaichuanForCausalLM, BloomForCausalLM, GPT2LMHeadModel,
-        GPTJForCausalLM, GPTNeoXForCausalLM, GPTBigCodeForCausalLM,
-        InternLMForCausalLM, FalconForCausalLM, AquilaForCausalLM,
-        OPTForCausalLM, MPTForCausalLM
+        LlamaForCausalLM,
+        QWenLMHeadModel,
+        BaiChuanForCausalLM,
+        BaichuanForCausalLM,
+        BloomForCausalLM,
+        GPT2LMHeadModel,
+        GPTJForCausalLM,
+        GPTNeoXForCausalLM,
+        GPTBigCodeForCausalLM,
+        InternLMForCausalLM,
+        FalconForCausalLM,
+        AquilaForCausalLM,
+        OPTForCausalLM,
+        MPTForCausalLM,
+        MistralForCausalLM,
     ],
 }
 
