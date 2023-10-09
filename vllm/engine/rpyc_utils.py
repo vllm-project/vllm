@@ -177,8 +177,3 @@ def init_rpyc_env(port):
     t = ThreadedServer(RPyCWorkerService(), port=port, protocol_config={"allow_pickle": True})
     t.start()
     return
-
-def example(local_rank):
-    # debug torch cuda
-    import torch
-    print("Example Cuda support:", torch.cuda.is_available(),":", torch.cuda.device_count(), "devices")

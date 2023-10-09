@@ -48,9 +48,6 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
-        # print(os.environ)
-
-
     def init_model(self):
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
@@ -276,7 +273,7 @@ class Worker:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
     ) -> SamplerOutput:
-        st = time.time()  # doesn't seem to change when we swap ray for rpyc
+        # st = time.time()  # doesn't seem to change when we swap ray for rpyc
         # print(f"st {os.getpid()} {st}")  # the execute_models() do not start at the same time
         # Issue cache operations.
         issued_cache_op = False
@@ -305,7 +302,7 @@ class Worker:
         # Prepare input tensors.
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
-        med = time.time()
+        # med = time.time()
         # Execute the model.
         output = self.model(
             input_ids=input_tokens,
@@ -314,9 +311,9 @@ class Worker:
             input_metadata=input_metadata,
             cache_events=cache_events,
         )
-        en = time.time()
+        # en = time.time()
         # print(f"en {os.getpid()} {en}")
-        print(f"execute_model time: {en - st}, prep inputs: {med - st}, model forward: {en - med}, pid {os.getpid()}")
+        # print(f"execute_model time: {en - st}, prep inputs: {med - st}, model forward: {en - med}, pid {os.getpid()}")
         return output
 
 
@@ -338,7 +335,6 @@ def _init_distributed_environment(
             "distributed_init_method must be set if torch.distributed "
             "is not already initialized")
     else:
-        # todo maybe manually init?
         torch.distributed.init_process_group(
             backend="nccl",
             world_size=parallel_config.world_size,

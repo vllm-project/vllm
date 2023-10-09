@@ -1,6 +1,4 @@
 from typing import Optional
-import time
-import os
 import torch
 from transformers import PretrainedConfig
 
@@ -247,7 +245,8 @@ class ParallelConfig:
         self.worker_use_rpyc = worker_use_rpyc
 
         self.world_size = pipeline_parallel_size * tensor_parallel_size
-        if self.world_size > 1 and not worker_use_rpyc:  # TODO messy handling of ray/rpyc
+        if self.world_size > 1 and not worker_use_rpyc:  
+            # HACK: kinda messy handling of whether we choose to use ray/rpyc/none for the workers
             self.worker_use_ray = True
         self._verify_args()
 
