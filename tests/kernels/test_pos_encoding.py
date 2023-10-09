@@ -10,10 +10,12 @@ from vllm import pos_encoding_ops
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
-ROTARY_DIMS = [None, 32]  # None means rotary dim == head size
+ROTARY_DIMS = [None]  # None means rotary dim == head size
 NUM_HEADS = [7, 12, 40, 52]  # Arbitrary values for testing
 NUM_TOKENS = [11, 83, 2048]  # Arbitrary values for testing
 SEEDS = [0]
+QUERY_SCALE = [0.09, 1.13, 1.78]
+KEY_SCALE = [0.23, 0.78, 1.45]
 
 
 def rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -168,7 +170,74 @@ def test_rotary_embedding(
     )
     ref_query = ref_query.view(num_tokens, num_heads * head_size)
     ref_key = ref_key.view(num_tokens, num_heads * head_size)
-
     # Compare the results.
     assert torch.allclose(out_query, ref_query, atol=1e-5, rtol=1e-5)
     assert torch.allclose(out_key, ref_key, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("query_scale", QUERY_SCALE)
+@pytest.mark.parametrize("key_scale", KEY_SCALE)
+@torch.inference_mode()
+def test_dequant_rotary_embedding(
+    is_neox_style: bool,
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    rotary_dim: Optional[int],
+    dtype: torch.dtype,
+    seed: int,
+    query_scale: float,
+    key_scale: float,
+    max_position: int = 8192,
+    base: int = 10000,
+) -> None:
+    if rotary_dim is None:
+        rotary_dim = head_size
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    positions = torch.randint(0, max_position, (num_tokens, ), device="cuda")
+    query = torch.randint(-1000, 1000, (num_tokens, num_heads * head_size),
+                        dtype=torch.int32,
+                        device="cuda")
+    key = torch.randint(-1000, 1000, (num_tokens, num_heads * head_size),
+                        dtype=torch.int32,
+                        device="cuda")
+    query_ = (query * query_scale).to(dtype)
+    key_ = (key * key_scale).to(dtype)
+
+    # Create the rotary embedding.
+    inv_freq = 1.0 / (base**(
+        torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+    t = torch.arange(max_position).float()
+    freqs = torch.einsum("i,j -> ij", t, inv_freq)
+    cos = freqs.cos()
+    sin = freqs.sin()
+    cos_sin_cache = torch.cat((cos, sin), dim=-1)
+    cos_sin_cache = cos_sin_cache.to(dtype=dtype, device='cuda')
+
+    ref_rotary_embedding = RefRotaryEmbedding(
+        dim=rotary_dim,
+        is_neox_style=is_neox_style,
+        max_position_embeddings=max_position,
+        base=base,
+    ).to(dtype=dtype, device="cuda")
+    ref_query, ref_key = ref_rotary_embedding(
+        positions,
+        query_.view(num_tokens, num_heads, head_size),
+        key_.view(num_tokens, num_heads, head_size),
+    )
+    ref_query = ref_query.view(num_tokens, num_heads * head_size)
+    ref_key = ref_key.view(num_tokens, num_heads * head_size)
+    out2_query = query_.clone()
+    out2_key = key_.clone()
+
+    pos_encoding_ops.invoke_dequant_rotary_embedding(positions, query, out2_query, key, out2_key, head_size, cos_sin_cache, query_scale, key_scale, is_neox_style)
+    assert torch.allclose(ref_key, out2_key, atol=1e-4)
