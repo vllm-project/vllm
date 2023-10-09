@@ -101,15 +101,15 @@ async def get_gen_prompt(request) -> str:
         conv = Conversation(
             name=template['name'],
             system_template=template['system_template'],
-            system_message=template.get('system_message', ""),  # Use default if not provided
+            system_message=template.get('system_message', ""),
             roles=tuple(template['roles']),
-            messages=template.get('messages', []),  # Use default if not provided
-            offset=template.get('offset', 0),  # Use default if not provided
+            messages=template.get('messages', []),
+            offset=template.get('offset', 0),
             sep_style=SeparatorStyle[template['sep_style']],
             sep=template['sep'],
-            sep2=template.get('sep2', ""),  # Use default if not provided
+            sep2=template.get('sep2', ""),
             stop_str=template['stop_str'],
-            stop_token_ids=template.get('stop_token_ids', [])  # Use default if not provided
+            stop_token_ids=template.get('stop_token_ids', [])
         )
 
     if isinstance(request.messages, str):
