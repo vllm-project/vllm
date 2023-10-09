@@ -226,12 +226,9 @@ class LLMEngine:
 
         # Initialize torch distributed process group for the workers.
         addr, port = self.workers[0].get_addr_and_port()
-        print(f"addr {addr} port {port}")
 
         executors = []
-
         for i, worker_client in enumerate(self.workers):
-            worker_client.print_debug_msg(str(i))
             exec = worker_client.ainit_torch_distributed(
                 addr,
                 port,
@@ -244,14 +241,12 @@ class LLMEngine:
         loop.run_until_complete(aio.gather(*executors))
 
         executors = []
-
         for worker_client in self.workers:
             exec = worker_client.ainit_worker(
                 self.model_config, self.parallel_config, self.scheduler_config
             )
             executors.append(exec)
         loop.run_until_complete(aio.gather(*executors))
-        print("attempting to init model")
         self._run_workers(
             "init_model",
             get_all_outputs=True,

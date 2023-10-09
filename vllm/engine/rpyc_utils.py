@@ -42,8 +42,6 @@ class RPyCWorkerService(rpyc.Service):
     def exposed_init_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
         # https://github.com/ray-project/ray/blob/7a3ae5ba5dbd6704f435bde8dba91a8a8d207ae4/python/ray/air/util/torch_dist.py#L95
         # for reference
-        print(f"Running on {os.getpid()}")
-        print(f"{master_addr}:{master_port}, #gpus {gpu_ids}, ws {world_size}, rank {rank}")
         
         os.environ["MASTER_ADDR"] = str(master_addr)
         os.environ["MASTER_PORT"] = str(master_port)
@@ -68,7 +66,7 @@ class RPyCWorkerService(rpyc.Service):
     def exposed_init_worker(self, model_config, parallel_config, scheduler_config):
         # we import worker explicitly here as opposed to provide some generic init_worker_fn() api
         # since the init_worker_fn() can't be pickled and sent over.
-        # import inside worker process since if not it'll break the engine process
+        # also import inside worker process since if not it'll break the engine process
         # probably same reason as why _init_workers_ray imports this so late?
         from vllm.worker.worker import Worker
         model_config, parallel_config, scheduler_config = obtain(model_config), obtain(parallel_config), obtain(scheduler_config)
@@ -81,8 +79,10 @@ class RPyCWorkerService(rpyc.Service):
         )
 
     def exposed_execute_method(self, method: str, *args, **kwargs):
-        # I believe this obtain() makes a call to the other process, which may be a bottleneck. 
-        args, kwargs = obtain(args), obtain(kwargs)  # with prints, seems like this takes about 0.0025 seconds 4 workers n=1
+        # I believe this obtain() makes a call to the other process, which may be a bottleneck.
+        # Potentially can try 1. a faster way of serializing the args/kwargs objects + avoiding the call to the other process
+        # or 2. sticking args/kwargs into shared memory
+        args, kwargs = obtain(args), obtain(kwargs)  # with prints, seems like this takes about 0.0025 seconds with 4 workers, which is pretty significant
         executor = getattr(self.worker, method)
         retval = executor(*args, **kwargs)
         return retval
