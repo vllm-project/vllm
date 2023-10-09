@@ -1,5 +1,6 @@
 import copy
 import time
+import os
 from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
@@ -30,9 +31,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _LOGGING_INTERVAL_SEC = 5
-
-import os
-print("importing llmengine", os.getpid())
 
 
 class LLMEngine:
@@ -107,7 +105,7 @@ class LLMEngine:
         if self.parallel_config.worker_use_ray:
             self._init_workers_ray(placement_group)
         elif self.parallel_config.worker_use_rpyc:
-            self._init_workers_rpyc("todo")
+            self._init_workers_rpyc()
         else:
             self._init_workers(distributed_init_method)
 
@@ -152,10 +150,8 @@ class LLMEngine:
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
-        # note (TODO delete) I'm assuming this process launches the workers 
-
         self.workers: List[Worker] = []
-        for bundle in placement_group.bundle_specs:  # probably creates N workers or something idk
+        for bundle in placement_group.bundle_specs:
             if not bundle.get("GPU", 0):
                 continue
             worker = ray.remote(
@@ -169,7 +165,7 @@ class LLMEngine:
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
-        init_torch_dist_process_group(self.workers, backend="nccl")  # TODO: replace with manually setting rank/url/port/etc. for rpyc
+        init_torch_dist_process_group(self.workers, backend="nccl")
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
@@ -187,90 +183,64 @@ class LLMEngine:
             get_all_outputs=True,
         )
 
-    def _init_workers_rpyc(self, todo_rpyc_args):
-        # set rank/url/port/etc. for rpyc workers
-        # use mp to run the workers
-        # note: parallel_config controls whether we're using ray or not
-
-        # uh probably create a Worker on each process, behind a rpyc server-thing that exposes the Worker's methods
-        # and call the _run_workers init_worker + init_model probably idk
-
-        # TODO I have no idea if any of this works lmao
+    def _init_workers_rpyc(self):
 
         from multiprocessing import Process, set_start_method
         import rpyc
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
-        import asyncio as aio  # todo doesn't break ray
+        import asyncio as aio
 
-        from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env, find_free_port, example  # todo does moving this here cause ray to not break? yup
+        from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env, find_free_port  # Import here, otherwise we break Ray
 
-        self.workers: List[RPyCWorkerClient] = []  # TODO type
+        self.workers: List[RPyCWorkerClient] = []
         ports = []
-        set_start_method("spawn")  # todo what does forkserver do
-        # Try setting here so that the env var gets set on the child process?
+        set_start_method("spawn")  # forkserver mode may work too
+        # HACK: There's some messiness with the order of spawning the process, importing torch, and setting env vars, 
+        # that cause the gpu to either be recognized or not by the worker process, so we set the env var here to make sure
+        # we've set the gpu correctly.
         gpu_ids = list(range(self.parallel_config.world_size))
-        # CUDA_VISIBLE_DEVICES isn't the only thing
+        # Think we just need to set CUDA_VISIBLE_DEVICES?
         os.environ["CUDA_VISIBLE_DEVICES"] = ','.join([str(gpu_id) for gpu_id in gpu_ids])
 
-        # TODO remove
-        # import torch.multiprocessing as mp
-        # from vllm.engine.rpyc_utils import example
-
-        # mp.spawn(example, (), 4, False, True)
-        # time.sleep(20)
-        # raise ValueError("terminate quickly ty")
-        # TODO end remove
-
-        # ports = [find_free_ports() for ]
         for i in range(self.parallel_config.world_size):
-            print(f">>> spawning child process {i}")
-            # TODO spawn a process with a Worker and rpyc server, stick it in the mp
             port = find_free_port()
-            # import pdb; pdb.set_trace()
             p = Process(target=init_rpyc_env, args=(port,))
-            # p = Process(target=example, args=(i,))
             p.start()
             ports.append(port)
         time.sleep(2)
         for i in range(self.parallel_config.world_size):
             port = ports[i]
-            # import pdb; pdb.set_trace()
             for _ in range(20):
                 try:
-                    conn = rpyc.connect("localhost", port, config={"allow_pickle": True})  # todo lightllm has retries here, you probably want to as well
+                    conn = rpyc.connect("localhost", port, config={"allow_pickle": True})
                     self.workers.append(RPyCWorkerClient(conn))
                     break
                 except ConnectionRefusedError:
-                    print(f"conn refused for worker {i}")
-                    time.sleep(2)  # time.sleep()? why not
+                    print(f"Conn refused for worker {i}")
+                    time.sleep(2)
                     continue
             else:
-                raise ConnectionRefusedError("couldn't connect to workers")
+                raise ConnectionRefusedError("Couldn't connect to workers")
 
-        print(">>> got to initializing workers")
         # Initialize torch distributed process group for the workers.
-
         addr, port = self.workers[0].get_addr_and_port()
         print(f"addr {addr} port {port}")
 
         executors = []
 
         for i, worker_client in enumerate(self.workers):
-            print(f">>> printing for process {i}")
             worker_client.print_debug_msg(str(i))
             exec = worker_client.ainit_torch_distributed(
-                addr,  # TODO
-                port,  # TODO
-                list(range(self.parallel_config.world_size)),  # TODO
+                addr,
+                port,
+                list(range(self.parallel_config.world_size)),
                 self.parallel_config.world_size,
                 i,
             )
             executors.append(exec)
         loop = aio.get_event_loop()
-        loop.run_until_complete(aio.gather(*executors))  # TODO may have to replace aio.run with something else because of some "no current event loop" thing
-
-        print(">>> initialized torchdist")
+        loop.run_until_complete(aio.gather(*executors))
 
         executors = []
 
@@ -278,16 +248,6 @@ class LLMEngine:
             exec = worker_client.ainit_worker(
                 self.model_config, self.parallel_config, self.scheduler_config
             )
-            # didn't work
-            # worker_client.init_worker(
-            #     lambda: Worker(
-            #         self.model_config,
-            #         self.parallel_config,
-            #         self.scheduler_config,
-            #         None,
-            #         None,
-            #     )
-            # )
             executors.append(exec)
         loop.run_until_complete(aio.gather(*executors))
         print("attempting to init model")
@@ -295,10 +255,6 @@ class LLMEngine:
             "init_model",
             get_all_outputs=True,
         )
-            
-
-
-        # raise NotImplementedError("rpyc not implemented yet")
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
