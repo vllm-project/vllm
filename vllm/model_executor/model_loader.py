@@ -23,9 +23,9 @@ _MODEL_REGISTRY = {
     "GPTJForCausalLM": GPTJForCausalLM,
     "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
     "InternLMForCausalLM": InternLMForCausalLM,
-    "LlamaForCausalLM": LlamaForCausalLM,
-    "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
-    "MistralForCausalLM": MistralForCausalLM,
+    # "LlamaForCausalLM": LlamaForCausalLM,
+    # "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    # "MistralForCausalLM": MistralForCausalLM,
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
@@ -34,7 +34,7 @@ _MODEL_REGISTRY = {
 
 # FIXME(woosuk): Remove this once all models support quantization.
 _MODEL_CLASSES_SUPPORT_QUANTIZATION = [
-    LlamaForCausalLM,
+    # LlamaForCausalLM,
 ]
 
 
