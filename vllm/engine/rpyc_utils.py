@@ -1,4 +1,4 @@
-# TODO maybe wrap in a try except ImportError? idk
+# TODO ray_utils wraps everything in a try except, we could do the same here.
 
 import os
 import asyncio as aio
@@ -10,10 +10,6 @@ import socket
 from datetime import timedelta
 import time
 
-# doesn't work
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
-print(">>> importing rpycutils", os.getpid())
-
 
 def find_free_port():
         with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
@@ -24,7 +20,6 @@ def find_free_port():
 
 class RPyCWorkerService(rpyc.Service):
     def on_connect(self, conn):
-
         pass
 
     def on_disconnect(self, conn):
@@ -50,15 +45,15 @@ class RPyCWorkerService(rpyc.Service):
         print(f"Running on {os.getpid()}")
         print(f"{master_addr}:{master_port}, #gpus {gpu_ids}, ws {world_size}, rank {rank}")
         
-        os.environ["MASTER_ADDR"] = str(master_addr)  # idk lmao search up torch distributed
+        os.environ["MASTER_ADDR"] = str(master_addr)
         os.environ["MASTER_PORT"] = str(master_port)
 
-        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"  # idk what this does
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id for gpu_id in gpu_ids))  # TODO wrong type?
+        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id for gpu_id in gpu_ids))
         if "NCCL_SOCKET_IFNAME" not in os.environ:
             os.environ["NCCL_SOCKET_IFNAME"] = "^lo,docker,veth"
 
-        import torch  # this import is fast, which suggests we've already imported it
+        import torch
         import torch.distributed as dist
 
         # ray makes a call to init process group here
@@ -86,29 +81,19 @@ class RPyCWorkerService(rpyc.Service):
         )
 
     def exposed_execute_method(self, method: str, *args, **kwargs):
-        # print(f"execute_method running on {os.getpid()}")
-        # raise ValueError("crashing to view call stack")
-        print(os.getpid(), "starthead", time.time())
         # I believe this obtain() makes a call to the other process, which may be a bottleneck. 
         args, kwargs = obtain(args), obtain(kwargs)  # with prints, seems like this takes about 0.0025 seconds 4 workers n=1
         executor = getattr(self.worker, method)
-        print(os.getpid(), "startexec", time.time())
         retval = executor(*args, **kwargs)
-        print(os.getpid(), "stopexec", time.time())
         return retval
     
 class RPyCWorkerClient:
     def __init__(self, conn):
         self.conn = conn
-        # conn is type rpyc.core.protocol.Connection
-        # import pdb; pdb.set_trace()
-        # print("workerclient.conn type", type(self.conn))  # apparently this hangs? wtf
         def async_wrap(f):
             f = rpyc.async_(f)
             async def _func(*args, **kwargs):
                 ans = f(*args, **kwargs)
-                # ans.set_expiry(3600)  # absurdly long, wait for model to init
-                # print(ans._ttl)
                 await aio.to_thread(ans.wait)
                 # raise if exception
                 return ans.value
@@ -122,8 +107,6 @@ class RPyCWorkerClient:
         self._execute_method = self.conn.root.execute_method
         self._get_addr_and_port = self.conn.root.get_addr_and_port
         
-
-
     def print_debug_msg(self, msg):
         self.conn.root.print_debug_msg(msg)
     
@@ -140,9 +123,7 @@ class RPyCWorkerClient:
         self._init_worker(model_config, parallel_config, scheduler_config)
 
     def execute_method(self, method, *args, **kwargs):
-        print(f"executing method {method} at {time.time()}")  # with threadpoolexecutor these prints seem to execute at the same time
-        ans = self._execute_method(method, *args, **kwargs)  # TODO is this right?
-        print(f"finish executing method {method} at {time.time()}")
+        ans = self._execute_method(method, *args, **kwargs)
         new_ans = obtain(ans)
         return new_ans
     
@@ -150,14 +131,9 @@ class RPyCWorkerClient:
         return self._get_addr_and_port()
     
     async def aexecute_method(self, method, *args, **kwargs):
-        t1 = time.time()
-        print(f'started at {t1}')
         ans = await self._aexecute_method(method, *args, **kwargs)
-        # t2 = time.time()
-        new_ans = obtain(ans)  # seems fast enough
-        # t3 = time.time()
-        # print(t2 - t1, t3 - t2)
-        return new_ans  # do we need to check None? probably not?
+        new_ans = obtain(ans)
+        return new_ans
     
     async def ainit_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
         return await self._ainit_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)
