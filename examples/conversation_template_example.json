@@ -1,0 +1,13 @@
+{
+  "name": "example",
+  "system_template": "{system_message}",
+  "system_message": "A chat between a user and an artificial intelligence assistant.",
+  "roles": ["USER", "ASSISTANT"],
+  "messages": [],
+  "offset": 0,
+  "sep_style": "ADD_COLON_TWO",
+  "sep": "\n",
+  "sep2": "</s>",
+  "stop_str": "",
+  "stop_token_ids": []
+}
