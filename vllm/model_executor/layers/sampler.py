@@ -35,20 +35,6 @@ class Sampler(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size
 
-    def _logits_forward(
-        self,
-        embedding: torch.Tensor,
-        hidden_states: torch.Tensor,
-        embedding_bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        logits = torch.matmul(hidden_states, embedding.t())
-        if embedding_bias is not None:
-            logits += embedding_bias
-        logits = tensor_model_parallel_all_gather(logits)
-        # Remove paddings in vocab (if any).
-        logits = logits[:, :self.vocab_size]
-        return logits
-
     def forward(
         self,
         embedding: torch.Tensor,
@@ -163,8 +149,9 @@ class Sampler(nn.Module):
                                   device=embedding.device)
 
         # Compute the logits for the prompt tokens.
-        log_probs = self._logits_forward(embedding, selected_hidden_states,
-                                         embedding_bias).log_softmax(dim=-1)
+        log_probs = _get_logits(selected_hidden_states, embedding,
+                                embedding_bias,
+                                self.vocab_size).log_softmax(dim=-1)
         # Log probs used in the prompt
         # Shift by 1 to account for the start token
         selected_log_probs = (log_probs.gather(
