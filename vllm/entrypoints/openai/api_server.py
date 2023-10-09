@@ -45,6 +45,7 @@ logger = init_logger(__name__)
 served_model = None
 app = fastapi.FastAPI()
 engine = None
+conversation_template = None
 
 
 def create_error_response(status_code: HTTPStatus,
@@ -80,20 +81,36 @@ async def get_gen_prompt(request) -> str:
             f"fastchat version is low. Current version: {fastchat.__version__} "
             "Please upgrade fastchat to use: `$ pip install -U fschat`")
 
-    conv = get_conversation_template(request.model)
-    conv = Conversation(
-        name=conv.name,
-        system_template=conv.system_template,
-        system_message=conv.system_message,
-        roles=conv.roles,
-        messages=list(conv.messages),  # prevent in-place modification
-        offset=conv.offset,
-        sep_style=SeparatorStyle(conv.sep_style),
-        sep=conv.sep,
-        sep2=conv.sep2,
-        stop_str=conv.stop_str,
-        stop_token_ids=conv.stop_token_ids,
-    )
+    if conversation_template is None:
+        template = get_conversation_template(request.model)
+        conv = Conversation(
+            name=template.name,
+            system_template=template.system_template,
+            system_message=template.system_message,
+            roles=template.roles,
+            messages=list(template.messages),  # prevent in-place modification
+            offset=template.offset,
+            sep_style=SeparatorStyle(template.sep_style),
+            sep=template.sep,
+            sep2=template.sep2,
+            stop_str=template.stop_str,
+            stop_token_ids=template.stop_token_ids,
+        )
+    else:
+        template = conversation_template
+        conv = Conversation(
+            name=template['name'],
+            system_template=template['system_template'],
+            system_message=template.get('system_message', ""),  # Use default if not provided
+            roles=tuple(template['roles']),
+            messages=template.get('messages', []),  # Use default if not provided
+            offset=template.get('offset', 0),  # Use default if not provided
+            sep_style=SeparatorStyle[template['sep_style']],
+            sep=template['sep'],
+            sep2=template.get('sep2', ""),  # Use default if not provided
+            stop_str=template['stop_str'],
+            stop_token_ids=template.get('stop_token_ids', [])  # Use default if not provided
+        )
 
     if isinstance(request.messages, str):
         prompt = request.messages
@@ -590,6 +607,11 @@ if __name__ == "__main__":
                         help="The model name used in the API. If not "
                         "specified, the model name will be the same as "
                         "the huggingface name.")
+    parser.add_argument("--conversation-template",
+                        type=str,
+                        default=None,
+                        help="The path to the conversation template to use "
+                             "with the specified model.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -608,6 +630,10 @@ if __name__ == "__main__":
         served_model = args.served_model_name
     else:
         served_model = args.model
+
+    if args.conversation_template is not None:
+        with open(args.conversation_template, "r") as f:
+            conversation_template = json.load(f)
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
