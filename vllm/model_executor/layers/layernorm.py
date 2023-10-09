@@ -1,6 +1,6 @@
 """Custom normalization layers."""
 import torch
-import torch.nn as nn
+# import torch.nn as nn
 
 # from vllm import layernorm_ops
 
@@ -32,12 +32,13 @@ import torch.nn as nn
 #         return out
 
 class RMSNorm(torch.nn.Module):
-    def __init__(self, hidden_size, epsilon=1e-6):
+    def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.empty(hidden_size))
-        self.epsilon = epsilon
+        self.epsilon = eps
 
-    def forward(self, hidden_states):
+    def forward(self, x):
+        hidden_states = x
         variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.epsilon)
 
