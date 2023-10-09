@@ -192,7 +192,6 @@ class _AsyncLLMEngine(LLMEngine):
             return ignored
 
         # Execute the model.
-        # TODO how big are the args even?
         output = await self._run_workers_async(
             "execute_model",
             seq_group_metadata_list=seq_group_metadata_list,
@@ -211,11 +210,9 @@ class _AsyncLLMEngine(LLMEngine):
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
-        st = time.time()
-        print(f"_run_workers_async start {st}")
+        # st = time.time()
+        # print(f"_run_workers_async start {st}")
         all_outputs = []
-
-        rpyc_use_tpe = False
 
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
@@ -226,39 +223,29 @@ class _AsyncLLMEngine(LLMEngine):
             else:
                 executor = getattr(worker, method)
 
-            if not self.parallel_config.worker_use_rpyc or not rpyc_use_tpe:
-                output = executor(*args, **kwargs)
-                all_outputs.append(output)
-        m1 = time.time()
-        print(f"_run_workers_async prep executors {m1}")
+            output = executor(*args, **kwargs)
+            all_outputs.append(output)
+        # m1 = time.time()
+        # print(f"_run_workers_async prep executors {m1}")
         if self.parallel_config.worker_use_ray:
             all_outputs = await asyncio.gather(*all_outputs)
         elif self.parallel_config.worker_use_rpyc:
-            
             all_outputs = await asyncio.gather(*all_outputs)
 
-            
-            # with ThreadPoolExecutor(max_workers=self.parallel_config.world_size) as tpe:  # increasing max_workers to 4 * worldsize doesn't seem to help
-                # all_outputs = list(tpe.map(lambda worker: worker.execute_method(method, *args, **kwargs), self.workers))
-                # print(type(all_outputs))
-                # print(type(all_outputs[0]))
-
-        m2 = time.time()
-        print(f"_run_workers_async wait for gather, {m2}")
+        # m2 = time.time()
+        # print(f"_run_workers_async wait for gather, {m2}")
         if get_all_outputs:
             return all_outputs
 
         # Make sure all workers have the same results.
-        # print(all_outputs)
-        # import pdb; pdb.set_trace()
         output = all_outputs[0]  # some "ray objectref" object in ray mode, some list(list(sequence_output)) in one-process mode
         if not self.parallel_config.worker_use_rpyc:
-            # if we're using rpyc, we are returned coroutines, and we can't assert equality
+            # HACK: if we're using rpyc, we are returned coroutines, and we can't assert equality
             for other_output in all_outputs[1:]:
                 assert output == other_output
-        en = time.time()
-        print(f"_run_workers_async end {en}")
-        print(f"_run_workers_async total {en - st}")
+        # en = time.time()
+        # print(f"_run_workers_async end {en}")
+        # print(f"_run_workers_async total {en - st}")
         return output
 
 
@@ -292,7 +279,7 @@ class AsyncLLMEngine:
                  worker_use_ray: bool,
                  worker_use_rpyc: bool,
                  engine_use_ray: bool,
-                 engine_use_rpyc: bool,
+                 engine_use_rpyc: bool, # TODO clean you up
                  *args,
                  log_requests: bool = True,
                  max_log_len: Optional[int] = None,
@@ -300,8 +287,6 @@ class AsyncLLMEngine:
                  **kwargs) -> None:
         assert not (engine_use_ray and engine_use_rpyc), (
             "Only one of engine_use_ray and engine_use_rpyc can be True.")
-        # TODO something similar with worker_use_ray + worker_use_rpyc probably
-        print(f">>> engine use ray: {engine_use_ray}, worker use ray/rpyc/none: {'ray' if worker_use_ray else 'rpyc' if worker_use_rpyc else 'none'}")
         self.worker_use_ray = worker_use_ray
         self.worker_use_rpyc = worker_use_rpyc
         self.engine_use_ray = engine_use_ray
@@ -341,9 +326,7 @@ class AsyncLLMEngine:
         if not self.engine_use_ray and not self.engine_use_rpyc:
             engine_class = self._engine_class
         elif self.engine_use_rpyc:
-            # import pdb; pdb.set_trace()
-            print("wtf")
-            # What does engine_use_ray even do? do we need a separate 
+            # TODO clean this up
             raise NotImplementedError("RPyC is not supported yet.")
         elif self.worker_use_ray:
             engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
@@ -532,7 +515,6 @@ class AsyncLLMEngine:
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
-        print(engine_args)
         parallel_config = engine_configs[2]
         # Initialize the cluster.
         distributed_init_method, placement_group = initialize_cluster(
