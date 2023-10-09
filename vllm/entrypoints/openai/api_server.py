@@ -609,7 +609,7 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="The path to the conversation template to use "
-                             "with the specified model.")
+                        "with the specified model.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
