@@ -98,19 +98,17 @@ async def get_gen_prompt(request) -> str:
         )
     else:
         template = conversation_template
-        conv = Conversation(
-            name=template['name'],
-            system_template=template['system_template'],
-            system_message=template.get('system_message', ""),
-            roles=tuple(template['roles']),
-            messages=template.get('messages', []),
-            offset=template.get('offset', 0),
-            sep_style=SeparatorStyle[template['sep_style']],
-            sep=template['sep'],
-            sep2=template.get('sep2', ""),
-            stop_str=template['stop_str'],
-            stop_token_ids=template.get('stop_token_ids', [])
-        )
+        conv = Conversation(name=template["name"],
+                            system_template=template["system_template"],
+                            system_message=template.get("system_message", ""),
+                            roles=tuple(template["roles"]),
+                            messages=template.get("messages", []),
+                            offset=template.get("offset", 0),
+                            sep_style=SeparatorStyle[template["sep_style"]],
+                            sep=template["sep"],
+                            sep2=template.get("sep2", ""),
+                            stop_str=template["stop_str"],
+                            stop_token_ids=template.get("stop_token_ids", []))
 
     if isinstance(request.messages, str):
         prompt = request.messages
