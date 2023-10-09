@@ -171,6 +171,8 @@ def init_rpyc_env(port):
     # We need to import torch here, otherwise torch won't recognize CUDA devices as available.
     # Not sure why unfortunately, but I think it's related to some ordering of imports/environment set up
     import torch
+    # This following print is necessary for the workers to start up, otherwise we get some 
+    print("init_rpyc_env cuda support:", torch.cuda.is_available(),":", torch.cuda.device_count(), "devices")
     t = ThreadedServer(RPyCWorkerService(), port=port, protocol_config={"allow_pickle": True})
     t.start()
     return
