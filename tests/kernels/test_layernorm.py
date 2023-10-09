@@ -55,4 +55,4 @@ def test_rms_norm(
         ref.variance_epsilon,
     )
     ref_out = ref(x)
-    assert torch.allclose(out, ref_out, atol=1e-2, rtol=1e-5)
+    assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
