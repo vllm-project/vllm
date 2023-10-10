@@ -117,6 +117,7 @@ activation_extension = CUDAExtension(
 )
 ext_modules.append(activation_extension)
 
+
 # Quantization kernels.
 quantization_extension = CUDAExtension(
     name="vllm.quantization_ops",
@@ -129,7 +130,8 @@ quantization_extension = CUDAExtension(
         "nvcc": NVCC_FLAGS,
     },
 )
-ext_modules.append(quantization_extension)
+if not torch.version.hip:
+    ext_modules.append(quantization_extension)
 
 # Misc. CUDA utils.
 cuda_utils_extension = CUDAExtension(
