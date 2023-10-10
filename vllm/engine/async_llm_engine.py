@@ -219,7 +219,7 @@ class _AsyncLLMEngine(LLMEngine):
 
             output = executor(*args, **kwargs)
             all_outputs.append(output)
-        
+
         if self.parallel_config.worker_use_ray:
             all_outputs = await asyncio.gather(*all_outputs)
         elif self.parallel_config.worker_use_rpyc:
