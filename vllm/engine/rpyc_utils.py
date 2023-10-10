@@ -25,11 +25,6 @@ class RPyCWorkerService(rpyc.Service):
     def on_disconnect(self, conn):
         pass
 
-    def exposed_print_debug_msg(self, msg):
-        print(f"in service {os.getpid()}:{msg}")
-
-    
-
     def exposed_get_addr_and_port(self):
         # equivalent of
         # addr = ray.util.get_node_ip_address()
@@ -37,7 +32,6 @@ class RPyCWorkerService(rpyc.Service):
         addr = "127.0.0.1"  # we should be local I think
         port = find_free_port()
         return addr, port
-
 
     def exposed_init_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
         # https://github.com/ray-project/ray/blob/7a3ae5ba5dbd6704f435bde8dba91a8a8d207ae4/python/ray/air/util/torch_dist.py#L95
@@ -102,31 +96,8 @@ class RPyCWorkerClient:
         self._ainit_torch_distributed = self.async_wrap(self.conn.root.init_torch_distributed)
         self._ainit_worker = self.async_wrap(self.conn.root.init_worker)
         self._aexecute_method = self.async_wrap(self.conn.root.execute_method)
-        self._init_torch_distributed = self.conn.root.init_torch_distributed
-        self._init_worker = self.conn.root.init_worker
-        self._execute_method = self.conn.root.execute_method
         self._get_addr_and_port = self.conn.root.get_addr_and_port
         
-    def print_debug_msg(self, msg):
-        self.conn.root.print_debug_msg(msg)
-    
-    async def aprint_debug_msg(self, msg):
-        return await self.async_wrap(self.conn.root.print_debug_msg)(msg)
-
-    # TODO will I end up needing the nonasync fns?
-    
-    def init_torch_distributed(self, master_addr, master_port, gpu_ids, world_size, rank):
-        self._init_torch_distributed(master_addr, master_port, gpu_ids, world_size, rank)
-
-    def init_worker(self, model_config, parallel_config, scheduler_config):
-        # we run obtain() on the worker to send {model|parallel|scheduler}_config to the workers
-        self._init_worker(model_config, parallel_config, scheduler_config)
-
-    def execute_method(self, method, *args, **kwargs):
-        ans = self._execute_method(method, *args, **kwargs)
-        new_ans = obtain(ans)
-        return new_ans
-    
     def get_addr_and_port(self):
         return self._get_addr_and_port()
     
