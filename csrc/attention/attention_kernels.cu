@@ -39,7 +39,11 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   // Compute the sum per warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
     sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
+#else
+    sum += __shfl_xor(uint32_t(-1), sum, mask);
+#endif
   }
 
   // Warp leaders store the data to shared memory.
@@ -58,11 +62,19 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   // Parallel reduction inside the warp.
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
     sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
+#else
+    sum += __shfl_xor(uint32_t(-1), sum, mask);
+#endif
   }
 
   // Broadcast to other threads.
+#ifndef USE_ROCM
   return __shfl_sync(uint32_t(-1), sum, 0);
+#else
+  return __shfl(uint32_t(-1), sum, 0);
+#endif
 }
 
 // Grid: (num_heads, num_seqs).
@@ -196,7 +208,11 @@ __global__ void single_query_cached_kv_attention_kernel(
   // The 0-th thread of each thread group already has its max qk value.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
+#ifndef USE_ROCM
     qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
+#else
+    qk_max = fmaxf(qk_max, __shfl_xor(uint32_t(-1), qk_max, mask));
+#endif
   }
   if (lane == 0) {
     red_smem[warp_idx] = qk_max;
@@ -208,10 +224,18 @@ __global__ void single_query_cached_kv_attention_kernel(
   qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
     qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
+#else
+    qk_max = fmaxf(qk_max, __shfl_xor(uint32_t(-1), qk_max, mask));
+#endif
   }
   // Broadcast the max qk value to all threads.
+#ifndef USE_ROCM
   qk_max = __shfl_sync(uint32_t(-1), qk_max, 0);
+#else
+  qk_max = __shfl(uint32_t(-1), qk_max, 0);
+#endif
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -284,7 +308,11 @@ __global__ void single_query_cached_kv_attention_kernel(
     float acc = accs[i];
 #pragma unroll
     for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
       acc += __shfl_xor_sync(uint32_t(-1), acc, mask);
+#else
+      acc += __shfl_xor(uint32_t(-1), acc, mask);
+#endif
     }
     accs[i] = acc;
   }
@@ -342,7 +370,7 @@ __global__ void single_query_cached_kv_attention_kernel(
 
 #define LAUNCH_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
   cudaFuncSetAttribute(                                                                       \
-      vllm::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,   \
+      (void*)vllm::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,   \
       cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                          \
   vllm::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>        \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
