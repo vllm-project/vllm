@@ -3,9 +3,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
-from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
+from flash_attn.flash_attn_interface import _flash_attn_forward
 
 from vllm import attention_ops
 from vllm import cache_ops
@@ -116,19 +114,30 @@ class PagedAttention(nn.Module):
             value = torch.repeat_interleave(value,
                                             self.num_queries_per_kv,
                                             dim=1)
+        
+        if query.dtype == torch.float:
+            raise ValueError('The float data type is not supported by '
+                             'FlashAttention. Use the half data type instead.')
+        head_size = query.shape[-1]
+        if head_size > 128:
+            raise ValueError('FlashAttention does not support head_size > 128.')
 
-        # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
-        out = xops.memory_efficient_attention_forward(
-            query.unsqueeze(0),
-            key.unsqueeze(0),
-            value.unsqueeze(0),
-            attn_bias=input_metadata.attn_bias[0],
-            p=0.0,
-            scale=self.scale,
+        # Directly call FlashAttention's internal function to avoid allocating
+        # a new tensor for the output.
+        _flash_attn_forward(
+            query,
+            key,
+            value,
+            output,
+            input_metadata.cumulative_prompt_lens,
+            input_metadata.cumulative_prompt_lens,
+            input_metadata.max_prompt_len,
+            input_metadata.max_prompt_len,
+            dropout_p=0.0,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax=False,
         )
-        # TODO(woosuk): Unnecessary copy. Optimize.
-        output.copy_(out.squeeze(0))
-        return output
 
     def single_query_cached_kv_attention(
         self,
