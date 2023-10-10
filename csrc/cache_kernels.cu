@@ -177,8 +177,8 @@ __global__ void reshape_and_cache_kernel(
                               + head_idx * head_size * block_size
                               + head_offset * block_size
                               + block_offset;
-    key_cache[tgt_key_idx] = VLLM_LDB(&key[src_key_idx]);
-    value_cache[tgt_value_idx] = VLLM_LDB(&value[src_value_idx]);
+    key_cache[tgt_key_idx] = VLLM_LDG(&key[src_key_idx]);
+    value_cache[tgt_value_idx] = VLLM_LDG(&value[src_value_idx]);
   }
 }
 
@@ -263,8 +263,8 @@ __global__ void gather_cached_kv_kernel(
                                 + head_offset * block_size
                                 + block_offset;
 
-      key[tgt_key_idx] = VLLM_LDB(&key_cache[src_key_idx]);
-      value[tgt_value_idx] = VLLM_LDB(&value_cache[src_value_idx]);
+      key[tgt_key_idx] = VLLM_LDG(&key_cache[src_key_idx]);
+      value[tgt_value_idx] = VLLM_LDG(&value_cache[src_value_idx]);
     }
 }
 
@@ -329,8 +329,8 @@ __global__ void gather_cached_kv_kernel_optimized(
             src_key_indices[j] = src_key_idx;
             src_value_indices[j] = src_value_idx;
 
-            keys_to_store[j] = VLLM_LDB(&key_cache[src_key_idx]);
-            values_to_store[j] = VLLM_LDB(&value_cache[src_value_idx]);
+            keys_to_store[j] = VLLM_LDG(&key_cache[src_key_idx]);
+            values_to_store[j] = VLLM_LDG(&value_cache[src_value_idx]);
         }
 
         #pragma unroll
