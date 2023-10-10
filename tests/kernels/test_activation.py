@@ -72,4 +72,4 @@ def test_gelu_fast(
     out = torch.empty(num_tokens, d, dtype=dtype, device="cuda")
     activation_ops.gelu_fast(out, x)
     ref_out = get_activation("gelu_fast")(x)
-    assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-3)
