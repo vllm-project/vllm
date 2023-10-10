@@ -207,13 +207,11 @@ class _AsyncLLMEngine(LLMEngine):
     ) -> Any:
         """Runs the given method on all workers."""
         all_outputs = []
-
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             elif self.parallel_config.worker_use_rpyc:
                 executor = partial(worker.aexecute_method, method)
-                pass
             else:
                 executor = getattr(worker, method)
 

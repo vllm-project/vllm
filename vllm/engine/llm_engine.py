@@ -188,8 +188,6 @@ class LLMEngine:
         import rpyc
         from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
 
-        import asyncio as aio
-
         from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env, find_free_port  # Import here, otherwise we break Ray
 
         self.workers: List[RPyCWorkerClient] = []
