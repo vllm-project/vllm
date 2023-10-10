@@ -73,53 +73,53 @@ def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
     return slopes
 
 
-# class BaiChuanMLP(nn.Module):
+class BaiChuanMLP(nn.Module):
 
-#     def __init__(
-#         self,
-#         hidden_size: int,
-#         intermediate_size: int,
-#         hidden_act: str,
-#     ):
-#         super().__init__()
-#         self.gate_up_proj = ColumnParallelLinear(
-#             hidden_size,
-#             2 * intermediate_size,
-#             bias=False,
-#             gather_output=False,
-#         )
-#         self.down_proj = RowParallelLinear(
-#             intermediate_size,
-#             hidden_size,
-#             bias=False,
-#             input_is_parallel=True,
-#         )
-#         if hidden_act != "silu":
-#             raise ValueError(f"Unsupported activation: {hidden_act}. "
-#                              "Only silu is supported for now.")
-        # self.act_fn = SiluAndMul()
-
-#     def forward(self, x):
-#         gate_up, _ = self.gate_up_proj(x)
-#         x = self.act_fn(gate_up)
-#         x, _ = self.down_proj(x)
-#         return x
-from transformers.activations import ACT2FN
-class BaiChuanMLP(torch.nn.Module):
     def __init__(
-            self,
-            hidden_size: int,
-            intermediate_size: int,
-            hidden_act: str,
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
     ):
         super().__init__()
-        self.gate_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = torch.nn.Linear(intermediate_size, hidden_size, bias=False)
-        self.up_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.act_fn = ACT2FN[hidden_act]
+        self.gate_up_proj = ColumnParallelLinear(
+            hidden_size,
+            2 * intermediate_size,
+            bias=False,
+            gather_output=False,
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+        )
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+# from transformers.activations import ACT2FN
+# class BaiChuanMLP(torch.nn.Module):
+#     def __init__(
+#             self,
+#             hidden_size: int,
+#             intermediate_size: int,
+#             hidden_act: str,
+#     ):
+#         super().__init__()
+#         self.gate_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
+#         self.down_proj = torch.nn.Linear(intermediate_size, hidden_size, bias=False)
+#         self.up_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
+#         self.act_fn = ACT2FN[hidden_act]
+
+#     def forward(self, x):
+#         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class BaiChuanAttention(nn.Module):
@@ -359,22 +359,22 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 loaded_weight = loaded_weight[:, head_start:head_end, :, :]
                 loaded_weight = loaded_weight.reshape(-1, hidden_size)
 
-            # is_gate_up_weight = False
-            # for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
-            #     if weight_name not in name:
-            #         continue
-            #     param = state_dict[name.replace(weight_name, "gate_up_proj")]
-            #     shard_size = param.shape[0] // 2
-            #     loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
-            #                                   (tp_rank + 1)]
-            #     param_slice = param.data[shard_size * stride_id:shard_size *
-            #                              (stride_id + 1)]
-            #     assert param_slice.shape == loaded_weight.shape
-            #     param_slice.copy_(loaded_weight)
-            #     is_gate_up_weight = True
-            #     break
-            # if is_gate_up_weight:
-            #     continue
+            is_gate_up_weight = False
+            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+                if weight_name not in name:
+                    continue
+                param = state_dict[name.replace(weight_name, "gate_up_proj")]
+                shard_size = param.shape[0] // 2
+                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
+                                              (tp_rank + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size *
+                                         (stride_id + 1)]
+                assert param_slice.shape == loaded_weight.shape
+                param_slice.copy_(loaded_weight)
+                is_gate_up_weight = True
+                break
+            if is_gate_up_weight:
+                continue
 
             param = state_dict[name]
 
