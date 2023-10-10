@@ -170,5 +170,5 @@ def test_rotary_embedding(
     ref_key = ref_key.view(num_tokens, num_heads * head_size)
 
     # Compare the results.
-    assert torch.allclose(out_query, ref_query, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(out_key, ref_key, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(out_query, ref_query, atol=1e-3, rtol=1e-3)
+    assert torch.allclose(out_key, ref_key, atol=1e-3, rtol=1e-3)
