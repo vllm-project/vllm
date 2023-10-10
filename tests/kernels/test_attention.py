@@ -1,10 +1,9 @@
 import random
 from typing import List, Optional, Tuple
 
+from flash_attn.flash_attn_interface import _flash_attn_forward
 import pytest
 import torch
-from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from vllm import attention_ops
 from vllm.utils import get_max_shared_memory_bytes
@@ -12,7 +11,7 @@ from vllm.utils import get_max_shared_memory_bytes
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
-MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
+MAX_SEQ_LEN = 8192
 NUM_BLOCKS = 128  # Arbitrary values for testing
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -270,20 +269,28 @@ def test_multi_query_kv_attention(
         # Handle MQA and GQA
         key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
         value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
-    attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
-    output = xops.memory_efficient_attention_forward(
-        query.unsqueeze(0),
-        key.unsqueeze(0),
-        value.unsqueeze(0),
-        attn_bias=attn_bias,
-        p=0.0,
-        scale=scale,
-    )
-    output = output.squeeze(0)
 
     cu_seq_lens = [0]
     for seq_len in seq_lens:
         cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
+    max_prompt_len = max(seq_lens)
+
+    output = torch.empty_like(query)
+    _flash_attn_forward(
+        query,
+        key,
+        value,
+        output,
+        cu_seq_lens,
+        cu_seq_lens,
+        max_prompt_len,
+        max_prompt_len,
+        dropout_p=0.0,
+        softmax_scale=scale,
+        causal=True,
+        return_softmax=False,
+    )
+
     ref_output = ref_multi_query_kv_attention(
         cu_seq_lens,
         query,
