@@ -4,8 +4,6 @@ from functools import partial
 from typing import (Any, Dict, Iterable, List, Optional, Set, Tuple, Type,
                     Union)
 
-from concurrent.futures import ThreadPoolExecutor
-
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
@@ -13,8 +11,6 @@ from vllm.engine.ray_utils import initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-
-import time
 
 logger = init_logger(__name__)
 
@@ -210,8 +206,6 @@ class _AsyncLLMEngine(LLMEngine):
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
-        # st = time.time()
-        # print(f"_run_workers_async start {st}")
         all_outputs = []
 
         for worker in self.workers:
@@ -225,15 +219,11 @@ class _AsyncLLMEngine(LLMEngine):
 
             output = executor(*args, **kwargs)
             all_outputs.append(output)
-        # m1 = time.time()
-        # print(f"_run_workers_async prep executors {m1}")
         if self.parallel_config.worker_use_ray:
             all_outputs = await asyncio.gather(*all_outputs)
         elif self.parallel_config.worker_use_rpyc:
             all_outputs = await asyncio.gather(*all_outputs)
 
-        # m2 = time.time()
-        # print(f"_run_workers_async wait for gather, {m2}")
         if get_all_outputs:
             return all_outputs
 
@@ -243,9 +233,6 @@ class _AsyncLLMEngine(LLMEngine):
             # HACK: if we're using rpyc, we are returned coroutines, and we can't assert equality
             for other_output in all_outputs[1:]:
                 assert output == other_output
-        # en = time.time()
-        # print(f"_run_workers_async end {en}")
-        # print(f"_run_workers_async total {en - st}")
         return output
 
 
