@@ -99,12 +99,7 @@ __global__ void NUQ4MatMulKernel(
   int row = BLOCKHEIGHT4 * blockIdx.x;
   int col =  BLOCKWIDTH * blockIdx.y + threadIdx.x;
 
-  // __shared__ __half blockvec[BLOCKWIDTH];
-  // blockvec[threadIdx.x] = vec[(row / BLOCKHEIGHT4) * BLOCKWIDTH + threadIdx.x];
-
   __shared__ half2 blockvec[blockwidth2];
-  // if (threadIdx.x < blockwidth2)
-  //   blockvec[threadIdx.x] = vec[(row / BLOCKHEIGHT4) * blockwidth2 + threadIdx.x];
 
   __shared__ __half deq2[16][BLOCKWIDTH];
   int off = threadIdx.x;
@@ -113,9 +108,6 @@ __global__ void NUQ4MatMulKernel(
     int lut_index = column_offset + val;
     deq2[val][off] = lookup_table[lut_index];
   }
-
-
-  // __syncthreads();
 
   __half res;
   half2 res2;
@@ -181,7 +173,6 @@ __global__ void NUQ4MatMulKernel(
       res3.y = res;
     }
 
-    // atomicAdd(&mul[b * width + col], res);
     atomicAdd(&mul[b * width / 2 + col / 2], res3);
   }
 }

@@ -37,8 +37,7 @@ class SqueezeLLMConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # @ Coleman - TODO check this
-        return 80
+        return 70
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
