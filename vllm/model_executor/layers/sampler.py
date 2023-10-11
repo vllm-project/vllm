@@ -105,7 +105,7 @@ def _prune_hidden_states(
     last_token_indices = []
     start_idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
-        seq_ids, sampling_params = seq_group
+        seq_ids, _ = seq_group
         if i < input_metadata.num_prompts:
             assert len(seq_ids) == 1, "Prompt input should have only one seq."
             prompt_len = input_metadata.prompt_lens[i]
