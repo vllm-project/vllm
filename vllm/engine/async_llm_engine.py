@@ -210,6 +210,8 @@ class _AsyncLLMEngine(LLMEngine):
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
+            elif self.parallel_config.worker_use_rpyc:
+                executor = partial(worker.aexecute_method, method)
             else:
                 executor = getattr(worker, method)
 
@@ -218,14 +220,18 @@ class _AsyncLLMEngine(LLMEngine):
 
         if self.parallel_config.worker_use_ray:
             all_outputs = await asyncio.gather(*all_outputs)
+        elif self.parallel_config.worker_use_rpyc:
+            all_outputs = await asyncio.gather(*all_outputs)
 
         if get_all_outputs:
             return all_outputs
 
         # Make sure all workers have the same results.
-        output = all_outputs[0]
-        for other_output in all_outputs[1:]:
-            assert output == other_output
+        output = all_outputs[0]  # some "ray objectref" object in ray mode, some list(list(sequence_output)) in one-process mode
+        if not self.parallel_config.worker_use_rpyc:
+            # HACK: if we're using rpyc, we are returned coroutines, and we can't assert equality
+            for other_output in all_outputs[1:]:
+                assert output == other_output
         return output
 
 
@@ -257,6 +263,7 @@ class AsyncLLMEngine:
 
     def __init__(self,
                  worker_use_ray: bool,
+                 worker_use_rpyc: bool,
                  engine_use_ray: bool,
                  *args,
                  log_requests: bool = True,
@@ -264,6 +271,7 @@ class AsyncLLMEngine:
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
+        self.worker_use_rpyc = worker_use_rpyc
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
         self.max_log_len = max_log_len
@@ -484,6 +492,7 @@ class AsyncLLMEngine:
             parallel_config, engine_args.engine_use_ray)
         # Create the async LLM engine.
         engine = cls(engine_args.worker_use_ray,
+                     engine_args.worker_use_rpyc,
                      engine_args.engine_use_ray,
                      *engine_configs,
                      distributed_init_method,

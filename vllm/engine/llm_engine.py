@@ -1,5 +1,7 @@
 import copy
 import time
+import os
+import asyncio as aio
 from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
@@ -104,6 +106,8 @@ class LLMEngine:
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
             self._init_workers_ray(placement_group)
+        elif self.parallel_config.worker_use_rpyc:
+            self._init_workers_rpyc()
         else:
             self._init_workers(distributed_init_method)
 
@@ -176,6 +180,72 @@ class LLMEngine:
                               None,
                               None,
                           ))
+        self._run_workers(
+            "init_model",
+            get_all_outputs=True,
+        )
+
+    def _init_workers_rpyc(self):
+
+        from multiprocessing import Process, set_start_method
+        import rpyc
+        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+
+        from vllm.engine.rpyc_utils import RPyCWorkerClient, init_rpyc_env, find_free_port  # Import here, otherwise we break Ray
+
+        self.workers: List[RPyCWorkerClient] = []
+        ports = []
+        set_start_method("spawn")  # forkserver mode may work too
+        # HACK: There's some messiness with the order of spawning the process, importing torch, and setting env vars, 
+        # that cause the gpu to either be recognized or not by the worker process, so we set the env var here to make sure
+        # we've set the gpu correctly.
+        gpu_ids = list(range(self.parallel_config.world_size))
+        # Think we just need to set CUDA_VISIBLE_DEVICES?
+        os.environ["CUDA_VISIBLE_DEVICES"] = ','.join([str(gpu_id) for gpu_id in gpu_ids])
+
+        for i in range(self.parallel_config.world_size):
+            port = find_free_port()
+            p = Process(target=init_rpyc_env, args=(port,))
+            p.start()
+            ports.append(port)
+        time.sleep(2)
+        for i in range(self.parallel_config.world_size):
+            port = ports[i]
+            for _ in range(20):
+                try:
+                    conn = rpyc.connect("localhost", port, config={"allow_pickle": True})
+                    self.workers.append(RPyCWorkerClient(conn))
+                    break
+                except ConnectionRefusedError:
+                    print(f"Conn refused for worker {i}")
+                    time.sleep(2)
+                    continue
+            else:
+                raise ConnectionRefusedError("Couldn't connect to workers")
+
+        # Initialize torch distributed process group for the workers.
+        addr, port = self.workers[0].get_addr_and_port()
+
+        executors = []
+        for i, worker_client in enumerate(self.workers):
+            exec = worker_client.ainit_torch_distributed(
+                addr,
+                port,
+                list(range(self.parallel_config.world_size)),
+                self.parallel_config.world_size,
+                i,
+            )
+            executors.append(exec)
+        loop = aio.get_event_loop()
+        loop.run_until_complete(aio.gather(*executors))
+
+        executors = []
+        for worker_client in self.workers:
+            exec = worker_client.ainit_worker(
+                self.model_config, self.parallel_config, self.scheduler_config
+            )
+            executors.append(exec)
+        loop.run_until_complete(aio.gather(*executors))
         self._run_workers(
             "init_model",
             get_all_outputs=True,
@@ -686,6 +756,8 @@ class LLMEngine:
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
+            elif self.parallel_config.worker_use_rpyc:
+                executor = partial(worker.aexecute_method, method)
             else:
                 executor = getattr(worker, method)
 
@@ -694,6 +766,10 @@ class LLMEngine:
 
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)
+        elif self.parallel_config.worker_use_rpyc:
+            # There may be a faster way to make all the requests.
+            loop = aio.get_event_loop()
+            all_outputs = loop.run_until_complete(aio.gather(*all_outputs))
 
         if get_all_outputs:
             return all_outputs

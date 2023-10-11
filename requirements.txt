@@ -11,3 +11,4 @@ xformers >= 0.0.22
 fastapi
 uvicorn[standard]
 pydantic < 2  # Required for OpenAI server.
+rpyc >= 5.3.0  # Required if you want to use RPyC. As of 5.3.0, there needs to be a separate change in the source to enable not-terrible performance compared to Ray.
