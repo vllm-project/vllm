@@ -25,9 +25,7 @@ class SqueezeLLMConfig(QuantizationConfig):
         self.pack_factor = 32 // self.weight_bits
 
     def __repr__(self) -> str:
-        return (f"SqueezeLLMConfig(weight_bits={self.weight_bits}, "
-                f"group_size={self.group_size}, "
-                f"zero_point={self.zero_point})")
+        return (f"SqueezeLLMConfig(weight_bits={self.weight_bits}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -63,4 +61,4 @@ class SqueezeLLMConfig(QuantizationConfig):
 
     @classmethod
     def get_tp_tensor_names(cls) -> List[str]:
-        return ["qweight", "qzeros", "scales"]
+        return ["qweight", "lookup_table"]

@@ -369,7 +369,8 @@ class LlamaForCausalLM(nn.Module):
                     param = param.T
 
                 if is_packed:
-                    if not self.quant_config.get_name() == 'squeezellm': #@Coleman check sharding here
+                    # needed due to different packing direction
+                    if not self.quant_config.get_name() == 'squeezellm':
                         shard_size //= self.quant_config.pack_factor
                         offset //= self.quant_config.pack_factor
 
@@ -378,7 +379,7 @@ class LlamaForCausalLM(nn.Module):
                 else:
                     shard_id = tp_rank
 
-                # @coleman check this!!
+                # needed due to different packing direction
                 if self.quant_config is not None and self.quant_config.get_name() == 'squeezellm' and 'lookup_table' not in name:
                     loaded_weight = loaded_weight[:,shard_size *
                                                   shard_id:shard_size *
@@ -406,7 +407,7 @@ class LlamaForCausalLM(nn.Module):
                 if is_transposed:
                     param = param.T
 
-                # @coleman check this!!
+                # needed due to different packing direction
                 if self.quant_config is not None and self.quant_config.get_name() == 'squeezellm' and 'lookup_table' not in name:
                     shard_size = param.shape[1] // 2
                     loaded_weight = loaded_weight[:, shard_size * tp_rank:shard_size *
@@ -419,14 +420,6 @@ class LlamaForCausalLM(nn.Module):
                                                   (tp_rank + 1)]
                     param_slice = param.data[shard_size * stride_id:shard_size *
                                              (stride_id + 1)]
-
-                # print(name)
-                # print(param.data.shape)
-                # print(param_slice.shape)
-                # print(tp_rank)
-                # print(shard_size)
-                # print(loaded_weight.shape)
-
 
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
