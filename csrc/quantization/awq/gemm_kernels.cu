@@ -191,7 +191,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
         }
       }
       for (int j_0_4 = 0; j_0_4 < 4; ++j_0_4) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
         {
           __asm__ __volatile__(
             "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
