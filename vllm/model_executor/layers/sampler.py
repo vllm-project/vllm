@@ -1,4 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -10,6 +11,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (SamplerOutput, SequenceData, SequenceGroupOutputs,
                            SequenceOutputs)
+from vllm.utils import ordered_unique
 
 _SAMPLING_EPS = 1e-5
 
@@ -41,24 +43,26 @@ class Sampler(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
         # Get the hidden states that we use for sampling.
-        hidden_states = _prune_hidden_states(hidden_states, input_metadata)
+        (hidden_states,
+         token_properties) = _prune_hidden_states(hidden_states,
+                                                  input_metadata)
 
         # Get the logits for the next tokens.
         logits = _get_logits(hidden_states, embedding, embedding_bias,
                              self.vocab_size)
 
         # Apply presence and frequency penalties.
-        output_tokens = _get_output_tokens(input_metadata)
+        output_tokens = _get_output_tokens(input_metadata, token_properties)
         assert len(output_tokens) == logits.shape[0]
         presence_penalties, frequency_penalties = _get_penalties(
-            input_metadata)
+            input_metadata, token_properties)
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
         logits = _apply_penalties(logits, output_tokens, presence_penalties,
                                   frequency_penalties)
 
         # Apply temperature scaling.
-        temperatures = _get_temperatures(input_metadata)
+        temperatures = _get_temperatures(input_metadata, token_properties)
         assert len(temperatures) == logits.shape[0]
         if any(t != 1.0 for t in temperatures):
             t = torch.tensor(temperatures,
@@ -68,7 +72,8 @@ class Sampler(nn.Module):
             logits.div_(t.unsqueeze(dim=1))
 
         # Apply top-p and top-k truncation.
-        top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
+        top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size,
+                                          token_properties)
         assert len(top_ps) == len(top_ks) == logits.shape[0]
         do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
         do_top_k = any(k != self.vocab_size for k in top_ks)
@@ -83,7 +88,15 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        return _sample(probs, logprobs, input_metadata)
+        return _sample(probs, logprobs, input_metadata, token_properties)
+
+
+@dataclass
+class TokenProperty:
+    seq_group_id: int
+    seq_id: int
+    sample_new_tokens: bool  # Wether need to sample this at this token or not.
+    is_prompt: bool  # Whether this token is from the prompt.
 
 
 def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
@@ -103,52 +116,80 @@ def _prune_hidden_states(
     hidden_states: torch.Tensor,
     input_metadata: InputMetadata,
 ) -> torch.Tensor:
-    last_token_indices = []
-    prompt_token_indices = []
+    selected_token_indices = []
+    selected_token_properties: List[TokenProperty] = []
     start_idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
         if i < input_metadata.num_prompts:
             assert len(seq_ids) == 1, "Prompt input should have only one seq."
+            seq_id = seq_ids[0]
             prompt_len = input_metadata.prompt_lens[i]
-            last_token_indices.append(start_idx + prompt_len - 1)
             if sampling_params.prompt_logprobs is not None:
-                prompt_token_indices.extend(
+                selected_token_indices.extend(
                     range(start_idx, start_idx + prompt_len - 1))
+                selected_token_properties.extend([
+                    TokenProperty(seq_group_id=i,
+                                  seq_id=seq_id,
+                                  sample_new_tokens=False,
+                                  is_prompt=True)
+                    for _ in range(prompt_len - 1)
+                ])
+            selected_token_indices.append(start_idx + prompt_len - 1)
+            selected_token_properties.append(
+                TokenProperty(seq_group_id=i,
+                              seq_id=seq_id,
+                              sample_new_tokens=True,
+                              is_prompt=True))
             start_idx += prompt_len
         else:
             num_seqs = len(seq_ids)
-            last_token_indices.extend(range(start_idx, start_idx + num_seqs))
+            selected_token_indices.extend(
+                range(start_idx, start_idx + num_seqs))
+            selected_token_properties.extend([
+                TokenProperty(seq_group_id=i,
+                              seq_id=seq_id,
+                              sample_new_tokens=True,
+                              is_prompt=False) for seq_id in seq_ids
+            ])
             start_idx += num_seqs
 
-    last_token_indices = last_token_indices + prompt_token_indices
-    last_token_indices = torch.tensor(last_token_indices,
-                                      dtype=torch.long,
-                                      device=hidden_states.device)
-    return hidden_states.index_select(0, last_token_indices)
+    selected_token_indices = torch.tensor(selected_token_indices,
+                                          dtype=torch.long,
+                                          device=hidden_states.device)
+    return (hidden_states.index_select(0, selected_token_indices),
+            selected_token_properties)
 
 
 def _get_penalties(
-        input_metadata: InputMetadata) -> Tuple[List[float], List[float]]:
+    input_metadata: InputMetadata,
+    token_properties: List[TokenProperty],
+) -> Tuple[List[float], List[float]]:
     # Collect the presence and frequency penalties.
     presence_penalties: List[float] = []
     frequency_penalties: List[float] = []
-    for seq_group in input_metadata.seq_groups:
-        seq_ids, sampling_params = seq_group
-        p = sampling_params.presence_penalty
-        f = sampling_params.frequency_penalty
-        presence_penalties += [p] * len(seq_ids)
-        frequency_penalties += [f] * len(seq_ids)
+    for token_property in token_properties:
+        _, sampling_params = input_metadata.seq_groups[
+            token_property.seq_group_id]
+        if token_property.sample_new_tokens:
+            presence_penalties.append(sampling_params.presence_penalty)
+            frequency_penalties.append(sampling_params.frequency_penalty)
+        else:
+            # Note: We do not apply presence and frequency penalties for the
+            # prompt token positions where we don't sample new tokens.
+            presence_penalties.append(0)
+            frequency_penalties.append(0)
     return presence_penalties, frequency_penalties
 
 
-def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
+def _get_output_tokens(
+    input_metadata: InputMetadata,
+    token_properties: List[TokenProperty],
+) -> List[List[int]]:
     output_tokens: List[List[int]] = []
-    for seq_group in input_metadata.seq_groups:
-        seq_ids, _ = seq_group
-        for seq_id in seq_ids:
-            seq_data = input_metadata.seq_data[seq_id]
-            output_tokens.append(seq_data.output_token_ids)
+    for token_property in token_properties:
+        seq_data = input_metadata.seq_data[token_property.seq_id]
+        output_tokens.append(seq_data.output_token_ids)
     return output_tokens
 
 
@@ -203,36 +244,42 @@ def _apply_penalties(
     return logits
 
 
-def _get_temperatures(input_metadata: InputMetadata) -> List[float]:
+def _get_temperatures(
+    input_metadata: InputMetadata,
+    token_properties: List[TokenProperty],
+) -> List[float]:
     # Collect the temperatures for the logits.
     temperatures: List[float] = []
-    for seq_group in input_metadata.seq_groups:
-        seq_ids, sampling_params = seq_group
+    for token_property in token_properties:
+        _, sampling_params = input_metadata.seq_groups[
+            token_property.seq_group_id]
         temperature = sampling_params.temperature
         if temperature < _SAMPLING_EPS:
             # NOTE: Zero temperature means deterministic sampling
             # (i.e., greedy sampling or beam search).
             # Set the temperature to 1 to avoid division by zero.
             temperature = 1.0
-        temperatures += [temperature] * len(seq_ids)
+        temperatures.append(temperature)
     return temperatures
 
 
 def _get_top_p_top_k(
     input_metadata: InputMetadata,
     vocab_size: int,
+    token_properties: List[TokenProperty],
 ) -> Tuple[List[float], List[int]]:
     top_ps: List[float] = []
     top_ks: List[int] = []
-    for seq_group in input_metadata.seq_groups:
-        seq_ids, sampling_params = seq_group
+    for token_property in token_properties:
+        _, sampling_params = input_metadata.seq_groups[
+            token_property.seq_group_id]
         top_p = sampling_params.top_p
         # k should not be greater than the vocab size.
         top_k = min(sampling_params.top_k, vocab_size)
         # k=-1 means no truncation.
         top_k = vocab_size if top_k == -1 else top_k
-        top_ps += [top_p] * len(seq_ids)
-        top_ks += [top_k] * len(seq_ids)
+        top_ps.append(top_p)
+        top_ks.append(top_k)
     return top_ps, top_ks
 
 
@@ -422,35 +469,46 @@ def _sample(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     input_metadata: InputMetadata,
+    token_properties: List[TokenProperty],
 ) -> SamplerOutput:
-    categorized_seq_group_ids = {t: [] for t in SamplingType}
-    start_idx = 0
-    categorized_seq_ids = {t: [] for t in SamplingType}
-    for i, seq_group in enumerate(input_metadata.seq_groups):
-        seq_ids, sampling_params = seq_group
+    categorized_token_indices = {t: [] for t in SamplingType}
+    categorized_token_properties = {t: [] for t in SamplingType}
+    prompt_logprobs_indices = []
+    for i, token_property in enumerate(token_properties):
+        if not token_property.sample_new_tokens:
+            prompt_logprobs_indices.append(i)
+            continue
+        _, sampling_params = input_metadata.seq_groups[
+            token_property.seq_group_id]
         sampling_type = sampling_params.sampling_type
-        categorized_seq_group_ids[sampling_type].append(i)
-        num_seqs = len(seq_ids)
-        categorized_seq_ids[sampling_type].extend(
-            range(start_idx, start_idx + num_seqs))
-        start_idx += num_seqs
+        categorized_token_indices[sampling_type].append(i)
+        categorized_token_properties[sampling_type].append(token_property)
+
     seq_outputs_dict: Dict[int, List[SequenceOutputs]] = {}
     for sampling_type in SamplingType:
-        seq_group_ids = categorized_seq_group_ids[sampling_type]
-        seq_groups = [input_metadata.seq_groups[i] for i in seq_group_ids]
-        is_prompts = [i < input_metadata.num_prompts for i in seq_group_ids]
-        num_tokens = len(categorized_seq_ids[sampling_type])
+        token_indices = categorized_token_indices[sampling_type]
+        token_properties = categorized_token_properties[sampling_type]
+        seq_group_ids = [token_property.seq_group_id for token_property in
+                         token_properties]
+        seq_group_ids = list(ordered_unique(seq_group_ids))
+        seq_groups = [
+            input_metadata.seq_groups[i] for i in seq_group_ids
+        ]
+        is_prompts = [token_property.is_prompt for token_property in
+                        token_properties]
+        num_tokens = len(token_indices)
         if num_tokens == 0:
             continue
-        category_logprobs = logprobs[categorized_seq_ids[sampling_type]]
-        category_probs = probs[categorized_seq_ids[sampling_type]]
+        category_logprobs = logprobs[token_indices]
         if sampling_type == SamplingType.GREEDY:
-            sample_results = _greedy_sample(seq_groups, category_logprobs)
+            sample_results = _greedy_sample(seq_groups,
+                                            category_logprobs)
         elif sampling_type == SamplingType.RANDOM:
-            sample_results = _random_sample(seq_groups, is_prompts,
-                                            category_probs)
+            category_probs = probs[token_indices]
+            sample_results = _random_sample(seq_groups, is_prompts, category_probs)
         elif sampling_type == SamplingType.BEAM:
-            sample_results = _beam_search_sample(seq_groups, is_prompts,
+            sample_results = _beam_search_sample(seq_groups,
+                                                 is_prompts,
                                                  input_metadata.seq_data,
                                                  category_logprobs)
         else:
@@ -499,26 +557,31 @@ def _sample(
 
     # Process prompt logprobs.
     output_prompt_logprobs_dict = {}
-    for i, seq_group in enumerate(input_metadata.seq_groups):
-        if i >= input_metadata.num_prompts:
-            break
-        seq_ids, sampling_params = seq_group
-        if sampling_params.prompt_logprobs is None:
-            continue
-        prompt_len = input_metadata.prompt_lens[i]
-        # Take the prompt token IDs from the first sequence.
-        prompt_token_ids = input_metadata.seq_data[seq_ids[0]].prompt_token_ids
-        # First token does not have log prob.
-        prompt_token_ids = prompt_token_ids[1:]
-        prompt_logprobs = logprobs[start_idx:start_idx + prompt_len - 1]
-        output_prompt_logporbs = [None]
-        for token_id, logprobs in zip(prompt_token_ids, prompt_logprobs):
-            token_to_logprobs = _get_topk_logprobs(
-                logprobs, sampling_params.prompt_logprobs)
-            token_to_logprobs[token_id] = logprobs[token_id].item()
-            output_prompt_logporbs.append(token_to_logprobs)
-        output_prompt_logprobs_dict[i] = output_prompt_logporbs
-        start_idx += prompt_len - 1
+    if len(prompt_logprobs_indices) > 0:
+        prompt_logprobs = logprobs[prompt_logprobs_indices]
+        print("prompt_logprobs.size()", prompt_logprobs.size())
+        start_idx = 0
+        for i, seq_group in enumerate(input_metadata.seq_groups):
+            if i >= input_metadata.num_prompts:
+                break
+            seq_ids, sampling_params = seq_group
+            if sampling_params.prompt_logprobs is None:
+                continue
+            prompt_len = input_metadata.prompt_lens[i]
+            # Take the prompt token IDs from the first sequence.
+            prompt_token_ids = input_metadata.seq_data[seq_ids[0]].prompt_token_ids
+            # First token does not have log prob.
+            prompt_token_ids = prompt_token_ids[1:]
+            output_prompt_logporbs = [None]
+            for j, token_id in enumerate(prompt_token_ids):
+                token_logprobs = prompt_logprobs[start_idx + j:start_idx + j + 1]
+                token_to_logprobs = _get_topk_logprobs(
+                    logprobs, sampling_params.prompt_logprobs)[0]
+                token_to_logprobs[token_id] = token_logprobs[0, token_id].item()
+                output_prompt_logporbs.append(token_to_logprobs)
+            output_prompt_logprobs_dict[i] = output_prompt_logporbs
+            start_idx += prompt_len - 1
+        assert start_idx == prompt_logprobs.size(0)
 
     sampler_output = [
         SequenceGroupOutputs(seq_outputs_dict[i],

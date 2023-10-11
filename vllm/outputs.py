@@ -113,5 +113,6 @@ class RequestOutput:
         return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
+                f"prompt_logprobs={self.prompt_logprobs}, "
                 f"outputs={self.outputs}, "
                 f"finished={self.finished})")
