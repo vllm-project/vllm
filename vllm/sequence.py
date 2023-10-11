@@ -37,6 +37,9 @@ class SequenceStatus(enum.Enum):
         elif status == SequenceStatus.FINISHED_ABORTED:
             finish_reason = "abort"
         elif status == SequenceStatus.FINISHED_IGNORED:
+            # The ignored sequences are the sequences whose prompt lengths
+            # are longer than the model's length cap. Therefore, the stop
+            # reason should also be "length" as in OpenAI API.
             finish_reason = "length"
         else:
             finish_reason = None
@@ -374,8 +377,8 @@ class SequenceOutputs:
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
-                f"output_token={self.output_token}), "
-                f"logprobs={self.logprobs}")
+                f"output_token={self.output_token}, "
+                f"logprobs={self.logprobs})")
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
