@@ -4,8 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import quantization_ops
-from vllm.model_executor.parallel_utils.tensor_parallel.layers import (
-    ColumnParallelLinear, RowParallelLinear)
+from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
+                                                       RowParallelLinear)
 
 
 class GPTQLinear(torch.nn.Module):
@@ -182,8 +182,8 @@ class GPTQRowParallelLinear(RowParallelLinear):
         group_size = self.quant_config.group_size if (
             self.quant_config.group_size != -1
         ) else self.input_size_per_partition
-        if self.world_size > 1 and (self.quant_config.desc_act
-                                    and self.quant_config.group_size != -1):
+        if self.tp_size > 1 and (self.quant_config.desc_act
+                                 and self.quant_config.group_size != -1):
             group_number = self.input_size // group_size
             self.use_exllama = False
         else:
