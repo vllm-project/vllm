@@ -8,7 +8,8 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather)
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SamplerOutput, SequenceData, SequenceOutputs
+from vllm.sequence import (SamplerOutput, SequenceData, SequenceGroupOutputs,
+                           SequenceOutputs)
 
 _SAMPLING_EPS = 1e-5
 
@@ -103,6 +104,7 @@ def _prune_hidden_states(
     input_metadata: InputMetadata,
 ) -> torch.Tensor:
     last_token_indices = {t: [] for t in SamplingType}
+    prompt_token_indices = []
     start_idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
@@ -112,6 +114,9 @@ def _prune_hidden_states(
             prompt_len = input_metadata.prompt_lens[i]
             last_token_indices[sampling_type].append(start_idx + prompt_len -
                                                      1)
+            if sampling_params.prompt_logprobs is not None:
+                prompt_token_indices.extend(
+                    range(start_idx, start_idx + prompt_len - 1))
             start_idx += prompt_len
         else:
             num_seqs = len(seq_ids)
@@ -119,13 +124,14 @@ def _prune_hidden_states(
                 range(start_idx, start_idx + num_seqs))
             start_idx += num_seqs
 
-    all_last_token_indices = []
+    selected_token_indices = []
     for sampling_type in SamplingType:
-        all_last_token_indices.extend(last_token_indices[sampling_type])
-    all_last_token_indices = torch.tensor(all_last_token_indices,
+        selected_token_indices.extend(last_token_indices[sampling_type])
+    selected_token_indices.extend(prompt_token_indices)
+    selected_token_indices = torch.tensor(selected_token_indices,
                                           dtype=torch.long,
                                           device=hidden_states.device)
-    return hidden_states.index_select(0, all_last_token_indices)
+    return hidden_states.index_select(0, selected_token_indices)
 
 
 def _get_penalties(
@@ -499,4 +505,34 @@ def _sample(
         assert sample_idx == num_tokens
         category_start_idx += num_tokens
 
-    return [seq_outputs_dict[i] for i in range(len(input_metadata.seq_groups))]
+    # Process prompt logprobs.
+    output_prompt_logprobs_dict = {}
+    token_idx = category_start_idx
+    for i, seq_group in enumerate(input_metadata.seq_groups):
+        if i >= input_metadata.num_prompts:
+            break
+        seq_ids, sampling_params = seq_group
+        if sampling_params.prompt_logprobs is None:
+            continue
+        prompt_len = input_metadata.prompt_lens[i]
+        # Take the prompt token IDs from the first sequence.
+        prompt_token_ids = input_metadata.seq_data[seq_ids[0]].prompt_token_ids
+        # First token does not have log prob.
+        prompt_token_ids = prompt_token_ids[1:]
+        prompt_logprobs = logprobs[token_idx:token_idx + prompt_len - 1]
+        output_prompt_logporbs = [None]
+        for token_id, logprobs in zip(prompt_token_ids, prompt_logprobs):
+            token_to_logprobs = _get_topk_logprobs(
+                logprobs, sampling_params.prompt_logprobs)
+            token_to_logprobs[token_id] = logprobs[token_id].item()
+            output_prompt_logporbs.append(token_to_logprobs)
+        output_prompt_logprobs_dict[i] = output_prompt_logporbs
+        token_idx += prompt_len - 1
+
+    sampler_output = [
+        SequenceGroupOutputs(seq_outputs_dict[i],
+                             output_prompt_logprobs_dict.get(i))
+        for i in range(len(input_metadata.seq_groups))
+    ]
+
+    return sampler_output

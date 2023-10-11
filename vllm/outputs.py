@@ -61,12 +61,14 @@ class RequestOutput:
         request_id: str,
         prompt: str,
         prompt_token_ids: List[int],
+        prompt_logprobs: Optional[List[Optional[Dict[int, float]]]],
         outputs: List[CompletionOutput],
         finished: bool,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
 
@@ -91,7 +93,7 @@ class RequestOutput:
                 # NOTE: We need to take care of this case because the sequence
                 # always has the logprobs of the sampled tokens even if the
                 # logprobs are not requested.
-                logprobs = {}
+                logprobs = None
             finshed_reason = SequenceStatus.get_finished_reason(seq.status)
             output = CompletionOutput(seqs.index(seq), seq.output_text,
                                       seq.get_output_token_ids(),
@@ -100,11 +102,12 @@ class RequestOutput:
             outputs.append(output)
 
         # Every sequence in the sequence group should have the same prompt.
-        prompt = top_n_seqs[0].prompt
-        prompt_token_ids = top_n_seqs[0].data.prompt_token_ids
+        prompt = seq_group.prompt
+        prompt_token_ids = seq_group.prompt_token_ids
+        prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
-        return cls(seq_group.request_id, prompt, prompt_token_ids, outputs,
-                   finished)
+        return cls(seq_group.request_id, prompt, prompt_token_ids,
+                   prompt_logprobs, outputs, finished)
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "
