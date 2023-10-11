@@ -429,7 +429,6 @@ def _sample(
             range(start_idx, start_idx + num_seqs))
         start_idx += num_seqs
     seq_outputs_dict: Dict[int, List[SequenceOutputs]] = {}
-    category_start_idx = 0
     for sampling_type in SamplingType:
         seq_group_ids = categorized_seq_group_ids[sampling_type]
         seq_groups = [input_metadata.seq_groups[i] for i in seq_group_ids]
@@ -491,6 +490,5 @@ def _sample(
             sample_idx += num_parent_seqs
             result_idx += num_results
         assert sample_idx == num_tokens
-        category_start_idx += num_tokens
 
     return [seq_outputs_dict[i] for i in range(len(input_metadata.seq_groups))]
