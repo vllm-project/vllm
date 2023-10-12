@@ -92,7 +92,6 @@ class SequenceData:
 
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
-            assert not self.has_prompt_embeds_forwarding()
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
