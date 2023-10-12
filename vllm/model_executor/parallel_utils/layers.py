@@ -347,7 +347,7 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
 
             batch = list(zip(x, self.batch_lora_ids))
             # rewrite as for loop
-            lora_out = torch.zeros_like(result)
+            lora_out = torch.zeros_like(result[0])
             for i, (x, lora_id) in enumerate(batch):
                 if lora_id in self.lora_A.keys():
                     lora_out[i] = self.scaling[lora_id] * self.lora_B[lora_id](
