@@ -99,8 +99,8 @@ def test_column_blora(
         else:
             ref_blinear.update_layer(adapter_name=adapter_name, r=r, lora_alpha=lora_alpha, lora_dropout=lora_drop_out, init_lora_weights=init_lora_weights)
             column_blora.update_layer(adapter_name=adapter_name, r=r, lora_alpha=lora_alpha, lora_dropout=lora_drop_out, init_lora_weights=init_lora_weights)
-    
-    
+    ref_blinear.cuda()
+    column_blora.cuda()
     # prepare inputs
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -109,7 +109,7 @@ def test_column_blora(
     x.uniform_(-scale, scale)
     setattr(ref_blinear, "batch_lora_ids", adapter_names)
     setattr(column_blora, "batch_lora_ids", adapter_names)
-
+    
     # align weights
     column_blora.weight.copy_(ref_blinear.weight)
     if column_blora.bias is not None:
@@ -120,7 +120,7 @@ def test_column_blora(
     for lora_id, adapter in column_blora.lora_A.items():
         adapter.weight.copy_(ref_blinear.lora_A[lora_id].weight)
         assert torch.allclose(adapter.weight, ref_blinear.lora_A[lora_id].weight, atol=1e-8, rtol=1e-8)
-    
+
     #test inputs
     ref_output = ref_blinear.forward(x)
     col_output = column_blora.forward(x)
