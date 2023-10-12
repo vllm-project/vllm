@@ -241,9 +241,21 @@ __device__ void paged_attention_kernel(
     exp_sum += val;
   }
   exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
+  const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
+
+  // If partitioning is enabled, store the max logit and exp_sum.
+  if (USE_PARTITIONING) {
+    float* max_logits_ptr = max_logits + seq_idx * num_heads * num_partitions
+                                       + head_idx * num_partitions
+                                       + partition_idx;
+    *max_logits_ptr = inv_sum;
+    float* exp_sums_ptr = exp_sums + seq_idx * num_heads * num_partitions
+                                   + head_idx * num_partitions
+                                   + partition_idx;
+    *exp_sums_ptr = exp_sum;
+  }
 
   // Compute softmax.
-  const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
   for (int i = thread_idx; i < context_len; i += NUM_THREADS) {
     logits[i] *= inv_sum;
   }
@@ -347,7 +359,9 @@ __device__ void paged_attention_kernel(
 
   // Write the final output.
   if (warp_idx == 0) {
-    scalar_t* out_ptr = out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
+    scalar_t* out_ptr = out + seq_idx * num_heads * num_partitions * HEAD_SIZE
+                            + head_idx * num_partitions * HEAD_SIZE
+                            + partition_idx * HEAD_SIZE;
 #pragma unroll
     for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
@@ -382,6 +396,35 @@ __global__ void paged_attention_v1_kernel(
     /* exp_sums */ nullptr, /* max_logits */ nullptr,
     out, q, k_cache, v_cache, head_mapping, scale, block_tables, context_lens,
     max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride);
+}
+
+// Grid: (num_heads, num_seqs, num_partitions).
+template<
+  typename scalar_t,
+  int HEAD_SIZE,
+  int BLOCK_SIZE,
+  int NUM_THREADS,
+  int PARTITION_SIZE>
+__global__ void paged_attention_v2_kernel(
+  float* __restrict__ exp_sums,           // [num_seqs, num_heads, num_partitions]
+  float* __restrict__ max_logits,         // [num_seqs, num_heads, num_partitions]
+  scalar_t* __restrict__ tmp_out,         // [num_seqs, num_heads, num_partitions, head_size]
+  const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
+  const scalar_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
+  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
+  const int* __restrict__ head_mapping,   // [num_heads]
+  const float scale,
+  const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
+  const int* __restrict__ context_lens,   // [num_seqs]
+  const int max_num_blocks_per_seq,
+  const float* __restrict__ alibi_slopes, // [num_heads]
+  const int q_stride,
+  const int kv_block_stride,
+  const int kv_head_stride) {
+  paged_attention_kernel<scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE>(
+    exp_sums, max_logits, tmp_out, q, k_cache, v_cache, head_mapping, scale,
+    block_tables, context_lens, max_num_blocks_per_seq, alibi_slopes,
+    q_stride, kv_block_stride, kv_head_stride);
 }
 
 } // namespace vllm
@@ -563,6 +606,24 @@ void paged_attention_v1(
   } else {
     TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
   }
+}
+
+void paged_attention_v2(
+  torch::Tensor& out,             // [num_seqs, num_heads, head_size]
+  torch::Tensor& exp_sums,        // [num_seqs, num_heads, num_partitions]
+  torch::Tensor& max_logits,      // [num_seqs, num_heads, num_partitions]
+  torch::Tensor& tmp_out,         // [num_seqs, num_heads, num_partitions, head_size]
+  torch::Tensor& query,           // [num_seqs, num_heads, head_size]
+  torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
+  torch::Tensor& value_cache,     // [num_blocks, num_heads, head_size, block_size]
+  torch::Tensor& head_mapping,    // [num_heads]
+  float scale,
+  torch::Tensor& block_tables,    // [num_seqs, max_num_blocks_per_seq]
+  torch::Tensor& context_lens,    // [num_seqs]
+  int block_size,
+  int max_context_len,
+  const c10::optional<torch::Tensor>& alibi_slopes) {
+  // TODO
 }
 
 #undef WARP_SIZE
