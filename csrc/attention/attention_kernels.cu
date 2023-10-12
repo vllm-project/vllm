@@ -247,7 +247,7 @@ __device__ void paged_attention_kernel(
   exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
 
   // If partitioning is enabled, store the max logit and exp_sum.
-  if (USE_PARTITIONING) {
+  if (USE_PARTITIONING && thread_idx == 0) {
     float* max_logits_ptr = max_logits + seq_idx * num_heads * max_num_partitions
                                        + head_idx * max_num_partitions
                                        + partition_idx;
