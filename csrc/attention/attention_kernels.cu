@@ -568,3 +568,4 @@ void paged_attention_v1(
 #undef WARP_SIZE
 #undef MAX
 #undef MIN
+#undef DIVIDE_ROUND_UP
