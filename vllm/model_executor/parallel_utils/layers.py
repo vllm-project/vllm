@@ -303,47 +303,63 @@ class RowParallelLinear(torch.nn.Module):
         return output, output_bias
 
 
-from peft.tuners.lora import Linear
-import torch
-import torch.nn.functional as F
-from peft.utils.other import transpose
-class BLinear(Linear):
+from peft.tuners.lora import LoraLayer
+class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        adapter_name: str,
+        bias: bool = True,
+        gather_output: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        r: int = 0,
+        lora_alpha: int = 1,
+        lora_dropout: float = 0.0,
+        **kwargs,
+    ):
+        init_lora_weights = kwargs.pop("init_lora_weights", True)
+
+        ColumnParallelLinear.__init__(self, input_size, output_size, bias, gather_output, skip_bias_add, params_dtype, quant_config)
+        LoraLayer.__init__(self, in_features=input_size, out_features=output_size)
+        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights)
+        self.active_adapter = adapter_name
+
     def forward(self, x: torch.Tensor):
         previous_dtype = x.dtype
         if self.active_adapter not in self.lora_A.keys():
-            return F.linear(
-                x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
-            )
+            # return F.linear(
+            #     x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
+            # )
+            result = ColumnParallelLinear.forward(self, x)
         if self.disable_adapters:
             if self.r[self.active_adapter] > 0 and self.merged:
                 self.unmerge()
-            result = F.linear(
-                x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
-            )
+            result = ColumnParallelLinear.forward(self, x)
         elif self.r[self.active_adapter] > 0 and not self.merged:
-            result = F.linear(
-                x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
-            )
+            result = ColumnParallelLinear.forward(self, x)
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
 
-            assert x.size(0) % len(self.batch_lora_ids) == 0, (x.size(0), len(self.batch_lora_ids))
-            num = x.size(0) // len(self.batch_lora_ids)
-            x_list = [x[num*i:num*(i+1)] for i in range(len(self.batch_lora_ids))]
+            assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
 
-            batch = list(zip(x_list, self.batch_lora_ids))
+            batch = list(zip(x, self.batch_lora_ids))
             # rewrite as for loop
             lora_out = torch.zeros_like(result)
             for i, (x, lora_id) in enumerate(batch):
                 if lora_id in self.lora_A.keys():
-                    lora_out[num*i:num*(i+1)] = self.scaling[lora_id] * self.lora_B[lora_id](
+                    lora_out[i] = self.scaling[lora_id] * self.lora_B[lora_id](
                         self.lora_A[lora_id](self.lora_dropout[lora_id](x))
                     )
-            result += lora_out
+            result[0] += lora_out
 
         else:
-            result = F.linear(
-                x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
-            )
+            result = ColumnParallelLinear.forward(self, x)
 
-        result = result.to(previous_dtype)
-        return result, None
+        result[0] = result[0].to(previous_dtype)
+        if result[1] is not None:
+            result[1] = result[1].to(previous_dtype)
+
+        return result
