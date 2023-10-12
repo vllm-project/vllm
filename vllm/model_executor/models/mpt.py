@@ -244,8 +244,12 @@ class MPTForCausalLM(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events, inputs_embeds=inputs_embeds)
+        hidden_states = self.transformer(input_ids,
+                                         positions,
+                                         kv_caches,
+                                         input_metadata,
+                                         cache_events,
+                                         inputs_embeds=inputs_embeds)
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
                                    input_metadata)
         return next_tokens

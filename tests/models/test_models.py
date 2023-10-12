@@ -3,7 +3,6 @@
 Run `pytest tests/models/test_models.py --forked`.
 """
 import pytest
-from vllm.sampling_params import SamplingParams
 
 MODELS = [
     "facebook/opt-125m",
@@ -79,17 +78,18 @@ def test_models_from_prompt_embeds(
     for i in range(len(example_prompts)):
         prompt = example_prompts[i]
         hf_output_str = hf_outputs[i][0]
-        vllm_output_str_from_prompts = vllm_outputs_from_prompts[
-            i][0]
-        vllm_output_str_from_embeds = vllm_outputs_from_embeds[
-            i][0]
+        vllm_output_str_from_prompts = vllm_outputs_from_prompts[i][0]
+        vllm_output_str_from_embeds = vllm_outputs_from_embeds[i][0]
 
         assert hf_output_str == vllm_output_str_from_prompts, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM_prompt: {vllm_output_str_from_prompts!r}"
-        )
+            f"Test{i}:\n"
+            "HF: {hf_output_str!r}\n"
+            "vLLM_prompt: {vllm_output_str_from_prompts!r}")
         assert hf_output_str == vllm_output_str_from_embeds, (
-            f"Test{i}:\nHF: {hf_output_str}\nvLLM_embeds: {vllm_output_str_from_embeds}"
-        )
+            f"Test{i}:\n"
+            "HF: {hf_output_str}\n"
+            "vLLM_embeds: {vllm_output_str_from_embeds}")
         assert vllm_output_str_from_prompts == vllm_output_str_from_embeds, (
-            f"Test{i}:\nvLLM_prompt: {vllm_output_str_from_prompts}\nvLLM_embeds: {vllm_output_str_from_embeds}"
-        )
+            f"Test{i}:\n"
+            "vLLM_prompt: {vllm_output_str_from_prompts}\n"
+            "vLLM_embeds: {vllm_output_str_from_embeds}")

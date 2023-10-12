@@ -63,7 +63,7 @@ def test_sampler_all_greedy(seed: int):
                 block_tables={0: [1]},
             ))
 
-    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    _, _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              input_metadata=input_metadata)
@@ -96,7 +96,7 @@ def test_sampler_all_random(seed: int):
                 block_tables={0: [1]},
             ))
 
-    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    _, _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              input_metadata=input_metadata)
@@ -126,7 +126,7 @@ def test_sampler_all_beam(seed: int):
                 block_tables={0: [1]},
             ))
 
-    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    _, _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
     sampler(embedding=None,
             hidden_states=input_tensor,
             input_metadata=input_metadata)
@@ -174,7 +174,7 @@ def test_sampler_mixed(seed: int):
                 block_tables={0: [1]},
             ))
 
-    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    _, _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              input_metadata=input_metadata)

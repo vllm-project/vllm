@@ -397,13 +397,13 @@ class AsyncLLMEngine:
         return stream
 
     async def generate(
-            self,
-            prompt: Optional[str],
-            sampling_params: SamplingParams,
-            request_id: str,
-            prompt_token_ids: Optional[List[int]] = None,
-            prompt_embeds: Optional[torch.Tensor] = None,
-        ) -> RequestOutput:
+        self,
+        prompt: Optional[str],
+        sampling_params: SamplingParams,
+        request_id: str,
+        prompt_token_ids: Optional[List[int]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+    ) -> RequestOutput:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -427,12 +427,14 @@ class AsyncLLMEngine:
         arrival_time = time.monotonic()
 
         try:
-            stream = await self.add_request(request_id,
-                                            prompt,
-                                            sampling_params,
-                                            prompt_token_ids=prompt_token_ids,
-                                            arrival_time=arrival_time,
-                                            prompt_embeds=prompt_embeds,)
+            stream = await self.add_request(
+                request_id,
+                prompt,
+                sampling_params,
+                prompt_token_ids=prompt_token_ids,
+                arrival_time=arrival_time,
+                prompt_embeds=prompt_embeds,
+            )
 
             async for request_output in stream:
                 yield request_output
