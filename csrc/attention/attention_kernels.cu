@@ -66,7 +66,7 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   return __shfl_sync(uint32_t(-1), sum, 0);
 }
 
-// TODO(woosuk): Flatten the last two dimensions of the grid.
+// TODO(woosuk): Merge the last two dimensions of the grid.
 // Grid: (num_heads, num_seqs, num_partitions).
 template<
   typename scalar_t,
@@ -364,7 +364,7 @@ template<
   int HEAD_SIZE,
   int BLOCK_SIZE,
   int NUM_THREADS>
-__global__ void paged_attention_v1(
+__global__ void paged_attention_v1_kernel(
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
@@ -386,11 +386,11 @@ __global__ void paged_attention_v1(
 
 } // namespace vllm
 
-#define LAUNCH_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
+#define LAUNCH_PAGED_ATTENTION_V1(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                      \
   cudaFuncSetAttribute(                                                                       \
-      vllm::paged_attention_v1<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,                        \
-      cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                          \
-  vllm::paged_attention_v1<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>                             \
+    vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,                   \
+    cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                            \
+  vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>                      \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     out_ptr,                                                                                  \
     query_ptr,                                                                                \
@@ -411,7 +411,7 @@ template<
   typename T,
   int BLOCK_SIZE,
   int NUM_THREADS = 128>
-void single_query_cached_kv_attention_launcher(
+void paged_attention_v1_launcher(
   torch::Tensor& out,
   torch::Tensor& query,
   torch::Tensor& key_cache,
@@ -461,31 +461,31 @@ void single_query_cached_kv_attention_launcher(
     // NOTE(woosuk): To reduce the compilation time, we omitted head sizes
     // 32, 160, 192.
     // case 32:
-    //   LAUNCH_ATTENTION_KERNEL(T, 32, BLOCK_SIZE, NUM_THREADS);
+    //   LAUNCH_PAGED_ATTENTION_V1(T, 32, BLOCK_SIZE, NUM_THREADS);
     //   break;
     case 64:
-      LAUNCH_ATTENTION_KERNEL(T, 64, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(T, 64, BLOCK_SIZE, NUM_THREADS);
       break;
     case 80:
-      LAUNCH_ATTENTION_KERNEL(T, 80, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(T, 80, BLOCK_SIZE, NUM_THREADS);
       break;
     case 96:
-      LAUNCH_ATTENTION_KERNEL(T, 96, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(T, 96, BLOCK_SIZE, NUM_THREADS);
       break;
     case 112:
-      LAUNCH_ATTENTION_KERNEL(T, 112, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(T, 112, BLOCK_SIZE, NUM_THREADS);
       break;
     case 128:
-      LAUNCH_ATTENTION_KERNEL(T, 128, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(T, 128, BLOCK_SIZE, NUM_THREADS);
       break;
     // case 160:
-    //   LAUNCH_ATTENTION_KERNEL(T, 160, BLOCK_SIZE, NUM_THREADS);
+    //   LAUNCH_PAGED_ATTENTION_V1(T, 160, BLOCK_SIZE, NUM_THREADS);
     //   break;
     // case 192:
-    //   LAUNCH_ATTENTION_KERNEL(T, 192, BLOCK_SIZE, NUM_THREADS);
+    //   LAUNCH_PAGED_ATTENTION_V1(T, 192, BLOCK_SIZE, NUM_THREADS);
     //   break;
     case 256:
-      LAUNCH_ATTENTION_KERNEL(T, 256, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(T, 256, BLOCK_SIZE, NUM_THREADS);
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
@@ -494,7 +494,7 @@ void single_query_cached_kv_attention_launcher(
 }
 
 #define CALL_KERNEL_LAUNCHER(T, BLOCK_SIZE)                         \
-  single_query_cached_kv_attention_launcher<T, BLOCK_SIZE>(         \
+  paged_attention_v1_launcher<T, BLOCK_SIZE>(                       \
     out,                                                            \
     query,                                                          \
     key_cache,                                                      \
@@ -542,7 +542,7 @@ void single_query_cached_kv_attention_launcher(
       break;                                                        \
   }
 
-void single_query_cached_kv_attention(
+void paged_attention_v1(
   torch::Tensor& out,             // [num_seqs, num_heads, head_size]
   torch::Tensor& query,           // [num_seqs, num_heads, head_size]
   torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]

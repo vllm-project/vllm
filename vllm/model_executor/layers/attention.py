@@ -150,7 +150,7 @@ class PagedAttention(nn.Module):
             input_metadata: metadata for paged attention.
         """
         block_size = value_cache.shape[3]
-        attention_ops.single_query_cached_kv_attention(
+        attention_ops.paged_attention_v1(
             output,
             query,
             key_cache,
