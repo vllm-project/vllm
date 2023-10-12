@@ -15,7 +15,7 @@ dist.init_process_group(rank=0, world_size=1)
 initialize_model_parallel()
 torch.cuda.init()
 
-LORA_DROP_OUTS = [0.0]
+LORA_DROP_OUTS = [0.0, 0.5]
 INPUT_SIZE = [8, 16, 16]
 OUTPUT_SIZE = [16, 16, 32]
 ADAPTER_NAMES = [["lora1", "lora2"], ["lora1", "lora2", "lora3"]]
