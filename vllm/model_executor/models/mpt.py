@@ -187,15 +187,10 @@ class MPTModel(nn.Module):
                         # Remove the bias term in Linear and LayerNorm.
                         module.register_parameter("bias", None)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, position_ids: torch.Tensor,
+                kv_caches: List[KVCache], input_metadata: InputMetadata,
+                cache_events: Optional[List[torch.cuda.Event]],
+                inputs_embeds: torch.Tensor) -> torch.Tensor:
         inputs_embeds = self.wte(input_ids) + inputs_embeds
         hidden_states = inputs_embeds
 
@@ -238,11 +233,8 @@ class MPTForCausalLM(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
         inputs_embeds: torch.Tensor,
     ) -> SamplerOutput:
-        hidden_states = self.transformer(input_ids,
-                                         positions,
-                                         kv_caches,
-                                         input_metadata,
-                                         cache_events,
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         input_metadata, cache_events,
                                          inputs_embeds)
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
                                    input_metadata)

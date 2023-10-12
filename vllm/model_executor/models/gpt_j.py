@@ -183,7 +183,7 @@ class GPTJModel(nn.Module):
     ) -> torch.Tensor:
         inputs_embeds = self.wte(input_ids) + inputs_embeds
         hidden_states = inputs_embeds
-            
+
         for i in range(len(self.h)):
             if cache_events is None:
                 cache_event = None
@@ -224,11 +224,8 @@ class GPTJForCausalLM(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
         inputs_embeds: torch.Tensor,
     ) -> SamplerOutput:
-        hidden_states = self.transformer(input_ids,
-                                         positions,
-                                         kv_caches,
-                                         input_metadata,
-                                         cache_events,
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         input_metadata, cache_events,
                                          inputs_embeds)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata, self.lm_head.bias)

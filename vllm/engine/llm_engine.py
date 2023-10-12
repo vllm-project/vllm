@@ -253,14 +253,14 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            prompt: The prompt string. Can be None if prompt_token_ids 
+            prompt: The prompt string. Can be None if prompt_token_ids
                 or prompt_embeds are provided.
             sampling_params: The sampling parameters for text generation.
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
-            prompt_embeds: The prompt embeddings. If set, 
+            prompt_embeds: The prompt embeddings. If set,
                 input prompt and prompt_token_ids are ignored
         """
         if arrival_time is None:

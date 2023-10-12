@@ -193,7 +193,7 @@ class GPTNeoXModel(nn.Module):
     ) -> torch.Tensor:
         inputs_embeds = self.embed_in(input_ids) + inputs_embeds
         hidden_states = inputs_embeds
-            
+
         for i in range(len(self.layers)):
             if cache_events is None:
                 cache_event = None
@@ -234,11 +234,8 @@ class GPTNeoXForCausalLM(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
         inputs_embeds: torch.Tensor,
     ) -> SamplerOutput:
-        hidden_states = self.gpt_neox(input_ids,
-                                      positions,
-                                      kv_caches,
-                                      input_metadata,
-                                      cache_events,
+        hidden_states = self.gpt_neox(input_ids, positions, kv_caches,
+                                      input_metadata, cache_events,
                                       inputs_embeds)
         next_tokens = self.sampler(self.embed_out.weight, hidden_states,
                                    input_metadata)

@@ -267,12 +267,8 @@ class OPTModel(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
         inputs_embeds: torch.Tensor,
     ) -> torch.Tensor:
-        return self.decoder(input_ids,
-                            positions,
-                            kv_caches,
-                            input_metadata,
-                            cache_events,
-                            inputs_embeds)
+        return self.decoder(input_ids, positions, kv_caches, input_metadata,
+                            cache_events, inputs_embeds)
 
 
 class OPTForCausalLM(nn.Module):

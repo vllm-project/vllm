@@ -261,11 +261,11 @@ class Worker:
 
         input_embeds = torch.cat(input_embeds, dim=0)
         input_embeds = _pad_embeddings_to_alignment(
-            input_embeds, 
-            multiple_of=8, 
+            input_embeds,
+            multiple_of=8,
             embedding_dim=self.model.get_input_embeddings().embedding_dim,
         )
-        
+
         # Convert to tensors.
         tokens_tensor = torch.tensor(input_tokens,
                                      dtype=torch.long,
@@ -387,13 +387,16 @@ def _init_distributed_environment(
 def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
     return x + [0] * ((-len(x)) % multiple_of)
 
-def _pad_embeddings_to_alignment(x: torch.Tensor, multiple_of: int, embedding_dim: int) -> torch.Tensor:
+
+def _pad_embeddings_to_alignment(x: torch.Tensor, multiple_of: int,
+                                 embedding_dim: int) -> torch.Tensor:
     return torch.cat(
         [x] \
         + [torch.zeros(1, embedding_dim, device="cuda")] \
         * ((-x.shape[0]) % multiple_of),
         dim=0,
     )
+
 
 def _pad_to_max(x: List[int], max_len: int) -> List[int]:
     return x + [0] * (max_len - len(x))

@@ -245,15 +245,10 @@ class LlamaModel(nn.Module):
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+                kv_caches: List[KVCache], input_metadata: InputMetadata,
+                cache_events: Optional[List[torch.cuda.Event]],
+                inputs_embeds: torch.Tensor) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids) + inputs_embeds
         hidden_states = inputs_embeds
 
@@ -303,12 +298,8 @@ class LlamaForCausalLM(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
         inputs_embeds: torch.Tensor,
     ) -> SamplerOutput:
-        hidden_states = self.model(input_ids,
-                                   positions,
-                                   kv_caches,
-                                   input_metadata,
-                                   cache_events,
-                                   inputs_embeds)
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   input_metadata, cache_events, inputs_embeds)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
         return next_tokens
