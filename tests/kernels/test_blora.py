@@ -111,13 +111,16 @@ def test_column_blora(
     setattr(column_blora, "batch_lora_ids", adapter_names)
     
     # align weights
+    ref_blinear.weight.to(dtype)
     column_blora.weight.copy_(ref_blinear.weight)
     assert torch.allclose(column_blora.weight, ref_blinear.weight, atol=1e-8, rtol=1e-8)
     if column_blora.bias is not None:
+        ref_blinear.bias.to(dtype)
         column_blora.bias.copy_(ref_blinear.bias)
         assert torch.allclose(column_blora.bias, ref_blinear.bias, atol=1e-8, rtol=1e-8)
     
     for lora_id, adapter in column_blora.lora_A.items():
+        ref_blinear.lora_A[lora_id].weight.to(dtype)
         adapter.weight.copy_(ref_blinear.lora_A[lora_id].weight)
         assert torch.allclose(adapter.weight, ref_blinear.lora_A[lora_id].weight, atol=1e-8, rtol=1e-8)
 
