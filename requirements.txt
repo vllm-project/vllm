@@ -11,3 +11,4 @@ xformers >= 0.0.22
 fastapi
 uvicorn[standard]
 pydantic < 2  # Required for OpenAI server.
+peft == 0.4.0
