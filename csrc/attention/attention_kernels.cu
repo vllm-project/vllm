@@ -65,14 +65,18 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   return __shfl_sync(uint32_t(-1), sum, 0);
 }
 
-// Grid: (num_heads, num_seqs).
+// TODO(woosuk): Flatten the last two dimensions of the grid.
+// Grid: (num_heads, num_seqs, num_partitions).
 template<
   typename scalar_t,
   int HEAD_SIZE,
   int BLOCK_SIZE,
-  int NUM_THREADS>
-__global__ void single_query_cached_kv_attention_kernel(
-  scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
+  int NUM_THREADS,
+  int PARTITION_SIZE = 0> // Zero means no partitioning.
+__device__ void paged_attention_kernel(
+  float* __restrict__ exp_sums,           // [num_seqs, num_heads, num_partitions]
+  float* __restrict__ max_logits,         // [num_seqs, num_heads, num_partitions]
+  scalar_t* __restrict__ out,             // [num_seqs, num_heads, num_partitions, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
   const scalar_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
@@ -98,6 +102,7 @@ __global__ void single_query_cached_kv_attention_kernel(
   const int num_heads = gridDim.x;
   const int kv_head_idx = head_mapping[head_idx];
   const int seq_idx = blockIdx.y;
+  const int partition_idx = blockIdx.z;
   const float alibi_slope = alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
 
   // A vector type to store a part of a key or a query.
@@ -338,13 +343,39 @@ __global__ void single_query_cached_kv_attention_kernel(
   }
 }
 
+// Grid: (num_heads, num_seqs, 1).
+template<
+  typename scalar_t,
+  int HEAD_SIZE,
+  int BLOCK_SIZE,
+  int NUM_THREADS>
+__global__ void paged_attention_v1(
+  scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
+  const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
+  const scalar_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
+  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
+  const int* __restrict__ head_mapping,   // [num_heads]
+  const float scale,
+  const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
+  const int* __restrict__ context_lens,   // [num_seqs]
+  const int max_num_blocks_per_seq,
+  const float* __restrict__ alibi_slopes, // [num_heads]
+  const int q_stride,
+  const int kv_block_stride,
+  const int kv_head_stride) {
+  paged_attention_kernel<scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>(
+    /* exp_sums */ nullptr, /* max_logits */ nullptr,
+    out, q, k_cache, v_cache, head_mapping, scale, block_tables, context_lens,
+    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride);
+}
+
 } // namespace vllm
 
 #define LAUNCH_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
   cudaFuncSetAttribute(                                                                       \
-      vllm::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,   \
+      vllm::paged_attention_v1<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,                        \
       cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                          \
-  vllm::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>        \
+  vllm::paged_attention_v1<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>                             \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     out_ptr,                                                                                  \
     query_ptr,                                                                                \
@@ -408,7 +439,7 @@ void single_query_cached_kv_attention_launcher(
   // Keep that in sync with the logic here!
   int shared_mem_size = std::max(logits_size, outputs_size);
 
-  dim3 grid(num_heads, num_seqs);
+  dim3 grid(num_heads, num_seqs, 1);
   dim3 block(NUM_THREADS);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   switch (head_size) {
