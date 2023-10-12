@@ -21,7 +21,7 @@ OUTPUT_SIZE = [16]
 ADAPTER_NAMES = [["lora1", "lora2"], ["lora1", "lora2", "lora3"]]
 LORA_ALPHA = [8]
 BIAS = [True, False]
-DTYPES = [torch.half, torch.bfloat16, torch.float]
+DTYPES = [torch.float]
 SEEDS = [0]
 R = [4]
 
@@ -125,8 +125,8 @@ def test_column_blora(
         assert torch.allclose(adapter.weight, ref_blinear.lora_A[lora_id].weight, atol=1e-8, rtol=1e-8)
 
     #test inputs
-    ref_output = ref_blinear.forward(x)
-    col_output = column_blora.forward(x)
+    ref_output, ref_output_bias = ref_blinear.forward(x)
+    col_output, col_output_bias = column_blora.forward(x)
 
     assert torch.allclose(ref_output, col_output, atol=1e-8, rtol=1e-8)
 

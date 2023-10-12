@@ -334,32 +334,32 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
             # return F.linear(
             #     x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
             # )
-            result = ColumnParallelLinear.forward(self, x)
+            output, output_bias = ColumnParallelLinear.forward(self, x)
         if self.disable_adapters:
             if self.r[self.active_adapter] > 0 and self.merged:
                 self.unmerge()
-            result = ColumnParallelLinear.forward(self, x)
+            output, output_bias = ColumnParallelLinear.forward(self, x)
         elif self.r[self.active_adapter] > 0 and not self.merged:
-            result = ColumnParallelLinear.forward(self, x)
+            output, output_bias = ColumnParallelLinear.forward(self, x)
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
 
             assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
 
             batch = list(zip(x, self.batch_lora_ids))
             # rewrite as for loop
-            lora_out = torch.zeros_like(result[0])
+            lora_out = torch.zeros_like(output)
             for i, (x, lora_id) in enumerate(batch):
                 if lora_id in self.lora_A.keys():
                     lora_out[i] = self.scaling[lora_id] * self.lora_B[lora_id](
                         self.lora_A[lora_id](self.lora_dropout[lora_id](x))
                     )
-            result[0] += lora_out
+            output += lora_out
 
         else:
-            result = ColumnParallelLinear.forward(self, x)
+            output, output_bias = ColumnParallelLinear.forward(self, x)
 
-        result[0] = result[0].to(previous_dtype)
-        if result[1] is not None:
-            result[1] = result[1].to(previous_dtype)
+        output = output.to(previous_dtype)
+        if output_bias is not None:
+            output_bias = output_bias.to(previous_dtype)
 
-        return result
+        return output, output_bias
