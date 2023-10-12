@@ -123,5 +123,6 @@ def test_column_blora(
     col_output, col_output_bias = column_blora.forward(x)
 
     assert torch.allclose(ref_output, col_output, atol=1e-8, rtol=1e-8)
-    assert torch.allclose(ref_output_bias, col_output_bias, atol=1e-8, rtol=1e-8)
+    if ref_output_bias is not None:
+        assert torch.allclose(ref_output_bias, col_output_bias, atol=1e-8, rtol=1e-8)
 
