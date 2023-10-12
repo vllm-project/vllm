@@ -15,7 +15,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     RotaryEmbedding)
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
-_PAGED_ATTENTION_PARTITION_SIZE = 512
+_PARTITION_SIZE = 512
 
 
 class PagedAttention(nn.Module):
@@ -150,11 +150,11 @@ class PagedAttention(nn.Module):
                 block_size]
             input_metadata: metadata for paged attention.
         """
-        num_partitions = (input_metadata.max_context_len +
-                          _PAGED_ATTENTION_PARTITION_SIZE -
-                          1) // _PAGED_ATTENTION_PARTITION_SIZE
+        max_num_partitions = (
+            (input_metadata.max_context_len + _PARTITION_SIZE - 1) //
+            _PARTITION_SIZE)
         block_size = value_cache.shape[3]
-        if num_partitions == 1:
+        if max_num_partitions == 1:
             # Short context. Run PagedAttention V1.
             attention_ops.paged_attention_v1(
                 output,
@@ -171,15 +171,15 @@ class PagedAttention(nn.Module):
             )
         else:
             # Long context. Run PagedAttention V2.
-            assert _PAGED_ATTENTION_PARTITION_SIZE % block_size == 0
+            assert _PARTITION_SIZE % block_size == 0
             num_seqs, num_heads, head_size = output.shape
             tmp_output = torch.empty(
-                size=(num_seqs, num_heads, num_partitions, head_size),
+                size=(num_seqs, num_heads, max_num_partitions, head_size),
                 dtype=output.dtype,
                 device=output.device,
             )
             exp_sums = torch.empty(
-                size=(num_seqs, num_heads, num_partitions),
+                size=(num_seqs, num_heads, max_num_partitions),
                 dtype=torch.float32,
                 device=output.device,
             )
