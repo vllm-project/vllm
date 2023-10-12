@@ -78,11 +78,11 @@ def test_models_from_prompt_embeds(
 
     for i in range(len(example_prompts)):
         prompt = example_prompts[i]
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids_from_prompts, vllm_output_str_from_prompts = vllm_outputs_from_prompts[
-            i]
-        vllm_output_ids_from_embeds, vllm_output_str_from_embeds = vllm_outputs_from_embeds[
-            i]
+        hf_output_str = hf_outputs[i][0]
+        vllm_output_str_from_prompts = vllm_outputs_from_prompts[
+            i][0]
+        vllm_output_str_from_embeds = vllm_outputs_from_embeds[
+            i][0]
 
         assert hf_output_str == vllm_output_str_from_prompts, (
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM_prompt: {vllm_output_str_from_prompts!r}"
