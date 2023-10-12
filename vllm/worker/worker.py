@@ -161,6 +161,8 @@ class Worker:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
+        last_token_indices: List[int] = []
+        last_token_start_idx = 0
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -179,6 +181,10 @@ class Worker:
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
+
+            assert len(seq_ids) == 1, "Prompt input should have only one seq."
+            last_token_indices.append(last_token_start_idx + prompt_len - 1)
+            last_token_start_idx += prompt_len
 
             input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
@@ -211,6 +217,11 @@ class Worker:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
+
+            num_seqs = len(seq_ids)
+            last_token_indices.extend(
+                range(last_token_start_idx, last_token_start_idx + num_seqs))
+            last_token_start_idx += num_seqs
 
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
@@ -259,6 +270,9 @@ class Worker:
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device="cuda")
+        last_token_indices = torch.tensor(last_token_indices,
+                                          dtype=torch.long,
+                                          device="cuda")
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq)
             for block_table in generation_block_tables
@@ -279,6 +293,7 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
+            last_token_indices=last_token_indices,
             sliding_window=self.sliding_window,
         )
         return tokens_tensor, positions_tensor, input_metadata

@@ -102,24 +102,7 @@ def _prune_hidden_states(
     hidden_states: torch.Tensor,
     input_metadata: InputMetadata,
 ) -> torch.Tensor:
-    last_token_indices = []
-    start_idx = 0
-    for i, seq_group in enumerate(input_metadata.seq_groups):
-        seq_ids, _ = seq_group
-        if i < input_metadata.num_prompts:
-            assert len(seq_ids) == 1, "Prompt input should have only one seq."
-            prompt_len = input_metadata.prompt_lens[i]
-            last_token_indices.append(start_idx + prompt_len - 1)
-            start_idx += prompt_len
-        else:
-            num_seqs = len(seq_ids)
-            last_token_indices.extend(range(start_idx, start_idx + num_seqs))
-            start_idx += num_seqs
-
-    last_token_indices = torch.tensor(last_token_indices,
-                                      dtype=torch.long,
-                                      device=hidden_states.device)
-    return hidden_states.index_select(0, last_token_indices)
+    return hidden_states.index_select(0, input_metadata.last_token_indices)
 
 
 def _get_penalties(
