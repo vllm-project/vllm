@@ -161,7 +161,9 @@ class Worker:
         input_positions: List[int] = []
         input_embeds: List[torch.Tensor] = []
         slot_mapping: List[int] = []
-
+        
+        embedding_dim = self.model.get_input_embeddings().embedding_dim
+        
         # Add prompt tokens.
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
@@ -184,11 +186,7 @@ class Worker:
             if seq_data.has_prompt_embeds_forwarding():
                 input_embeds.append(seq_data.prompt_embeds.to("cuda"))
             else:
-                input_embeds.append(
-                    torch.zeros(
-                        len(prompt_tokens),
-                        self.model.get_input_embeddings().embedding_dim,
-                        device="cuda"))
+                input_embeds.append(_get_zero_embeds(len(prompt_tokens), embedding_dim))
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(range(len(prompt_tokens)))
@@ -224,11 +222,7 @@ class Worker:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
-                input_embeds.append(
-                    torch.zeros(
-                        1,
-                        self.model.get_input_embeddings().embedding_dim,
-                        device="cuda"))
+                input_embeds.append(_get_zero_embeds(1, embedding_dim))
 
                 context_len = seq_data.get_len()
                 position = context_len - 1
@@ -263,7 +257,7 @@ class Worker:
         input_embeds = _pad_embeddings_to_alignment(
             input_embeds,
             multiple_of=8,
-            embedding_dim=self.model.get_input_embeddings().embedding_dim,
+            embedding_dim=embedding_dim,
         )
 
         # Convert to tensors.
@@ -383,6 +377,8 @@ def _init_distributed_environment(
     initialize_model_parallel(parallel_config.tensor_parallel_size,
                               parallel_config.pipeline_parallel_size)
 
+def _get_zero_embeds(seqs_len: int, embedding_dim: int) -> torch.Tensor:
+    return torch.zeros(seqs_len, embedding_dim, device="cuda")
 
 def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
     return x + [0] * ((-len(x)) % multiple_of)
@@ -391,9 +387,7 @@ def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
 def _pad_embeddings_to_alignment(x: torch.Tensor, multiple_of: int,
                                  embedding_dim: int) -> torch.Tensor:
     return torch.cat(
-        [x] \
-        + [torch.zeros(1, embedding_dim, device="cuda")] \
-        * ((-x.shape[0]) % multiple_of),
+        [x, _get_zero_embeds(((-x.shape[0]) % multiple_of), embedding_dim)],
         dim=0,
     )
 
