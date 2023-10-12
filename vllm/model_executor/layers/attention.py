@@ -171,6 +171,7 @@ class PagedAttention(nn.Module):
             )
         else:
             # Long context. Run PagedAttention V2.
+            assert _PAGED_ATTENTION_PARTITION_SIZE % block_size == 0
             num_seqs, num_heads, head_size = output.shape
             tmp_output = torch.empty(
                 size=(num_seqs, num_heads, num_partitions, head_size),
