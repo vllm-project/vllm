@@ -82,7 +82,7 @@ def test_column_blora(
     column_blora = None
     skip_bias_add = not bias
     # create model
-    for i in range(adapter_names):
+    for i in range(len(adapter_names)):
         adapter_name = adapter_names[i]
         if i == 0:
             ref_blinear = RefBLinear(adapter_name=adapter_name, in_features=input_size, out_features=output_size, r=r, lora_alpha=lora_alpha, bias=bias)
