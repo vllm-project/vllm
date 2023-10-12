@@ -5,6 +5,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 import uvicorn
+import torch
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -23,16 +24,26 @@ async def generate(request: Request) -> Response:
 
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
+    - prompt_embeds: the prompt embedding to use for the generation 
+        instead of the prompt.
     - stream: whether to stream the results or not.
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
+    prompt_embeds = request_dict.pop("prompt_embeds", None)
+    if prompt_embeds is not None:
+        prompt_embeds = torch.tensor(prompt_embeds).to("cuda")
+        prompt = None
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
-    results_generator = engine.generate(prompt, sampling_params, request_id)
+    results_generator = engine.generate(
+        prompt, 
+        sampling_params, 
+        request_id, 
+        prompt_embeds=prompt_embeds,)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -58,7 +69,10 @@ async def generate(request: Request) -> Response:
 
     assert final_output is not None
     prompt = final_output.prompt
-    text_outputs = [prompt + output.text for output in final_output.outputs]
+    if prompt:
+        text_outputs = [prompt + output.text for output in final_output.outputs]
+    else:
+        text_outputs = [output.text for output in final_output.outputs]
     ret = {"text": text_outputs}
     return JSONResponse(ret)
 
