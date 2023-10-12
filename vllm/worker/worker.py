@@ -182,7 +182,7 @@ class Worker:
 
             input_tokens.extend(prompt_tokens)
             if seq_data.has_prompt_embeds_forwarding():
-                input_embeds.append(seq_data.prompt_embeds)
+                input_embeds.append(seq_data.prompt_embeds.to("cuda"))
             else:
                 input_embeds.append(
                     torch.zeros(
@@ -259,17 +259,13 @@ class Worker:
         input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
         input_positions = _pad_to_alignment(input_positions, multiple_of=8)
 
-        #
         input_embeds = torch.cat(input_embeds, dim=0)
-        input_embeds = torch.cat([input_embeds] + [
-            torch.zeros(1,
-                        self.model.get_input_embeddings().embedding_dim,
-                        device="cuda")
-        ] * ((-input_embeds.shape[0]) % 8),
-                                 dim=0)
-        embeds_tensor = input_embeds.to(dtype=self.model_config.dtype,
-                                        device="cuda")
-
+        input_embeds = _pad_embeddings_to_alignment(
+            input_embeds, 
+            multiple_of=8, 
+            embedding_dim=self.model.get_input_embeddings().embedding_dim,
+        )
+        
         # Convert to tensors.
         tokens_tensor = torch.tensor(input_tokens,
                                      dtype=torch.long,
@@ -290,6 +286,8 @@ class Worker:
         block_tables_tensor = torch.tensor(padded_block_tables,
                                            dtype=torch.int,
                                            device="cuda")
+        embeds_tensor = input_embeds.to(dtype=self.model_config.dtype,
+                                        device="cuda")
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
@@ -389,6 +387,13 @@ def _init_distributed_environment(
 def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
     return x + [0] * ((-len(x)) % multiple_of)
 
+def _pad_embeddings_to_alignment(x: torch.Tensor, multiple_of: int, embedding_dim: int) -> torch.Tensor:
+    return torch.cat(
+        [x] \
+        + [torch.zeros(1, embedding_dim, device="cuda")] \
+        * ((-x.shape[0]) % multiple_of),
+        dim=0,
+    )
 
 def _pad_to_max(x: List[int], max_len: int) -> List[int]:
     return x + [0] * (max_len - len(x))

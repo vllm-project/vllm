@@ -236,8 +236,11 @@ class MistralModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
+        inputs_embeds: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids) + inputs_embeds
+        hidden_states = inputs_embeds
+
         for i in range(len(self.layers)):
             if cache_events is None:
                 cache_event = None

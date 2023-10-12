@@ -187,16 +187,9 @@ class GPT2Model(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor,
     ) -> torch.Tensor:
-        if inputs_embeds is None:
-            inputs_embeds = torch.zeros(input_ids.size(0),
-                                        self.wte.embedding_dim)
-        inputs_ids_indices = (input_ids != -1).nonzero().flatten()
-        inputs_ids_embeds = self.wte(
-            torch.index_select(input_ids, 0, inputs_ids_indices))
-        inputs_embeds[inputs_ids_indices] = inputs_ids_embeds
-
+        inputs_embeds = self.wte(input_ids) + inputs_embeds
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds
 
@@ -231,14 +224,14 @@ class GPT2LMHeadModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor,
     ) -> SamplerOutput:
         hidden_states = self.transformer(input_ids,
                                          positions,
                                          kv_caches,
                                          input_metadata,
                                          cache_events,
-                                         inputs_embeds=inputs_embeds)
+                                         inputs_embeds)
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
                                    input_metadata)
         return next_tokens

@@ -266,9 +266,9 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.monotonic()
 
-        # If prompt_embeds is set, prompt_token_ids is filled with -1
+        # If prompt_embeds is set, prompt_token_ids is filled with 0
         if prompt_embeds is not None:
-            prompt_token_ids = [-1] * prompt_embeds.size(0)
+            prompt_token_ids = [0] * prompt_embeds.size(0)
         elif prompt_token_ids is None:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
