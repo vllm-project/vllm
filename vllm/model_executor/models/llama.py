@@ -370,7 +370,7 @@ class LlamaForCausalLM(nn.Module):
 
                 if is_packed:
                     # needed due to different packing direction
-                    if not self.quant_config.get_name() == 'squeezellm':
+                    if not self.quant_config.get_name() == "squeezellm":
                         shard_size //= self.quant_config.pack_factor
                         offset //= self.quant_config.pack_factor
 
@@ -380,11 +380,13 @@ class LlamaForCausalLM(nn.Module):
                     shard_id = tp_rank
 
                 # needed due to different packing direction
-                if self.quant_config is not None and self.quant_config.get_name() == 'squeezellm' and 'lookup_table' not in name:
-                    loaded_weight = loaded_weight[:,shard_size *
+                if (self.quant_config is not None
+                        and self.quant_config.get_name() == "squeezellm"
+                        and "lookup_table" not in name):
+                    loaded_weight = loaded_weight[:, shard_size *
                                                   shard_id:shard_size *
                                                   (shard_id + 1)]
-                    param_slice = param.data[:,offset:offset + shard_size]
+                    param_slice = param.data[:, offset:offset + shard_size]
                 else:
                     loaded_weight = loaded_weight[shard_size *
                                                   shard_id:shard_size *
@@ -408,17 +410,23 @@ class LlamaForCausalLM(nn.Module):
                     param = param.T
 
                 # needed due to different packing direction
-                if self.quant_config is not None and self.quant_config.get_name() == 'squeezellm' and 'lookup_table' not in name:
+                if (self.quant_config is not None
+                        and self.quant_config.get_name() == "squeezellm"
+                        and "lookup_table" not in name):
                     shard_size = param.shape[1] // 2
-                    loaded_weight = loaded_weight[:, shard_size * tp_rank:shard_size *
+                    loaded_weight = loaded_weight[:, shard_size *
+                                                  tp_rank:shard_size *
                                                   (tp_rank + 1)]
-                    param_slice = param.data[:, shard_size * stride_id:shard_size *
+                    param_slice = param.data[:, shard_size *
+                                             stride_id:shard_size *
                                              (stride_id + 1)]
                 else:
                     shard_size = param.shape[0] // 2
-                    loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
+                    loaded_weight = loaded_weight[shard_size *
+                                                  tp_rank:shard_size *
                                                   (tp_rank + 1)]
-                    param_slice = param.data[shard_size * stride_id:shard_size *
+                    param_slice = param.data[shard_size *
+                                             stride_id:shard_size *
                                              (stride_id + 1)]
 
                 assert param_slice.shape == loaded_weight.shape

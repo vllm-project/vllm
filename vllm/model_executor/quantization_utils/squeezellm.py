@@ -25,7 +25,7 @@ class SqueezeLLMConfig(QuantizationConfig):
         self.pack_factor = 32 // self.weight_bits
 
     def __repr__(self) -> str:
-        return (f"SqueezeLLMConfig(weight_bits={self.weight_bits}")
+        return f"SqueezeLLMConfig(weight_bits={self.weight_bits})"
 
     @classmethod
     def get_name(cls) -> str:
