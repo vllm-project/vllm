@@ -10,7 +10,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.model_executor import get_model, InputMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
@@ -163,6 +163,8 @@ class Worker:
         slot_mapping: List[int] = []
         last_token_indices: List[int] = []
         last_token_start_idx = 0
+        categorized_seq_ids = {t: [] for t in SamplingType}
+        categorized_seq_ids_start_idx = 0
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -185,6 +187,11 @@ class Worker:
             assert len(seq_ids) == 1, "Prompt input should have only one seq."
             last_token_indices.append(last_token_start_idx + prompt_len - 1)
             last_token_start_idx += prompt_len
+
+            categorized_seq_ids[sampling_params.sampling_type].extend(
+                range(categorized_seq_ids_start_idx,
+                      categorized_seq_ids_start_idx + 1))
+            categorized_seq_ids_start_idx += 1
 
             input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
@@ -222,6 +229,11 @@ class Worker:
             last_token_indices.extend(
                 range(last_token_start_idx, last_token_start_idx + num_seqs))
             last_token_start_idx += num_seqs
+
+            categorized_seq_ids[sampling_params.sampling_type].extend(
+                range(categorized_seq_ids_start_idx,
+                      categorized_seq_ids_start_idx + num_seqs))
+            categorized_seq_ids_start_idx += num_seqs
 
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
@@ -273,6 +285,10 @@ class Worker:
         last_token_indices = torch.tensor(last_token_indices,
                                           dtype=torch.long,
                                           device="cuda")
+        categorized_seq_ids = {
+            t: torch.tensor(seq_ids, dtype=torch.int, device="cuda")
+            for t, seq_ids in categorized_seq_ids.items()
+        }
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq)
             for block_table in generation_block_tables
@@ -294,6 +310,7 @@ class Worker:
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
             last_token_indices=last_token_indices,
+            categorized_seq_ids=categorized_seq_ids,
             sliding_window=self.sliding_window,
         )
         return tokens_tensor, positions_tensor, input_metadata

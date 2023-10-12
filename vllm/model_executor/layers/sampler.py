@@ -401,16 +401,11 @@ def _sample(
     input_metadata: InputMetadata,
 ) -> SamplerOutput:
     categorized_seq_group_ids = {t: [] for t in SamplingType}
-    start_idx = 0
-    categorized_seq_ids = {t: [] for t in SamplingType}
+    categorized_seq_ids = input_metadata.categorized_seq_ids
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
         sampling_type = sampling_params.sampling_type
         categorized_seq_group_ids[sampling_type].append(i)
-        num_seqs = len(seq_ids)
-        categorized_seq_ids[sampling_type].extend(
-            range(start_idx, start_idx + num_seqs))
-        start_idx += num_seqs
     seq_outputs_dict: Dict[int, List[SequenceOutputs]] = {}
     for sampling_type in SamplingType:
         seq_group_ids = categorized_seq_group_ids[sampling_type]

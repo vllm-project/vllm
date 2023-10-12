@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from xformers.ops import AttentionBias
 
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData
 
 
@@ -30,6 +30,7 @@ class InputMetadata:
         max_context_len: int,
         block_tables: torch.Tensor,
         last_token_indices: torch.Tensor,
+        categorized_seq_ids: Dict[SamplingType, torch.Tensor],
         sliding_window: Optional[int] = None,
     ) -> None:
         self.seq_groups = seq_groups
@@ -40,6 +41,7 @@ class InputMetadata:
         self.max_context_len = max_context_len
         self.block_tables = block_tables
         self.last_token_indices = last_token_indices
+        self.categorized_seq_ids = categorized_seq_ids
 
         self.to_cache = None
         if sliding_window is not None:
@@ -86,4 +88,5 @@ class InputMetadata:
                 f'max_num_blocks_per_seq={self.max_num_blocks_per_seq}, '
                 f'block_tables={self.block_tables}, '
                 f'last_token_indices={self.last_token_indices}, '
+                f'categorized_seq_ids={self.categorized_seq_ids}, '
                 f'slot_mapping={self.slot_mapping})')
