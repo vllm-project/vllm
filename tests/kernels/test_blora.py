@@ -21,7 +21,7 @@ OUTPUT_SIZE = [16]
 ADAPTER_NAMES = [["lora1", "lora2"], ["lora1", "lora2", "lora3"]]
 LORA_ALPHA = [8]
 BIAS = [True, False]
-DTYPES = [torch.float]
+DTYPES = [torch.half, torch.bfloat16, torch.float]
 SEEDS = [0]
 R = [4]
 
