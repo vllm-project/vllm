@@ -1,7 +1,6 @@
 import enum
 import uuid
 from platform import uname
-from typing import Any, Iterable
 
 import psutil
 import torch
@@ -54,11 +53,3 @@ def random_uuid() -> str:
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
-
-def ordered_unique(seq: Iterable[Any]) -> Iterable[Any]:
-    seen = set()
-    for x in seq:
-        if x in seen:
-            continue
-        seen.add(x)
-        yield x
