@@ -5,6 +5,15 @@ from peft.tuners.lora import Linear
 import torch
 import torch.nn.functional as F
 from peft.utils.other import transpose
+import torch.nn.init as init
+import torch.distributed as dist
+import os
+from vllm.model_executor.parallel_utils.parallel_state import initialize_model_parallel
+os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+os.environ.setdefault("MASTER_PORT", "8000")
+dist.init_process_group(rank=0, world_size=1)
+initialize_model_parallel()
+torch.cuda.init()
 
 LORA_DROP_OUTS = [0.0]
 INPUT_SIZE = [8]
