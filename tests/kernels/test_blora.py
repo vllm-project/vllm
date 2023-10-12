@@ -112,7 +112,8 @@ def test_column_blora(
 
     # align weights
     column_blora.weight.copy_(ref_blinear.weight)
-    column_blora.bias.copy_(ref_blinear.bias)
+    if column_blora.bias is not None:
+        column_blora.bias.copy_(ref_blinear.bias)
     assert torch.allclose(column_blora.weight, ref_blinear.weight, atol=1e-8, rtol=1e-8)
     assert torch.allclose(column_blora.bias, ref_blinear.bias, atol=1e-8, rtol=1e-8)
 
