@@ -26,6 +26,7 @@
 #define WARP_SIZE 32
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
 namespace vllm {
 
@@ -89,10 +90,29 @@ __device__ void paged_attention_kernel(
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride) {
+  // FIXME(woosuk): Optimize.
+  const int seq_idx = blockIdx.y;
+  const int partition_idx = blockIdx.z;
+  const int num_partitions = gridDim.z;
+  constexpr bool USE_PARTITIONING = PARTITION_SIZE > 0;
+  const int context_len = context_lens[seq_idx];
+  const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
+  const int num_blocks_per_partition = USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_context_blocks;
+  const int start_block_idx = USE_PARTITIONING ? partition_idx * num_blocks_per_partition : 0;
+  int num_blocks;
+  if (USE_PARTITIONING) {
+    num_blocks = MIN(num_context_blocks - start_block_idx, num_blocks_per_partition);
+  } else {
+    num_blocks = num_context_blocks;
+  }
+  if (num_blocks <= 0) {
+    return;
+  }
+
   constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   constexpr int NUM_THREAD_GROUPS = NUM_THREADS / THREAD_GROUP_SIZE; // Note: This assumes THREAD_GROUP_SIZE divides NUM_THREADS
   assert(NUM_THREADS % THREAD_GROUP_SIZE == 0);
-  constexpr int NUM_TOKENS_PER_THREAD_GROUP = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
+  constexpr int NUM_TOKENS_PER_THREAD_GROUP = DIVIDE_ROUND_UP(BLOCK_SIZE, WARP_SIZE);
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   const int thread_idx = threadIdx.x;
   const int warp_idx = thread_idx / WARP_SIZE;
@@ -101,8 +121,6 @@ __device__ void paged_attention_kernel(
   const int head_idx = blockIdx.x;
   const int num_heads = gridDim.x;
   const int kv_head_idx = head_mapping[head_idx];
-  const int seq_idx = blockIdx.y;
-  const int partition_idx = blockIdx.z;
   const float alibi_slope = alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
 
   // A vector type to store a part of a key or a query.
@@ -147,15 +165,12 @@ __device__ void paged_attention_kernel(
   constexpr int x = 16 / sizeof(scalar_t);
   float qk_max = -FLT_MAX;
 
-  const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
-  const int context_len = context_lens[seq_idx];
-  const int num_blocks = (context_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
   // Iterate over the key blocks.
   // Each warp fetches a block of keys for each iteration.
   // Each thread group in a warp fetches a key from the block, and computes
   // dot product with the query.
-  for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
+  const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
+  for (int block_idx = start_block_idx + warp_idx; block_idx < num_context_blocks; block_idx += NUM_WARPS) {
     const int physical_block_number = block_table[block_idx];
 
     // Load a key to registers.
@@ -242,7 +257,7 @@ __device__ void paged_attention_kernel(
 
   constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;
   constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
-  constexpr int NUM_ROWS_PER_THREAD = (HEAD_SIZE + NUM_ROWS_PER_ITER - 1) / NUM_ROWS_PER_ITER;
+  constexpr int NUM_ROWS_PER_THREAD = DIVIDE_ROUND_UP(HEAD_SIZE, NUM_ROWS_PER_ITER);
 
   // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
   float accs[NUM_ROWS_PER_THREAD];
@@ -432,7 +447,7 @@ void single_query_cached_kv_attention_launcher(
   int* context_lens_ptr = context_lens.data_ptr<int>();
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
-  int padded_max_context_len = ((max_context_len + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+  int padded_max_context_len = DIVIDE_ROUND_UP(max_context_len, BLOCK_SIZE) * BLOCK_SIZE;
   int logits_size = padded_max_context_len * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
   // Python-side check in vllm.worker.worker._check_if_can_support_max_seq_len
