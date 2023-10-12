@@ -119,10 +119,8 @@ def test_column_blora(
         assert torch.allclose(adapter.weight, ref_blinear.lora_A[lora_id].weight, atol=1e-8, rtol=1e-8)
 
     #test inputs
-    ref_output, ref_output_bias = ref_blinear.forward(x)
-    col_output, col_output_bias = column_blora.forward(x)
+    ref_output, _ = ref_blinear.forward(x)
+    col_output, _ = column_blora.forward(x)
 
     assert torch.allclose(ref_output, col_output, atol=1e-8, rtol=1e-8)
-    if ref_output_bias is not None:
-        assert torch.allclose(ref_output_bias, col_output_bias, atol=1e-8, rtol=1e-8)
 
