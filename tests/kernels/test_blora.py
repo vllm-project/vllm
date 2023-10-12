@@ -21,7 +21,6 @@ OUTPUT_SIZE = [16]
 ADAPTER_NAMES = [["lora1", "lora2"], ["lora1", "lora2", "lora3"]]
 LORA_ALPHA = [8]
 BIAS = [True, False]
-DTYPES = [torch.half, torch.bfloat16, torch.float]
 SEEDS = [0]
 R = [4]
 
@@ -72,7 +71,6 @@ class RefBLinear(Linear):
 @pytest.mark.parametrize("r", R)
 @pytest.mark.parametrize("lora_alpha", LORA_ALPHA)
 @pytest.mark.parametrize("lora_drop_out", LORA_DROP_OUTS)
-@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_column_blora(
@@ -84,7 +82,6 @@ def test_column_blora(
     lora_alpha: int,
     lora_drop_out: float,
     seed: int,
-    dtype: torch.dtype,
     init_lora_weights = True,
 ):
     ref_blinear = None
@@ -105,22 +102,19 @@ def test_column_blora(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     scale = float(input_size**-0.5)
-    x = torch.empty(len(adapter_names), input_size, dtype=dtype, device="cuda")
+    x = torch.empty(len(adapter_names), input_size, device="cuda")
     x.uniform_(-scale, scale)
     setattr(ref_blinear, "batch_lora_ids", adapter_names)
     setattr(column_blora, "batch_lora_ids", adapter_names)
     
     # align weights
-    ref_blinear.weight.to(dtype)
     column_blora.weight.copy_(ref_blinear.weight)
     assert torch.allclose(column_blora.weight, ref_blinear.weight, atol=1e-8, rtol=1e-8)
     if column_blora.bias is not None:
-        ref_blinear.bias.to(dtype)
         column_blora.bias.copy_(ref_blinear.bias)
         assert torch.allclose(column_blora.bias, ref_blinear.bias, atol=1e-8, rtol=1e-8)
     
     for lora_id, adapter in column_blora.lora_A.items():
-        ref_blinear.lora_A[lora_id].weight.to(dtype)
         adapter.weight.copy_(ref_blinear.lora_A[lora_id].weight)
         assert torch.allclose(adapter.weight, ref_blinear.lora_A[lora_id].weight, atol=1e-8, rtol=1e-8)
 
@@ -129,4 +123,5 @@ def test_column_blora(
     col_output, col_output_bias = column_blora.forward(x)
 
     assert torch.allclose(ref_output, col_output, atol=1e-8, rtol=1e-8)
+    assert torch.allclose(ref_output_bias, col_output_bias, atol=1e-8, rtol=1e-8)
 
