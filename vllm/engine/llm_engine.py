@@ -17,7 +17,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
-from vllm.model_executor.parallel_utils.layers import BLinear
+from vllm.model_executor.parallel_utils.layers import BLoraColumnParallelLinear
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -561,7 +561,7 @@ class LLMEngine:
         for worker in self.workers:
             model = worker.model
             for _, module in model.named_modules():
-                if isinstance(module, BLinear):
+                if isinstance(module, BLoraColumnParallelLinear):
                     module.batch_lora_ids = batch_lora_ids
         # Execute the model.
         output = self._run_workers(
