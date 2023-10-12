@@ -16,13 +16,13 @@ initialize_model_parallel()
 torch.cuda.init()
 
 LORA_DROP_OUTS = [0.0]
-INPUT_SIZE = [8]
-OUTPUT_SIZE = [16]
+INPUT_SIZE = [8, 16, 16]
+OUTPUT_SIZE = [16, 16, 32]
 ADAPTER_NAMES = [["lora1", "lora2"], ["lora1", "lora2", "lora3"]]
-LORA_ALPHA = [8]
+LORA_ALPHA = [4, 6, 8, 10]
 BIAS = [True, False]
 SEEDS = [0]
-R = [4]
+R = [1, 2, 4, 8]
 
 class RefBLinear(Linear):
     def forward(self, x: torch.Tensor):
