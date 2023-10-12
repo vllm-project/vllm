@@ -97,8 +97,8 @@ def test_column_blora(
             ref_blinear = RefBLinear(adapter_name=adapter_name, in_features=input_size, out_features=output_size, r=r, lora_alpha=lora_alpha, bias=bias)
             column_blora = BLoraColumnParallelLinear(input_size=input_size, output_size=output_size, adapter_name=adapter_name, bias=bias, skip_bias_add=skip_bias_add, r=r, lora_alpha=lora_alpha, lora_dropout=lora_drop_out)
         else:
-            ref_blinear.update_layer(adapter_name=adapter_name, r=r, lora_alpha=lora_alpha, lora_dropout=lora_alpha, init_lora_weights=init_lora_weights)
-            column_blora.update_layer(adapter_name=adapter_name, r=r, lora_alpha=lora_alpha, lora_dropout=lora_alpha, init_lora_weights=init_lora_weights)
+            ref_blinear.update_layer(adapter_name=adapter_name, r=r, lora_alpha=lora_alpha, lora_dropout=lora_drop_out, init_lora_weights=init_lora_weights)
+            column_blora.update_layer(adapter_name=adapter_name, r=r, lora_alpha=lora_alpha, lora_dropout=lora_drop_out, init_lora_weights=init_lora_weights)
     
     
     # prepare inputs
