@@ -161,9 +161,9 @@ class Worker:
         input_positions: List[int] = []
         input_embeds: List[torch.Tensor] = []
         slot_mapping: List[int] = []
-        
+
         embedding_dim = self.model.get_input_embeddings().embedding_dim
-        
+
         # Add prompt tokens.
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
@@ -186,7 +186,8 @@ class Worker:
             if seq_data.has_prompt_embeds_forwarding():
                 input_embeds.append(seq_data.prompt_embeds.to("cuda"))
             else:
-                input_embeds.append(_get_zero_embeds(len(prompt_tokens), embedding_dim))
+                input_embeds.append(
+                    _get_zero_embeds(len(prompt_tokens), embedding_dim))
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(range(len(prompt_tokens)))
@@ -377,8 +378,10 @@ def _init_distributed_environment(
     initialize_model_parallel(parallel_config.tensor_parallel_size,
                               parallel_config.pipeline_parallel_size)
 
+
 def _get_zero_embeds(seqs_len: int, embedding_dim: int) -> torch.Tensor:
     return torch.zeros(seqs_len, embedding_dim, device="cuda")
+
 
 def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
     return x + [0] * ((-len(x)) % multiple_of)
