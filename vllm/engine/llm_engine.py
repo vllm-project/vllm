@@ -253,18 +253,20 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            prompt: The prompt string. Can be None if prompt_token_ids is
-                provided.
+            prompt: The prompt string. Can be None if prompt_token_ids 
+                or prompt_embeds are provided.
             sampling_params: The sampling parameters for text generation.
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            prompt_embeds: The prompt embeddings. If set, 
+                input prompt and prompt_token_ids are ignored
         """
         if arrival_time is None:
             arrival_time = time.monotonic()
 
-        # When prompt_embeds is set, prompt_token_ids is filled with -1
+        # If prompt_embeds is set, prompt_token_ids is filled with -1
         if prompt_embeds is not None:
             prompt_token_ids = [-1] * prompt_embeds.size(0)
         elif prompt_token_ids is None:
@@ -642,12 +644,17 @@ class LLMEngine:
     def _decode_sequence(self, seq: Sequence,
                          sampling_params: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
+
+        # if data has prompt embeds, all_input_ids are only output token ids
+        if seq.data.has_prompt_embeds_forwarding():
+            all_input_ids = seq.get_output_token_ids()
+        else:
+            all_input_ids = seq.get_token_ids()
+
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
              self.tokenizer,
-             all_input_ids=seq.get_token_ids()
-             if seq.data.has_prompt_embeds_forwarding() is None else
-             seq.get_output_token_ids(),
+             all_input_ids=all_input_ids,
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
