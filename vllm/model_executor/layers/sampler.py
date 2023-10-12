@@ -499,7 +499,7 @@ def _get_logprobs(
                                        sampling_params.prompt_logprobs)
         if sampling_params.logprobs is not None:
             largest_num_logprobs = max(largest_num_logprobs,
-                                    sampling_params.logprobs)
+                                       sampling_params.logprobs)
     if largest_num_logprobs > 0:
         top_logprobs, top_token_ids = torch.topk(logprobs,
                                                  largest_num_logprobs,
@@ -528,8 +528,7 @@ def _get_logprobs(
             group_prompt_logprobs = [None]
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
-                    token_id:
-                    batched_logprobs_query_result[sample_idx].item()
+                    token_id: batched_logprobs_query_result[sample_idx].item()
                 }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
