@@ -5,7 +5,6 @@ from peft.tuners.lora import Linear
 import torch
 import torch.nn.functional as F
 from peft.utils.other import transpose
-import torch.nn.init as init
 import torch.distributed as dist
 import os
 from vllm.model_executor.parallel_utils.parallel_state import initialize_model_parallel
