@@ -24,8 +24,9 @@ BIAS = [True, False]
 SEEDS = [0]
 R = [1, 2, 4, 8]
 
+REDUCE_RESULTS = [True, False]
+
 IS_INPUT_PARALLEL = [True, False]
-REDUCE_RESULT = [True, False]
 
 class RefBLinear(Linear):
     def forward(self, x: torch.Tensor):
@@ -131,30 +132,30 @@ def test_column_blora(
 @pytest.mark.parametrize("adapter_names", ADAPTER_NAMES)
 @pytest.mark.parametrize("output_size", OUTPUT_SIZE)
 @pytest.mark.parametrize("input_size", INPUT_SIZE)
-@pytest.mark.parametrize("bias", BIAS)
+@pytest.mark.parametrize("reduce_results", REDUCE_RESULTS)
 @pytest.mark.parametrize("r", R)
 @pytest.mark.parametrize("lora_alpha", LORA_ALPHA)
 @pytest.mark.parametrize("lora_drop_out", LORA_DROP_OUTS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("is_input_parallel", IS_INPUT_PARALLEL)
-@pytest.mark.parametrize("reduce_results", REDUCE_RESULT)
 @torch.inference_mode()
 def test_row_blora(
     adapter_names: list[str],
     input_size: int,
     output_size: int,
-    bias: bool,
+    reduce_results: bool,
     r: int,
     lora_alpha: int,
     lora_drop_out: float,
     seed: int,
     is_input_parallel: bool,
-    reduce_results: bool, 
     init_lora_weights = True,
 ):
     ref_blinear = None
     row_blora = None
+    bias = reduce_results
     skip_bias_add = not bias
+    
     # create model
     for i in range(len(adapter_names)):
         adapter_name = adapter_names[i]
