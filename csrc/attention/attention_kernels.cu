@@ -90,12 +90,16 @@ __device__ void paged_attention_kernel(
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride) {
-  // FIXME(woosuk): Optimize.
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
   const int max_num_partitions = gridDim.z;
   constexpr bool USE_PARTITIONING = PARTITION_SIZE > 0;
   const int context_len = context_lens[seq_idx];
+  if (USE_PARTITIONING && partition_idx * PARTITION_SIZE >= context_len) {
+    // No work to do. Terminate the thread block.
+    return;
+  }
+
   const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
   const int num_blocks_per_partition = USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_context_blocks;
 
@@ -103,10 +107,6 @@ __device__ void paged_attention_kernel(
   const int start_block_idx = USE_PARTITIONING ? partition_idx * num_blocks_per_partition : 0;
   int end_block_idx = MIN(start_block_idx + num_blocks_per_partition, num_context_blocks);
   int num_blocks = end_block_idx - start_block_idx;
-  if (num_blocks <= 0) {
-    // No work to do. Terminate the thread block.
-    return;
-  }
 
   // [start_token_idx, end_token_idx) is the range of tokens to process.
   int start_token_idx = start_block_idx * BLOCK_SIZE;
@@ -246,6 +246,13 @@ __device__ void paged_attention_kernel(
   }
   exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
 
+  // Compute softmax.
+  const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
+  for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
+    logits[i] *= inv_sum;
+  }
+  __syncthreads();
+
   // If partitioning is enabled, store the max logit and exp_sum.
   if (USE_PARTITIONING && thread_idx == 0) {
     float* max_logits_ptr = max_logits + seq_idx * num_heads * max_num_partitions
@@ -257,13 +264,6 @@ __device__ void paged_attention_kernel(
                                    + partition_idx;
     *exp_sums_ptr = exp_sum;
   }
-
-  // Compute softmax.
-  const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
-  for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
-    logits[i] *= inv_sum;
-  }
-  __syncthreads();
 
   // Each thread will fetch 16 bytes from the value cache at a time.
   constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);
