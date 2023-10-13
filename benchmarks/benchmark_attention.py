@@ -175,7 +175,9 @@ def test_single_query_cached_kv_attention(
         f()
     torch.cuda.synchronize()
     end = time.time()
-    print(f"Time: {(end - start) / 100 * 1000:.3f} ms")
+    t = (end - start) / 100 * 1000
+    print(f"Time: {t:.3f} ms")
+    return t
 
 
 if __name__ == "__main__":
@@ -183,11 +185,12 @@ if __name__ == "__main__":
         for num_seqs in NUM_GEN_SEQS:
             for num_heads in NUM_HEADS:
                     for dtype in DTYPES:
+                        ts = []
                         for version in [1, 2]:
                             print(
                                 f"Testing: V{version} {num_seqs}, {context_len}"
                             )
-                            test_single_query_cached_kv_attention(
+                            t = test_single_query_cached_kv_attention(
                                 num_seqs,
                                 context_len,
                                 num_heads,
@@ -198,3 +201,5 @@ if __name__ == "__main__":
                                 0,
                                 version,
                             )
+                            ts.append(t)
+                        print(f"Speedup: {ts[0] / ts[1]:.3f}")
