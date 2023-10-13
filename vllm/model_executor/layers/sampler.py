@@ -581,7 +581,6 @@ def _build_sampler_output(
         for parent_id, next_token_id, logprobs in zip(parent_ids,
                                                       next_token_ids,
                                                       group_sample_logprobs):
-            print("logprobs", logprobs)
             seq_outputs.append(
                 SequenceOutputs(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
