@@ -513,6 +513,7 @@ def _get_logprobs(
     result_prompt_logprobs: List[Optional[List[Optional[Dict[int, int]]]]] = []
     result_sample_logprobs: List[List[Optional[Dict[int, int]]]] = []
     sample_idx = 0
+    result_idx = 0
     for i, (seq_group, sample_result) in enumerate(
             zip(input_metadata.seq_groups, sample_results)):
         seq_ids, sampling_params = seq_group
@@ -523,12 +524,11 @@ def _get_logprobs(
                 and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
             prompt_len = input_metadata.prompt_lens[i]
-            prompt_tokens = input_metadata.seq_data[
-                seq_ids[0]].prompt_token_ids[1:]
+            prompt_tokens = input_metadata.seq_data[seq_ids[0]].prompt_token_ids
             group_prompt_logprobs = [None]
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
-                    token_id: batched_logprobs_query_result[sample_idx].item()
+                    token_id: batched_logprobs_query_result[result_idx].item()
                 }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
@@ -536,6 +536,7 @@ def _get_logprobs(
                             top_logprobs[sample_idx, :num_logprobs].tolist()))
                 group_prompt_logprobs.append(prompt_logprobs_dict)
                 sample_idx += 1
+                result_idx += 1
             result_prompt_logprobs.append(group_prompt_logprobs)
         else:
             result_prompt_logprobs.append(None)
@@ -548,8 +549,9 @@ def _get_logprobs(
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
                 next_token_id:
-                batched_logprobs_query_result[sample_idx].item()
+                batched_logprobs_query_result[result_idx].item()
             }
+            result_idx += 1
             if num_logprobs > 0:
                 sample_logprobs_dict.update(
                     zip(
