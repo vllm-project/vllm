@@ -42,8 +42,8 @@ class AWQConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # The AWQ kernel only supports Ampere or newer GPUs.
-        return 80
+        # The AWQ kernel only supports Turing or newer GPUs.
+        return 75
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
