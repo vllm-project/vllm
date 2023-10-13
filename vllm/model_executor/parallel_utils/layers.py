@@ -363,3 +363,65 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
             output_bias = output_bias.to(previous_dtype)
 
         return output, output_bias
+    
+
+class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        adapter_name: str,
+        bias: bool = True,
+        input_is_parallel: bool = False,
+        reduce_results: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        r: int = 0,
+        lora_alpha: int = 1,
+        lora_dropout: float = 0.0,
+        **kwargs,
+    ):
+        init_lora_weights = kwargs.pop("init_lora_weights", True)
+
+        RowParallelLinear.__init__(self, input_size, output_size, bias, input_is_parallel, skip_bias_add, params_dtype, reduce_results, quant_config)
+        LoraLayer.__init__(self, in_features=input_size, out_features=output_size)
+        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights)
+        self.active_adapter = adapter_name
+
+    def forward(self, x: torch.Tensor):
+        previous_dtype = x.dtype
+        if self.active_adapter not in self.lora_A.keys():
+            # return F.linear(
+            #     x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
+            # )
+            output, output_bias = RowParallelLinear.forward(self, x)
+        if self.disable_adapters:
+            if self.r[self.active_adapter] > 0 and self.merged:
+                self.unmerge()
+            output, output_bias = RowParallelLinear.forward(self, x)
+        elif self.r[self.active_adapter] > 0 and not self.merged:
+            output, output_bias = RowParallelLinear.forward(self, x)
+            x = x.to(self.lora_A[self.active_adapter].weight.dtype)
+
+            assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
+
+            batch = list(zip(x, self.batch_lora_ids))
+            # rewrite as for loop
+            lora_out = torch.zeros_like(output)
+            for i, (x, lora_id) in enumerate(batch):
+                if lora_id in self.lora_A.keys():
+                    lora_out[i] = self.scaling[lora_id] * self.lora_B[lora_id](
+                        self.lora_A[lora_id](self.lora_dropout[lora_id](x))
+                    )
+            output += lora_out
+
+        else:
+            output, output_bias = RowParallelLinear.forward(self, x)
+
+        output = output.to(previous_dtype)
+        if output_bias is not None:
+            output_bias = output_bias.to(previous_dtype)
+
+        return output, output_bias

@@ -1,5 +1,5 @@
 import pytest
-from vllm.model_executor.parallel_utils.layers import BLoraColumnParallelLinear
+from vllm.model_executor.parallel_utils.layers import BLoraColumnParallelLinear, BLoraRowParallelLinear
 
 from peft.tuners.lora import Linear
 import torch
@@ -23,6 +23,9 @@ LORA_ALPHA = [4, 6, 8, 10]
 BIAS = [True, False]
 SEEDS = [0]
 R = [1, 2, 4, 8]
+
+IS_INPUT_PARALLEL = [True, False]
+REDUCE_RESULT = [True, False]
 
 class RefBLinear(Linear):
     def forward(self, x: torch.Tensor):
@@ -124,3 +127,67 @@ def test_column_blora(
 
     assert torch.allclose(ref_output, col_output, atol=1e-8, rtol=1e-8)
 
+
+@pytest.mark.parametrize("adapter_names", ADAPTER_NAMES)
+@pytest.mark.parametrize("output_size", OUTPUT_SIZE)
+@pytest.mark.parametrize("input_size", INPUT_SIZE)
+@pytest.mark.parametrize("bias", BIAS)
+@pytest.mark.parametrize("r", R)
+@pytest.mark.parametrize("lora_alpha", LORA_ALPHA)
+@pytest.mark.parametrize("lora_drop_out", LORA_DROP_OUTS)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("is_input_parallel", IS_INPUT_PARALLEL)
+@pytest.mark.parametrize("reduce_results", REDUCE_RESULT)
+@torch.inference_mode()
+def test_row_blora(
+    adapter_names: list[str],
+    input_size: int,
+    output_size: int,
+    bias: bool,
+    r: int,
+    lora_alpha: int,
+    lora_drop_out: float,
+    seed: int,
+    is_input_parallel: bool,
+    reduce_results: bool, 
+    init_lora_weights = True,
+):
+    ref_blinear = None
+    row_blora = None
+    skip_bias_add = not bias
+    # create model
+    for i in range(len(adapter_names)):
+        adapter_name = adapter_names[i]
+        if i == 0:
+            ref_blinear = RefBLinear(adapter_name=adapter_name, in_features=input_size, out_features=output_size, r=r, lora_alpha=lora_alpha, bias=bias)
+            row_blora = BLoraRowParallelLinear(input_size=input_size, output_size=output_size, adapter_name=adapter_name, bias=bias, skip_bias_add=skip_bias_add, r=r, lora_alpha=lora_alpha, lora_dropout=lora_drop_out, is_input_parallel=is_input_parallel, reduce_results=reduce_results)
+        else:
+            ref_blinear.update_layer(adapter_name=adapter_name, r=r, lora_alpha=lora_alpha, lora_dropout=lora_drop_out, init_lora_weights=init_lora_weights)
+            row_blora.update_layer(adapter_name=adapter_name, r=r, lora_alpha=lora_alpha, lora_dropout=lora_drop_out, init_lora_weights=init_lora_weights)
+    ref_blinear.cuda()
+    row_blora.cuda()
+    # prepare inputs
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    scale = float(input_size**-0.5)
+    x = torch.empty(len(adapter_names), input_size, device="cuda")
+    x.uniform_(-scale, scale)
+    setattr(ref_blinear, "batch_lora_ids", adapter_names)
+    setattr(row_blora, "batch_lora_ids", adapter_names)
+    
+    # align weights
+    row_blora.weight.copy_(ref_blinear.weight)
+    assert torch.allclose(row_blora.weight, ref_blinear.weight, atol=1e-8, rtol=1e-8)
+    if row_blora.bias is not None:
+        row_blora.bias.copy_(ref_blinear.bias)
+        assert torch.allclose(row_blora.bias, ref_blinear.bias, atol=1e-8, rtol=1e-8)
+    
+    for lora_id, adapter in row_blora.lora_A.items():
+        adapter.weight.copy_(ref_blinear.lora_A[lora_id].weight)
+        assert torch.allclose(adapter.weight, ref_blinear.lora_A[lora_id].weight, atol=1e-8, rtol=1e-8)
+
+    #test inputs
+    ref_output, _ = ref_blinear.forward(x)
+    row_output, _ = row_blora.forward(x)
+
+    assert torch.allclose(ref_output, row_output, atol=1e-8, rtol=1e-8)
