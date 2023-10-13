@@ -460,9 +460,10 @@ def _get_logprobs(
     input_metadata: InputMetadata,
     sample_results: List[Tuple[List[int], List[int]]],
 ):
-    # Batched query for logprobs of selected token
+    # Prepare query indices
     batched_logprobs_query_seq_indices: List[int] = []
     batched_logprobs_query_token_indices: List[int] = []
+    largest_num_logprobs = 0
     sample_idx = 0
     for i, (seq_group, sample_result) in enumerate(
             zip(input_metadata.seq_groups, sample_results)):
@@ -471,6 +472,8 @@ def _get_logprobs(
         num_parent_seqs = len(seq_ids)
         if (i < input_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
+            largest_num_logprobs = max(largest_num_logprobs,
+                                       sampling_params.prompt_logprobs)
             prompt_len = input_metadata.prompt_lens[i]
             prompt_tokens = input_metadata.seq_data[
                 seq_ids[0]].prompt_token_ids
@@ -482,24 +485,19 @@ def _get_logprobs(
         batched_logprobs_query_seq_indices.extend(
             [sample_idx + parent_id for parent_id in parent_ids])
         batched_logprobs_query_token_indices.extend(next_token_ids)
+        if sampling_params.logprobs is not None:
+            largest_num_logprobs = max(largest_num_logprobs,
+                                        sampling_params.logprobs)
         sample_idx += num_parent_seqs
     assert sample_idx == logprobs.size(0)
+
+    # Batched query for logprobs of selected token
     batched_logprobs_query_result = logprobs[[
         batched_logprobs_query_seq_indices,
         batched_logprobs_query_token_indices
     ]].cpu()
 
     # Batched query for logprobs of topk tokens
-    largest_num_logprobs = 0
-    for i, seq_group in enumerate(input_metadata.seq_groups):
-        seq_ids, sampling_params = seq_group
-        if (i < input_metadata.num_prompts
-                and sampling_params.prompt_logprobs is not None):
-            largest_num_logprobs = max(largest_num_logprobs,
-                                       sampling_params.prompt_logprobs)
-        if sampling_params.logprobs is not None:
-            largest_num_logprobs = max(largest_num_logprobs,
-                                       sampling_params.logprobs)
     if largest_num_logprobs > 0:
         top_logprobs, top_token_ids = torch.topk(logprobs,
                                                  largest_num_logprobs,
