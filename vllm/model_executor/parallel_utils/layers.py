@@ -10,6 +10,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
+from peft.tuners.lora import LoraLayer
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -303,7 +304,7 @@ class RowParallelLinear(torch.nn.Module):
         return output, output_bias
 
 
-from peft.tuners.lora import LoraLayer
+
 class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
 
     def __init__(
