@@ -151,11 +151,13 @@ class PagedAttention(nn.Module):
                 block_size]
             input_metadata: metadata for paged attention.
         """
+        block_size = value_cache.shape[3]
+        num_seqs, num_heads, head_size = query.shape
         max_num_partitions = (
             (input_metadata.max_context_len + _PARTITION_SIZE - 1) //
             _PARTITION_SIZE)
-        block_size = value_cache.shape[3]
-        if max_num_partitions == 1:
+        use_v1 = max_num_partitions == 1 or num_seqs * num_heads > 512
+        if use_v1:
             # Short context. Run PagedAttention V1.
             attention_ops.paged_attention_v1(
                 output,
@@ -173,7 +175,6 @@ class PagedAttention(nn.Module):
         else:
             # Long context. Run PagedAttention V2.
             assert _PARTITION_SIZE % block_size == 0
-            num_seqs, num_heads, head_size = output.shape
             tmp_output = torch.empty(
                 size=(num_seqs, num_heads, max_num_partitions, head_size),
                 dtype=output.dtype,
