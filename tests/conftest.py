@@ -111,7 +111,6 @@ class HfRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        num_logprobs: int,
     ) -> List[List[torch.Tensor]]:
         all_logprobs = []
         for prompt in prompts:
@@ -126,14 +125,17 @@ class HfRunner:
             )
             seq_logprobs = []
             for hidden_states in output.hidden_states:
-                last_hidden_states = hidden_states[0][-1]
+                last_hidden_states = hidden_states[-1][0]
                 logits = torch.matmul(
                     last_hidden_states,
                     self.model.get_output_embeddings().weight.t(),
                 )
                 if self.model.get_output_embeddings().bias is not None:
-                    logits += self.model.get_output_embeddings().bias.unsqueeze(0)
-                logprobs = torch.nn.functional.log_softmax(logits, dim=-1)
+                    logits += self.model.get_output_embeddings(
+                    ).bias.unsqueeze(0)
+                logprobs = torch.nn.functional.log_softmax(logits,
+                                                           dim=-1,
+                                                           dtype=torch.float32)
                 seq_logprobs.append(logprobs)
             all_logprobs.append(seq_logprobs)
         return all_logprobs

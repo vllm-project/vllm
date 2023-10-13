@@ -524,7 +524,8 @@ def _get_logprobs(
                 and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
             prompt_len = input_metadata.prompt_lens[i]
-            prompt_tokens = input_metadata.seq_data[seq_ids[0]].prompt_token_ids
+            prompt_tokens = input_metadata.seq_data[
+                seq_ids[0]].prompt_token_ids
             group_prompt_logprobs = [None]
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
