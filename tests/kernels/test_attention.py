@@ -162,19 +162,52 @@ def test_single_query_cached_kv_attention(
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    attention_ops.single_query_cached_kv_attention(
-        output,
-        query,
-        key_cache,
-        value_cache,
-        head_mapping,
-        scale,
-        block_tables,
-        context_lens,
-        block_size,
-        max_context_len,
-        alibi_slopes,
-    )
+    PARTITION_SIZE = 512
+    num_partitions = (max_context_len + PARTITION_SIZE - 1) // PARTITION_SIZE
+    if num_partitions == 1:
+        attention_ops.paged_attention_v1(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            head_mapping,
+            scale,
+            block_tables,
+            context_lens,
+            block_size,
+            max_context_len,
+            alibi_slopes,
+        )
+    else:
+        assert PARTITION_SIZE % block_size == 0
+        num_seqs, num_heads, head_size = output.shape
+        tmp_output = torch.empty(
+            size=(num_seqs, num_heads, num_partitions, head_size),
+            dtype=output.dtype,
+            device=output.device,
+        )
+        exp_sums = torch.empty(
+            size=(num_seqs, num_heads, num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        max_logits = torch.empty_like(exp_sums)
+        attention_ops.paged_attention_v2(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            head_mapping,
+            scale,
+            block_tables,
+            context_lens,
+            block_size,
+            max_context_len,
+            alibi_slopes,
+        )
 
     # Run the reference implementation.
     ref_output = torch.empty_like(query)
