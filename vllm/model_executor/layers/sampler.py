@@ -1,5 +1,4 @@
 """A layer that samples the next tokens from the model's outputs."""
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -487,7 +486,7 @@ def _get_logprobs(
         batched_logprobs_query_token_indices.extend(next_token_ids)
         if sampling_params.logprobs is not None:
             largest_num_logprobs = max(largest_num_logprobs,
-                                        sampling_params.logprobs)
+                                       sampling_params.logprobs)
         sample_idx += num_parent_seqs
     assert sample_idx == logprobs.size(0)
 
@@ -572,12 +571,12 @@ def _build_sampler_output(
     sample_logprobs: List[List[Optional[Dict[int, int]]]],
 ) -> SamplerOutput:
     sampler_output = []
-    for (seq_group, sample_results, group_prompt_logprobs,
+    for (seq_group, sample_result, group_prompt_logprobs,
          group_sample_logprobs) in zip(input_metadata.seq_groups,
                                        sample_results, prompt_logprobs,
                                        sample_logprobs):
         seq_ids, _ = seq_group
-        next_token_ids, parent_ids = sample_results
+        next_token_ids, parent_ids = sample_result
         seq_outputs = []
         for parent_id, next_token_id, logprobs in zip(parent_ids,
                                                       next_token_ids,
