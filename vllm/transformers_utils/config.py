@@ -17,15 +17,6 @@ _CONFIG_REGISTRY = {
 def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None) -> PretrainedConfig:
-    # NOTE: Because the Mistral model in HF hub does not have
-    # `configuration_mistral.py`, we cannot use `AutoConfig` to load the
-    # config. Instead, we use `MistralConfig` directly.
-    # NOTE: This is a hack. This does not work for local models.
-    # FIXME: Remove this once the Mistral model is available in the stable
-    # version of HF transformers.
-    if "mistral" in model.lower():
-        return MistralConfig.from_pretrained(model, revision=revision)
-
     try:
         config = AutoConfig.from_pretrained(
             model, trust_remote_code=trust_remote_code, revision=revision)
