@@ -347,7 +347,7 @@ class BaiChuanBaseForCausalLM(nn.Module):
         for seq_groups in input_metadata.seq_groups:
             seq_ids = seq_groups[0]
             sampling_params = seq_groups[1]
-            for i in range(seq_ids):
+            for i in range(len(seq_ids)):
                 batch_lora_ids.append(sampling_params.lora_id)
 
         for _, module in self.model.named_modules():
