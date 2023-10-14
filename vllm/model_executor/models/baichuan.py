@@ -353,15 +353,16 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 seq_id = seq_ids[i]
                 s_data = input_metadata.seq_data.get(seq_id)
                 batch_lora_ids.append(sampling_params.lora_id)
-                if s_data.get_output_len == 0:
+                if s_data.get_output_len() == 0:
                     # prompt stage
-                    token_lengths.append(8)
-                else:
-                    # generation stage
+                    
                     prompt_len = s_data.get_prompt_len()
                     # padding
                     token_len = ((prompt_len // 8) + 1) * 8
                     token_lengths.append(token_len)
+                else:
+                    # generation stage
+                    token_lengths.append(8)
 
         for _, module in self.model.named_modules():
             if isinstance(module, BLoraColumnParallelLinear) or isinstance(module, BLoraRowParallelLinear):
