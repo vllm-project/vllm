@@ -13,7 +13,7 @@ docker run --runtime nvidia --gpus all \
     -p 8000:8000 \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
-    vllm <args...>
+    vllm python3 -m vllm.entrypoints.api_server <args...>
 ```
 
 ## Distributed
