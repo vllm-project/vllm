@@ -326,22 +326,22 @@ class BaiChuanBaseForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        #for debug
-        seq_groups = input_metadata.seq_groups
-        seq_data = input_metadata.seq_data
-        seq_ids_num = 0
-        for seq_group in seq_groups:
-            ids = seq_group[0]
-            seq_ids_num += len(ids)
-        sed_ids_from_seqdata = len(seq_data.keys())
-        print(f"seq_ids_num: {seq_ids_num}; sed_ids_from_seqdata: {sed_ids_from_seqdata}")
+        # #for debug
+        # seq_groups = input_metadata.seq_groups
+        # seq_data = input_metadata.seq_data
+        # seq_ids_num = 0
+        # for seq_group in seq_groups:
+        #     ids = seq_group[0]
+        #     seq_ids_num += len(ids)
+        # sed_ids_from_seqdata = len(seq_data.keys())
+        # print(f"seq_ids_num: {seq_ids_num}; sed_ids_from_seqdata: {sed_ids_from_seqdata}")
         
-        print(f"ids in seq_data: {seq_data.keys()}")
-        print(f"ids in seq_groups: {[x[0] for x in seq_groups]}")
+        # print(f"ids in seq_data: {seq_data.keys()}")
+        # print(f"ids in seq_groups: {[x[0] for x in seq_groups]}")
         
-        for id, s_data in seq_data.items():
-            print(f"id: {id}, prompt_token_ids: {s_data.prompt_token_ids}; output_token_ids: {s_data.output_token_ids}")
-        # debug end
+        # for id, s_data in seq_data.items():
+        #     print(f"id: {id}, prompt_token_ids: {s_data.prompt_token_ids}; output_token_ids: {s_data.output_token_ids}")
+        # # debug end
 
         # Set batch lora id and token length
         batch_lora_ids = []
