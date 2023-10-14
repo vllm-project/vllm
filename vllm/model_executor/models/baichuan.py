@@ -192,7 +192,6 @@ class BaiChuanAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        print("Compute qkv")
         qkv, _ = self.W_pack(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
@@ -287,6 +286,7 @@ class BaiChuanModel(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
+        print(f"Compute input ids: {input_ids}")
         for i in range(len(self.layers)):
             if cache_events is None:
                 cache_event = None
