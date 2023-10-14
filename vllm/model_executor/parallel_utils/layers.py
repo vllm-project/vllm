@@ -324,7 +324,8 @@ def compulate_lora(obj: LoraLayer,x: torch.Tensor, output:torch.Tensor, batch_to
                 obj.lora_A[lora_id](obj.lora_dropout[lora_id](x_list))
             )
             print(f"lora_result output: {lora_result.shape}")
-        start += len(x_list)
+            lora_out[start: x_list.shape[0]]
+        start += x_list.shape[0]
     return lora_out
         
 
