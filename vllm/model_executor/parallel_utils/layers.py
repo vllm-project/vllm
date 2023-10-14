@@ -305,7 +305,7 @@ class RowParallelLinear(torch.nn.Module):
 
 
 def compulate_lora(obj: LoraLayer,x: torch.Tensor, output:torch.Tensor, batch_token_lengths: list[int], batch_lora_ids: list[str]) -> torch.Tensor:
-    print(f"batch_token_lengths: {batch_token_lengths}; batch_lora_ids: {batch_lora_ids}")
+    # print(f"batch_token_lengths: {batch_token_lengths}; batch_lora_ids: {batch_lora_ids}")
     assert len(batch_token_lengths) == len(batch_lora_ids), (batch_token_lengths, batch_lora_ids)
     start = 0
     x_lists = []
