@@ -109,6 +109,10 @@ def test_column_blora(
     x.uniform_(-scale, scale)
     setattr(ref_blinear, "batch_lora_ids", adapter_names)
     setattr(column_blora, "batch_lora_ids", adapter_names)
+    batch_token_length = []
+    for i in range(len(adapter_names)):
+        batch_token_length.append(1)
+    setattr(column_blora, "batch_token_lengths", batch_token_length)
     
     # align weights
     column_blora.weight.copy_(ref_blinear.weight)
@@ -174,6 +178,10 @@ def test_row_blora(
     x.uniform_(-scale, scale)
     setattr(ref_blinear, "batch_lora_ids", adapter_names)
     setattr(row_blora, "batch_lora_ids", adapter_names)
+    batch_token_length = []
+    for i in range(len(adapter_names)):
+        batch_token_length.append(1)
+    setattr(row_blora, "batch_token_lengths", batch_token_length)
     
     # align weights
     row_blora.weight.copy_(ref_blinear.weight)
