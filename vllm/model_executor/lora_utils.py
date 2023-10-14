@@ -30,6 +30,7 @@ def _create_new_module(lora_config, adapter_name, target):
         new_module = BLoraRowParallelLinear(input_size=target.input_size,output_size=target.output_size, adapter_name=adapter_name,bias=target.bias,
                                                 input_is_parallel=target.input_is_parallel,reduce_results=target.reduce_results ,skip_bias_add=target.skip_bias_add,
                                                 quant_config=target.quant_config, lora_alpha=lora_alpha, r=r, lora_dropout=lora_dropout)
+        return new_module
 
 
 def _replace_module(parent, child_name, new_module, child):
