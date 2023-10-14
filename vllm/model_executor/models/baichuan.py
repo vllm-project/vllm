@@ -335,8 +335,8 @@ class BaiChuanBaseForCausalLM(nn.Module):
         sed_ids_from_seqdata = len(seq_data.keys())
         print(f"seq_ids_num: {seq_ids_num}; sed_ids_from_seqdata: {sed_ids_from_seqdata}")
         
-        print("ids in seq_data: " + seq_data.keys())
-        print("ids in seq_groups: " + [x[0] for x in seq_groups])
+        print(f"ids in seq_data: {seq_data.keys()}")
+        print(f"ids in seq_groups: {[x[0] for x in seq_groups]}")
         
         for id, s_data in seq_data.items():
             print(f"id: {id}, prompt_token_ids: {s_data.prompt_token_ids}; output_token_ids: {s_data.output_token_ids}")
