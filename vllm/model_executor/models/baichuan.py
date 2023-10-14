@@ -192,6 +192,7 @@ class BaiChuanAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
+        print("Compute qkv")
         qkv, _ = self.W_pack(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
@@ -342,17 +343,30 @@ class BaiChuanBaseForCausalLM(nn.Module):
             print(f"id: {id}, prompt_token_ids: {s_data.prompt_token_ids}; output_token_ids: {s_data.output_token_ids}")
         # debug end
 
-        # Set batch lora id
+        # Set batch lora id and token length
         batch_lora_ids = []
+        token_lengths = []
         for seq_groups in input_metadata.seq_groups:
             seq_ids = seq_groups[0]
             sampling_params = seq_groups[1]
             for i in range(len(seq_ids)):
+                seq_id = seq_ids[i]
+                s_data = input_metadata.seq_data.get(seq_id)
                 batch_lora_ids.append(sampling_params.lora_id)
+                if s_data.get_output_len == 0:
+                    # prompt stage
+                    token_lengths.append(8)
+                else:
+                    # generation stage
+                    prompt_len = s_data.get_prompt_len
+                    # padding
+                    token_len = ((prompt_len // 8) + 1) * 8
+                    token_lengths.append(token_len)
 
         for _, module in self.model.named_modules():
             if isinstance(module, BLoraColumnParallelLinear) or isinstance(module, BLoraRowParallelLinear):
                 module.batch_lora_ids = batch_lora_ids
+                module.batch_token_lengths = token_lengths
 
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
