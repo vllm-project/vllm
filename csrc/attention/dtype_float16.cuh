@@ -113,24 +113,29 @@ inline __device__ uint16_t float_to_half(float f) {
 }
 
 inline __device__ uint32_t float2_to_half2(float2 f) {
+#ifndef USE_ROCM
   union {
     uint32_t u32;
     uint16_t u16[2];
   } tmp;
 
-#ifndef USE_ROCM
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(tmp.u32) : "f"(f.y), "f"(f.x));
   #else
     asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f.x));
     asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[1]) : "f"(f.y));
   #endif
-#else
-  __half2 h = __float22half2_rn(f);
-  tmp.u16[0] = h.x;
-  tmp.u16[1] = h.y;
-#endif
   return tmp.u32;
+#else
+  union {
+    __half2 h2;
+    uint32_t u32;
+  } R;
+
+  R.h2.x = __half_as_ushort(__float2half_rn(f.x));
+  R.h2.y = __half_as_ushort(__float2half_rn(f.y));
+  return R.u32;
+#endif
 }
 
 // Vector addition.
@@ -150,15 +155,14 @@ inline __device__ uint32_t add(uint32_t a, uint32_t b) {
   asm volatile("add.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
   return c;
 #else
-  __half2 h = __hadd2(a, b);
   union {
+    __half2 h2;
     uint32_t u32;
-    uint16_t u16[2];
-  } tmp;
-  tmp.u16[0] = h.x;
-  tmp.u16[1] = h.y;
-
-  return tmp.u32;
+  } A, B, C;
+  A.u32 = a;
+  B.u32 = b;
+  C.h2 = __hadd2(A.h2, B.h2);
+  return C.u32;
 #endif
 }
 
