@@ -42,6 +42,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
                                                        ColumnParallelLinear,
                                                        RowParallelLinear)
+from vllm.model_executor.parallel_utils.layers import BLoraColumnParallelLinear,BLoraRowParallelLinear
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
 
@@ -324,6 +325,35 @@ class BaiChuanBaseForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
+        #for debug
+        seq_groups = input_metadata.seq_groups
+        seq_data = input_metadata.seq_data
+        seq_ids_num = 0
+        for seq_group in seq_groups:
+            ids = seq_group[0]
+            seq_ids_num += len(ids)
+        sed_ids_from_seqdata = len(seq_data.keys())
+        print(f"seq_ids_num: {seq_ids_num}; sed_ids_from_seqdata: {sed_ids_from_seqdata}")
+        
+        print("ids in seq_data: " + seq_data.keys())
+        print("ids in seq_groups: " + [x[0] for x in seq_groups])
+        
+        for id, s_data in seq_data.items():
+            print(f"id: {id}, prompt_token_ids: {s_data.prompt_token_ids}; output_token_ids: {s_data.output_token_ids}")
+        # debug end
+
+        # Set batch lora id
+        batch_lora_ids = []
+        for seq_groups in input_metadata.seq_groups:
+            seq_ids = seq_groups[0]
+            sampling_params = seq_groups[1]
+            for i in range(seq_ids):
+                batch_lora_ids.append(sampling_params.lora_id)
+
+        for _, module in self.model.named_modules():
+            if isinstance(module, BLoraColumnParallelLinear) or isinstance(module, BLoraRowParallelLinear):
+                module.batch_lora_ids = batch_lora_ids
+
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,

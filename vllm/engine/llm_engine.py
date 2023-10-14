@@ -17,7 +17,6 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
-from vllm.model_executor.parallel_utils.layers import BLoraColumnParallelLinear
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -552,17 +551,6 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
                 
-        # Set batch lora id
-        batch_lora_ids = []
-        for seq_group_metadata in seq_group_metadata_list:
-            sampling_params = seq_group_metadata.sampling_params
-            batch_lora_ids.append(sampling_params.lora_id)
-
-        for worker in self.workers:
-            model = worker.model
-            for _, module in model.named_modules():
-                if isinstance(module, BLoraColumnParallelLinear):
-                    module.batch_lora_ids = batch_lora_ids
         # Execute the model.
         output = self._run_workers(
             "execute_model",
