@@ -364,7 +364,6 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
         elif self.r[self.active_adapter] > 0 and not self.merged:
             output, output_bias = ColumnParallelLinear.forward(self, x)
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
-            print(f"input tensor shape: {x.shape}")
             # assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
             batch_token_lengths = self.batch_token_lengths
             batch_lora_ids = self.batch_lora_ids
