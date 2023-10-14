@@ -367,7 +367,7 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
             print(f"input tensor shape: {x.shape}")
             # assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
             batch_token_lengths = self.batch_token_lengths
-            batch_lora_ids = self.batch_token_lengths
+            batch_lora_ids = self.batch_lora_ids
             lora_out = compulate_lora(self, x, output, batch_token_lengths, batch_lora_ids)
             output += lora_out
 
@@ -422,7 +422,7 @@ class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
 
             batch_token_lengths = self.batch_token_lengths
-            batch_lora_ids = self.batch_token_lengths
+            batch_lora_ids = self.batch_lora_ids
             lora_out = compulate_lora(self, x, output, batch_token_lengths, batch_lora_ids)
             output += lora_out
 
