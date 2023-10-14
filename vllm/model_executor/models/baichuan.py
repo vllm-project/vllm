@@ -358,7 +358,7 @@ class BaiChuanBaseForCausalLM(nn.Module):
                     token_lengths.append(8)
                 else:
                     # generation stage
-                    prompt_len = s_data.get_prompt_len
+                    prompt_len = s_data.get_prompt_len()
                     # padding
                     token_len = ((prompt_len // 8) + 1) * 8
                     token_lengths.append(token_len)
