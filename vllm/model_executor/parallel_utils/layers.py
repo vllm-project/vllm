@@ -405,9 +405,7 @@ class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
         elif self.r[self.active_adapter] > 0 and not self.merged:
             output, output_bias = RowParallelLinear.forward(self, x)
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
-            if x.shape[0] != 8:
-                print(f"input tensor shape: {x.shape}")
-            # print(f"input tensor shape: {x.shape}")
+            print(f"input tensor shape: {x.shape}")
             # assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
 
             batch = list(zip(x, self.batch_lora_ids))
