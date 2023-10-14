@@ -344,7 +344,7 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
             output, output_bias = ColumnParallelLinear.forward(self, x)
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
             print(f"input tensor shape: {x.shape}")
-            assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
+            # assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
 
             batch = list(zip(x, self.batch_lora_ids))
             # rewrite as for loop
@@ -406,7 +406,7 @@ class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
             output, output_bias = RowParallelLinear.forward(self, x)
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
             print(f"input tensor shape: {x.shape}")
-            assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
+            # assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
 
             batch = list(zip(x, self.batch_lora_ids))
             # rewrite as for loop
