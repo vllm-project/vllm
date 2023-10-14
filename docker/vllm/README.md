@@ -18,5 +18,5 @@ docker run --runtime nvidia --gpus all \
 
 ## Distributed
 
-To run on multiple machines, set up a Ray cluster via one of the methods described in [the Ray documentation](https://docs.ray.io/en/master/cluster/getting-started.html), using rather than `rayproject/ray`. Then exec `python3 -m vllm.entrypoints.api_server <args...>` on the container hosting the Ray head node.
+To run on multiple machines, set up a Ray cluster via one of the methods described in [the Ray documentation](https://docs.ray.io/en/master/cluster/getting-started.html), using this image rather than `rayproject/ray` where necessary. Then exec `python3 -m vllm.entrypoints.api_server <args...>` on the container hosting the Ray head node.
 
