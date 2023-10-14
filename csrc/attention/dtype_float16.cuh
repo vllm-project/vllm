@@ -92,11 +92,15 @@ inline __device__ float2 half2_to_float2(uint32_t v) {
 #ifndef USE_ROCM
   uint16_t lo, hi;
   asm volatile("mov.b32 {%0, %1}, %2;\n" : "=h"(lo), "=h"(hi) : "r"(v));
-#else
-  uint16_t hi = (v >> 16) & 0xFFFF;
-  uint16_t lo = v & 0xFFFF;
-#endif
   return make_float2(half_to_float(lo), half_to_float(hi));
+#else
+  union {
+    __half2 h2;
+    uint32_t u32;
+  } V;
+  V.u32 = v;
+  return make_float2(half_to_float(V.h2.x), half_to_float(V.h2.y));
+#endif
 }
 
 inline __device__ uint16_t float_to_half(float f) {
@@ -222,15 +226,14 @@ inline __device__ uint32_t mul(uint32_t a, uint32_t b) {
   asm volatile("mul.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
   return c;
 #else
-  __half2 h = __hmul2(a, b);
-    union {
+  union {
+    __half2 h2;
     uint32_t u32;
-    uint16_t u16[2];
-  } tmp;
-  tmp.u16[0] = h.x;
-  tmp.u16[1] = h.y;
-
-  return tmp.u32;
+  } A, B, C;
+  A.u32 = a;
+  B.u32 = b;
+  C.h2 = __hmul2(A.h2, B.h2);
+  return C.u32;
 #endif
 }
 
