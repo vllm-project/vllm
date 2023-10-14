@@ -304,6 +304,27 @@ class RowParallelLinear(torch.nn.Module):
         return output, output_bias
 
 
+def compulate_lora(obj: LoraLayer,x: torch.Tensor, output:torch.Tensor, batch_token_lengths: list[int], batch_lora_ids: list[str]) -> torch.Tensor:
+    assert len(batch_token_lengths) == len(batch_lora_ids), (batch_token_lengths, batch_lora_ids)
+    print(f"batch_lora_ids: {batch_lora_ids}")
+    print(f"batch_token_lengths: {batch_token_lengths}")
+    start = 0
+    x_lists = []
+    for token_length in batch_token_lengths:
+        x_list = x[start: start + token_length]
+        x_lists.append(x_list)
+        start += token_length
+        batch = list(zip(x_lists, batch_lora_ids))
+            # rewrite as for loop
+    lora_out = torch.zeros_like(output)
+    for i, (x_list, lora_id) in enumerate(batch):
+        if lora_id in obj.lora_A.keys():
+            lora_out[i] = obj.scaling[lora_id] * obj.lora_B[lora_id](
+                obj.lora_A[lora_id](obj.lora_dropout[lora_id](x_list))
+            )
+    return lora_out
+        
+
 
 class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
 
@@ -345,15 +366,9 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
             print(f"input tensor shape: {x.shape}")
             # assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
-
-            batch = list(zip(x, self.batch_lora_ids))
-            # rewrite as for loop
-            lora_out = torch.zeros_like(output)
-            for i, (x, lora_id) in enumerate(batch):
-                if lora_id in self.lora_A.keys():
-                    lora_out[i] = self.scaling[lora_id] * self.lora_B[lora_id](
-                        self.lora_A[lora_id](self.lora_dropout[lora_id](x))
-                    )
+            batch_token_lengths = self.batch_token_lengths
+            batch_lora_ids = self.batch_token_lengths
+            lora_out = compulate_lora(self, x, output, batch_token_lengths, batch_lora_ids)
             output += lora_out
 
         else:
@@ -405,17 +420,10 @@ class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
         elif self.r[self.active_adapter] > 0 and not self.merged:
             output, output_bias = RowParallelLinear.forward(self, x)
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
-            # print(f"input tensor shape: {x.shape}")
-            # assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
 
-            batch = list(zip(x, self.batch_lora_ids))
-            # rewrite as for loop
-            lora_out = torch.zeros_like(output)
-            for i, (x, lora_id) in enumerate(batch):
-                if lora_id in self.lora_A.keys():
-                    lora_out[i] = self.scaling[lora_id] * self.lora_B[lora_id](
-                        self.lora_A[lora_id](self.lora_dropout[lora_id](x))
-                    )
+            batch_token_lengths = self.batch_token_lengths
+            batch_lora_ids = self.batch_token_lengths
+            lora_out = compulate_lora(self, x, output, batch_token_lengths, batch_lora_ids)
             output += lora_out
 
         else:
