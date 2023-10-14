@@ -314,8 +314,7 @@ def compulate_lora(obj: LoraLayer,x: torch.Tensor, output:torch.Tensor, batch_to
         x_list = x[start: start + token_length]
         x_lists.append(x_list)
         start += token_length
-        batch = list(zip(x_lists, batch_lora_ids))
-            # rewrite as for loop
+    batch = list(zip(x_lists, batch_lora_ids))
     lora_out = torch.zeros_like(output)
     for i, (x_list, lora_id) in enumerate(batch):
         if lora_id in obj.lora_A.keys():
