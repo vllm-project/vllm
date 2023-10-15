@@ -23,6 +23,7 @@ BLOCK_SIZES = [16]
 USE_ALIBI = [False]
 SEEDS = [0]
 
+
 def create_kv_caches(
     num_blocks: int,
     block_size: int,
@@ -184,22 +185,20 @@ if __name__ == "__main__":
     for context_len in CONTEXT_LENS:
         for num_seqs in NUM_GEN_SEQS:
             for num_heads in NUM_HEADS:
-                    for dtype in DTYPES:
-                        ts = []
-                        for version in [1, 2]:
-                            print(
-                                f"Testing: V{version} {num_seqs}, {context_len}"
-                            )
-                            t = test_single_query_cached_kv_attention(
-                                num_seqs,
-                                context_len,
-                                num_heads,
-                                128,
-                                False,
-                                16,
-                                dtype,
-                                0,
-                                version,
-                            )
-                            ts.append(t)
-                        print(f"Speedup: {ts[0] / ts[1]:.3f}")
+                for dtype in DTYPES:
+                    ts = []
+                    for version in [1, 2]:
+                        print(f"Testing: V{version} {num_seqs}, {context_len}")
+                        t = test_single_query_cached_kv_attention(
+                            num_seqs,
+                            context_len,
+                            num_heads,
+                            128,
+                            False,
+                            16,
+                            dtype,
+                            0,
+                            version,
+                        )
+                        ts.append(t)
+                    print(f"Speedup: {ts[0] / ts[1]:.3f}")
