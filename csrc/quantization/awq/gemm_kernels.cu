@@ -547,7 +547,7 @@ torch::Tensor awq_gemm(
     }
     else if (num_out_channels % 64 == 0)
     {
-	      int j_factors1 = num_out_channels / 64 / 1;
+        int j_factors1 = num_out_channels / 64 / 1;
         dim3 num_blocks(1 * (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
     
         // threadIdx.x: 32
