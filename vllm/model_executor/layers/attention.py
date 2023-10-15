@@ -156,6 +156,12 @@ class PagedAttention(nn.Module):
         max_num_partitions = (
             (input_metadata.max_context_len + _PARTITION_SIZE - 1) //
             _PARTITION_SIZE)
+        # NOTE(woosuk): We use a simple heuristic to decide whether to use
+        # PagedAttention V1 or V2. If the number of partitions is 1, we use
+        # V1 to avoid the overhead of reduction. Also, if the number of
+        # sequences or heads is large, we use V1 since there is enough work
+        # to parallelize.
+        # TODO(woosuk): Tune this heuristic.
         use_v1 = max_num_partitions == 1 or num_seqs * num_heads > 512
         if use_v1:
             # Short context. Run PagedAttention V1.
