@@ -604,11 +604,9 @@ void paged_attention_v1_launcher(
   dim3 block(NUM_THREADS);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   switch (head_size) {
-    // NOTE(woosuk): To reduce the compilation time, we omitted head sizes
-    // 32, 160, 192.
-    // case 32:
-    //   LAUNCH_PAGED_ATTENTION_V1(T, 32, BLOCK_SIZE, NUM_THREADS);
-    //   break;
+    // NOTE(woosuk): To reduce the compilation time, we only compile for the
+    // head sizes that we use in the model. However, we can easily extend this
+    // to support any head size which is a multiple of 16.
     case 64:
       LAUNCH_PAGED_ATTENTION_V1(T, 64, BLOCK_SIZE, NUM_THREADS);
       break;
@@ -624,12 +622,6 @@ void paged_attention_v1_launcher(
     case 128:
       LAUNCH_PAGED_ATTENTION_V1(T, 128, BLOCK_SIZE, NUM_THREADS);
       break;
-    // case 160:
-    //   LAUNCH_PAGED_ATTENTION_V1(T, 160, BLOCK_SIZE, NUM_THREADS);
-    //   break;
-    // case 192:
-    //   LAUNCH_PAGED_ATTENTION_V1(T, 192, BLOCK_SIZE, NUM_THREADS);
-    //   break;
     case 256:
       LAUNCH_PAGED_ATTENTION_V1(T, 256, BLOCK_SIZE, NUM_THREADS);
       break;
@@ -781,11 +773,9 @@ void paged_attention_v2_launcher(
   dim3 block(NUM_THREADS);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   switch (head_size) {
-    // NOTE(woosuk): To reduce the compilation time, we omitted head sizes
-    // 32, 160, 192.
-    // case 32:
-    //   LAUNCH_PAGED_ATTENTION_V2(T, 32, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
-    //   break;
+    // NOTE(woosuk): To reduce the compilation time, we only compile for the
+    // head sizes that we use in the model. However, we can easily extend this
+    // to support any head size which is a multiple of 16.
     case 64:
       LAUNCH_PAGED_ATTENTION_V2(T, 64, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
       break;
@@ -801,12 +791,6 @@ void paged_attention_v2_launcher(
     case 128:
       LAUNCH_PAGED_ATTENTION_V2(T, 128, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
       break;
-    // case 160:
-    //   LAUNCH_PAGED_ATTENTION_V2(T, 160, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
-    //   break;
-    // case 192:
-    //   LAUNCH_PAGED_ATTENTION_V2(T, 192, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
-    //   break;
     case 256:
       LAUNCH_PAGED_ATTENTION_V2(T, 256, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
       break;
