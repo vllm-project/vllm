@@ -96,20 +96,19 @@ def main(
     # Create the KV cache.
     x = 16 // torch.tensor([], dtype=dtype).element_size()
     key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x, block_size, x)
-    key_cache = torch.empty(size=key_cache_shape,
-                            dtype=dtype,
-                            device="cuda")
+    key_cache = torch.empty(size=key_cache_shape, dtype=dtype, device="cuda")
     key_cache.uniform_(-scale, scale)
     value_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size, block_size)
     value_cache = torch.empty(size=value_cache_shape,
-                                dtype=dtype,
-                                device="cuda")
+                              dtype=dtype,
+                              device="cuda")
     value_cache.uniform_(-scale, scale)
 
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
     if version == 2:
-        num_partitions = ((max_context_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
+        num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
+                          PARTITION_SIZE)
         tmp_output = torch.empty(
             size=(num_seqs, num_query_heads, num_partitions, head_size),
             dtype=output.dtype,
@@ -187,10 +186,16 @@ if __name__ == '__main__':
     parser.add_argument("--context-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
-    parser.add_argument("--head-size", type=int, choices=[64, 80, 96, 112, 128, 256], default=128)
+    parser.add_argument("--head-size",
+                        type=int,
+                        choices=[64, 80, 96, 112, 128, 256],
+                        default=128)
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--use-alibi", action="store_true")
-    parser.add_argument("--dtype", type=str, choices=["half", "bfloat16", "float"], default="half")
+    parser.add_argument("--dtype",
+                        type=str,
+                        choices=["half", "bfloat16", "float"],
+                        default="half")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()
