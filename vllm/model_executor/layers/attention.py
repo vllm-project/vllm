@@ -164,7 +164,7 @@ class PagedAttention(nn.Module):
         # TODO(woosuk): Tune this heuristic.
         use_v1 = max_num_partitions == 1 or num_seqs * num_heads > 512
         if use_v1:
-            # Short context. Run PagedAttention V1.
+            # Run PagedAttention V1.
             attention_ops.paged_attention_v1(
                 output,
                 query,
@@ -179,7 +179,7 @@ class PagedAttention(nn.Module):
                 None,  # alibi_slopes
             )
         else:
-            # Long context. Run PagedAttention V2.
+            # Run PagedAttention V2.
             assert _PARTITION_SIZE % block_size == 0
             tmp_output = torch.empty(
                 size=(num_seqs, num_heads, max_num_partitions, head_size),
