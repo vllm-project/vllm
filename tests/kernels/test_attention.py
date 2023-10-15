@@ -179,7 +179,8 @@ def test_paged_attention(
             alibi_slopes,
         )
     else:
-        num_partitions = ((max_context_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
+        num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
+                          PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
         tmp_output = torch.empty(
