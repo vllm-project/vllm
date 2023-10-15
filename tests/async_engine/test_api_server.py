@@ -1,4 +1,3 @@
-import asyncio
 import subprocess
 import sys
 import time
@@ -77,20 +76,24 @@ def test_api_server(api_server):
         # Null prompts must be refused by the server
         try:
             for response in pool.map(_query_server, [None]):
-                assert False, f'A null prompt should result in 400 Bad Request, but it gives a response: {response!r}'
+                assert False, (
+                    "A null prompt should result in 400 Bad Request, " +
+                    f"but it gives a response: {response!r}")
         except requests.exceptions.HTTPError as e:
             assert e.response.status_code == 400
 
         # Unknown sampling params must be refused by the server
         try:
             for response in pool.map(_query_server_with_params,
-                                     [('Dummy prompt', {
-                                         'unknown_param': 1
+                                     [("Dummy prompt", {
+                                         "unknown_param": 1
                                      })]):
-                assert False, f'Passing an unknown sampling param should result in 400 Bad Request, but it gives a response: {response!r}'
+                assert False, ("Passing an unknown sampling param should " +
+                               "result in 400 Bad Request, " +
+                               f"but it gives a response: {response!r}")
         except requests.exceptions.HTTPError as e:
             assert e.response.status_code == 400
-            assert 'unknown_param' in e.response.content.decode('utf-8')
+            assert "unknown_param" in e.response.content.decode("utf-8")
 
         # Stats
         stats = requests.get("http://localhost:8000/stats").json()
