@@ -182,13 +182,13 @@ def main(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Benchmark the paged attention kernel.")
+    parser.add_argument("--version", type=int, choices=[1, 2], default=2)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--context-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
     parser.add_argument("--head-size", type=int, choices=[64, 80, 96, 112, 128, 256], default=128)
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
-    parser.add_argument("--version", type=int, choices=[1, 2], default=2)
     parser.add_argument("--use-alibi", action="store_true")
     parser.add_argument("--dtype", type=str, choices=["half", "bfloat16", "float"], default="half")
     parser.add_argument("--seed", type=int, default=0)
