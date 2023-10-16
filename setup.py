@@ -201,7 +201,6 @@ activation_extension = CUDAExtension(
 )
 ext_modules.append(activation_extension)
 
-
 # Quantization kernels.
 quantization_extension = CUDAExtension(
     name="vllm.quantization_ops",
