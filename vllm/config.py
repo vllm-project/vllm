@@ -143,7 +143,7 @@ class ModelConfig:
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU worker."""
         # For GPTBigCode & Falcon:
-        # Note: for falcon, when new_decoder_architecture is True, the
+        # NOTE: for falcon, when new_decoder_architecture is True, the
         # multi_query flag is ignored and we use n_head_kv for the number of
         # KV heads.
         falcon_model_types = ["falcon", "RefinedWeb", "RefinedWebModel"]

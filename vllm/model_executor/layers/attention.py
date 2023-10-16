@@ -420,7 +420,7 @@ class PagedAttentionWithALiBi(PagedAttention):
         # Generates ALiBi mask for each prompt.
         for prompt_len in input_metadata.prompt_lens:
             bias = torch.arange(prompt_len, dtype=dtype)
-            # Note(zhuohan): HF uses
+            # NOTE(zhuohan): HF uses
             #     `bias = bias[None, :].repeat(prompt_len, 1)`
             # here. We find that both biases give the same results, but
             # the bias below more accurately follows the original ALiBi
