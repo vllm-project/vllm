@@ -143,7 +143,7 @@ class ModelConfig:
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU worker."""
         # For GPTBigCode & Falcon:
-        # Note: for falcon, when new_decoder_architecture is True, the
+        # NOTE: for falcon, when new_decoder_architecture is True, the
         # multi_query flag is ignored and we use n_head_kv for the number of
         # KV heads.
         falcon_model_types = ["falcon", "RefinedWeb", "RefinedWebModel"]
@@ -345,15 +345,6 @@ def _get_and_verify_dtype(
             # Casting between float16 and bfloat16 is allowed with a warning.
             logger.warning(f"Casting {config_dtype} to {torch_dtype}.")
 
-    # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:
-        compute_capability = torch.cuda.get_device_capability()
-        if compute_capability[0] < 8:
-            gpu_name = torch.cuda.get_device_name()
-            raise ValueError(
-                "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}.")
     return torch_dtype
 
 

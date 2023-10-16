@@ -147,6 +147,7 @@ class AquilaAttention(nn.Module):
             rotary_dim=self.head_dim,
             base=self.rope_theta,
             max_position=self.max_position_embeddings,
+            num_kv_heads=self.num_kv_heads,
         )
 
     def forward(
@@ -177,7 +178,7 @@ class AquilaDecoderLayer(nn.Module):
         self.self_attn = AquilaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             max_position_embeddings=max_position_embeddings,
         )
@@ -308,7 +309,7 @@ class AquilaForCausalLM(nn.Module):
         q_proj_shard_size = (self.config.hidden_size // tp_size)
         kv_proj_shard_size = (self.config.hidden_size //
                               self.config.num_attention_heads *
-                              self.config.num_attention_heads // tp_size)
+                              self.config.num_key_value_heads // tp_size)
         attention_weight_specs = [
             # (weight_name, shard_size, offset)
             ("q_proj", q_proj_shard_size, 0),
