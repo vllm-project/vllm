@@ -4,7 +4,6 @@
 #include "dispatch_utils.h"
 #include "reduction_utils.cuh"
 
-
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
