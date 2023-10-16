@@ -73,7 +73,7 @@ inline __device__ float block_sum(float* red_smem, float sum) {
 #ifndef USE_ROCM
   return __shfl_sync(uint32_t(-1), sum, 0);
 #else
-  return __shfl(uint32_t(-1), sum, 0);
+  return __shfl(sum, 0);
 #endif
 }
 
