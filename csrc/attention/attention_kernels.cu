@@ -856,7 +856,7 @@ void single_query_cached_kv_attention_quantized_launcher(
     k_scale,                                                        \
     k_zp,                                                           \
     v_scale,                                                        \
-    k_zp);
+    v_zp);
 
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
