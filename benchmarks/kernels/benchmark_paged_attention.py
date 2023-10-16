@@ -75,7 +75,7 @@ def main(
 
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
-    if version == 2:
+    if version == "v2":
         num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
                           PARTITION_SIZE)
         tmp_output = torch.empty(
