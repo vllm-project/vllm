@@ -81,13 +81,15 @@ async def get_gen_prompt(request) -> str:
     else:
         if not _fastchat_available:
             raise ModuleNotFoundError(
-                "fastchat is not installed. Please install fastchat to use "
-                "the chat completion and conversation APIs: `$ pip install fschat`"
+                "fastchat is not installed. Please install fastchat "
+                "to use the chat completion and conversation APIs: "
+                "`$ pip install fschat`"
             )
         if version.parse(fastchat.__version__) < version.parse("0.2.23"):
             raise ImportError(
-                f"fastchat version is low. Current version: {fastchat.__version__} "
-                "Please upgrade fastchat to use: `$ pip install -U fschat`")
+                f"fastchat version is low. Current version: "
+                "{fastchat.__version__} Please upgrade fastchat to use: "
+                "`$ pip install -U fschat`")
         template = get_conversation_template(request.model)
         conv = Conversation(
             name=template.name,
@@ -456,10 +458,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
               and not request.use_beam_search)
 
     def create_stream_response_json(
-            index: int,
-            text: str,
-            logprobs: Optional[LogProbs] = None,
-            finish_reason: Optional[str] = None,
+        index: int,
+        text: str,
+        logprobs: Optional[LogProbs] = None,
+        finish_reason: Optional[str] = None,
     ) -> str:
         choice_data = CompletionResponseStreamChoice(
             index=index,
