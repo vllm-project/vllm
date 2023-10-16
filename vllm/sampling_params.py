@@ -60,6 +60,11 @@ class SamplingParams:
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
+            Note that the implementation follows the OpenAI API: The return
+            result includes the log probabilities on the `logprobs` most likely
+            tokens, as well the chosen tokens. The API will always return the
+            log probability of the sampled token, so there  may be up to
+            `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
         skip_special_tokens: Whether to skip special tokens in the output.
     """
