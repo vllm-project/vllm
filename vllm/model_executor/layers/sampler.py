@@ -143,7 +143,7 @@ def _get_penalties(
         f = sampling_params.frequency_penalty
         if (i < input_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
-            # Note: We do not apply presence and frequency penalties for the
+            # NOTE: We do not apply presence and frequency penalties for the
             # prompt token positions where we don't sample new tokens.
             prompt_len = input_metadata.prompt_lens[i]
             presence_penalties += [0] * (prompt_len - 1)
@@ -159,7 +159,7 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
         seq_ids, sampling_params = seq_group
         if (i < input_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
-            # Note: prompt token positions do not need output tokens to
+            # NOTE: prompt token positions do not need output tokens to
             # compute penalties.
             prompt_len = input_metadata.prompt_lens[i]
             output_tokens.extend([] for _ in range(prompt_len - 1))
@@ -295,7 +295,7 @@ def _greedy_sample(
     selected_seq_groups: List[Tuple[List[int], SamplingParams]],
     logprobs: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
-    samples = torch.argmax(logprobs, dim=-1).cpu()
+    samples = torch.argmax(logprobs, dim=-1).tolist()
     sample_idx = 0
     results = []
     for seq_group in selected_seq_groups:
@@ -304,7 +304,7 @@ def _greedy_sample(
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples[sample_idx].item()]
+        next_token_ids = [samples[sample_idx]]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     assert sample_idx == logprobs.size(0)
@@ -361,7 +361,7 @@ def _beam_search_sample(
     # for details. See also HF reference:
     # https://github.com/huggingface/transformers/blob/a4dd53d88e4852f023332d284ff07a01afcd5681/src/transformers/generation/utils.py#L3063-L3065
     #
-    # Note: Beam search is not vectorized, so its speed can be slower than
+    # NOTE: Beam search is not vectorized, so its speed can be slower than
     # other sampling methods.
     sample_idx = 0
     results = []
@@ -414,7 +414,7 @@ def _sample(
         sampling_type = sampling_params.sampling_type
         if (i < input_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
-            # Note: prompt token positions do not need sample, skip
+            # NOTE: prompt token positions do not need sample, skip
             prompt_len = input_metadata.prompt_lens[i]
             start_idx += prompt_len - 1
         categorized_seq_group_ids[sampling_type].append(i)
@@ -494,15 +494,15 @@ def _get_logprobs(
     batched_logprobs_query_result = logprobs[[
         batched_logprobs_query_seq_indices,
         batched_logprobs_query_token_indices
-    ]].cpu()
+    ]].tolist()
 
     # Batched query for logprobs of topk tokens
     if largest_num_logprobs > 0:
         top_logprobs, top_token_ids = torch.topk(logprobs,
                                                  largest_num_logprobs,
                                                  dim=-1)
-        top_logprobs = top_logprobs.cpu()
-        top_token_ids = top_token_ids.cpu()
+        top_logprobs = top_logprobs.tolist()
+        top_token_ids = top_token_ids.tolist()
     else:
         top_logprobs, top_token_ids = None, None
 
@@ -548,16 +548,16 @@ def _get_logprobs(
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
                 next_token_id:
-                batched_logprobs_query_result[query_result_idx].item()
+                batched_logprobs_query_result[query_result_idx]
             }
             query_result_idx += 1
             if num_logprobs > 0:
                 sample_logprobs_dict.update(
                     zip(
                         top_token_ids[sample_idx +
-                                      parent_id, :num_logprobs].tolist(),
+                                      parent_id][:num_logprobs],
                         top_logprobs[sample_idx +
-                                     parent_id, :num_logprobs].tolist()))
+                                     parent_id][:num_logprobs]))
             group_sample_logprobs.append(sample_logprobs_dict)
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)
