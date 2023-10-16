@@ -40,7 +40,11 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   // Compute the sum per warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
     sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
+#else
+    sum += __shfl_xor(sum, mask);
+#endif
   }
 
   // Warp leaders store the data to shared memory.
@@ -59,11 +63,19 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   // Parallel reduction inside the warp.
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
     sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
+#else
+    sum += __shfl_xor(sum, mask);
+#endif
   }
 
   // Broadcast to other threads.
+#ifndef USE_ROCM
   return __shfl_sync(uint32_t(-1), sum, 0);
+#else
+  return __shfl(sum, 0);
+#endif
 }
 
 // TODO(woosuk): Merge the last two dimensions of the grid.
@@ -220,7 +232,11 @@ __device__ void paged_attention_kernel(
   // The 0-th thread of each thread group already has its max qk value.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
+#ifndef USE_ROCM
     qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
+#else
+    qk_max = fmaxf(qk_max, __shfl_xor(qk_max, mask));
+#endif
   }
   if (lane == 0) {
     red_smem[warp_idx] = qk_max;
@@ -232,10 +248,18 @@ __device__ void paged_attention_kernel(
   qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
     qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
+#else
+    qk_max = fmaxf(qk_max, __shfl_xor(qk_max, mask));
+#endif
   }
   // Broadcast the max qk value to all threads.
+#ifndef USE_ROCM
   qk_max = __shfl_sync(uint32_t(-1), qk_max, 0);
+#else
+  qk_max = __shfl(qk_max, 0);
+#endif
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -320,7 +344,11 @@ __device__ void paged_attention_kernel(
     float acc = accs[i];
 #pragma unroll
     for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
       acc += __shfl_xor_sync(uint32_t(-1), acc, mask);
+#else
+      acc += __shfl_xor(acc, mask);
+#endif
     }
     accs[i] = acc;
   }
@@ -486,7 +514,11 @@ __global__ void paged_attention_v2_reduce_kernel(
   // Reduce within the warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
     max_logit = fmaxf(max_logit, __shfl_xor_sync(uint32_t(-1), max_logit, mask));
+#else
+    max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
+#endif
   }
   if (lane == 0) {
     red_smem[warp_idx] = max_logit;
@@ -496,10 +528,18 @@ __global__ void paged_attention_v2_reduce_kernel(
   max_logit = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
+#ifndef USE_ROCM
     max_logit = fmaxf(max_logit, __shfl_xor_sync(uint32_t(-1), max_logit, mask));
+#else
+    max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
+#endif
   }
   // Broadcast the max value to all threads.
+#ifndef USE_ROCM
   max_logit = __shfl_sync(uint32_t(-1), max_logit, 0);
+#else
+  max_logit = __shfl(max_logit, 0);
+#endif
 
   // Load rescaled exp sums to shared memory.
   float* shared_exp_sums = reinterpret_cast<float*>(shared_mem + sizeof(float) * num_partitions);
@@ -534,7 +574,7 @@ __global__ void paged_attention_v2_reduce_kernel(
 
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                                  \
   cudaFuncSetAttribute(                                                                       \
-    vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,                   \
+    (void*)vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,            \
     cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                            \
   vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>                      \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
