@@ -73,7 +73,7 @@ def _convert_tokens_to_string_with_added_encoders(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     output_tokens: List[str],
     skip_special_tokens: bool,
-    spaces_between_special_tokens: bool, 
+    spaces_between_special_tokens: bool,
 ) -> str:
     # Adapted from
     # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921

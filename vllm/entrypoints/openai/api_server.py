@@ -445,8 +445,7 @@ async def create_completion(req: CompletionRequest, raw_request: Request):
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.
-    stream = (req.stream
-              and (req.best_of is None or req.n == req.best_of)
+    stream = (req.stream and (req.best_of is None or req.n == req.best_of)
               and not req.use_beam_search)
 
     def create_stream_response_json(
