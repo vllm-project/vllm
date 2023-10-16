@@ -42,7 +42,7 @@ inline __device__ float qk_dot_(const Vec (&q)[N], const Vec (&k)[N]) {
 #ifndef USE_ROCM
     qk += __shfl_xor_sync(uint32_t(-1), qk, mask);
 #else
-    qk += __shfl_xor(uint32_t(-1), qk, mask);
+    qk += __shfl_xor(qk, mask);
 #endif
   }
   return qk;

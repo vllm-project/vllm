@@ -339,9 +339,21 @@ inline __device__ Float8_ mul(uint16_t a, uint4 b) {
 
 // Vector fused multiply-add.
 inline __device__ uint32_t fma(uint32_t a, uint32_t b, uint32_t c) {
+#ifndef USE_ROCM
   uint32_t d;
   asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(d) : "r"(a), "r"(b), "r"(c));
   return d;
+#else
+  union {
+    __half2 h2;
+    uint32_t u32;
+  } A, B, C, D;
+  A.u32 = a;
+  B.u32 = b;
+  C.u32 = c;
+  D.h2 = __hfma2(A.h2, B.h2, C.h2);
+  return D.u32;
+#endif
 }
 
 inline __device__ uint32_t fma(uint16_t a, uint32_t b, uint32_t c) {
