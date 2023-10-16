@@ -72,9 +72,12 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 async def get_gen_prompt(request) -> str:
     if chat_template is not None:
-        return tokenizer.apply_chat_template(conversation=request.messages, chat_template=chat_template, tokenize=False)
+        return tokenizer.apply_chat_template(conversation=request.messages,
+                                             chat_template=chat_template,
+                                             tokenize=False)
     elif tokenizer.chat_template is not None:
-        return tokenizer.apply_chat_template(conversation=request.messages, tokenize=False)
+        return tokenizer.apply_chat_template(conversation=request.messages,
+                                             tokenize=False)
     else:
         if not _fastchat_available:
             raise ModuleNotFoundError(
@@ -122,9 +125,9 @@ async def get_gen_prompt(request) -> str:
 
 
 async def check_length(
-        request: Union[ChatCompletionRequest, CompletionRequest],
-        prompt: Optional[str] = None,
-        prompt_ids: Optional[List[int]] = None
+    request: Union[ChatCompletionRequest, CompletionRequest],
+    prompt: Optional[str] = None,
+    prompt_ids: Optional[List[int]] = None
 ) -> Tuple[List[int], Optional[JSONResponse]]:
     assert (not (prompt is None and prompt_ids is None)
             and not (prompt is not None and prompt_ids is not None)
@@ -239,9 +242,9 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                        token_ids)
 
     def create_stream_response_json(
-            index: int,
-            text: str,
-            finish_reason: Optional[str] = None,
+        index: int,
+        text: str,
+        finish_reason: Optional[str] = None,
     ) -> str:
         choice_data = ChatCompletionResponseStreamChoice(
             index=index,
@@ -593,13 +596,13 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="The model name used in the API. If not "
-                             "specified, the model name will be the same as "
-                             "the huggingface name.")
+                        "specified, the model name will be the same as "
+                        "the huggingface name.")
     parser.add_argument("--chat-template",
                         type=str,
                         default=None,
                         help="The path to the chat template to use "
-                             "with the specified model.")
+                        "with the specified model.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
