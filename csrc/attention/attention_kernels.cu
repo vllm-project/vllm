@@ -20,6 +20,7 @@
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
+#include "../cuda_compat.h"
 
 #include <algorithm>
 
@@ -40,11 +41,7 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   // Compute the sum per warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
-#ifndef USE_ROCM
-    sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
-#else
-    sum += __shfl_xor(sum, mask);
-#endif
+    sum += VLLM_SHFL_XOR_SYNC(sum, mask);
   }
 
   // Warp leaders store the data to shared memory.
@@ -63,11 +60,7 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   // Parallel reduction inside the warp.
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-#ifndef USE_ROCM
-    sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
-#else
-    sum += __shfl_xor(sum, mask);
-#endif
+    sum += VLLM_SHFL_XOR_SYNC(sum, mask);
   }
 
   // Broadcast to other threads.
@@ -232,11 +225,7 @@ __device__ void paged_attention_kernel(
   // The 0-th thread of each thread group already has its max qk value.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
-#ifndef USE_ROCM
-    qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
-#else
-    qk_max = fmaxf(qk_max, __shfl_xor(qk_max, mask));
-#endif
+    qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
   }
   if (lane == 0) {
     red_smem[warp_idx] = qk_max;
@@ -248,11 +237,7 @@ __device__ void paged_attention_kernel(
   qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-#ifndef USE_ROCM
-    qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
-#else
-    qk_max = fmaxf(qk_max, __shfl_xor(qk_max, mask));
-#endif
+    qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
   }
   // Broadcast the max qk value to all threads.
 #ifndef USE_ROCM
@@ -344,11 +329,7 @@ __device__ void paged_attention_kernel(
     float acc = accs[i];
 #pragma unroll
     for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
-#ifndef USE_ROCM
-      acc += __shfl_xor_sync(uint32_t(-1), acc, mask);
-#else
-      acc += __shfl_xor(acc, mask);
-#endif
+      acc += VLLM_SHFL_XOR_SYNC(acc, mask);
     }
     accs[i] = acc;
   }
@@ -514,11 +495,7 @@ __global__ void paged_attention_v2_reduce_kernel(
   // Reduce within the warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
-#ifndef USE_ROCM
-    max_logit = fmaxf(max_logit, __shfl_xor_sync(uint32_t(-1), max_logit, mask));
-#else
-    max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
-#endif
+    max_logit = fmaxf(max_logit, VLLM_SHFL_XOR_SYNC(max_logit, mask));
   }
   if (lane == 0) {
     red_smem[warp_idx] = max_logit;
@@ -528,11 +505,7 @@ __global__ void paged_attention_v2_reduce_kernel(
   max_logit = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-#ifndef USE_ROCM
-    max_logit = fmaxf(max_logit, __shfl_xor_sync(uint32_t(-1), max_logit, mask));
-#else
-    max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
-#endif
+    max_logit = fmaxf(max_logit, VLLM_SHFL_XOR_SYNC(max_logit, mask));
   }
   // Broadcast the max value to all threads.
 #ifndef USE_ROCM
