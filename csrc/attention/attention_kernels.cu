@@ -42,7 +42,7 @@ inline __device__ float block_sum(float* red_smem, float sum) {
 #ifndef USE_ROCM
     sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
 #else
-    sum += __shfl_xor(uint32_t(-1), sum, mask);
+    sum += __shfl_xor(sum, mask);
 #endif
   }
 
@@ -65,7 +65,7 @@ inline __device__ float block_sum(float* red_smem, float sum) {
 #ifndef USE_ROCM
     sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
 #else
-    sum += __shfl_xor(uint32_t(-1), sum, mask);
+    sum += __shfl_xor(sum, mask);
 #endif
   }
 
@@ -211,7 +211,7 @@ __global__ void single_query_cached_kv_attention_kernel(
 #ifndef USE_ROCM
     qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
 #else
-    qk_max = fmaxf(qk_max, __shfl_xor(uint32_t(-1), qk_max, mask));
+    qk_max = fmaxf(qk_max, __shfl_xor(qk_max, mask));
 #endif
   }
   if (lane == 0) {
@@ -227,7 +227,7 @@ __global__ void single_query_cached_kv_attention_kernel(
 #ifndef USE_ROCM
     qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
 #else
-    qk_max = fmaxf(qk_max, __shfl_xor(uint32_t(-1), qk_max, mask));
+    qk_max = fmaxf(qk_max, __shfl_xor(qk_max, mask));
 #endif
   }
   // Broadcast the max qk value to all threads.
@@ -311,7 +311,7 @@ __global__ void single_query_cached_kv_attention_kernel(
 #ifndef USE_ROCM
       acc += __shfl_xor_sync(uint32_t(-1), acc, mask);
 #else
-      acc += __shfl_xor(uint32_t(-1), acc, mask);
+      acc += __shfl_xor(acc, mask);
 #endif
     }
     accs[i] = acc;
