@@ -295,7 +295,7 @@ def _greedy_sample(
     selected_seq_groups: List[Tuple[List[int], SamplingParams]],
     logprobs: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
-    samples = torch.argmax(logprobs, dim=-1).tolist()
+    samples = torch.argmax(logprobs, dim=-1).cpu()
     sample_idx = 0
     results = []
     for seq_group in selected_seq_groups:
@@ -304,7 +304,7 @@ def _greedy_sample(
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples[sample_idx]]
+        next_token_ids = [samples[sample_idx].item()]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     assert sample_idx == logprobs.size(0)
@@ -495,15 +495,15 @@ def _get_logprobs(
     batched_logprobs_query_result = logprobs[[
         batched_logprobs_query_seq_indices,
         batched_logprobs_query_token_indices
-    ]].tolist()
+    ]].cpu()
 
     # Batched query for logprobs of topk tokens
     if largest_num_logprobs > 0:
         top_logprobs, top_token_ids = torch.topk(logprobs,
                                                  largest_num_logprobs,
                                                  dim=-1)
-        top_logprobs = top_logprobs.tolist()
-        top_token_ids = top_token_ids.tolist()
+        top_logprobs = top_logprobs.cpu()
+        top_token_ids = top_token_ids.cpu()
     else:
         top_logprobs, top_token_ids = None, None
 
@@ -549,13 +549,17 @@ def _get_logprobs(
         group_sample_logprobs: List[Dict[int, float]] = []
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
-                next_token_id: batched_logprobs_query_result[query_result_idx]
+                next_token_id:
+                batched_logprobs_query_result[query_result_idx].item()
             }
             query_result_idx += 1
             if num_logprobs > 0:
                 sample_logprobs_dict.update(
-                    zip(top_token_ids[sample_idx + parent_id][:num_logprobs],
-                        top_logprobs[sample_idx + parent_id][:num_logprobs]))
+                    zip(
+                        top_token_ids[sample_idx +
+                                      parent_id, :num_logprobs].tolist(),
+                        top_logprobs[sample_idx +
+                                     parent_id, :num_logprobs].tolist()))
             group_sample_logprobs.append(sample_logprobs_dict)
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)
