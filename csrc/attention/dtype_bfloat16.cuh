@@ -420,6 +420,11 @@ inline __device__ void from_float(bf16_8_t& dst, Float8_ src) {
 #endif
 }
 
+// From bfloat16 to float32.
+inline __device__ float to_float(__nv_bfloat16 u) {
+  return __bfloat162float(u);
+}
+
 // Zero-out a variable.
 inline __device__ void zero(__nv_bfloat16& dst) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
