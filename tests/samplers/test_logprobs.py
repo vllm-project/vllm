@@ -49,7 +49,6 @@ def test_get_prompt_logprobs(
         vllm_sample_logprobs = vllm_result.outputs[0].logprobs
         for i, vllm_sample_logprob_dict in enumerate(vllm_sample_logprobs):
             for token_id, logprob in vllm_sample_logprob_dict.items():
-                print(logprob, hf_logprob[i][-1][token_id].item())
                 torch.testing.assert_close(logprob,
                                            hf_logprob[i][-1][token_id].item(),
                                            atol=1e-2,
