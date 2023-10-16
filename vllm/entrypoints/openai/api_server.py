@@ -181,7 +181,7 @@ def create_logprobs(token_ids: List[int],
 
 
 @app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest,
+async def create_chat_completion(req: ChatCompletionRequest,
                                  raw_request: Request):
     """Completion API similar to OpenAI's API.
 
@@ -192,41 +192,41 @@ async def create_chat_completion(request: ChatCompletionRequest,
         - function_call (Users should implement this by themselves)
         - logit_bias (to be supported by vLLM engine)
     """
-    logger.info(f"Received chat completion request: {request}")
+    logger.info(f"Received chat completion request: {req}")
 
-    error_check_ret = await check_model(request)
+    error_check_ret = await check_model(req)
     if error_check_ret is not None:
         return error_check_ret
 
-    if request.logit_bias is not None and len(request.logit_bias) > 0:
+    if req.logit_bias is not None and len(req.logit_bias) > 0:
         # TODO: support logit_bias in vLLM engine.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "logit_bias is not currently supported")
 
-    prompt = await get_gen_prompt(request)
-    token_ids, error_check_ret = await check_length(request, prompt=prompt)
+    prompt = await get_gen_prompt(req)
+    token_ids, error_check_ret = await check_length(req, prompt=prompt)
     if error_check_ret is not None:
         return error_check_ret
 
-    model_name = request.model
+    model_name = req.model
     request_id = f"cmpl-{random_uuid()}"
     created_time = int(time.monotonic())
     try:
         sampling_params = SamplingParams(
-            n=request.n,
-            presence_penalty=request.presence_penalty,
-            frequency_penalty=request.frequency_penalty,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            stop=request.stop,
-            stop_token_ids=request.stop_token_ids,
-            max_tokens=request.max_tokens,
-            best_of=request.best_of,
-            top_k=request.top_k,
-            ignore_eos=request.ignore_eos,
-            use_beam_search=request.use_beam_search,
-            skip_special_tokens=request.skip_special_tokens,
-            spaces_between_special_tokens=request.spaces_between_special_tokens,
+            n=req.n,
+            presence_penalty=req.presence_penalty,
+            frequency_penalty=req.frequency_penalty,
+            temperature=req.temperature,
+            top_p=req.top_p,
+            stop=req.stop,
+            stop_token_ids=req.stop_token_ids,
+            max_tokens=req.max_tokens,
+            best_of=req.best_of,
+            top_k=req.top_k,
+            ignore_eos=req.ignore_eos,
+            use_beam_search=req.use_beam_search,
+            skip_special_tokens=req.skip_special_tokens,
+            spaces_between_special_tokens=req.spaces_between_special_tokens,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -256,7 +256,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
     async def completion_stream_generator() -> AsyncGenerator[str, None]:
         # First chunk with role
-        for i in range(request.n):
+        for i in range(req.n):
             choice_data = ChatCompletionResponseStreamChoice(
                 index=i,
                 delta=DeltaMessage(role="assistant"),
@@ -268,8 +268,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
             data = chunk.json(exclude_unset=True, ensure_ascii=False)
             yield f"data: {data}\n\n"
 
-        previous_texts = [""] * request.n
-        previous_num_tokens = [0] * request.n
+        previous_texts = [""] * req.n
+        previous_num_tokens = [0] * req.n
         async for res in result_generator:
             res: RequestOutput
             for output in res.outputs:
@@ -292,7 +292,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         yield "data: [DONE]\n\n"
 
     # Streaming response
-    if request.stream:
+    if req.stream:
         return StreamingResponse(completion_stream_generator(),
                                  media_type="text/event-stream")
 
@@ -331,7 +331,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         usage=usage,
     )
 
-    if request.stream:
+    if req.stream:
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
         response_json = response.json(ensure_ascii=False)
@@ -347,7 +347,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 
 @app.post("/v1/completions")
-async def create_completion(request: CompletionRequest, raw_request: Request):
+async def create_completion(req: CompletionRequest, raw_request: Request):
     """Completion API similar to OpenAI's API.
 
     See https://platform.openai.com/docs/api-reference/completions/create
@@ -360,76 +360,76 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
           suffix)
         - logit_bias (to be supported by vLLM engine)
     """
-    logger.info(f"Received completion request: {request}")
+    logger.info(f"Received completion request: {req}")
 
-    error_check_ret = await check_model(request)
+    error_check_ret = await check_model(req)
     if error_check_ret is not None:
         return error_check_ret
 
-    if request.echo:
+    if req.echo:
         # We do not support echo since the vLLM engine does not
         # currently support getting the logprobs of prompt tokens.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "echo is not currently supported")
 
-    if request.suffix is not None:
+    if req.suffix is not None:
         # The language models we currently support do not support suffix.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "suffix is not currently supported")
 
-    if request.logit_bias is not None and len(request.logit_bias) > 0:
+    if req.logit_bias is not None and len(req.logit_bias) > 0:
         # TODO: support logit_bias in vLLM engine.
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "logit_bias is not currently supported")
 
-    model_name = request.model
+    model_name = req.model
     request_id = f"cmpl-{random_uuid()}"
 
     use_token_ids = False
-    if isinstance(request.prompt, list):
-        if len(request.prompt) == 0:
+    if isinstance(req.prompt, list):
+        if len(req.prompt) == 0:
             return create_error_response(HTTPStatus.BAD_REQUEST,
                                          "please provide at least one prompt")
-        first_element = request.prompt[0]
+        first_element = req.prompt[0]
         if isinstance(first_element, int):
             use_token_ids = True
-            prompt = request.prompt
+            prompt = req.prompt
         elif isinstance(first_element, (str, list)):
             # TODO: handles multiple prompt case in list[list[int]]
-            if len(request.prompt) > 1:
+            if len(req.prompt) > 1:
                 return create_error_response(
                     HTTPStatus.BAD_REQUEST,
                     "multiple prompts in a batch is not currently supported")
             use_token_ids = not isinstance(first_element, str)
-            prompt = request.prompt[0]
+            prompt = req.prompt[0]
     else:
-        prompt = request.prompt
+        prompt = req.prompt
 
     if use_token_ids:
-        _, error_check_ret = await check_length(request, prompt_ids=prompt)
+        _, error_check_ret = await check_length(req, prompt_ids=prompt)
     else:
-        token_ids, error_check_ret = await check_length(request, prompt=prompt)
+        token_ids, error_check_ret = await check_length(req, prompt=prompt)
     if error_check_ret is not None:
         return error_check_ret
 
     created_time = int(time.monotonic())
     try:
         sampling_params = SamplingParams(
-            n=request.n,
-            best_of=request.best_of,
-            presence_penalty=request.presence_penalty,
-            frequency_penalty=request.frequency_penalty,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            top_k=request.top_k,
-            stop=request.stop,
-            stop_token_ids=request.stop_token_ids,
-            ignore_eos=request.ignore_eos,
-            max_tokens=request.max_tokens,
-            logprobs=request.logprobs,
-            use_beam_search=request.use_beam_search,
-            skip_special_tokens=request.skip_special_tokens,
-            spaces_between_special_tokens=request.spaces_between_special_tokens,
+            n=req.n,
+            best_of=req.best_of,
+            presence_penalty=req.presence_penalty,
+            frequency_penalty=req.frequency_penalty,
+            temperature=req.temperature,
+            top_p=req.top_p,
+            top_k=req.top_k,
+            stop=req.stop,
+            stop_token_ids=req.stop_token_ids,
+            ignore_eos=req.ignore_eos,
+            max_tokens=req.max_tokens,
+            logprobs=req.logprobs,
+            use_beam_search=req.use_beam_search,
+            skip_special_tokens=req.skip_special_tokens,
+            spaces_between_special_tokens=req.spaces_between_special_tokens,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -445,9 +445,9 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.
-    stream = (request.stream
-              and (request.best_of is None or request.n == request.best_of)
-              and not request.use_beam_search)
+    stream = (req.stream
+              and (req.best_of is None or req.n == req.best_of)
+              and not req.use_beam_search)
 
     def create_stream_response_json(
         index: int,
@@ -472,14 +472,14 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return response_json
 
     async def completion_stream_generator() -> AsyncGenerator[str, None]:
-        previous_texts = [""] * request.n
-        previous_num_tokens = [0] * request.n
+        previous_texts = [""] * req.n
+        previous_num_tokens = [0] * req.n
         async for res in result_generator:
             res: RequestOutput
             for output in res.outputs:
                 i = output.index
                 delta_text = output.text[len(previous_texts[i]):]
-                if request.logprobs is not None:
+                if req.logprobs is not None:
                     logprobs = create_logprobs(
                         output.token_ids[previous_num_tokens[i]:],
                         output.logprobs[previous_num_tokens[i]:],
@@ -496,7 +496,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
                     logprobs = (LogProbs()
-                                if request.logprobs is not None else None)
+                                if req.logprobs is not None else None)
                     response_json = create_stream_response_json(
                         index=i,
                         text="",
@@ -523,7 +523,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     assert final_res is not None
     choices = []
     for output in final_res.outputs:
-        if request.logprobs is not None:
+        if req.logprobs is not None:
             logprobs = create_logprobs(output.token_ids, output.logprobs)
         else:
             logprobs = None
@@ -551,7 +551,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         usage=usage,
     )
 
-    if request.stream:
+    if req.stream:
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
         response_json = response.json(ensure_ascii=False)
