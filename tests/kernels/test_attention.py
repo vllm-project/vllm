@@ -192,7 +192,7 @@ def test_single_query_cached_kv_attention(
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
     # outputs. Thus, we use a relaxed tolerance for the test.
-    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-3)
+    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-3)
 
 
 def ref_multi_query_kv_attention(

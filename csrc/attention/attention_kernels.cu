@@ -234,7 +234,7 @@ __global__ void single_query_cached_kv_attention_kernel(
 #ifndef USE_ROCM
   qk_max = __shfl_sync(uint32_t(-1), qk_max, 0);
 #else
-  qk_max = __shfl(uint32_t(-1), qk_max, 0);
+  qk_max = __shfl(qk_max, 0);
 #endif
 
   // Get the sum of the exp values.
