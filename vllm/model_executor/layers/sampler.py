@@ -8,8 +8,8 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather)
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import (SamplerOutput, SequenceData, SequenceGroupOutputs,
-                           SequenceOutputs)
+from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
+                           SequenceData, SequenceGroupOutputs, SequenceOutputs)
 
 _SAMPLING_EPS = 1e-5
 
@@ -508,9 +508,8 @@ def _get_logprobs(
         top_logprobs, top_token_ids = None, None
 
     # Gather results
-    result_prompt_logprobs: List[Optional[List[Optional[Dict[int,
-                                                             float]]]]] = []
-    result_sample_logprobs: List[List[Dict[int, float]]] = []
+    result_prompt_logprobs: List[Optional[PromptLogprobs]] = []
+    result_sample_logprobs: List[SampleLogprobs] = []
     sample_idx = 0
     query_result_idx = 0
     for i, (seq_group, sample_result) in enumerate(
@@ -525,7 +524,7 @@ def _get_logprobs(
             prompt_len = input_metadata.prompt_lens[i]
             prompt_tokens = input_metadata.seq_data[
                 seq_ids[0]].prompt_token_ids
-            group_prompt_logprobs = [None]
+            group_prompt_logprobs: PromptLogprobs = [None]
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
                     token_id:
@@ -546,7 +545,7 @@ def _get_logprobs(
         num_logprobs = sampling_params.logprobs
         if num_logprobs is None:
             num_logprobs = 0
-        group_sample_logprobs: List[Dict[int, float]] = []
+        group_sample_logprobs: SampleLogprobs = []
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
                 next_token_id:
@@ -570,8 +569,8 @@ def _get_logprobs(
 def _build_sampler_output(
     sample_results: List[Tuple[List[int], List[int]]],
     input_metadata: InputMetadata,
-    prompt_logprobs: List[Optional[List[Optional[Dict[int, float]]]]],
-    sample_logprobs: List[List[Dict[int, float]]],
+    prompt_logprobs: List[Optional[PromptLogprobs]],
+    sample_logprobs: List[SampleLogprobs],
 ) -> SamplerOutput:
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,

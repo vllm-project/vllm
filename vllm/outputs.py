@@ -1,6 +1,7 @@
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-from vllm.sequence import SequenceGroup, SequenceStatus
+from vllm.sequence import (PromptLogprobs, SampleLogprobs, SequenceGroup,
+                           SequenceStatus)
 
 
 class CompletionOutput:
@@ -23,7 +24,7 @@ class CompletionOutput:
         text: str,
         token_ids: List[int],
         cumulative_logprob: float,
-        logprobs: Optional[List[Dict[int, float]]],
+        logprobs: Optional[SampleLogprobs],
         finish_reason: Optional[str] = None,
     ) -> None:
         self.index = index
@@ -61,7 +62,7 @@ class RequestOutput:
         request_id: str,
         prompt: str,
         prompt_token_ids: List[int],
-        prompt_logprobs: Optional[List[Optional[Dict[int, float]]]],
+        prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
     ) -> None:

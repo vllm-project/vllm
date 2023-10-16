@@ -6,6 +6,9 @@ from typing import Dict, List, Optional, Union
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
 
+PromptLogprobs = List[Optional[Dict[int, float]]]
+SampleLogprobs = List[Dict[int, float]]
+
 
 class SequenceStatus(enum.Enum):
     """Status of a sequence."""
@@ -116,7 +119,7 @@ class Sequence:
         self.block_size = block_size
 
         self.data = SequenceData(prompt_token_ids)
-        self.output_logprobs: List[Dict[int, float]] = []
+        self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
@@ -238,7 +241,7 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
-        self.prompt_logprobs: Optional[List[Optional[Dict[int, float]]]] = None
+        self.prompt_logprobs: Optional[PromptLogprobs] = None
 
     @property
     def prompt(self) -> str:
@@ -387,9 +390,10 @@ class SequenceGroupOutputs:
     """The model outputs associated with a sequence group."""
 
     def __init__(
-            self, samples: List[SequenceOutputs],
-            prompt_logprobs: Optional[List[Optional[Dict[int,
-                                                         float]]]]) -> None:
+        self,
+        samples: List[SequenceOutputs],
+        prompt_logprobs: Optional[PromptLogprobs],
+    ) -> None:
         self.samples = samples
         self.prompt_logprobs = prompt_logprobs
 
