@@ -61,6 +61,8 @@ class SamplingParams:
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
         skip_special_tokens: Whether to skip special tokens in the output.
+        spaces_between_special_tokens: Whether to add spaces between special
+            tokens in the output.  Defaults to True.
     """
 
     def __init__(
@@ -81,6 +83,7 @@ class SamplingParams:
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
+        spaces_between_special_tokens: bool = True,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -106,6 +109,7 @@ class SamplingParams:
         self.max_tokens = max_tokens
         self.logprobs = logprobs
         self.skip_special_tokens = skip_special_tokens
+        self.spaces_between_special_tokens = spaces_between_special_tokens
 
         self._verify_args()
         if self.use_beam_search:
@@ -200,4 +204,5 @@ class SamplingParams:
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
                 f"logprobs={self.logprobs}, "
-                f"skip_special_tokens={self.skip_special_tokens})")
+                f"skip_special_tokens={self.skip_special_tokens}, "
+                f"spaces_between_special_tokens={self.spaces_between_special_tokens})")

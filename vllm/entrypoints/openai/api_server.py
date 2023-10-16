@@ -226,6 +226,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             ignore_eos=request.ignore_eos,
             use_beam_search=request.use_beam_search,
             skip_special_tokens=request.skip_special_tokens,
+            spaces_between_special_tokens=request.spaces_between_special_tokens,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -428,6 +429,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
             skip_special_tokens=request.skip_special_tokens,
+            spaces_between_special_tokens=request.spaces_between_special_tokens,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
