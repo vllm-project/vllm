@@ -133,7 +133,7 @@ class ColumnParallelLinear(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
 
         # Parameters.
-        # Note: torch.nn.functional.linear performs XA^T + b and as a result
+        # NOTE: torch.nn.functional.linear performs XA^T + b and as a result
         # we allocate the transpose.
         self.create_weights(params_dtype)
 

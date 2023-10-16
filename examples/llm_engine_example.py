@@ -11,7 +11,7 @@ def main(args: argparse.Namespace):
     # Test the following prompts.
     test_prompts = [
         ("A robot may not injure a human being",
-         SamplingParams(temperature=0.0)),
+         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1)),
         ("To be or not to be,",
          SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
         ("What is the meaning of life?",
