@@ -63,11 +63,7 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   }
 
   // Broadcast to other threads.
-#ifndef USE_ROCM
-  return __shfl_sync(uint32_t(-1), sum, 0);
-#else
-  return __shfl(sum, 0);
-#endif
+  return VLLM_SHFL_SYNC(sum, 0);
 }
 
 // TODO(woosuk): Merge the last two dimensions of the grid.
@@ -239,11 +235,7 @@ __device__ void paged_attention_kernel(
     qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
   }
   // Broadcast the max qk value to all threads.
-#ifndef USE_ROCM
-  qk_max = __shfl_sync(uint32_t(-1), qk_max, 0);
-#else
-  qk_max = __shfl(qk_max, 0);
-#endif
+  qk_max = VLLM_SHFL_SYNC(qk_max, 0);
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -507,11 +499,7 @@ __global__ void paged_attention_v2_reduce_kernel(
     max_logit = fmaxf(max_logit, VLLM_SHFL_XOR_SYNC(max_logit, mask));
   }
   // Broadcast the max value to all threads.
-#ifndef USE_ROCM
-  max_logit = __shfl_sync(uint32_t(-1), max_logit, 0);
-#else
-  max_logit = __shfl(max_logit, 0);
-#endif
+  max_logit = VLLM_SHFL_SYNC(max_logit, 0);
 
   // Load rescaled exp sums to shared memory.
   float* shared_exp_sums = reinterpret_cast<float*>(shared_mem + sizeof(float) * num_partitions);
