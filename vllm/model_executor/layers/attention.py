@@ -132,6 +132,14 @@ class PagedAttention(nn.Module):
         output.copy_(out.squeeze(0))
         return output
 
+    def get_alibi_slopes(self) -> Optional[torch.Tensor]:
+        """Returns the slopes for the alibi attention bias.
+
+        Returns:
+            slopes: shape = [num_heads]
+        """
+        return None
+
     def single_query_cached_kv_attention(
         self,
         output: torch.Tensor,
@@ -139,6 +147,7 @@ class PagedAttention(nn.Module):
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         input_metadata: InputMetadata,
+        alibi_slopes: Optional[torch.Tensor],
     ) -> None:
         """PagedAttention for the generation tokens.
 
@@ -150,6 +159,7 @@ class PagedAttention(nn.Module):
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
                 block_size]
             input_metadata: metadata for paged attention.
+            alibi_slopes: shape = [num_heads]
         """
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
@@ -176,7 +186,7 @@ class PagedAttention(nn.Module):
                 input_metadata.context_lens,
                 block_size,
                 input_metadata.max_context_len,
-                None,  # alibi_slopes
+                alibi_slopes,
             )
         else:
             # Run PagedAttention V2.
@@ -206,7 +216,7 @@ class PagedAttention(nn.Module):
                 input_metadata.context_lens,
                 block_size,
                 input_metadata.max_context_len,
-                None,  # alibi_slopes
+                alibi_slopes,
             )
 
     def forward(
@@ -294,11 +304,12 @@ class PagedAttention(nn.Module):
             assert key_cache is not None and value_cache is not None, (
                 "key_cache and value_cache must be provided when "
                 "generating tokens.")
+            alibi_slopes = self.get_alibi_slopes()
             # Compute the attention op for generation tokens.
             self.single_query_cached_kv_attention(
                 output[num_prompt_tokens:num_valid_tokens],
                 query[num_prompt_tokens:num_valid_tokens], key_cache,
-                value_cache, input_metadata)
+                value_cache, input_metadata, alibi_slopes)
 
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.
@@ -476,36 +487,5 @@ class PagedAttentionWithALiBi(PagedAttention):
             start += prompt_len
         return output
 
-    def single_query_cached_kv_attention(
-        self,
-        output: torch.Tensor,
-        query: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        input_metadata: InputMetadata,
-    ) -> None:
-        """PagedAttention with ALiBi bias for the generation tokens.
-
-        Args:
-            output: shape = [num_generation_tokens, num_heads, head_size]
-            query: shape = [num_generation_tokens, num_heads, head_size]
-            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
-                block_size, x]
-            value_cache: shape = [num_blocks, num_kv_heads, head_size,
-                block_size]
-            input_metadata: metadata for paged attention.
-        """
-        block_size = value_cache.shape[3]
-        attention_ops.single_query_cached_kv_attention(
-            output,
-            query,
-            key_cache,
-            value_cache,
-            self.head_mapping,
-            self.scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
-            block_size,
-            input_metadata.max_context_len,
-            self.alibi_slopes,
-        )
+    def get_alibi_slopes(self) -> Optional[torch.Tensor]:
+        return self.alibi_slopes
