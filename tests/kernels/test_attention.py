@@ -97,7 +97,7 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
-@pytest.mark.parametrize("use_v2", [True, False])
+@pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -107,7 +107,7 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("seed", SEEDS)
 def test_paged_attention(
     kv_cache_factory,
-    use_v2: bool,
+    version: str,
     num_seqs: int,
     num_heads: Tuple[int, int],
     head_size: int,
@@ -164,7 +164,7 @@ def test_paged_attention(
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    if not use_v2:
+    if version == "v1":
         attention_ops.paged_attention_v1(
             output,
             query,
@@ -178,7 +178,7 @@ def test_paged_attention(
             max_context_len,
             alibi_slopes,
         )
-    else:
+    elif version == "v2":
         num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
                           PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
@@ -210,6 +210,8 @@ def test_paged_attention(
             max_context_len,
             alibi_slopes,
         )
+    else:
+        assert False, f"Unknown version: {version}"
 
     # Run the reference implementation.
     ref_output = torch.empty_like(query)

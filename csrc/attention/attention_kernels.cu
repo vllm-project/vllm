@@ -105,13 +105,13 @@ __device__ void paged_attention_kernel(
 
   // [start_block_idx, end_block_idx) is the range of blocks to process.
   const int start_block_idx = USE_PARTITIONING ? partition_idx * num_blocks_per_partition : 0;
-  int end_block_idx = MIN(start_block_idx + num_blocks_per_partition, num_context_blocks);
-  int num_blocks = end_block_idx - start_block_idx;
+  const int end_block_idx = MIN(start_block_idx + num_blocks_per_partition, num_context_blocks);
+  const int num_blocks = end_block_idx - start_block_idx;
 
   // [start_token_idx, end_token_idx) is the range of tokens to process.
-  int start_token_idx = start_block_idx * BLOCK_SIZE;
-  int end_token_idx = MIN(start_token_idx + num_blocks * BLOCK_SIZE, context_len);
-  int num_tokens = end_token_idx - start_token_idx;
+  const int start_token_idx = start_block_idx * BLOCK_SIZE;
+  const int end_token_idx = MIN(start_token_idx + num_blocks * BLOCK_SIZE, context_len);
+  const int num_tokens = end_token_idx - start_token_idx;
 
   constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   constexpr int NUM_THREAD_GROUPS = NUM_THREADS / THREAD_GROUP_SIZE; // Note: This assumes THREAD_GROUP_SIZE divides NUM_THREADS
@@ -532,7 +532,7 @@ __global__ void paged_attention_v2_reduce_kernel(
 
 } // namespace vllm
 
-#define LAUNCH_PAGED_ATTENTION_V1(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                      \
+#define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                                  \
   cudaFuncSetAttribute(                                                                       \
     vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,                   \
     cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                            \
@@ -608,22 +608,22 @@ void paged_attention_v1_launcher(
     // head sizes that we use in the model. However, we can easily extend this
     // to support any head size which is a multiple of 16.
     case 64:
-      LAUNCH_PAGED_ATTENTION_V1(T, 64, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(64);
       break;
     case 80:
-      LAUNCH_PAGED_ATTENTION_V1(T, 80, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(80);
       break;
     case 96:
-      LAUNCH_PAGED_ATTENTION_V1(T, 96, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(96);
       break;
     case 112:
-      LAUNCH_PAGED_ATTENTION_V1(T, 112, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(112);
       break;
     case 128:
-      LAUNCH_PAGED_ATTENTION_V1(T, 128, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(128);
       break;
     case 256:
-      LAUNCH_PAGED_ATTENTION_V1(T, 256, BLOCK_SIZE, NUM_THREADS);
+      LAUNCH_PAGED_ATTENTION_V1(256);
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
@@ -685,7 +685,7 @@ void paged_attention_v1(
   }
 }
 
-#define LAUNCH_PAGED_ATTENTION_V2(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE)      \
+#define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                                  \
   vllm::paged_attention_v2_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE>      \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     exp_sums_ptr,                                                                             \
@@ -704,7 +704,7 @@ void paged_attention_v1(
     kv_block_stride,                                                                          \
     kv_head_stride);                                                                          \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS, PARTITION_SIZE>           \
-  <<<grid2, block, shared_mem_size2, stream>>>(                                               \
+  <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                                   \
     out_ptr,                                                                                  \
     exp_sums_ptr,                                                                             \
     max_logits_ptr,                                                                           \
@@ -767,8 +767,8 @@ void paged_attention_v2_launcher(
   dim3 grid(num_heads, num_seqs, max_num_partitions);
   int shared_mem_size = std::max(logits_size, outputs_size);
   // For paged attention v2 reduce kernel.
-  dim3 grid2(num_heads, num_seqs);
-  int shared_mem_size2 = 2 * max_num_partitions * sizeof(float);
+  dim3 reduce_grid(num_heads, num_seqs);
+  int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
 
   dim3 block(NUM_THREADS);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -777,22 +777,22 @@ void paged_attention_v2_launcher(
     // head sizes that we use in the model. However, we can easily extend this
     // to support any head size which is a multiple of 16.
     case 64:
-      LAUNCH_PAGED_ATTENTION_V2(T, 64, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
+      LAUNCH_PAGED_ATTENTION_V2(64);
       break;
     case 80:
-      LAUNCH_PAGED_ATTENTION_V2(T, 80, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
+      LAUNCH_PAGED_ATTENTION_V2(80);
       break;
     case 96:
-      LAUNCH_PAGED_ATTENTION_V2(T, 96, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
+      LAUNCH_PAGED_ATTENTION_V2(96);
       break;
     case 112:
-      LAUNCH_PAGED_ATTENTION_V2(T, 112, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
+      LAUNCH_PAGED_ATTENTION_V2(112);
       break;
     case 128:
-      LAUNCH_PAGED_ATTENTION_V2(T, 128, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
+      LAUNCH_PAGED_ATTENTION_V2(128);
       break;
     case 256:
-      LAUNCH_PAGED_ATTENTION_V2(T, 256, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE);
+      LAUNCH_PAGED_ATTENTION_V2(256);
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);

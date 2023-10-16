@@ -12,7 +12,7 @@ PARTITION_SIZE = 512
 
 @torch.inference_mode()
 def main(
-    version: int,
+    version: str,
     num_seqs: int,
     context_len: int,
     num_query_heads: int,
@@ -91,12 +91,13 @@ def main(
         max_logits = torch.empty_like(exp_sums)
 
     def run_benchmark(num_iters: int, profile: bool = False) -> float:
+        torch.cuda.synchronize()
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.perf_counter()
 
         for _ in range(num_iters):
-            if version == 1:
+            if version == "v1":
                 attention_ops.paged_attention_v1(
                     output,
                     query,
@@ -110,7 +111,7 @@ def main(
                     max_context_len,
                     alibi_slopes,
                 )
-            else:
+            elif version == "v2":
                 attention_ops.paged_attention_v2(
                     output,
                     exp_sums,
@@ -127,6 +128,8 @@ def main(
                     max_context_len,
                     alibi_slopes,
                 )
+            else:
+                raise ValueError(f"Invalid version: {version}")
         torch.cuda.synchronize()
 
         end_time = time.perf_counter()
@@ -137,7 +140,6 @@ def main(
     # Warmup.
     print("Warming up...")
     run_benchmark(num_iters=3, profile=False)
-    torch.cuda.synchronize()
 
     # Benchmark.
     if do_profile:
@@ -150,7 +152,7 @@ def main(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Benchmark the paged attention kernel.")
-    parser.add_argument("--version", type=int, choices=[1, 2], default=2)
+    parser.add_argument("--version", type=str, choices=["v1", "v2"], default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--context-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
