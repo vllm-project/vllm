@@ -304,12 +304,11 @@ class PagedAttention(nn.Module):
             assert key_cache is not None and value_cache is not None, (
                 "key_cache and value_cache must be provided when "
                 "generating tokens.")
-            alibi_slopes = self.get_alibi_slopes()
             # Compute the attention op for generation tokens.
             self.single_query_cached_kv_attention(
                 output[num_prompt_tokens:num_valid_tokens],
                 query[num_prompt_tokens:num_valid_tokens], key_cache,
-                value_cache, input_metadata, alibi_slopes)
+                value_cache, input_metadata, self.get_alibi_slopes())
 
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.
