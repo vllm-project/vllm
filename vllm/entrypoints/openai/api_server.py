@@ -45,7 +45,7 @@ logger = init_logger(__name__)
 served_model = None
 app = fastapi.FastAPI()
 engine = None
-conversation_template = None
+chat_template = None
 
 
 def create_error_response(status_code: HTTPStatus,
@@ -71,17 +71,20 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 
 async def get_gen_prompt(request) -> str:
-    if not _fastchat_available:
-        raise ModuleNotFoundError(
-            "fastchat is not installed. Please install fastchat to use "
-            "the chat completion and conversation APIs: `$ pip install fschat`"
-        )
-    if version.parse(fastchat.__version__) < version.parse("0.2.23"):
-        raise ImportError(
-            f"fastchat version is low. Current version: {fastchat.__version__} "
-            "Please upgrade fastchat to use: `$ pip install -U fschat`")
-
-    if conversation_template is None:
+    if chat_template is not None:
+        return tokenizer.apply_chat_template(conversation=request.messages, chat_template=chat_template, tokenize=False)
+    elif tokenizer.chat_template is not None:
+        return tokenizer.apply_chat_template(conversation=request.messages, tokenize=False)
+    else:
+        if not _fastchat_available:
+            raise ModuleNotFoundError(
+                "fastchat is not installed. Please install fastchat to use "
+                "the chat completion and conversation APIs: `$ pip install fschat`"
+            )
+        if version.parse(fastchat.__version__) < version.parse("0.2.23"):
+            raise ImportError(
+                f"fastchat version is low. Current version: {fastchat.__version__} "
+                "Please upgrade fastchat to use: `$ pip install -U fschat`")
         template = get_conversation_template(request.model)
         conv = Conversation(
             name=template.name,
@@ -96,45 +99,32 @@ async def get_gen_prompt(request) -> str:
             stop_str=template.stop_str,
             stop_token_ids=template.stop_token_ids,
         )
-    else:
-        template = conversation_template
-        conv = Conversation(name=template["name"],
-                            system_template=template["system_template"],
-                            system_message=template.get("system_message", ""),
-                            roles=tuple(template["roles"]),
-                            messages=template.get("messages", []),
-                            offset=template.get("offset", 0),
-                            sep_style=SeparatorStyle[template["sep_style"]],
-                            sep=template["sep"],
-                            sep2=template.get("sep2", ""),
-                            stop_str=template["stop_str"],
-                            stop_token_ids=template.get("stop_token_ids", []))
 
-    if isinstance(request.messages, str):
-        prompt = request.messages
-    else:
-        for message in request.messages:
-            msg_role = message["role"]
-            if msg_role == "system":
-                conv.system_message = message["content"]
-            elif msg_role == "user":
-                conv.append_message(conv.roles[0], message["content"])
-            elif msg_role == "assistant":
-                conv.append_message(conv.roles[1], message["content"])
-            else:
-                raise ValueError(f"Unknown role: {msg_role}")
+        if isinstance(request.messages, str):
+            prompt = request.messages
+        else:
+            for message in request.messages:
+                msg_role = message["role"]
+                if msg_role == "system":
+                    conv.system_message = message["content"]
+                elif msg_role == "user":
+                    conv.append_message(conv.roles[0], message["content"])
+                elif msg_role == "assistant":
+                    conv.append_message(conv.roles[1], message["content"])
+                else:
+                    raise ValueError(f"Unknown role: {msg_role}")
 
-        # Add a blank message for the assistant.
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
+            # Add a blank message for the assistant.
+            conv.append_message(conv.roles[1], None)
+            prompt = conv.get_prompt()
 
-    return prompt
+        return prompt
 
 
 async def check_length(
-    request: Union[ChatCompletionRequest, CompletionRequest],
-    prompt: Optional[str] = None,
-    prompt_ids: Optional[List[int]] = None
+        request: Union[ChatCompletionRequest, CompletionRequest],
+        prompt: Optional[str] = None,
+        prompt_ids: Optional[List[int]] = None
 ) -> Tuple[List[int], Optional[JSONResponse]]:
     assert (not (prompt is None and prompt_ids is None)
             and not (prompt is not None and prompt_ids is not None)
@@ -249,9 +239,9 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                        token_ids)
 
     def create_stream_response_json(
-        index: int,
-        text: str,
-        finish_reason: Optional[str] = None,
+            index: int,
+            text: str,
+            finish_reason: Optional[str] = None,
     ) -> str:
         choice_data = ChatCompletionResponseStreamChoice(
             index=index,
@@ -463,10 +453,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
               and not request.use_beam_search)
 
     def create_stream_response_json(
-        index: int,
-        text: str,
-        logprobs: Optional[LogProbs] = None,
-        finish_reason: Optional[str] = None,
+            index: int,
+            text: str,
+            logprobs: Optional[LogProbs] = None,
+            finish_reason: Optional[str] = None,
     ) -> str:
         choice_data = CompletionResponseStreamChoice(
             index=index,
@@ -603,13 +593,13 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="The model name used in the API. If not "
-                        "specified, the model name will be the same as "
-                        "the huggingface name.")
-    parser.add_argument("--conversation-template",
+                             "specified, the model name will be the same as "
+                             "the huggingface name.")
+    parser.add_argument("--chat-template",
                         type=str,
                         default=None,
-                        help="The path to the conversation template to use "
-                        "with the specified model.")
+                        help="The path to the chat template to use "
+                             "with the specified model.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -629,9 +619,9 @@ if __name__ == "__main__":
     else:
         served_model = args.model
 
-    if args.conversation_template is not None:
-        with open(args.conversation_template, "r") as f:
-            conversation_template = json.load(f)
+    if args.chat_template is not None:
+        with open(args.chat_template, "r") as f:
+            chat_template = f.read()
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
