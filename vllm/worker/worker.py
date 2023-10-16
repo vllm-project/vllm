@@ -161,10 +161,10 @@ class Worker:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
-        last_token_indices: List[int] = []
-        last_token_start_idx = 0
-        categorized_seq_ids = {t: [] for t in SamplingType}
-        categorized_seq_ids_start_idx = 0
+        selected_token_indices: List[int] = []
+        selected_token_start_idx = 0
+        categorized_sample_indices = {t: [] for t in SamplingType}
+        categorized_sample_indices_start_idx = 0
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -185,13 +185,22 @@ class Worker:
             prompt_lens.append(prompt_len)
 
             assert len(seq_ids) == 1, "Prompt input should have only one seq."
-            last_token_indices.append(last_token_start_idx + prompt_len - 1)
-            last_token_start_idx += prompt_len
+            if sampling_params.prompt_logprobs is not None:
+                selected_token_indices.extend(
+                    range(selected_token_start_idx,
+                          selected_token_start_idx + prompt_len - 1))
+            selected_token_indices.append(selected_token_start_idx +
+                                          prompt_len - 1)
+            selected_token_start_idx += prompt_len
 
-            categorized_seq_ids[sampling_params.sampling_type].extend(
-                range(categorized_seq_ids_start_idx,
-                      categorized_seq_ids_start_idx + 1))
-            categorized_seq_ids_start_idx += 1
+            if sampling_params.prompt_logprobs is not None:
+                # NOTE: prompt token positions do not need sample, skip
+                categorized_sample_indices_start_idx += prompt_len - 1
+
+            categorized_sample_indices[sampling_params.sampling_type].extend(
+                range(categorized_sample_indices_start_idx,
+                      categorized_sample_indices_start_idx + 1))
+            categorized_sample_indices_start_idx += 1
 
             input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
@@ -226,14 +235,15 @@ class Worker:
             seq_groups.append((seq_ids, sampling_params))
 
             num_seqs = len(seq_ids)
-            last_token_indices.extend(
-                range(last_token_start_idx, last_token_start_idx + num_seqs))
-            last_token_start_idx += num_seqs
+            selected_token_indices.extend(
+                range(selected_token_start_idx,
+                      selected_token_start_idx + num_seqs))
+            selected_token_start_idx += num_seqs
 
-            categorized_seq_ids[sampling_params.sampling_type].extend(
-                range(categorized_seq_ids_start_idx,
-                      categorized_seq_ids_start_idx + num_seqs))
-            categorized_seq_ids_start_idx += num_seqs
+            categorized_sample_indices[sampling_params.sampling_type].extend(
+                range(categorized_sample_indices_start_idx,
+                      categorized_sample_indices_start_idx + num_seqs))
+            categorized_sample_indices_start_idx += num_seqs
 
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
@@ -282,12 +292,12 @@ class Worker:
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device="cuda")
-        last_token_indices = torch.tensor(last_token_indices,
-                                          dtype=torch.long,
-                                          device="cuda")
-        categorized_seq_ids = {
+        selected_token_indices = torch.tensor(selected_token_indices,
+                                              dtype=torch.long,
+                                              device="cuda")
+        categorized_sample_indices = {
             t: torch.tensor(seq_ids, dtype=torch.int, device="cuda")
-            for t, seq_ids in categorized_seq_ids.items()
+            for t, seq_ids in categorized_sample_indices.items()
         }
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq)
@@ -309,8 +319,8 @@ class Worker:
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
-            last_token_indices=last_token_indices,
-            categorized_seq_ids=categorized_seq_ids,
+            selected_token_indices=selected_token_indices,
+            categorized_sample_indices=categorized_sample_indices,
             sliding_window=self.sliding_window,
         )
         return tokens_tensor, positions_tensor, input_metadata

@@ -9,10 +9,10 @@ from vllm.model_executor.models.gpt_j import GPTJForCausalLM
 from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
 from vllm.model_executor.models.internlm import InternLMForCausalLM
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.mistral import MistralForCausalLM
 from vllm.model_executor.models.mpt import MPTForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
-from vllm.model_executor.models.mistral import MistralForCausalLM
 
 __all__ = [
     "AquilaForCausalLM",
