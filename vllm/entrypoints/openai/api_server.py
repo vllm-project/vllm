@@ -83,8 +83,7 @@ async def get_gen_prompt(request) -> str:
             raise ModuleNotFoundError(
                 "fastchat is not installed. Please install fastchat "
                 "to use the chat completion and conversation APIs: "
-                "`$ pip install fschat`"
-            )
+                "`$ pip install fschat`")
         if version.parse(fastchat.__version__) < version.parse("0.2.23"):
             raise ImportError(
                 "fastchat version is low. "
