@@ -238,7 +238,7 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
-        self.prompt_logprobs: Optional[List[Optional[Dict[int, int]]]] = None
+        self.prompt_logprobs: Optional[List[Optional[Dict[int, float]]]] = None
 
     @property
     def prompt(self) -> str:
@@ -384,12 +384,12 @@ class SequenceOutputs:
 
 
 class SequenceGroupOutputs:
-    """The model outputs associated with a sequence group.
-    """
+    """The model outputs associated with a sequence group."""
 
     def __init__(
             self, samples: List[SequenceOutputs],
-            prompt_logprobs: Optional[List[Optional[Dict[int, int]]]]) -> None:
+            prompt_logprobs: Optional[List[Optional[Dict[int,
+                                                         float]]]]) -> None:
         self.samples = samples
         self.prompt_logprobs = prompt_logprobs
 

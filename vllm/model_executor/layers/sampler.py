@@ -108,7 +108,7 @@ def _prune_hidden_states(
     hidden_states: torch.Tensor,
     input_metadata: InputMetadata,
 ) -> torch.Tensor:
-    selected_token_indices = []
+    selected_token_indices: List[int] = []
     start_idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
@@ -405,7 +405,7 @@ def _sample(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     input_metadata: InputMetadata,
-) -> SamplerOutput:
+) -> List[Tuple[List[int], List[int]]]:
     categorized_seq_group_ids = {t: [] for t in SamplingType}
     categorized_sample_indices = {t: [] for t in SamplingType}
     start_idx = 0
@@ -423,7 +423,7 @@ def _sample(
             range(start_idx, start_idx + num_seqs))
         start_idx += num_seqs
 
-    sample_results_dict: Dict[int, List[Tuple[List[int], List[int]]]] = {}
+    sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
     for sampling_type in SamplingType:
         seq_group_ids = categorized_seq_group_ids[sampling_type]
         seq_groups = [input_metadata.seq_groups[i] for i in seq_group_ids]
@@ -458,7 +458,8 @@ def _get_logprobs(
     logprobs: torch.Tensor,
     input_metadata: InputMetadata,
     sample_results: List[Tuple[List[int], List[int]]],
-):
+) -> Tuple[List[Optional[List[Optional[Dict[int, float]]]]], List[List[Dict[
+        int, float]]]]:
     # Prepare query indices
     batched_logprobs_query_seq_indices: List[int] = []
     batched_logprobs_query_token_indices: List[int] = []
@@ -507,8 +508,9 @@ def _get_logprobs(
         top_logprobs, top_token_ids = None, None
 
     # Gather results
-    result_prompt_logprobs: List[Optional[List[Optional[Dict[int, int]]]]] = []
-    result_sample_logprobs: List[List[Optional[Dict[int, int]]]] = []
+    result_prompt_logprobs: List[Optional[List[Optional[Dict[int,
+                                                             float]]]]] = []
+    result_sample_logprobs: List[List[Dict[int, float]]] = []
     sample_idx = 0
     query_result_idx = 0
     for i, (seq_group, sample_result) in enumerate(
@@ -544,20 +546,16 @@ def _get_logprobs(
         num_logprobs = sampling_params.logprobs
         if num_logprobs is None:
             num_logprobs = 0
-        group_sample_logprobs = []
+        group_sample_logprobs: List[Dict[int, float]] = []
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
-                next_token_id:
-                batched_logprobs_query_result[query_result_idx]
+                next_token_id: batched_logprobs_query_result[query_result_idx]
             }
             query_result_idx += 1
             if num_logprobs > 0:
                 sample_logprobs_dict.update(
-                    zip(
-                        top_token_ids[sample_idx +
-                                      parent_id][:num_logprobs],
-                        top_logprobs[sample_idx +
-                                     parent_id][:num_logprobs]))
+                    zip(top_token_ids[sample_idx + parent_id][:num_logprobs],
+                        top_logprobs[sample_idx + parent_id][:num_logprobs]))
             group_sample_logprobs.append(sample_logprobs_dict)
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)
@@ -568,8 +566,8 @@ def _get_logprobs(
 def _build_sampler_output(
     sample_results: List[Tuple[List[int], List[int]]],
     input_metadata: InputMetadata,
-    prompt_logprobs: List[Optional[List[Optional[Dict[int, int]]]]],
-    sample_logprobs: List[List[Optional[Dict[int, int]]]],
+    prompt_logprobs: List[Optional[List[Optional[Dict[int, float]]]]],
+    sample_logprobs: List[List[Dict[int, float]]],
 ) -> SamplerOutput:
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,
