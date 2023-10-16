@@ -17,6 +17,7 @@
  */
 #pragma once
 
+#include "../cuda_compat.h"
 #include "attention_dtypes.h"
 
 #include <float.h>
@@ -39,11 +40,7 @@ inline __device__ float qk_dot_(const Vec (&q)[N], const Vec (&k)[N]) {
   float qk = sum(qk_vec);
 #pragma unroll
   for (int mask = THREAD_GROUP_SIZE / 2; mask >= 1; mask /= 2) {
-#ifndef USE_ROCM
-    qk += __shfl_xor_sync(uint32_t(-1), qk, mask);
-#else
-    qk += __shfl_xor(qk, mask);
-#endif
+    qk += VLLM_SHFL_XOR_SYNC(qk, mask);
   }
   return qk;
 }
