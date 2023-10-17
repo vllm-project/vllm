@@ -143,6 +143,11 @@ class LLMEngine:
             "init_model",
             get_all_outputs=True,
         )
+        self._run_workers(
+            "load_model",
+            get_all_outputs=True,
+            batch_size=self.parallel_config.model_load_batch_size,
+        )
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -181,6 +186,11 @@ class LLMEngine:
         self._run_workers(
             "init_model",
             get_all_outputs=True,
+        )
+        self._run_workers(
+            "load_model",
+            get_all_outputs=True,
+            batch_size=self.parallel_config.model_load_batch_size,
         )
 
     def _verify_args(self) -> None:
@@ -682,16 +692,15 @@ class LLMEngine:
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
-    def _run_workers(
+    def _run_workers_in_batch(
         self,
+        workers,
         method: str,
         *args,
-        get_all_outputs: bool = False,
         **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers."""
+    ):
         all_outputs = []
-        for worker in self.workers:
+        for worker in workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             else:
@@ -699,9 +708,31 @@ class LLMEngine:
 
             output = executor(*args, **kwargs)
             all_outputs.append(output)
-
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)
+        return all_outputs
+
+    def _run_workers(
+        self,
+        method: str,
+        *args,
+        get_all_outputs: bool = False,
+        batch_size: Optional[int] = None,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers."""
+        all_outputs = []
+        if batch_size:
+            work_groups = [
+                self.workers[i:i + batch_size]
+                for i in range(0, len(self.workers), batch_size)
+            ]
+        else:
+            work_groups = [self.workers]
+
+        for workers in work_groups:
+            all_outputs.extend(
+                self._run_workers_in_batch(workers, method, *args, **kwargs))
 
         if get_all_outputs:
             return all_outputs
