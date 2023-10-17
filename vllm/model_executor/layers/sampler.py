@@ -47,11 +47,11 @@ class Sampler(nn.Module):
         logits = _get_logits(hidden_states, embedding, embedding_bias,
                              self.vocab_size)
 
-        # Apply presence and frequency penalties.
+        # Apply presence, frequency and repetition penalties.
         output_tokens = _get_output_tokens(input_metadata)
         assert len(output_tokens) == logits.shape[0]
-        presence_penalties, frequency_penalties, repetition_penalties = _get_penalties(
-            input_metadata)
+        (presence_penalties, frequency_penalties,
+            repetition_penalties) = _get_penalties(input_metadata)
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
         assert len(repetition_penalties) == logits.shape[0]
@@ -189,7 +189,7 @@ def _apply_penalties(input_metadata: InputMetadata, logits: torch.Tensor,
         f = frequency_penalties[i]
         r = repetition_penalties[i]
         if abs(p) < _SAMPLING_EPS and abs(f) < _SAMPLING_EPS and abs(
-            r) < _SAMPLING_EPS:
+                    r) < _SAMPLING_EPS:
             continue
         break
     else:
