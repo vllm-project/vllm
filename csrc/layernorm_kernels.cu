@@ -67,7 +67,7 @@ __global__ void rms_norm_quant_kernel(const T *__restrict__ input,
 
 template <typename T>
 __global__ void dequant_add_residual_rms_norm_quant_kernel(
-    const int32_t *__restrict__ input, const T *__restrict__ residual,
+    const int32_t *__restrict__ input, T *__restrict__ residual,
     int8_t *__restrict__ output, const T *__restrict__ gamma,
     const float layernorm_eps, const float scale, int m, int n) {
   // layernorm module in the T5 style No bias and no subtraction of mean.
@@ -80,6 +80,7 @@ __global__ void dequant_add_residual_rms_norm_quant_kernel(
   for (int i = tid; i < n; i += blockDim.x) {
     float diff = ((((float)input[blockIdx.x * n + i]) * scale) +
                   (float)residual[blockIdx.x * n + i]);
+    residual[blockIdx.x * n + i] = (T)diff;
     local_var_sum += diff * diff;
   }
   variance = blockReduceSum(local_var_sum);
@@ -90,10 +91,8 @@ __global__ void dequant_add_residual_rms_norm_quant_kernel(
   __syncthreads();
 
   for (int i = tid; i < n; i += blockDim.x) {
-    float tmp = ((((float)input[blockIdx.x * n + i]) * scale) +
-                 (float)residual[blockIdx.x * n + i]);
     output[blockIdx.x * n + i] =
-        float_to_int8_rn((tmp * s_variance) * (float)(gamma[i]));
+        float_to_int8_rn((((float)(residual[blockIdx.x * n + i])) * s_variance) * (float)(gamma[i]));
   }
 }
 
