@@ -8,7 +8,7 @@ import warnings
 from packaging.version import parse, Version
 import setuptools
 import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
 
@@ -24,11 +24,14 @@ ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
+if torch.version.hip:
+    if ROCM_HOME is not None:
+        NVCC_FLAGS += [f"-DUSE_ROCM"]
+
 if not torch.version.hip:
     if CUDA_HOME is None:
         raise RuntimeError(
             "Cannot find CUDA_HOME. CUDA must be available to build the package.")
-
 
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
     """Get the CUDA version from nvcc.
