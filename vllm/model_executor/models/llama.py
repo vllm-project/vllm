@@ -32,14 +32,18 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm, I8RMSNorm
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.activation import SiluAndMul, DequantSiluAndMulQuant
+from vllm.model_executor.layers.layernorm import RMSNorm, I8RMSNorm, DequantAddResidualI8RMSNormQuant
+from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, DequantPagedAttentionWithRoPEQuant
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.quantized_linear import ParallelLinear
 from vllm.model_executor.layers.int8_linear.w8a8linear import (
     W8A8OFP32LinearWithSFactorCublas,
-    W8A8O32LinearCublas)
+    W8A8O32LinearCublas,
+    W8A8O32LinearCublasNoDequant,
+    W8A8OFP32LinearWithSFactorCublasNoQuant,
+    W8A8O32Linear)
+from vllm.model_executor.layers.fusion import DequantAddResidual
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
@@ -66,9 +70,14 @@ class LlamaMLP(nn.Module):
         self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
 
         if self.use_int8:
-            self.gate_up_proj = W8A8O32LinearCublas(hidden_size,
+            # self.gate_up_proj = W8A8O32LinearCublas(hidden_size,
+            #                                 2 * intermediate_size)
+            self.gate_up_proj = W8A8O32Linear(hidden_size,
                                             2 * intermediate_size)
-            self.down_proj = W8A8OFP32LinearWithSFactorCublas(intermediate_size,
+            
+            # self.down_proj = W8A8OFP32LinearWithSFactorCublas(intermediate_size,
+            #                                         hidden_size)
+            self.down_proj = W8A8O32Linear(intermediate_size,
                                                     hidden_size)
         else:
             self.gate_up_proj = ParallelLinear.column(hidden_size,
@@ -87,14 +96,15 @@ class LlamaMLP(nn.Module):
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+        # self.act_fn = SiluAndMul()
+        self.act_fn = DequantSiluAndMulQuant()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         # FIXME: currently gate up share same scale, plan to use seperate scales 
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
-        x = x.half()
+        # x = x.half()
         return x
 
 
@@ -127,10 +137,16 @@ class LlamaAttention(nn.Module):
         self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
 
         if self.use_int8:
-            self.qkv_proj = W8A8O32LinearCublas(
+            # self.qkv_proj = W8A8O32LinearCublas(
+            #     hidden_size,
+            #     (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim)
+            self.qkv_proj = W8A8O32Linear(
                 hidden_size,
                 (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim)
-            self.o_proj = W8A8OFP32LinearWithSFactorCublas(
+            # self.o_proj = W8A8OFP32LinearWithSFactorCublas(
+            #     self.total_num_heads * self.head_dim,
+            #     hidden_size)
+            self.o_proj = W8A8O32Linear(
                 self.total_num_heads * self.head_dim,
                 hidden_size)
         else:
@@ -151,7 +167,15 @@ class LlamaAttention(nn.Module):
                 perform_initialization=False,
                 quant_config=quant_config,
             )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
+        # self.attn = PagedAttentionWithRoPE(self.num_heads,
+        #                                    self.head_dim,
+        #                                    self.scaling,
+        #                                    base=self.rope_theta,
+        #                                    rotary_dim=self.head_dim,
+        #                                    num_kv_heads=self.num_kv_heads,
+        #                                    quant_kv_cache=quant_kv_cache,
+        #                                    kv_quant_params=kv_quant_params)
+        self.attn = DequantPagedAttentionWithRoPEQuant(self.num_heads,
                                            self.head_dim,
                                            self.scaling,
                                            base=self.rope_theta,
@@ -169,14 +193,14 @@ class LlamaAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        qkv = qkv.half()
+        # qkv = qkv.half()
         # FIXME: currently qkv share same scale, plan to use seperate scales 
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
         output, _ = self.o_proj(attn_output)
-        output = output.half()
+        # output = output.half()
         return output
 
 
@@ -211,8 +235,13 @@ class LlamaDecoderLayer(nn.Module):
         if quant_config is not None and quant_config.get_name() == "smoothquant":
             self.input_layernorm = I8RMSNorm(config.hidden_size,
                                         eps=config.rms_norm_eps)
-            self.post_attention_layernorm = I8RMSNorm(config.hidden_size,
+            # self.post_attention_layernorm = I8RMSNorm(config.hidden_size,
+            #                                         eps=config.rms_norm_eps)
+            self.dequant_add_residual_layernorm_quant = DequantAddResidualI8RMSNormQuant(config.hidden_size,
                                                     eps=config.rms_norm_eps)
+            # self.attn_dequant_add_residual = DequantAddResidual()
+            # self.mlp_dequant_add_residual = DequantAddResidual()
+            self.dequant_add_residual = DequantAddResidual()
         else:
             self.input_layernorm = RMSNorm(config.hidden_size,
                                         eps=config.rms_norm_eps)
@@ -237,13 +266,17 @@ class LlamaDecoderLayer(nn.Module):
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
-        hidden_states = residual + hidden_states
+        # hidden_states = residual + hidden_states
+        # hidden_states = self.attn_dequant_add_residual(residual, hidden_states)
 
         # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        # residual = hidden_states
+        residual, hidden_states = self.dequant_add_residual_layernorm_quant(residual, hidden_states)
+        # hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        # hidden_states = residual + hidden_states
+        # hidden_states = self.mlp_dequant_add_residual(residual, hidden_states)
+        hidden_states = self.dequant_add_residual(residual, hidden_states)
         return hidden_states
 
 
@@ -505,6 +538,28 @@ class LlamaForCausalLM(nn.Module):
             if is_transposed:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 loaded_weight = loaded_weight.T
+            
+            is_fusion_weight = False
+            name_dict = {
+                "self_attn.q_proj.a": "self_attn.attn.a",
+                "self_attn.k_proj.a": "self_attn.attn.a",
+                "self_attn.v_proj.a": "self_attn.attn.a",
+                "self_attn.o_proj.inscale": "self_attn.attn.inscale",
+                "self_attn.o_proj.a": "dequant_add_residual_layernorm_quant.a",
+                "post_attention_layernorm.weight": "dequant_add_residual_layernorm_quant.weight",
+                "mlp.gate_proj.a": "mlp.act_fn.a",
+                "mlp.up_proj.a": "mlp.act_fn.a",
+                "mlp.down_proj.inscale": "mlp.act_fn.inscale",
+                "mlp.down_proj.a": "dequant_add_residual.a"
+            }
+            for weight_name in name_dict.keys():
+                if weight_name not in name:
+                    continue
+                param = state_dict[name.replace(weight_name, name_dict[weight_name])]
+                param.copy_(loaded_weight)
+                is_fusion_weight = True
+            if is_fusion_weight:
+                continue
 
             is_attention_weight = False
             for weight_name, shard_size, offset in attention_weight_specs:
