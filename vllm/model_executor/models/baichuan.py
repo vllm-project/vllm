@@ -306,12 +306,12 @@ class BaiChuanModel(nn.Module):
 class NormHead(ColumnParallelLinear):
     def __init__(self, hidden_size, vocab_size, bias=False):
         super().__init__(hidden_size, vocab_size, bias=False, gather_output=False)
-        self.first_flag = False
+        self.first_flag = True
     
     def forward(self, hidden_states):
         if self.first_flag:
             self.first_flag = False
-            self.weight == nn.Parameter(nn.functional.normalize(self.weight))
+            self.weight = nn.Parameter(nn.functional.normalize(self.weight))
         return ColumnParallelLinear.forward(self, hidden_states)
 
 
