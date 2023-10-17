@@ -1,6 +1,8 @@
 from vllm.model_executor.models.aquila import AquilaForCausalLM
 from vllm.model_executor.models.baichuan import (BaiChuanForCausalLM,
-                                                 BaichuanForCausalLM)
+                                                 BaichuanForCausalLM,
+                                                 Baichuan2ForCausalLM,
+                                                 BaiChuan2ForCausalLM)
 from vllm.model_executor.models.bloom import BloomForCausalLM
 from vllm.model_executor.models.falcon import FalconForCausalLM
 from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
