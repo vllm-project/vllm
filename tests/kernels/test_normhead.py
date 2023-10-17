@@ -60,7 +60,12 @@ def test_column_blora(
     vllm_first_output, _ = vllm_normhead.forward(x)
     assert torch.allclose(hf_first_output, vllm_first_output, atol=1e-8)
 
+    hf_first_output_mul = torch.matmul(x, hf_normhead.weight.t())
+    vllm_first_output_mul = torch.matmul(x, vllm_normhead.weight.t())
+    assert torch.allclose(hf_first_output, hf_first_output_mul)
+    assert torch.allclose(hf_first_output_mul, vllm_first_output_mul)
 
     hf_second_output = hf_normhead.forward(x)
     vllm_second_output, _ = vllm_normhead.forward(x)
     assert torch.allclose(hf_second_output, vllm_second_output, atol=1e-8)
+    assert torch.allclose(hf_first_output_mul, hf_second_output, atol=1e-8)
