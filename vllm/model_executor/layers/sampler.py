@@ -50,7 +50,8 @@ class Sampler(nn.Module):
         # Apply presence and frequency penalties.
         output_tokens = _get_output_tokens(input_metadata)
         assert len(output_tokens) == logits.shape[0]
-        presence_penalties, frequency_penalties, repetition_penalties = _get_penalties(input_metadata)
+        presence_penalties, frequency_penalties, repetition_penalties = _get_penalties(
+            input_metadata)
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
         assert len(repetition_penalties) == logits.shape[0]
@@ -175,14 +176,11 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
     return output_tokens
 
 
-def _apply_penalties(
-    input_metadata: InputMetadata,
-    logits: torch.Tensor,
-    output_tokens: List[List[int]],
-    presence_penalties: List[float],
-    frequency_penalties: List[float],
-    repetition_penalties: List[float]
-) -> torch.Tensor:
+def _apply_penalties(input_metadata: InputMetadata, logits: torch.Tensor,
+                     output_tokens: List[List[int]],
+                     presence_penalties: List[float],
+                     frequency_penalties: List[float],
+                     repetition_penalties: List[float]) -> torch.Tensor:
     num_seqs, vocab_size = logits.shape
     for i in range(num_seqs):
         if not output_tokens[i]:
@@ -190,7 +188,8 @@ def _apply_penalties(
         p = presence_penalties[i]
         f = frequency_penalties[i]
         r = repetition_penalties[i]
-        if abs(p) < _SAMPLING_EPS and abs(f) < _SAMPLING_EPS and abs(r) < _SAMPLING_EPS:
+        if abs(p) < _SAMPLING_EPS and abs(f) < _SAMPLING_EPS and abs(
+            r) < _SAMPLING_EPS:
             continue
         break
     else:
