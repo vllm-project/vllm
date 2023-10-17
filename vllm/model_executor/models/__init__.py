@@ -20,6 +20,8 @@ __all__ = [
     "AquilaForCausalLM",
     "BaiChuanForCausalLM",
     "BaichuanForCausalLM",
+    "Baichuan2ForCausalLM",
+    "BaiChuan2ForCausalLM",
     "BloomForCausalLM",
     "FalconForCausalLM",
     "GPT2LMHeadModel",
