@@ -308,6 +308,12 @@ class NormHead(ColumnParallelLinear):
         super().__init__(hidden_size, vocab_size, bias=False, gather_output=False)
         self.first_flag = True
     
+    def get_weight(self):
+        if self.first_flag:
+            self.first_flag = False
+            self.weight = nn.Parameter(nn.functional.normalize(self.weight))
+        return self.weight
+
     def forward(self, hidden_states):
         if self.first_flag:
             self.first_flag = False
@@ -317,16 +323,26 @@ class NormHead(ColumnParallelLinear):
 
 class BaiChuanBaseForCausalLM(nn.Module):
 
-    def __init__(self, config, position_embedding: str):
+    def __init__(self, config, position_embedding: str, version: str):
         super().__init__()
         self.config = config
         self.model = BaiChuanModel(config, position_embedding)
-        self.lm_head = ColumnParallelLinear(
-            config.hidden_size,
-            config.vocab_size,
-            bias=False,
-            gather_output=False,
-        )
+        self.version = version
+        if version == "1":
+            self.lm_head = ColumnParallelLinear(
+                config.hidden_size,
+                config.vocab_size,
+                bias=False,
+                gather_output=False,
+            )
+        elif version == "2":
+            self.lm_head = NormHead(
+                config.hidden_size,
+                config.vocab_size,
+                bias=False,
+            )
+        else:
+            raise ValueError("Only support baichuan version 1 and 2")
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -379,7 +395,8 @@ class BaiChuanBaseForCausalLM(nn.Module):
 
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
+        lm_head_weight = self.lm_head.weight if self.version == "1" else self.lm_head.get_weight() 
+        next_tokens = self.sampler(lm_head_weight, hidden_states,
                                    input_metadata)
         return next_tokens
 
