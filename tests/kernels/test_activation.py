@@ -32,8 +32,8 @@ def test_silu_and_mul(
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    x = torch.randn(num_tokens, 2 * d, dtype=dtype, device='cuda')
-    out = torch.empty(num_tokens, d, dtype=dtype, device='cuda')
+    x = torch.randn(num_tokens, 2 * d, dtype=dtype, device="cuda")
+    out = torch.empty(num_tokens, d, dtype=dtype, device="cuda")
     activation_ops.silu_and_mul(out, x)
     ref_out = ref_silu_and_mul(x)
     assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
@@ -54,22 +54,26 @@ def test_dequant_silu_and_mul_quant(
     seed: int,
     scale_gate: float,
     scale_up: float,
-    scale_out: float
+    scale_out: float,
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     # x = torch.randn(num_tokens, 2 * d, dtype=dtype, device='cuda')
-    x = torch.randint(-1000, 1000, (num_tokens, 2 * d), dtype=torch.int32, device='cuda')
+    x = torch.randint(
+        -1000, 1000, (num_tokens, 2 * d), dtype=torch.int32, device="cuda"
+    )
     x_ = torch.empty_like(x, dtype=dtype)
     x_[:, :d] = x[:, :d] * scale_gate
     x_[:, d:] = x[:, d:] * scale_up
-    out1 = torch.empty(num_tokens, d, dtype=dtype, device='cuda')
+    out1 = torch.empty(num_tokens, d, dtype=dtype, device="cuda")
     activation_ops.silu_and_mul(out1, x_)
     out1 = (out1 / scale_out).round().clamp(-128, 127).to(torch.int8)
     # ref_out = ref_silu_and_mul(x)
 
-    out2 = torch.empty(num_tokens, d, dtype=torch.int8, device='cuda')
-    activation_ops.invoke_dequant_silu_and_mul_quant(out2, x, scale_gate, scale_up, scale_out)
+    out2 = torch.empty(num_tokens, d, dtype=torch.int8, device="cuda")
+    activation_ops.invoke_dequant_silu_and_mul_quant(
+        out2, x, scale_gate, scale_up, scale_out
+    )
     assert torch.allclose(out1, out2, atol=2)
 
 
@@ -86,8 +90,8 @@ def test_gelu_new(
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    x = torch.randn(num_tokens, d, dtype=dtype, device='cuda')
-    out = torch.empty(num_tokens, d, dtype=dtype, device='cuda')
+    x = torch.randn(num_tokens, d, dtype=dtype, device="cuda")
+    out = torch.empty(num_tokens, d, dtype=dtype, device="cuda")
     activation_ops.gelu_new(out, x)
     ref_out = get_activation("gelu_new")(x)
     assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
@@ -105,8 +109,8 @@ def test_gelu_fast(
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    x = torch.randn(num_tokens, d, dtype=dtype, device='cuda')
-    out = torch.empty(num_tokens, d, dtype=dtype, device='cuda')
+    x = torch.randn(num_tokens, d, dtype=dtype, device="cuda")
+    out = torch.empty(num_tokens, d, dtype=dtype, device="cuda")
     activation_ops.gelu_fast(out, x)
     ref_out = get_activation("gelu_fast")(x)
     assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)

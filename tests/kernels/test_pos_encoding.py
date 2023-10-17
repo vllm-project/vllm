@@ -14,13 +14,13 @@ ROTARY_DIMS = [None]  # None means rotary dim == head size
 NUM_HEADS = [7, 12, 40, 52]  # Arbitrary values for testing
 NUM_TOKENS = [11, 83, 2048]  # Arbitrary values for testing
 SEEDS = [0]
-QUERY_SCALE = [0.09, 1.13, 1.78]
-KEY_SCALE = [0.23, 0.78, 1.45]
+QUERY_SCALE = [0.0002, 0.0008]
+KEY_SCALE = [0.0002, 0.0008]
 
 
 def rotate_neox(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -60,7 +60,7 @@ class RefRotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         # Create cos and sin embeddings.
-        inv_freq = 1.0 / (base**(torch.arange(0, dim, 2) / dim))
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2) / dim))
         t = torch.arange(max_position_embeddings).float()
         freqs = torch.einsum("i,j->ij", t, inv_freq.float())
         if is_neox_style:
@@ -78,18 +78,19 @@ class RefRotaryEmbedding(nn.Module):
         query: torch.Tensor,  # [num_tokens, num_heads, head_size]
         key: torch.Tensor,  # [num_tokens, num_heads, head_size]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        query_rot = query[..., :self.rotary_dim]
-        query_pass = query[..., self.rotary_dim:]
-        key_rot = key[..., :self.rotary_dim]
-        key_pass = key[..., self.rotary_dim:]
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim :]
+        key_rot = key[..., : self.rotary_dim]
+        key_pass = key[..., self.rotary_dim :]
 
         query_rot = query_rot.transpose(0, 1)
         key_rot = key_rot.transpose(0, 1)
         cos = F.embedding(positions, self.cos_cached)
         sin = F.embedding(positions, self.sin_cached)
 
-        query_rot, key_rot = apply_rope(query_rot, key_rot, cos, sin,
-                                        self.is_neox_style)
+        query_rot, key_rot = apply_rope(
+            query_rot, key_rot, cos, sin, self.is_neox_style
+        )
         query_rot = query_rot.transpose(0, 1).contiguous()
         key_rot = key_rot.transpose(0, 1).contiguous()
 
@@ -124,25 +125,20 @@ def test_rotary_embedding(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    positions = torch.randint(0, max_position, (num_tokens, ), device="cuda")
-    query = torch.randn(num_tokens,
-                        num_heads * head_size,
-                        dtype=dtype,
-                        device="cuda")
-    key = torch.randn(num_tokens,
-                      num_heads * head_size,
-                      dtype=dtype,
-                      device="cuda")
+    positions = torch.randint(0, max_position, (num_tokens,), device="cuda")
+    query = torch.randn(num_tokens, num_heads * head_size, dtype=dtype, device="cuda")
+    key = torch.randn(num_tokens, num_heads * head_size, dtype=dtype, device="cuda")
 
     # Create the rotary embedding.
-    inv_freq = 1.0 / (base**(
-        torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+    inv_freq = 1.0 / (
+        base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
+    )
     t = torch.arange(max_position).float()
     freqs = torch.einsum("i,j -> ij", t, inv_freq)
     cos = freqs.cos()
     sin = freqs.sin()
     cos_sin_cache = torch.cat((cos, sin), dim=-1)
-    cos_sin_cache = cos_sin_cache.to(dtype=dtype, device='cuda')
+    cos_sin_cache = cos_sin_cache.to(dtype=dtype, device="cuda")
 
     # Run the kernel. The kernel is in-place, so we need to clone the inputs.
     out_query = query.clone()
@@ -203,25 +199,34 @@ def test_dequant_rotary_embedding(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    positions = torch.randint(0, max_position, (num_tokens, ), device="cuda")
-    query = torch.randint(-1000, 1000, (num_tokens, num_heads * head_size),
-                        dtype=torch.int32,
-                        device="cuda")
-    key = torch.randint(-1000, 1000, (num_tokens, num_heads * head_size),
-                        dtype=torch.int32,
-                        device="cuda")
+    positions = torch.randint(0, max_position, (num_tokens,), device="cuda")
+    query = torch.randint(
+        -1000,
+        1000,
+        (num_tokens, num_heads * head_size),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    key = torch.randint(
+        -1000,
+        1000,
+        (num_tokens, num_heads * head_size),
+        dtype=torch.int32,
+        device="cuda",
+    )
     query_ = (query * query_scale).to(dtype)
     key_ = (key * key_scale).to(dtype)
 
     # Create the rotary embedding.
-    inv_freq = 1.0 / (base**(
-        torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+    inv_freq = 1.0 / (
+        base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
+    )
     t = torch.arange(max_position).float()
     freqs = torch.einsum("i,j -> ij", t, inv_freq)
     cos = freqs.cos()
     sin = freqs.sin()
     cos_sin_cache = torch.cat((cos, sin), dim=-1)
-    cos_sin_cache = cos_sin_cache.to(dtype=dtype, device='cuda')
+    cos_sin_cache = cos_sin_cache.to(dtype=dtype, device="cuda")
 
     ref_rotary_embedding = RefRotaryEmbedding(
         dim=rotary_dim,
@@ -236,8 +241,20 @@ def test_dequant_rotary_embedding(
     )
     ref_query = ref_query.view(num_tokens, num_heads * head_size)
     ref_key = ref_key.view(num_tokens, num_heads * head_size)
-    out2_query = query_.clone()
-    out2_key = key_.clone()
+    out2_query = torch.empty_like(query_)
+    out2_key = torch.empty_like(key_)
 
-    pos_encoding_ops.invoke_dequant_rotary_embedding(positions, query, out2_query, key, out2_key, head_size, cos_sin_cache, query_scale, key_scale, is_neox_style)
+    pos_encoding_ops.invoke_dequant_rotary_embedding(
+        positions,
+        query,
+        out2_query,
+        key,
+        out2_key,
+        head_size,
+        cos_sin_cache,
+        query_scale,
+        key_scale,
+        is_neox_style,
+    )
     assert torch.allclose(ref_key, out2_key, atol=1e-4)
+    assert torch.allclose(ref_query, out2_query, atol=1e-4)
