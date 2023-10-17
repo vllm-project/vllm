@@ -77,13 +77,10 @@ class ModelConfig:
         self.quantization = quantization
 
         self.hf_config = get_config(model, trust_remote_code, revision)
-
-        # add following lines to support fschat to load model which uses dynamic ntk (e.g Qwen)
-        # https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/vllm_worker.py#L59C65-L59C87
+        # support fschat to load model which uses dynamic ntk (e.g Qwen)
         use_dynamic_ntk = getattr(self.hf_config, "use_dynamic_ntk", None)
         if use_dynamic_ntk is not None:
             self.hf_config.max_sequence_length = 16384
-        
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_config,
                                                      max_model_len)
