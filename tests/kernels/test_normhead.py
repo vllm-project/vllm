@@ -34,8 +34,8 @@ class NormHead(nn.Module):
         return nn.functional.linear(hidden_states, norm_weight)
 
 
-@pytest.mark.parametrize("hidden_size", [5120])
-@pytest.mark.parametrize("vocab_size", [125696])
+@pytest.mark.parametrize("hidden_size", [512, 1024])
+@pytest.mark.parametrize("vocab_size", [256, 1256])
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16, torch.float])
 @torch.inference_mode()
 def test_column_blora(
