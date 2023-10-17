@@ -44,7 +44,7 @@ class InputMetadata:
         if sliding_window is not None:
             # We need to keep the positions of sliding windows within
             # the key / value tables, this is helpful to know which
-            # elements we need to cache and where.
+            # elements we need to cache.
             to_cache, start_idx = [], 0
             for prompt_len in self.prompt_lens:
                 to_cache.extend(
