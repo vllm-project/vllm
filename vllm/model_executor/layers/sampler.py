@@ -108,6 +108,7 @@ def _prune_hidden_states(
     hidden_states: torch.Tensor,
     input_metadata: InputMetadata,
 ) -> torch.Tensor:
+    hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
     return hidden_states.index_select(0, input_metadata.selected_token_indices)
 
 
