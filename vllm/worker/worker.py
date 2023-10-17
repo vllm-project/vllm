@@ -191,15 +191,14 @@ class Worker:
                           selected_token_start_idx + prompt_len - 1))
             selected_token_indices.append(selected_token_start_idx +
                                           prompt_len - 1)
-            selected_token_start_idx += prompt_len
+            selected_token_start_idx += input_metadata.max_prompt_len
 
             if sampling_params.prompt_logprobs is not None:
                 # NOTE: prompt token positions do not need sample, skip
                 categorized_sample_indices_start_idx += prompt_len - 1
 
-            categorized_sample_indices[sampling_params.sampling_type].extend(
-                range(categorized_sample_indices_start_idx,
-                      categorized_sample_indices_start_idx + 1))
+            categorized_sample_indices[sampling_params.sampling_type].append(
+                categorized_sample_indices_start_idx)
             categorized_sample_indices_start_idx += 1
 
             input_tokens.extend(prompt_tokens)
