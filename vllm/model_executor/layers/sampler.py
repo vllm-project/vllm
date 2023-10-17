@@ -184,61 +184,71 @@ def _apply_penalties(
     repetition_penalties: List[float]
 ) -> torch.Tensor:
     num_seqs, vocab_size = logits.shape
-    indices = False
     for i in range(num_seqs):
         if not output_tokens[i]:
             continue
         p = presence_penalties[i]
         f = frequency_penalties[i]
         r = repetition_penalties[i]
-        if abs(p) < _SAMPLING_EPS and abs(f) < _SAMPLING_EPS:
+        if abs(p) < _SAMPLING_EPS and abs(f) < _SAMPLING_EPS and abs(r) < _SAMPLING_EPS:
             continue
         break
     else:
-        indices = True
         # Return early if all sequences have zero penalties.
-    if not indices:
-        max_output_len = max(len(tokens) for tokens in output_tokens)
-        padded_output_tokens = [
-            tokens + [vocab_size] * (max_output_len - len(tokens))
-            for tokens in output_tokens
-        ]
-        output_tokens_tensor = torch.tensor(padded_output_tokens,
+        return logits
+    
+    max_output_len = max(len(tokens) for tokens in output_tokens)
+    padded_output_tokens = [
+        tokens + [vocab_size] * (max_output_len - len(tokens))
+        for tokens in output_tokens
+    ]
+    output_tokens_tensor = torch.tensor(padded_output_tokens,
                                             dtype=torch.long,
                                             device=logits.device)
 
-        # Compute the bin counts for the output tokens.
-        # vocab_size + 1 for padding.
-        bin_counts = torch.zeros((num_seqs, vocab_size + 1),
-                                 dtype=torch.long,
-                                 device=logits.device)
-        bin_counts.scatter_add_(1, output_tokens_tensor,
-                                torch.ones_like(output_tokens_tensor))
-        bin_counts = bin_counts[:, :vocab_size]  # Remove the padding bin.
+    # Compute the bin counts for the output tokens.
+    # vocab_size + 1 for padding.
+    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
+                             dtype=torch.long,
+                             device=logits.device)
+    bin_counts.scatter_add_(1, output_tokens_tensor,
+                            torch.ones_like(output_tokens_tensor))
+    bin_counts = bin_counts[:, :vocab_size]  # Remove the padding bin.
 
-        frequency_penalties = torch.tensor(frequency_penalties,
+    frequency_penalties = torch.tensor(frequency_penalties,
                                            dtype=logits.dtype,
                                            device=logits.device)
-        presence_penalties = torch.tensor(presence_penalties,
+    presence_penalties = torch.tensor(presence_penalties,
                                           dtype=logits.dtype,
                                           device=logits.device)
 
-        # We follow the definition in OpenAI API.
-        # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-        logits -= frequency_penalties.unsqueeze(dim=1) * bin_counts
-        logits -= presence_penalties.unsqueeze(dim=1) * (bin_counts > 0)
-    else:
-        # repetition penalty aligned with huggingface transformers
-        for i, seq_group in enumerate(input_metadata.seq_groups):
-            r = repetition_penalties[i]
-            if r == 1.0:
-                continue
-            seq_ids, _ = seq_group
-            if i < input_metadata.num_prompts:
-                # A prompt input.
-                # NOTE: While the prompt input usually has no output tokens,
-                # it may have output tokens in the case of recomputation.
-                seq_id = seq_ids[0]
+    # We follow the definition in OpenAI API.
+    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
+    logits -= frequency_penalties.unsqueeze(dim=1) * bin_counts
+    logits -= presence_penalties.unsqueeze(dim=1) * (bin_counts > 0)
+
+    # repetition penalty aligned with huggingface transformers
+    for i, seq_group in enumerate(input_metadata.seq_groups):
+        r = repetition_penalties[i]
+        if r == 1.0:
+            continue
+        seq_ids, _ = seq_group
+        if i < input_metadata.num_prompts:
+            # A prompt input.
+            # NOTE: While the prompt input usually has no output tokens,
+            # it may have output tokens in the case of recomputation.
+            seq_id = seq_ids[0]
+            seq_data = input_metadata.seq_data[seq_id]
+            token_ids = seq_data.get_token_ids()
+            token_ids = torch.tensor(token_ids,
+                                     dtype=torch.int64,
+                                     device=logits.device)
+            score = torch.gather(logits[i], 0, token_ids)
+            score = torch.where(score < 0, score * r, score / r)
+            logits[i].scatter_(0, token_ids, score)
+        else:
+            # A generation token.
+            for seq_id in seq_ids:
                 seq_data = input_metadata.seq_data[seq_id]
                 token_ids = seq_data.get_token_ids()
                 token_ids = torch.tensor(token_ids,
@@ -247,17 +257,6 @@ def _apply_penalties(
                 score = torch.gather(logits[i], 0, token_ids)
                 score = torch.where(score < 0, score * r, score / r)
                 logits[i].scatter_(0, token_ids, score)
-            else:
-                # A generation token.
-                for seq_id in seq_ids:
-                    seq_data = input_metadata.seq_data[seq_id]
-                    token_ids = seq_data.get_token_ids()
-                    token_ids = torch.tensor(token_ids,
-                                             dtype=torch.int64,
-                                             device=logits.device)
-                    score = torch.gather(logits[i], 0, token_ids)
-                    score = torch.where(score < 0, score * r, score / r)
-                    logits[i].scatter_(0, token_ids, score)
     return logits
 
 
