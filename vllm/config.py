@@ -399,11 +399,6 @@ def _get_and_verify_max_len(
         scaling_factor = rope_scaling["factor"]
         derived_max_model_len *= scaling_factor
 
-    # consifer use_dynamic_ntk case
-    use_dynamic_ntk = getattr(hf_config, "use_dynamic_ntk", None)
-    if use_dynamic_ntk is not None:
-        derived_max_model_len = 16384
-
     if max_model_len is None:
         max_model_len = derived_max_model_len
     elif max_model_len > derived_max_model_len:
