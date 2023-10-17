@@ -323,7 +323,7 @@ class NormHead(ColumnParallelLinear):
 
 class BaiChuanBaseForCausalLM(nn.Module):
 
-    def __init__(self, config, position_embedding: str, version: str):
+    def __init__(self, config, position_embedding: str, version: str = "1"):
         super().__init__()
         self.config = config
         self.model = BaiChuanModel(config, position_embedding)
@@ -476,3 +476,15 @@ class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 7b
 
     def __init__(self, config):
         super().__init__(config, "ROPE")
+
+
+class Baichuan2ForCausalLM(BaiChuanBaseForCausalLM):  # baichuan2 13b
+
+    def __init__(self, config):
+        super().__init__(config, "ALIBI", "2")
+
+
+class BaiChuan2ForCausalLM(BaiChuanBaseForCausalLM):  # baichuan2 7b
+
+    def __init__(self, config):
+        super().__init__(config, "ROPE", "2")
