@@ -44,6 +44,7 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
         kv_cache_dtype=args.kv_cache_dtype,
         kv_quant_params_path=args.kv_quant_params_path,
+        quantization=args.quantization
     )
     requests, labels, _ = sample_requests(
         args.dev_data_path,
@@ -103,5 +104,8 @@ if __name__ == "__main__":
     parser.add_argument("--kv-quant-params-path",
                         type=str,
                         default=None)
+    parser.add_argument("--quantization",
+                        type=str,
+                        default="smoothquant")
     args = parser.parse_args()
     main(args)
