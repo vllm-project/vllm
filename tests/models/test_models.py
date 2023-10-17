@@ -16,6 +16,7 @@ import pytest
 #     "meta-llama/Llama-2-7b-hf",
 # ]
 MODELS = [
+    "/cephfs/group/taiji-ieg-bp-cdp/sifaxie/llm/models/baichuan-13b"
     "/cephfs/group/taiji-ieg-bp-cdp/sifaxie/llm/models/baichuan2-13b"
 ]
 
