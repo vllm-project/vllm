@@ -303,6 +303,18 @@ class BaiChuanModel(nn.Module):
         return hidden_states
 
 
+class NormHead(ColumnParallelLinear):
+    def __init__(self, hidden_size, vocab_size, bias=False):
+        super().__init__(hidden_size, vocab_size, bias=False, gather_output=False)
+        self.first_flag = False
+    
+    def forward(self, hidden_states):
+        if self.first_flag:
+            self.first_flag = False
+            self.weight == nn.Parameter(nn.functional.normalize(self.weight))
+        return ColumnParallelLinear.forward(self, hidden_states)
+
+
 class BaiChuanBaseForCausalLM(nn.Module):
 
     def __init__(self, config, position_embedding: str):
