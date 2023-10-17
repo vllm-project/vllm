@@ -56,10 +56,10 @@ def test_column_blora(
     x = torch.randn(1, hidden_size, device="cuda")
 
     hf_first_output = hf_normhead.forward(x)
-    vllm_first_output = vllm_normhead.forward(x)
+    vllm_first_output, _ = vllm_normhead.forward(x)
     assert torch.allclose(hf_first_output, vllm_first_output, atol=1e-8)
 
 
     hf_second_output = hf_normhead.forward(x)
-    vllm_second_output = vllm_normhead.forward(x)
+    vllm_second_output, _ = vllm_normhead.forward(x)
     assert torch.allclose(hf_second_output, vllm_second_output, atol=1e-8)
