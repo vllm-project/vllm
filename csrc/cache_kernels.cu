@@ -154,6 +154,11 @@ __global__ void reshape_and_cache_kernel(
   const int x) {
   const int token_idx = blockIdx.x;
   const int slot_idx = slot_mapping[token_idx];
+  if (slot_idx < 0) {
+    // Padding token that should be ignored.
+    return;
+  }
+
   const int block_idx = slot_idx / block_size;
   const int block_offset = slot_idx % block_size;
 
@@ -176,8 +181,8 @@ __global__ void reshape_and_cache_kernel(
                               + head_idx * head_size * block_size
                               + head_offset * block_size
                               + block_offset;
-    key_cache[tgt_key_idx] = __ldg(&key[src_key_idx]);
-    value_cache[tgt_value_idx] = __ldg(&value[src_value_idx]);
+    key_cache[tgt_key_idx] = key[src_key_idx];
+    value_cache[tgt_value_idx] = value[src_value_idx];
   }
 }
 

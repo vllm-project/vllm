@@ -27,6 +27,7 @@ class EngineArgs:
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
+    max_paddings: int = 256
     disable_log_stats: bool = False
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
@@ -156,6 +157,10 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='maximum number of sequences per iteration')
+        parser.add_argument('--max-paddings',
+                            type=int,
+                            default=EngineArgs.max_paddings,
+                            help='maximum number of paddings in a batch')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
@@ -193,7 +198,8 @@ class EngineArgs:
                                          self.worker_use_ray)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
-                                           model_config.max_model_len)
+                                           model_config.max_model_len,
+                                           self.max_paddings)
         return model_config, cache_config, parallel_config, scheduler_config
 
 
