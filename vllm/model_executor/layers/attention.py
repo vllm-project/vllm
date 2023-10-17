@@ -10,6 +10,7 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 from vllm import attention_ops
 from vllm import cache_ops
 from vllm import pos_encoding_ops
+from vllm import fused_kernels
 from vllm.model_executor.input_metadata import InputMetadata
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
@@ -328,6 +329,122 @@ class PagedAttentionWithRoPE(PagedAttention):
             input_metadata,
             cache_event,
         )
+
+
+class DequantPagedAttentionWithRoPEQuant(PagedAttention):
+    """PagedAttention with rotary embedding."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        rotary_dim: int,
+        max_position: int = 8192,
+        base: int = 10000,
+        num_kv_heads: Optional[int] = None,
+        is_neox_style: bool = True,
+        quant_kv_cache: bool = False,
+        kv_quant_params: torch.Tensor = None,
+        dequant_scale: float = 1.0,
+        quant_scale: float = 1.0
+    ) -> None:
+        super().__init__(num_heads, head_size, scale, num_kv_heads, quant_kv_cache, kv_quant_params)
+        self.is_neox_style = is_neox_style
+
+        # Create the cos and sin cache.
+        inv_freq = 1.0 / (base**(torch.arange(
+            0, rotary_dim, 2, dtype=torch.float, device="cuda") / rotary_dim))
+        t = torch.arange(max_position, dtype=torch.float, device="cuda")
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+
+        # FIXME(woosuk): This assumes that we configure the default dtype when
+        # initializing the model.
+        # TODO(woosuk): Make it more robust.
+        torch_dtype = torch.get_default_dtype()
+        cache = cache.to(torch_dtype)
+        # Embedding size: [max_position, rotary_dim]
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.register_buffer('a', torch.tensor(dequant_scale, dtype=torch.float32, requires_grad=False))
+        self.register_buffer('inscale', torch.tensor(quant_scale, dtype=torch.float32, requires_grad=False))
+    
+    def _apply(self, fn):
+        super()._apply(fn)
+        self.a = self.a.cpu()
+        self.inscale = self.inscale.cpu()
+        return self
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self.a = self.a.to(*args, **kwargs)
+        self.a = self.a.to(torch.float32)
+        self.inscale = self.inscale.to(*args, **kwargs)
+        self.inscale = self.inscale.to(torch.float32)
+        return self
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
+    ) -> torch.Tensor:
+        """ PagedAttention forward pass with rotary embedding.
+
+        Args:
+            positions: shape = [num_tokens]
+                        query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size]
+            value: shape = [num_tokens, num_kv_heads * head_size]
+            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
+                block_size, x]
+            value_cache: shape = [num_blocks, num_kv_heads, head_size,
+                block_size]
+            input_metadata: metadata for paged attention.
+            cache_event: event to wait for the cache operations to finish.
+
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+
+        # Apply rotary embedding to the query and key before passing them
+        # to the attention op.
+        query_dequant = torch.empty_like(query, dtype=self.cos_sin_cache.dtype)
+        key_dequant = torch.empty_like(key, dtype=self.cos_sin_cache.dtype)
+        value_dequant = torch.empty_like(value, dtype=self.cos_sin_cache.dtype)
+
+        fused_kernels.invoke_dequant(value_dequant, value, self.a.item())
+        pos_encoding_ops.invoke_dequant_rotary_embedding(
+            positions,
+            query,
+            query_dequant,
+            key,
+            key_dequant,
+            self.head_size,
+            self.cos_sin_cache,
+            self.a.item(),
+            self.a.item(),
+            self.is_neox_style,
+        )
+        out = super().forward(
+            query_dequant,
+            key_dequant,
+            value_dequant,
+            key_cache,
+            value_cache,
+            input_metadata,
+            cache_event,
+        )
+        quant_out = torch.empty_like(out, dtype=torch.int8)
+        fused_kernels.invoke_quant(quant_out, out, self.inscale.item())
+        return quant_out
 
 
 class PagedAttentionWithALiBi(PagedAttention):
