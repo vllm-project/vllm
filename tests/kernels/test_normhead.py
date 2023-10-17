@@ -48,7 +48,7 @@ def test_column_blora(
     vllm_normhead = vllm_NormHead(hidden_size, vocab_size, bias=False)
 
     # align weights
-    hf_normhead.weight = hf_normhead.weight.to(dtype)
+    hf_normhead.weight.data = hf_normhead.weight.to(dtype)
     vllm_normhead.weight.copy_(hf_normhead.weight)
     assert torch.allclose(vllm_normhead.weight, hf_normhead.weight, atol=1e-8)
 
