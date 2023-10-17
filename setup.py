@@ -208,7 +208,7 @@ ext_modules.append(cuda_utils_extension)
 
 topk_extension = CUDAExtension(
     name="vllm.topk",
-    sources=["csrc/topk/vllm_topk.cpp", "csrc/topk/topk_kernels.cu"],
+    sources=["csrc/topk.cpp", "csrc/topk/topk_kernels.cu"],
     extra_compile_args={
         "cxx": CXX_FLAGS,
         "nvcc": NVCC_FLAGS,
@@ -216,15 +216,6 @@ topk_extension = CUDAExtension(
 )
 ext_modules.append(topk_extension)
 
-sort_extension = CUDAExtension(
-    name="vllm.sort",
-    sources=["csrc/sort/vllm_sort.cpp", "csrc/sort/cub_sort.cu"],
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(sort_extension)
 
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
