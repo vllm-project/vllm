@@ -117,7 +117,9 @@ __global__ void dequant_rotary_embedding_kernel(
   const scalar_t* __restrict__ cos_sin_cache,   // [max_position, 2, rot_dim // 2]
   const int rot_dim,
   const int query_stride,
+  const int query_out_stride,
   const int key_stride,
+  const int key_out_stride,
   const int num_heads,
   const int num_kv_heads,
   const int head_size,
@@ -136,8 +138,9 @@ __global__ void dequant_rotary_embedding_kernel(
   for (int i = threadIdx.x; i < nq; i += blockDim.x) {
     const int head_idx = i / embed_dim;
     const int token_head = token_idx * query_stride + head_idx * head_size;
+    const int token_out_head = token_idx * query_out_stride + head_idx * head_size;
     const int rot_offset = i % embed_dim;
-    apply_dequant_rotary_embedding<scalar_t, IS_NEOX>(query + token_head, query_out + token_head, cos_ptr,
+    apply_dequant_rotary_embedding<scalar_t, IS_NEOX>(query + token_head, query_out + token_out_head, cos_ptr,
                                               sin_ptr, rot_offset, embed_dim, query_scale);
   }
 
@@ -145,8 +148,9 @@ __global__ void dequant_rotary_embedding_kernel(
   for (int i = threadIdx.x; i < nk; i += blockDim.x) {
     const int head_idx = i / embed_dim;
     const int token_head = token_idx * key_stride + head_idx * head_size;
+    const int token_out_head = token_idx * key_out_stride + head_idx * head_size;
     const int rot_offset = i % embed_dim;
-    apply_dequant_rotary_embedding<scalar_t, IS_NEOX>(key + token_head, key_out + token_head, cos_ptr,
+    apply_dequant_rotary_embedding<scalar_t, IS_NEOX>(key + token_head, key_out + token_out_head, cos_ptr,
                                               sin_ptr, rot_offset, embed_dim, key_scale);
   }
 }
@@ -220,8 +224,8 @@ void invoke_dequant_rotary_embedding(
   int num_kv_heads = key.size(1) / head_size;
   int query_stride = query.stride(0);
   int key_stride = key.stride(0);
-  std::cout << rot_dim << std::endl;
-  std::cout << query_stride << std::endl;
+  int query_out_stride = query_out.stride(0);
+  int key_out_stride = key_out.stride(0);
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * rot_dim / 2, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -239,7 +243,9 @@ void invoke_dequant_rotary_embedding(
           cos_sin_cache.data_ptr<scalar_t>(),
           rot_dim,
           query_stride,
+          query_out_stride,
           key_stride,
+          key_out_stride,
           num_heads,
           num_kv_heads,
           head_size,
@@ -255,7 +261,9 @@ void invoke_dequant_rotary_embedding(
           cos_sin_cache.data_ptr<scalar_t>(),
           rot_dim,
           query_stride,
+          query_out_stride,
           key_stride,
+          key_out_stride,
           num_heads,
           num_kv_heads,
           head_size,
