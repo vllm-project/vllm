@@ -67,8 +67,8 @@ struct FloatVec<uint4> {
 
 // Utility functions for type conversions.
 inline __device__ uint32_t h0_h0(uint16_t a) {
-#ifndef USE_ROCM
   uint32_t b;
+#ifndef USE_ROCM
   asm volatile("mov.b32 %0, {%1, %1};" : "=r"(b) : "h"(a));
 #else
   union {
@@ -77,7 +77,7 @@ inline __device__ uint32_t h0_h0(uint16_t a) {
   } tmp;
   tmp.u16[0] = a;
   tmp.u16[1] = a;
-  b = tmp.u32
+  b = tmp.u32;
 #endif
   return b;
 }
