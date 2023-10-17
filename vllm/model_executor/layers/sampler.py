@@ -196,15 +196,15 @@ def _apply_penalties(
     else:
         # Return early if all sequences have zero penalties.
         return logits
-    
+
     max_output_len = max(len(tokens) for tokens in output_tokens)
     padded_output_tokens = [
         tokens + [vocab_size] * (max_output_len - len(tokens))
         for tokens in output_tokens
     ]
     output_tokens_tensor = torch.tensor(padded_output_tokens,
-                                            dtype=torch.long,
-                                            device=logits.device)
+                                        dtype=torch.long,
+                                        device=logits.device)
 
     # Compute the bin counts for the output tokens.
     # vocab_size + 1 for padding.
@@ -216,11 +216,11 @@ def _apply_penalties(
     bin_counts = bin_counts[:, :vocab_size]  # Remove the padding bin.
 
     frequency_penalties = torch.tensor(frequency_penalties,
-                                           dtype=logits.dtype,
-                                           device=logits.device)
+                                       dtype=logits.dtype,
+                                       device=logits.device)
     presence_penalties = torch.tensor(presence_penalties,
-                                          dtype=logits.dtype,
-                                          device=logits.device)
+                                      dtype=logits.dtype,
+                                      device=logits.device)
 
     # We follow the definition in OpenAI API.
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
