@@ -47,6 +47,7 @@ class HfRunner:
             torch_dtype=torch_dtype,
             trust_remote_code=True,
         ).cuda()
+        print(self.model)
         if tokenizer_name is None:
             tokenizer_name = model_name
         self.tokenizer = get_tokenizer(tokenizer_name, trust_remote_code=True)
