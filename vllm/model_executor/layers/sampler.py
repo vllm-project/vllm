@@ -189,7 +189,7 @@ def _apply_penalties(input_metadata: InputMetadata, logits: torch.Tensor,
         f = frequency_penalties[i]
         r = repetition_penalties[i]
         if abs(p) < _SAMPLING_EPS and abs(f) < _SAMPLING_EPS and abs(
-                r) < _SAMPLING_EPS:
+                r - 1.0) < _SAMPLING_EPS:
             continue
         break
     else:
