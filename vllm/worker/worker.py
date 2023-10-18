@@ -162,7 +162,8 @@ class Worker:
         slot_mapping: List[List[int]] = []
         input_embeds: List[torch.Tensor] = []
 
-        zero_token_embeds = self.model.get_input_embeddings()(torch.tensor([[0]], device="cuda"))[0]
+        zero_token_embeds = self.model.get_input_embeddings()(torch.tensor(
+            [[0]], device="cuda"))[0]
         zero_embeds = torch.zeros(zero_token_embeds.shape, device="cuda")
 
         # Add prompt tokens.
@@ -185,9 +186,12 @@ class Worker:
 
             input_tokens.append(prompt_tokens)
             if seq_data.has_prompt_embeds_forwarding():
-                # If prompt_embeds are set, the token_ids of the prompt are treated as 0, 
+                # If prompt_embeds are set,
+                # the token_ids of the prompt are treated as 0,
                 # so zero_token_embeds is excluded from prompt_embeds.
-                input_embeds.append(seq_data.prompt_embeds.to("cuda") - zero_token_embeds.repeat(len(prompt_tokens), 1))
+                input_embeds.append(
+                    seq_data.prompt_embeds.to("cuda") -
+                    zero_token_embeds.repeat(len(prompt_tokens), 1))
             else:
                 input_embeds.append(zero_embeds.repeat(len(prompt_tokens), 1))
 
@@ -271,7 +275,8 @@ class Worker:
             for block_table in generation_block_tables
         ]
         padded_input_embeds = [
-            _pad_embeddings_to_max(embeds, max_seq_len, zero_embeds) for embeds in input_embeds
+            _pad_embeddings_to_max(embeds, max_seq_len, zero_embeds)
+            for embeds in input_embeds
         ]
 
         # Convert to tensors.
@@ -291,8 +296,7 @@ class Worker:
                                            dtype=torch.int,
                                            device="cuda")
         embeds_tensor = torch.stack(padded_input_embeds).to(
-                                     dtype=self.model_config.dtype,
-                                     device="cuda")
+            dtype=self.model_config.dtype, device="cuda")
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
@@ -402,7 +406,7 @@ def _get_zero_embeds(seqs_len: int, embedding_dim: int) -> torch.Tensor:
 
 
 def _pad_embeddings_to_max(x: torch.Tensor, max_len: int,
-                                 pad: torch.Tensor) -> torch.Tensor:
+                           pad: torch.Tensor) -> torch.Tensor:
     return torch.cat(
         [x, pad.repeat(max_len - x.shape[0], 1)],
         dim=0,
