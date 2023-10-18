@@ -119,7 +119,7 @@ def _prune_hidden_states(
                 selected_token_indices.extend(
                     range(start_idx, start_idx + prompt_len - 1))
             selected_token_indices.append(start_idx + prompt_len - 1)
-            start_idx += prompt_len
+            start_idx += input_metadata.max_prompt_len
         else:
             num_seqs = len(seq_ids)
             selected_token_indices.extend(
@@ -129,6 +129,7 @@ def _prune_hidden_states(
     selected_token_indices = torch.tensor(selected_token_indices,
                                           dtype=torch.long,
                                           device=hidden_states.device)
+    hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
     return hidden_states.index_select(0, selected_token_indices)
 
 
