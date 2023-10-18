@@ -162,7 +162,8 @@ class Worker:
         slot_mapping: List[List[int]] = []
         input_embeds: List[torch.Tensor] = []
 
-        embedding_dim = self.model.get_input_embeddings().embedding_dim
+        zero_token_embeds = self.model.get_input_embeddings()(torch.tensor([[0]], device="cuda"))[0]
+        zero_embeds = torch.zeros(zero_token_embeds.shape, device="cuda")
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -184,10 +185,11 @@ class Worker:
 
             input_tokens.append(prompt_tokens)
             if seq_data.has_prompt_embeds_forwarding():
-                input_embeds.append(seq_data.prompt_embeds.to("cuda"))
+                # If prompt_embeds are set, the token_ids of the prompt are treated as 0, 
+                # so zero_token_embeds is excluded from prompt_embeds.
+                input_embeds.append(seq_data.prompt_embeds.to("cuda") - zero_token_embeds.repeat(len(prompt_tokens), 1))
             else:
-                input_embeds.append(
-                    _get_zero_embeds(len(prompt_tokens), embedding_dim))
+                input_embeds.append(zero_embeds.repeat(len(prompt_tokens), 1))
 
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
@@ -226,7 +228,7 @@ class Worker:
                 generation_token = seq_data.get_last_token_id()
 
                 input_tokens.append([generation_token])
-                input_embeds.append(_get_zero_embeds(1, embedding_dim))
+                input_embeds.append(zero_embeds)
 
                 context_len = seq_data.get_len()
                 position = context_len - 1
@@ -268,13 +270,9 @@ class Worker:
             _pad_to_max(block_table, max_num_blocks_per_seq, pad=0)
             for block_table in generation_block_tables
         ]
-
-        input_embeds = torch.cat(input_embeds, dim=0)
-        input_embeds = _pad_embeddings_to_alignment(
-            input_embeds,
-            multiple_of=8,
-            embedding_dim=embedding_dim,
-        )
+        padded_input_embeds = [
+            _pad_embeddings_to_max(embeds, max_seq_len, zero_embeds) for embeds in input_embeds
+        ]
 
         # Convert to tensors.
         tokens_tensor = torch.tensor(padded_input_tokens,
@@ -292,8 +290,9 @@ class Worker:
         block_tables_tensor = torch.tensor(padded_block_tables,
                                            dtype=torch.int,
                                            device="cuda")
-        embeds_tensor = input_embeds.to(dtype=self.model_config.dtype,
-                                        device="cuda")
+        embeds_tensor = torch.stack(padded_input_embeds).to(
+                                     dtype=self.model_config.dtype,
+                                     device="cuda")
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
@@ -402,10 +401,10 @@ def _get_zero_embeds(seqs_len: int, embedding_dim: int) -> torch.Tensor:
     return torch.zeros(seqs_len, embedding_dim, device="cuda")
 
 
-def _pad_embeddings_to_alignment(x: torch.Tensor, multiple_of: int,
-                                 embedding_dim: int) -> torch.Tensor:
+def _pad_embeddings_to_max(x: torch.Tensor, max_len: int,
+                                 pad: torch.Tensor) -> torch.Tensor:
     return torch.cat(
-        [x, _get_zero_embeds(((-x.shape[0]) % multiple_of), embedding_dim)],
+        [x, pad.repeat(max_len - x.shape[0], 1)],
         dim=0,
     )
 
