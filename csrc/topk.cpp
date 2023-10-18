@@ -6,6 +6,7 @@
 #include <vector>
 
 void top_k(const torch::Tensor src,
+           const torch::Tensor softmax_src,
            torch::Tensor       dst,
            bool                top_k,
            int                 max_top_k,
