@@ -45,7 +45,7 @@ def _replace_module(parent, child_name, new_module, child):
                 module.to(child.weight.device)
 
 def _create_and_replace(lora_config, adapter_name, target, target_name, parent):
-    if isinstance(target, ColumnParallelLinear) or isinstance(target, RowParallelLinear):
+    if (isinstance(target, ColumnParallelLinear) or isinstance(target, RowParallelLinear)) and not isinstance(target, LoraLayer):
         new_module = _create_new_module(lora_config, adapter_name, target)
         _replace_module(parent, target_name, new_module, target)
     elif isinstance(target, LoraLayer):
