@@ -238,6 +238,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         index: int,
         text: str,
         finish_reason: Optional[str] = None,
+        payload: Optional[Tuple[float, int]] = None,
     ) -> str:
         choice_data = ChatCompletionResponseStreamChoice(
             index=index,
@@ -249,6 +250,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             created=created_time,
             model=model_name,
             choices=[choice_data],
+            payload=payload,
         )
         response_json = response.json(ensure_ascii=False)
 
@@ -280,6 +282,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                 response_json = create_stream_response_json(
                     index=i,
                     text=delta_text,
+                    payload=res.payload,
                 )
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
@@ -287,6 +290,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         index=i,
                         text="",
                         finish_reason=output.finish_reason,
+                        payload=res.payload,
                     )
                     yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"
@@ -454,6 +458,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         text: str,
         logprobs: Optional[LogProbs] = None,
         finish_reason: Optional[str] = None,
+        payload: Optional[Tuple[float, int]] = None,
     ) -> str:
         choice_data = CompletionResponseStreamChoice(
             index=index,
@@ -466,6 +471,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             created=created_time,
             model=model_name,
             choices=[choice_data],
+            payload=payload,
         )
         response_json = response.json(ensure_ascii=False)
 
@@ -492,6 +498,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                     index=i,
                     text=delta_text,
                     logprobs=logprobs,
+                    payload=res.payload,
                 )
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
@@ -502,6 +509,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                         text="",
                         logprobs=logprobs,
                         finish_reason=output.finish_reason,
+                        payload=res.payload,
                     )
                     yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"

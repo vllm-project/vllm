@@ -296,13 +296,18 @@ class LLMEngine:
         """Returns True if there are unfinished requests."""
         return self.scheduler.has_unfinished_seqs()
 
+    def get_payload(self) -> Tuple[float, int]:
+        """Returns current payload and the monotonic timestamp."""
+        return (self.scheduler.get_num_unfinished_seq_groups() /
+                self.scheduler_config.max_num_seqs, time.monotonic_ns())
+
     def _schedule(
         self
     ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs,
                List[RequestOutput]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         return seq_group_metadata_list, scheduler_outputs, [
-            RequestOutput.from_seq_group(seq_group)
+            RequestOutput.from_seq_group(seq_group, self.get_payload())
             for seq_group in scheduler_outputs.ignored_seq_groups
         ]
 
@@ -533,10 +538,10 @@ class LLMEngine:
         self.scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        request_outputs: List[RequestOutput] = []
-        for seq_group in scheduled_seq_groups:
-            request_output = RequestOutput.from_seq_group(seq_group)
-            request_outputs.append(request_output)
+        request_outputs = [
+            RequestOutput.from_seq_group(seq_group, self.get_payload())
+            for seq_group in scheduled_seq_groups
+        ]
 
         if self.log_stats:
             # Log the system stats.
