@@ -115,6 +115,7 @@ class LLMEngine:
         # Create the scheduler.
         self.scheduler = Scheduler(scheduler_config, cache_config)
 
+        self.last_request_id: str = ""
         # Logging.
         self.last_logging_time = 0.0
         # List of (timestamp, num_tokens)
@@ -258,6 +259,7 @@ class LLMEngine:
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
         """
+        self.last_request_id = request_id
         if arrival_time is None:
             arrival_time = time.monotonic()
         if prompt_token_ids is None:
@@ -307,7 +309,8 @@ class LLMEngine:
                List[RequestOutput]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         return seq_group_metadata_list, scheduler_outputs, [
-            RequestOutput.from_seq_group(seq_group, self.get_payload())
+            RequestOutput.from_seq_group(seq_group, self.get_payload(),
+                                         self.last_request_id)
             for seq_group in scheduler_outputs.ignored_seq_groups
         ]
 
@@ -539,7 +542,8 @@ class LLMEngine:
 
         # Create the outputs.
         request_outputs = [
-            RequestOutput.from_seq_group(seq_group, self.get_payload())
+            RequestOutput.from_seq_group(seq_group, self.get_payload(),
+                                         self.last_request_id)
             for seq_group in scheduled_seq_groups
         ]
 

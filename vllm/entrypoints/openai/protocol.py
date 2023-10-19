@@ -73,6 +73,7 @@ class ChatCompletionRequest(BaseModel):
     use_beam_search: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
+    id: Optional[str] = None
 
 
 class CompletionRequest(BaseModel):
@@ -100,6 +101,7 @@ class CompletionRequest(BaseModel):
     use_beam_search: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
+    id: Optional[str] = None
 
 
 class LogProbs(BaseModel):
@@ -122,6 +124,7 @@ class CompletionResponse(BaseModel):
     object: str = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     payload: Optional[Tuple[float, int]] = None,
+    last_request_id: Optional[str] = None,
     model: str
     choices: List[CompletionResponseChoice]
     usage: UsageInfo
@@ -139,6 +142,7 @@ class CompletionStreamResponse(BaseModel):
     object: str = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     payload: Optional[Tuple[float, int]] = None,
+    last_request_id: Optional[str] = None,
     model: str
     choices: List[CompletionResponseStreamChoice]
 
@@ -159,6 +163,7 @@ class ChatCompletionResponse(BaseModel):
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     payload: Optional[Tuple[float, int]] = None,
+    last_request_id: Optional[str] = None,
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
@@ -180,5 +185,6 @@ class ChatCompletionStreamResponse(BaseModel):
     object: str = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     payload: Optional[Tuple[float, int]] = None,
+    last_request_id: Optional[str] = None,
     model: str
     choices: List[ChatCompletionResponseStreamChoice]

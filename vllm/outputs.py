@@ -54,8 +54,9 @@ class RequestOutput:
         prompt: The prompt string of the request.
         prompt_token_ids: The token IDs of the prompt.
         outputs: The output sequences of the request.
-        padload: Current payload and the monotonic timestamp.
         finished: Whether the whole request is finished.
+        padload: Current payload and the monotonic timestamp.
+        last_request_id: Last request id.
     """
 
     def __init__(
@@ -67,6 +68,7 @@ class RequestOutput:
         outputs: List[CompletionOutput],
         finished: bool,
         payload: Optional[Tuple[float, int]],
+        last_request_id: Optional[str],
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -75,12 +77,14 @@ class RequestOutput:
         self.outputs = outputs
         self.finished = finished
         self.payload = payload
+        self.last_request_id = last_request_id
 
     @classmethod
     def from_seq_group(
         cls,
         seq_group: SequenceGroup,
         payload: Optional[Tuple[float, int]] = None,
+        last_request_id: Optional[str] = None,
     ) -> "RequestOutput":
         # Get the top-n sequences.
         n = seq_group.sampling_params.n
@@ -115,7 +119,7 @@ class RequestOutput:
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
         return cls(seq_group.request_id, prompt, prompt_token_ids,
-                   prompt_logprobs, outputs, finished, payload)
+                   prompt_logprobs, outputs, finished, payload, last_request_id)
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "

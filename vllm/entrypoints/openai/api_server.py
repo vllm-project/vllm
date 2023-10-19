@@ -209,7 +209,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return error_check_ret
 
     model_name = request.model
-    request_id = f"cmpl-{random_uuid()}"
+    request_id = request.id or f"cmpl-{random_uuid()}"
     created_time = int(time.monotonic())
     try:
         sampling_params = SamplingParams(
@@ -239,6 +239,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         text: str,
         finish_reason: Optional[str] = None,
         payload: Optional[Tuple[float, int]] = None,
+        last_request_id: Optional[str] = None,
     ) -> str:
         choice_data = ChatCompletionResponseStreamChoice(
             index=index,
@@ -251,6 +252,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             model=model_name,
             choices=[choice_data],
             payload=payload,
+            last_request_id=last_request_id,
         )
         response_json = response.json(ensure_ascii=False)
 
@@ -283,6 +285,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                     index=i,
                     text=delta_text,
                     payload=res.payload,
+                    last_request_id=res.last_request_id,
                 )
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
@@ -291,6 +294,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         text="",
                         finish_reason=output.finish_reason,
                         payload=res.payload,
+                        last_request_id=res.last_request_id,
                     )
                     yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"
@@ -387,7 +391,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                                      "logit_bias is not currently supported")
 
     model_name = request.model
-    request_id = f"cmpl-{random_uuid()}"
+    request_id = request.id or f"cmpl-{random_uuid()}"
 
     use_token_ids = False
     if isinstance(request.prompt, list):
@@ -459,6 +463,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         logprobs: Optional[LogProbs] = None,
         finish_reason: Optional[str] = None,
         payload: Optional[Tuple[float, int]] = None,
+        last_request_id: Optional[str] = None,
     ) -> str:
         choice_data = CompletionResponseStreamChoice(
             index=index,
@@ -472,6 +477,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             model=model_name,
             choices=[choice_data],
             payload=payload,
+            last_request_id=last_request_id,
         )
         response_json = response.json(ensure_ascii=False)
 
@@ -499,6 +505,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                     text=delta_text,
                     logprobs=logprobs,
                     payload=res.payload,
+                    last_request_id=res.last_request_id,
                 )
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
@@ -510,6 +517,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                         logprobs=logprobs,
                         finish_reason=output.finish_reason,
                         payload=res.payload,
+                        last_request_id=res.last_request_id,
                     )
                     yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"
