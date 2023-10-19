@@ -275,6 +275,7 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
+        stop_preempted_request: bool = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -284,6 +285,7 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
+        self.stop_preempted_request = stop_preempted_request
         self._verify_args()
 
     def _verify_args(self) -> None:

@@ -19,6 +19,7 @@ class SequenceStatus(enum.Enum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
+    FINISHED_PREEMPTED = enum.auto()
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
@@ -27,6 +28,7 @@ class SequenceStatus(enum.Enum):
             SequenceStatus.FINISHED_LENGTH_CAPPED,
             SequenceStatus.FINISHED_ABORTED,
             SequenceStatus.FINISHED_IGNORED,
+            SequenceStatus.FINISHED_PREEMPTED,
         ]
 
     @staticmethod
@@ -42,6 +44,8 @@ class SequenceStatus(enum.Enum):
             # are longer than the model's length cap. Therefore, the stop
             # reason should also be "length" as in OpenAI API.
             finish_reason = "length"
+        elif status == SequenceStatus.FINISHED_PREEMPTED:
+            finish_reason = "preempted"
         else:
             finish_reason = None
         return finish_reason
