@@ -3,7 +3,7 @@ import argparse
 from vllm import EngineArgs, LLMEngine, SamplingParams
 import time
 from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
-from torch.profiler import profile, ProfilerActivity
+# from torch.profiler import profile, ProfilerActivity
 
 
 def make_predictions(engine: LLMEngine, prompts: list,
@@ -14,9 +14,9 @@ def make_predictions(engine: LLMEngine, prompts: list,
     # Run the engine by calling `engine.step()` manually.
     while True:
         request_outputs = engine.step()
-        # for request_output in request_outputs:
-        #     if request_output.finished:
-        #         print(f"- {request_output.prompt} {request_output.outputs[0].text}")
+        for request_output in request_outputs:
+            if request_output.finished:
+                print(f"- {request_output.prompt} {request_output.outputs[0].text}")
 
         if not (engine.has_unfinished_requests()):
             break
@@ -48,25 +48,25 @@ def run_test(args: argparse.Namespace, use_cuda_graph: bool):
     ] * args.batch_size
 
     # Prevent hanging from profiler. See https://github.com/pytorch/pytorch/issues/60158
-    with profile() as profiler:
-        pass
+    # with profile() as profiler:
+    #     pass
 
     # Warm up
     make_predictions(engine, test_prompts, sampling_params)
 
-    with profile(record_shapes=True) as prof:
-        start = time.time()
+    # with profile(record_shapes=True) as prof:
+    start = time.time()
 
-        print("start profiling")
-        make_predictions(engine, test_prompts, sampling_params)
-        print(f"Time taken: {time.time() - start} seconds")
+    print("start profiling")
+    make_predictions(engine, test_prompts, sampling_params)
+    print(f"Time taken: {time.time() - start} seconds")
 
-    prof.export_chrome_trace("trace.json")
+    # prof.export_chrome_trace("trace.json")
 
 
 def main(args: argparse.Namespace):
-    # run_test(args, use_cuda_graph=False)
-    # destroy_model_parallel()
+    run_test(args, use_cuda_graph=False)
+    destroy_model_parallel()
     run_test(args, use_cuda_graph=True)
 
 

@@ -26,6 +26,7 @@ The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
 import math
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -292,7 +293,8 @@ class LlamaForCausalLM(nn.Module):
         self._compiled_tensors = None
         self._compiled_logits = None
         self._compiled_input_metadata = None
-
+        self._forward_time = 0
+        
     def _compile_model(
         self,
         input_ids: torch.Tensor,
@@ -385,7 +387,6 @@ class LlamaForCausalLM(nn.Module):
                                                       kv_caches,
                                                       input_metadata,
                                                       cache_events)
-
         return self.compiled_model(
             input_metadata.block_tables.shape[0],
             input_ids,
@@ -403,7 +404,10 @@ class LlamaForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-
+        start = time.time()
+        if input_metadata.num_prompt_tokens > 0:
+            print("resetting forward time")
+            self._forward_time = 0
         if input_metadata.num_prompt_tokens > 0 or not input_metadata.use_cuda_graph:
             hidden_states = self.model(input_ids, positions, kv_caches,
                                        input_metadata, cache_events)
@@ -412,8 +416,18 @@ class LlamaForCausalLM(nn.Module):
             assert cache_events is None, "cache_events not supported yet"
             hidden_states = self.compile_and_call_model(
                 input_ids, positions, kv_caches, input_metadata, cache_events)
+        self._forward_time += time.time() - start
+        print(f"Model forward time: {self._forward_time:.4f}s")
+        if input_metadata.num_prompt_tokens > 0:
+            self._sample_time = 0
+
+        torch.cuda.synchronize()
+
+        start = time.time()
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata)
+                                input_metadata)
+        self._sample_time += time.time() - start
+        print(f"Model sample time: {self._sample_time:.4f}s")
         return next_tokens
 
     _column_parallel_layers = []
