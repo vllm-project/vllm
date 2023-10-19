@@ -2,9 +2,16 @@ from vllm.model_executor.layers.quantized_linear.awq import (
     AWQColumnParallelLinear, AWQRowParallelLinear)
 from vllm.model_executor.parallel_utils.tensor_parallel import (
     ColumnParallelLinear, RowParallelLinear)
+from vllm.model_executor.layers.int8_linear.w8a8linear import (
+    W8A8OFP32LinearWithSFactorCublas,
+    W8A8O32LinearCublas,
+    W8A8O32LinearCublasNoDequant,
+    W8A8OFP32LinearWithSFactorCublasNoQuant,
+    W8A8O32Linear)
 
 _QUANTIZED_LINEAR_REGISTRY = {
     "awq": (AWQColumnParallelLinear, AWQRowParallelLinear),
+    "smoothquant": (ColumnParallelLinear, RowParallelLinear)
 }
 
 

@@ -69,16 +69,16 @@ class LlamaMLP(nn.Module):
         super().__init__()
         self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
 
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                            "Only silu is supported for now.")
+
         if self.use_int8:
-            # self.gate_up_proj = W8A8O32LinearCublas(hidden_size,
-            #                                 2 * intermediate_size)
             self.gate_up_proj = W8A8O32Linear(hidden_size,
                                             2 * intermediate_size)
-            
-            # self.down_proj = W8A8OFP32LinearWithSFactorCublas(intermediate_size,
-            #                                         hidden_size)
             self.down_proj = W8A8O32Linear(intermediate_size,
                                                     hidden_size)
+            self.act_fn = DequantSiluAndMulQuant()
         else:
             self.gate_up_proj = ParallelLinear.column(hidden_size,
                                                     2 * intermediate_size,
@@ -92,19 +92,13 @@ class LlamaMLP(nn.Module):
                                                 input_is_parallel=True,
                                                 perform_initialization=False,
                                                 quant_config=quant_config)
-        
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                            "Only silu is supported for now.")
-        # self.act_fn = SiluAndMul()
-        self.act_fn = DequantSiluAndMulQuant()
+            self.act_fn = SiluAndMul()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         # FIXME: currently gate up share same scale, plan to use seperate scales 
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
-        # x = x.half()
         return x
     
     def trans_int8(self):
@@ -180,18 +174,21 @@ class LlamaAttention(nn.Module):
         self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
 
         if self.use_int8:
-            # self.qkv_proj = W8A8O32LinearCublas(
-            #     hidden_size,
-            #     (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim)
             self.qkv_proj = W8A8O32Linear(
                 hidden_size,
                 (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim)
-            # self.o_proj = W8A8OFP32LinearWithSFactorCublas(
-            #     self.total_num_heads * self.head_dim,
-            #     hidden_size)
             self.o_proj = W8A8O32Linear(
                 self.total_num_heads * self.head_dim,
                 hidden_size)
+            self.attn = DequantPagedAttentionWithRoPEQuant(self.num_heads,
+                                            self.head_dim,
+                                            self.scaling,
+                                            base=self.rope_theta,
+                                            rotary_dim=self.head_dim,
+                                            num_kv_heads=self.num_kv_heads,
+                                            quant_kv_cache=quant_kv_cache,
+                                            kv_quant_params=kv_quant_params)
+
         else:
             self.qkv_proj = ParallelLinear.column(
                 hidden_size,
@@ -210,20 +207,14 @@ class LlamaAttention(nn.Module):
                 perform_initialization=False,
                 quant_config=quant_config,
             )
-        # self.attn = PagedAttentionWithRoPE(self.num_heads,
-        #                                    self.head_dim,
-        #                                    self.scaling,
-        #                                    base=self.rope_theta,
-        #                                    rotary_dim=self.head_dim,
-        #                                    num_kv_heads=self.num_kv_heads,
-        #                                    quant_kv_cache=quant_kv_cache,
-        #                                    kv_quant_params=kv_quant_params)
-        self.attn = DequantPagedAttentionWithRoPEQuant(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           base=self.rope_theta,
-                                           rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads)
+            self.attn = PagedAttentionWithRoPE(self.num_heads,
+                                            self.head_dim,
+                                            self.scaling,
+                                            base=self.rope_theta,
+                                            rotary_dim=self.head_dim,
+                                            num_kv_heads=self.num_kv_heads,
+                                            quant_kv_cache=quant_kv_cache,
+                                            kv_quant_params=kv_quant_params)
 
     def forward(
         self,
@@ -297,6 +288,7 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
         self.self_attn = LlamaAttention(
@@ -312,15 +304,12 @@ class LlamaDecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             quant_config=quant_config,
         )
-        if quant_config is not None and quant_config.get_name() == "smoothquant":
+        if self.use_int8:
             self.input_layernorm = I8RMSNorm(config.hidden_size,
                                         eps=config.rms_norm_eps)
-            # self.post_attention_layernorm = I8RMSNorm(config.hidden_size,
-            #                                         eps=config.rms_norm_eps)
+            # kernel fusion, post_attention_layernorm are fused into DequantAddResidualI8RMSNormQuant
             self.dequant_add_residual_layernorm_quant = DequantAddResidualI8RMSNormQuant(config.hidden_size,
                                                     eps=config.rms_norm_eps)
-            # self.attn_dequant_add_residual = DequantAddResidual()
-            # self.mlp_dequant_add_residual = DequantAddResidual()
             self.dequant_add_residual = DequantAddResidual()
         else:
             self.input_layernorm = RMSNorm(config.hidden_size,
@@ -346,17 +335,19 @@ class LlamaDecoderLayer(nn.Module):
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
-        # hidden_states = residual + hidden_states
-        # hidden_states = self.attn_dequant_add_residual(residual, hidden_states)
 
-        # Fully Connected
-        # residual = hidden_states
-        residual, hidden_states = self.dequant_add_residual_layernorm_quant(residual, hidden_states)
-        # hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        # hidden_states = residual + hidden_states
-        # hidden_states = self.mlp_dequant_add_residual(residual, hidden_states)
-        hidden_states = self.dequant_add_residual(residual, hidden_states)
+        if self.use_int8:
+            residual, hidden_states = self.dequant_add_residual_layernorm_quant(residual, hidden_states)
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = self.dequant_add_residual(residual, hidden_states)
+        else:
+            hidden_states = residual + hidden_states
+            # Fully Connected
+            residual = hidden_states
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = residual + hidden_states
+        
         return hidden_states
 
 
