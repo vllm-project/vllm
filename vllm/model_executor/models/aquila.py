@@ -39,8 +39,9 @@ from vllm.model_executor.weight_utils import (
     load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
+from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
+                                                       ColumnParallelLinear,
+                                                       RowParallelLinear)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.aquila import AquilaConfig
 
@@ -56,16 +57,18 @@ class AquilaMLP(nn.Module):
         hidden_act: str,
     ):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                 2 * intermediate_size,
-                                                 bias=False,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           input_is_parallel=True,
-                                           perform_initialization=False)
+        self.gate_up_proj = ColumnParallelLinear(
+            hidden_size,
+            2 * intermediate_size,
+            bias=False,
+            gather_output=False,
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+        )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -130,14 +133,12 @@ class AquilaAttention(nn.Module):
             self.head_dim,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
         )
         self.attn = PagedAttentionWithRoPE(
             self.num_heads,
@@ -146,6 +147,7 @@ class AquilaAttention(nn.Module):
             rotary_dim=self.head_dim,
             base=self.rope_theta,
             max_position=self.max_position_embeddings,
+            num_kv_heads=self.num_kv_heads,
         )
 
     def forward(
@@ -176,7 +178,7 @@ class AquilaDecoderLayer(nn.Module):
         self.self_attn = AquilaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             max_position_embeddings=max_position_embeddings,
         )
@@ -230,7 +232,7 @@ class AquilaModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            perform_initialization=False)
+        )
         self.layers = nn.ModuleList([
             AquilaDecoderLayer(config) for _ in range(config.num_hidden_layers)
         ])
@@ -270,11 +272,12 @@ class AquilaForCausalLM(nn.Module):
         self.config = config
         self.model = AquilaModel(config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.lm_head = ColumnParallelLinear(config.hidden_size,
-                                            vocab_size,
-                                            bias=False,
-                                            gather_output=False,
-                                            perform_initialization=False)
+        self.lm_head = ColumnParallelLinear(
+            config.hidden_size,
+            vocab_size,
+            bias=False,
+            gather_output=False,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -306,7 +309,7 @@ class AquilaForCausalLM(nn.Module):
         q_proj_shard_size = (self.config.hidden_size // tp_size)
         kv_proj_shard_size = (self.config.hidden_size //
                               self.config.num_attention_heads *
-                              self.config.num_attention_heads // tp_size)
+                              self.config.num_key_value_heads // tp_size)
         attention_weight_specs = [
             # (weight_name, shard_size, offset)
             ("q_proj", q_proj_shard_size, 0),

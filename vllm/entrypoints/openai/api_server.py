@@ -210,7 +210,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
     model_name = request.model
     request_id = f"cmpl-{random_uuid()}"
-    created_time = int(time.time())
+    created_time = int(time.monotonic())
     try:
         sampling_params = SamplingParams(
             n=request.n,
@@ -411,7 +411,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     if error_check_ret is not None:
         return error_check_ret
 
-    created_time = int(time.time())
+    created_time = int(time.monotonic())
     try:
         sampling_params = SamplingParams(
             n=request.n,
@@ -567,10 +567,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
-    parser.add_argument("--host",
-                        type=str,
-                        default="localhost",
-                        help="host name")
+    parser.add_argument("--host", type=str, default=None, help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument("--allow-credentials",
                         action="store_true",

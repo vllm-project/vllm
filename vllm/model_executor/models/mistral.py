@@ -20,7 +20,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights.
+"""Inference-only Mistral model compatible with HuggingFace weights.
 
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
@@ -29,6 +29,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers import MistralConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -38,14 +39,12 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.quantized_linear import ParallelLinear
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
     load_tensor_parallel_weights, load_padded_tensor_parallel_vocab)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.mistral import MistralConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -64,13 +63,11 @@ class MistralMLP(nn.Module):
                                                   2 * intermediate_size,
                                                   bias=False,
                                                   gather_output=False,
-                                                  perform_initialization=False,
                                                   quant_config=quant_config)
         self.down_proj = ParallelLinear.row(intermediate_size,
                                             hidden_size,
                                             bias=False,
                                             input_is_parallel=True,
-                                            perform_initialization=False,
                                             quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -116,7 +113,6 @@ class MistralAttention(nn.Module):
             self.head_dim,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         self.o_proj = ParallelLinear.row(
@@ -124,7 +120,6 @@ class MistralAttention(nn.Module):
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         self.attn = PagedAttentionWithRoPE(self.num_heads,
@@ -225,7 +220,9 @@ class MistralModel(nn.Module):
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
-            vocab_size, config.hidden_size, perform_initialization=False)
+            vocab_size,
+            config.hidden_size,
+        )
         self.layers = nn.ModuleList([
             MistralDecoderLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)
@@ -275,7 +272,6 @@ class MistralForCausalLM(nn.Module):
                                              vocab_size,
                                              bias=False,
                                              gather_output=False,
-                                             perform_initialization=False,
                                              quant_config=None)
         self.sampler = Sampler(config.vocab_size)
 

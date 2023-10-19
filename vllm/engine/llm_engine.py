@@ -12,8 +12,8 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupMetadata, SequenceOutputs,
-                           SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupOutputs,
+                           SequenceOutputs, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
@@ -75,6 +75,7 @@ class LLMEngine:
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"revision={model_config.revision}, "
+            f"tokenizer_revision={model_config.tokenizer_revision}, "
             f"trust_remote_code={model_config.trust_remote_code}, "
             f"dtype={model_config.dtype}, "
             f"max_seq_len={model_config.max_model_len}, "
@@ -98,6 +99,7 @@ class LLMEngine:
             model_config.tokenizer,
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code,
+            tokenizer_revision=model_config.tokenizer_revision,
             revision=model_config.revision)
         self.seq_counter = Counter()
 
@@ -269,10 +271,10 @@ class LLMEngine:
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
-                the current time.
+                the current monotonic time.
         """
         if arrival_time is None:
-            arrival_time = time.time()
+            arrival_time = time.monotonic()
         if prompt_token_ids is None:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
@@ -363,9 +365,15 @@ class LLMEngine:
                         eos_token_id=self.tokenizer.eos_token_id))
         return current_worst_score >= highest_attainable_score
 
-    def _process_sequence_group_samples(
-            self, seq_group: SequenceGroup,
-            samples: List[SequenceOutputs]) -> None:
+    def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
+                                        outputs: SequenceGroupOutputs) -> None:
+        # Process prompt logprobs
+        prompt_logprobs = outputs.prompt_logprobs
+        if prompt_logprobs is not None:
+            seq_group.prompt_logprobs = prompt_logprobs
+
+        # Process samples
+        samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         existing_finished_seqs = seq_group.get_finished_seqs()
         parent_child_dict = {
@@ -533,8 +541,8 @@ class LLMEngine:
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-        for seq_group, samples in zip(scheduled_seq_groups, output):
-            self._process_sequence_group_samples(seq_group, samples)
+        for seq_group, outputs in zip(scheduled_seq_groups, output):
+            self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
@@ -581,7 +589,7 @@ class LLMEngine:
         prompt_run: bool,
         num_batched_tokens: int,
     ) -> None:
-        now = time.time()
+        now = time.monotonic()
         # Log the number of batched input tokens.
         if prompt_run:
             self.num_prompt_tokens.append((now, num_batched_tokens))
