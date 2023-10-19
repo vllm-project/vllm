@@ -81,18 +81,15 @@ def test_topk_kernel(inputs,topps,topks):
 if __name__ == "__main__":
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
-
     start.record()
-
     pre=torch.cuda.max_memory_allocated(device="cuda:0")
     _apply_top_p_top_k_with_new_kernel(INPUTS_TEST[0],TOPS_TEST[0],TOPK_TEST[0])
     aft=torch.cuda.max_memory_allocated(device="cuda:0")
-    print(aft-pre)
     end.record()
     torch.cuda.synchronize()
 
-    print(start.elapsed_time(end))
-   
+    print(f"time cost of new kernel is {start.elapsed_time(end)/1000}s")
+    print(f"memory cost of new kernel cost is {aft-pre}")
 
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -101,7 +98,7 @@ if __name__ == "__main__":
     pre=torch.cuda.max_memory_allocated(device="cuda:0")
     _apply_top_p_top_k(INPUTS_TEST[0],TOPS_TEST[0],TOPK_TEST[0])
     aft=torch.cuda.max_memory_allocated(device="cuda:0")
-    print(aft-pre)
     end.record()
     torch.cuda.synchronize()
-    print(start.elapsed_time(end))
+    print(f"time cost of old kernel is {start.elapsed_time(end)/1000}s")
+    print(f"memory cost of old kernel cost is {aft-pre}")
