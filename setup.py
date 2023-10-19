@@ -91,25 +91,7 @@ if nvcc_cuda_version >= Version("11.2"):
 
 ext_modules = []
 
-# Int8GEMM(cutlass required)
-i8gemm_extension = CUDAExtension(
-    name='vllm.i8gemm',
-    sources=[
-        'csrc/int8gemm/cutlass/linear.cu',
-        'csrc/int8gemm/cutlass/bmm.cu',
-        'csrc/int8gemm/cutlass/fused.cu',
-        'csrc/int8gemm/cutlass/bindings.cpp',
-    ],
-    include_dirs=['csrc/int8gemm/cutlass/include'],
-    extra_link_args=['-lcublas_static', '-lcublasLt_static',
-                        '-lculibos', '-lcudart', '-lcudart_static',
-                        '-lrt', '-lpthread', '-ldl', '-L/usr/lib/x86_64-linux-gnu/'],
-    extra_compile_args={'cxx': ['-std=c++14', '-O3'],
-                        'nvcc': ['-O3', '-std=c++14', '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__']},
-)
-ext_modules.append(i8gemm_extension)
-
-# int8gemm(cutlass required)
+# int8gemm
 i8cugemm_extension = CUDAExtension(
     name='vllm.i8cugemm',
     sources=[
