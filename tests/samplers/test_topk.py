@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import List
 import pytest
 import torch
 from vllm import topk
@@ -11,7 +11,7 @@ TOPK_TEST = [[random.randint(1, 100) for _ in range(batch_size)]
              for _ in range(test_cnt)]
 TOPS_TEST = [[random.uniform(0.0, 1.0) for _ in range(batch_size)]
              for _ in range(test_cnt)]
-INPUTS_TEST = [torch.randn(batch_size, vocab_size, device='cuda:0')]
+INPUTS_TEST = [torch.randn(batch_size, vocab_size, device="cuda:0")]
 
 
 def _apply_top_p_top_k_with_new_kernel(
