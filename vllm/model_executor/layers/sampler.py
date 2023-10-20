@@ -8,7 +8,8 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather)
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SamplerOutput, SequenceData, SequenceOutputs
+from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
+                           SequenceData, SequenceGroupOutputs, SequenceOutputs)
 from vllm import topk
 _SAMPLING_EPS = 1e-5
 
