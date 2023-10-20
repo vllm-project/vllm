@@ -17,14 +17,7 @@ app = FastAPI()
 engine = None
 
 
-@app.get("/healthz")
-@app.get("/health")
-def healthcheck():
-    return "OK"
-
-
-@app.post("/predict")
-@app.post("/stream")
+@app.post("/generate")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
 
@@ -38,38 +31,25 @@ async def generate(request: Request) -> Response:
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
+
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Streaming case
-    async def stream_results() -> AsyncGenerator[str, None]:
-        last_output_text = ""
+    async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
-            ret = {
-                "text":
-                request_output.outputs[-1].text[len(last_output_text):],
-                "count_prompt_tokens":
-                len(request_output.prompt_token_ids),
-                "count_output_tokens":
-                len(request_output.outputs[0].token_ids),
-                "log_probs":
-                request_output.outputs[0].logprobs[-1]
-                if sampling_params.logprobs else None,
-                "finished":
-                request_output.finished,
-            }
-            last_output_text = request_output.outputs[-1].text
-            yield f"data:{json.dumps(ret)}\n\n"
+            prompt = request_output.prompt
+            text_outputs = [
+                prompt + output.text for output in request_output.outputs
+            ]
+            ret = {"text": text_outputs}
+            yield (json.dumps(ret) + "\0").encode("utf-8")
 
     if stream:
         return StreamingResponse(stream_results())
 
     # Non-streaming case
     final_output = None
-    tokens = []
-    last_output_text = ""
     async for request_output in results_generator:
-        tokens.append(request_output.outputs[-1].text[len(last_output_text):])
-        last_output_text = request_output.outputs[-1].text
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await engine.abort(request_id)
@@ -78,14 +58,9 @@ async def generate(request: Request) -> Response:
 
     assert final_output is not None
     prompt = final_output.prompt
-    ret = {
-        "text": final_output.outputs[0].text,
-        "count_prompt_tokens": len(final_output.prompt_token_ids),
-        "count_output_tokens": len(final_output.outputs[0].token_ids),
-        "log_probs": final_output.outputs[0].logprobs,
-        "tokens": tokens,
-    }
-    return Response(content=json.dumps(ret))
+    text_outputs = [prompt + output.text for output in final_output.outputs]
+    ret = {"text": text_outputs}
+    return JSONResponse(ret)
 
 
 if __name__ == "__main__":
@@ -98,10 +73,8 @@ if __name__ == "__main__":
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="debug",
-        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-    )
+    uvicorn.run(app,
+                host=args.host,
+                port=args.port,
+                log_level="debug",
+                timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
