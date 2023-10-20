@@ -234,8 +234,8 @@ class LLMEngine:
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
-    def compile_cuda_graphs(self) -> None:
-        """Compiles CUDA graphs up to max sequence num."""
+    def warm_up_cuda_graph(self) -> None:
+        """Compiles a CUDA graph with batch size of max sequence num."""
         if not self.model_config.use_cuda_graph:
             return
 

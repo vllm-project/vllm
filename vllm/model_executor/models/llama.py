@@ -50,6 +50,8 @@ from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+forward_time = 0
+
 
 class LlamaMLP(nn.Module):
 
@@ -293,113 +295,90 @@ class LlamaForCausalLM(nn.Module):
                                              quant_config=None)
         self.sampler = Sampler(config.vocab_size)
 
-        self.compiled_model = None
-        self._cuda_graph = None
-        self._compiled_tensors = None
-        self._compiled_logits = None
-        self._compiled_input_metadata = None
+        self._cuda_graph: Dict[int, torch.cuda.CUDAGraph] = {}
+        self._compiled_tensors: Dict[
+            int,
+            Tuple[
+                torch.Tensor,
+                torch.Tensor,
+            ],
+        ] = {}
+        self._compiled_logits: Dict[int, torch.Tensor] = {}
+        self._compiled_input_metadata: Dict[int, InputMetadata] = {}
         self._forward_time = 0
-        
-    def _compile_model(
+
+    def _compile_for_batch_size(
         self,
+        batch_size: int,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ):
-        assert (self._cuda_graph is None and self._compiled_tensors is None and
-                self._compiled_logits is None and self._compiled_input_metadata is None), "Already compiled the model"
+        max_batch_size = max(self._cuda_graph.keys(), default=None)
+        pool = (None if batch_size == max_batch_size or max_batch_size is None
+                else self._cuda_graph[max_batch_size].pool()
+                )  # reusing memory pool
 
-        self._cuda_graph: Dict[int, torch.cuda.CUDAGraph] = {}
-        self._compiled_tensors: Dict[int, Tuple[torch.Tensor,
-                                                torch.Tensor, ], ] = {}
-        self._compiled_logits: Dict[int, torch.Tensor] = {}
-        self._compiled_input_metadata: Dict[int, InputMetadata] = {}
+        self._cuda_graph[batch_size] = torch.cuda.CUDAGraph()
 
-        batch_size = input_metadata.block_tables.shape[0]
-        for i in range(batch_size, 0, -1):
+        # The following fields are used in model forward pass
+        # input_metadata.block_tables, # shape[1] hardcoded to model_config.max_model_len
+        # input_metadata.context_lens,
+        # input_metadata.slot_mapping,
+        # input_metadata.max_context_len, # hardcoded to model_config.max_model_len
 
-            padded_i = math.ceil(i / 8) * 8
-            pool = (None if i == batch_size else
-                    self._cuda_graph[batch_size].pool())  # reusing memory pool
+        self._compiled_input_metadata[batch_size] = InputMetadata(
+            input_metadata.seq_groups,
+            input_metadata.seq_data,
+            input_metadata.prompt_lens,
+            input_metadata.slot_mapping[:batch_size].clone(),
+            input_metadata.context_lens[:batch_size].clone(),
+            input_metadata.max_context_len,
+            input_metadata.block_tables[:batch_size].clone(),
+            input_metadata.use_cuda_graph,
+        )
 
-            self._cuda_graph[i] = torch.cuda.CUDAGraph()
+        self._compiled_tensors[batch_size] = tuple([
+            input_ids[:batch_size].clone(),
+            positions[:batch_size].clone(),
+        ])
 
-            # Need the following tensors from input_metadata:
-            # input_metadata.block_tables, # shape[1] hardcoded to model_config.max_model_len
-            # input_metadata.context_lens,
-            # input_metadata.slot_mapping,
-            # input_metadata.max_context_len, # hardcoded to model_config.max_model_len
-
-            self._compiled_input_metadata[i] = InputMetadata(
-                input_metadata.seq_groups,
-                input_metadata.seq_data,
-                input_metadata.prompt_lens,
-                input_metadata.slot_mapping[:i].clone(),
-                input_metadata.context_lens[:i].clone(),
-                input_metadata.max_context_len,
-                input_metadata.block_tables[:i].clone(),
-                input_metadata.use_cuda_graph,
+        with torch.cuda.graph(self._cuda_graph[batch_size], pool=pool):
+            self._compiled_logits[batch_size] = self.model.forward(
+                *self._compiled_tensors[batch_size],
+                kv_caches=kv_caches,
+                input_metadata=self._compiled_input_metadata[batch_size],
+                cache_events=None,
             )
-
-            self._compiled_tensors[i] = tuple([
-                input_ids[:padded_i].clone(),
-                positions[:padded_i].clone(),
-            ])
-
-            with torch.cuda.graph(self._cuda_graph[i], pool=pool):
-                self._compiled_logits[i] = self.model.forward(
-                    *self._compiled_tensors[i],
-                    kv_caches=kv_caches,
-                    input_metadata=self._compiled_input_metadata[i],
-                    cache_events=None,
-                )
-
-        def replay(
-            batch_size: int,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[KVCache],
-            input_metadata: InputMetadata,
-            cache_events: Optional[List[torch.cuda.Event]],
-        ):
-            self._compiled_tensors[batch_size][0].copy_(input_ids)
-            self._compiled_tensors[batch_size][1].copy_(positions)
-            self._compiled_input_metadata[batch_size].block_tables.copy_(
-                input_metadata.block_tables)
-            self._compiled_input_metadata[batch_size].context_lens.copy_(
-                input_metadata.context_lens)
-            self._compiled_input_metadata[batch_size].slot_mapping.copy_(
-                input_metadata.slot_mapping)
-
-            self._cuda_graph[batch_size].replay()
-
-            return self._compiled_logits[batch_size]
-
-        return replay
 
     def compile_and_call_model(
         self,
+        batch_size: int,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        if self.compiled_model is None:
-            self.compiled_model = self._compile_model(input_ids, positions,
-                                                      kv_caches,
-                                                      input_metadata,
-                                                      cache_events)
-        return self.compiled_model(
-            input_metadata.block_tables.shape[0],
-            input_ids,
-            positions,
-            kv_caches,
-            input_metadata,
-            cache_events,
-        )
+        if batch_size not in self._cuda_graph:
+            self._compile_for_batch_size(batch_size, input_ids, positions,
+                                         kv_caches, input_metadata,
+                                         cache_events)
+
+        self._compiled_tensors[batch_size][0].copy_(input_ids)
+        self._compiled_tensors[batch_size][1].copy_(positions)
+        self._compiled_input_metadata[batch_size].block_tables.copy_(
+            input_metadata.block_tables)
+        self._compiled_input_metadata[batch_size].context_lens.copy_(
+            input_metadata.context_lens)
+        self._compiled_input_metadata[batch_size].slot_mapping.copy_(
+            input_metadata.slot_mapping)
+
+        self._cuda_graph[batch_size].replay()
+
+        return self._compiled_logits[batch_size]
 
     def forward(
         self,
@@ -409,10 +388,11 @@ class LlamaForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
+        global forward_time
         start = time.time()
+        batch_size = input_metadata.block_tables.shape[0]
         if input_metadata.num_prompt_tokens > 0:
-            print("resetting forward time")
-            self._forward_time = 0
+            forward_time = 0
         if input_metadata.num_prompt_tokens > 0 or not input_metadata.use_cuda_graph:
             hidden_states = self.model(input_ids, positions, kv_caches,
                                        input_metadata, cache_events)
@@ -420,19 +400,17 @@ class LlamaForCausalLM(nn.Module):
             # TODO: support cache_events
             assert cache_events is None, "cache_events not supported yet"
             hidden_states = self.compile_and_call_model(
-                input_ids, positions, kv_caches, input_metadata, cache_events)
-        self._forward_time += time.time() - start
-        print(f"Model forward time: {self._forward_time:.4f}s")
+                batch_size, input_ids, positions, kv_caches, input_metadata,
+                cache_events)
+        torch.cuda.synchronize()
+        forward_time += time.time() - start
         if input_metadata.num_prompt_tokens > 0:
             self._sample_time = 0
 
-        torch.cuda.synchronize()
-
         start = time.time()
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                input_metadata)
+                                   input_metadata)
         self._sample_time += time.time() - start
-        print(f"Model sample time: {self._sample_time:.4f}s")
         return next_tokens
 
     _column_parallel_layers = []
