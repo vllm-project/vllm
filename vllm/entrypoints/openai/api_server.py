@@ -35,6 +35,7 @@ try:
     import fastchat
     from fastchat.conversation import Conversation, SeparatorStyle
     from fastchat.model.model_adapter import get_conversation_template
+    from fastchat.conversation import get_conv_template
     _fastchat_available = True
 except ImportError:
     _fastchat_available = False
@@ -69,7 +70,23 @@ async def check_model(request) -> Optional[JSONResponse]:
     return ret
 
 
-async def get_gen_prompt(request) -> str:
+def _add_to_set(s, new_stop) -> None:
+    if not s:
+        return
+    if isinstance(s, str):
+        new_stop.add(s)
+    else:
+        new_stop.update(s)
+
+
+def _merge(x, y) -> List:
+    ret = set()
+    _add_to_set(x, ret)
+    _add_to_set(y, ret)
+    return list(ret)
+
+
+async def get_gen_params(request: ChatCompletionRequest) -> Tuple[str, Dict]:
     if not _fastchat_available:
         raise ModuleNotFoundError(
             "fastchat is not installed. Please install fastchat to use "
@@ -80,20 +97,23 @@ async def get_gen_prompt(request) -> str:
             f"fastchat version is low. Current version: {fastchat.__version__} "
             "Please upgrade fastchat to use: `$ pip install -U fschat`")
 
-    conv = get_conversation_template(request.model)
-    conv = Conversation(
-        name=conv.name,
-        system_template=conv.system_template,
-        system_message=conv.system_message,
-        roles=conv.roles,
-        messages=list(conv.messages),  # prevent in-place modification
-        offset=conv.offset,
-        sep_style=SeparatorStyle(conv.sep_style),
-        sep=conv.sep,
-        sep2=conv.sep2,
-        stop_str=conv.stop_str,
-        stop_token_ids=conv.stop_token_ids,
-    )
+    if conv_template:
+        conv = get_conv_template(conv_template)
+    else:
+        conv = get_conversation_template(request.model)
+        conv = Conversation(
+            name=conv.name,
+            system_template=conv.system_template,
+            system_message=conv.system_message,
+            roles=conv.roles,
+            messages=list(conv.messages),  # prevent in-place modification
+            offset=conv.offset,
+            sep_style=SeparatorStyle(conv.sep_style),
+            sep=conv.sep,
+            sep2=conv.sep2,
+            stop_str=conv.stop_str,
+            stop_token_ids=conv.stop_token_ids,
+        )
 
     if isinstance(request.messages, str):
         prompt = request.messages
@@ -113,7 +133,24 @@ async def get_gen_prompt(request) -> str:
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-    return prompt
+    sampling_params = dict(
+        n=request.n,
+        presence_penalty=request.presence_penalty,
+        frequency_penalty=request.frequency_penalty,
+        repetition_penalty=request.repetition_penalty,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        stop=_merge(request.stop, conv.stop_str),
+        stop_token_ids=_merge(request.stop_token_ids, conv.stop_token_ids),
+        max_tokens=request.max_tokens,
+        best_of=request.best_of,
+        top_k=request.top_k,
+        ignore_eos=request.ignore_eos,
+        use_beam_search=request.use_beam_search,
+        skip_special_tokens=request.skip_special_tokens,
+    )
+
+    return prompt, sampling_params
 
 
 async def check_length(
@@ -203,7 +240,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "logit_bias is not currently supported")
 
-    prompt = await get_gen_prompt(request)
+    prompt, sampling_params = await get_gen_params(request)
     token_ids, error_check_ret = await check_length(request, prompt=prompt)
     if error_check_ret is not None:
         return error_check_ret
@@ -212,22 +249,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     request_id = request.id or f"cmpl-{random_uuid()}"
     created_time = int(time.monotonic())
     try:
-        sampling_params = SamplingParams(
-            n=request.n,
-            presence_penalty=request.presence_penalty,
-            frequency_penalty=request.frequency_penalty,
-            repetition_penalty=request.repetition_penalty,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            stop=request.stop,
-            stop_token_ids=request.stop_token_ids,
-            max_tokens=request.max_tokens,
-            best_of=request.best_of,
-            top_k=request.top_k,
-            ignore_eos=request.ignore_eos,
-            use_beam_search=request.use_beam_search,
-            skip_special_tokens=request.skip_special_tokens,
-        )
+        sampling_params = SamplingParams(**sampling_params)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
@@ -608,6 +630,10 @@ if __name__ == "__main__":
                         help="The model name used in the API. If not "
                         "specified, the model name will be the same as "
                         "the huggingface name.")
+    parser.add_argument("--conv-template",
+                        type=str,
+                        default=None,
+                        help="The conversation template name.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -626,6 +652,7 @@ if __name__ == "__main__":
         served_model = args.served_model_name
     else:
         served_model = args.model
+    conv_template = args.conv_template
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
