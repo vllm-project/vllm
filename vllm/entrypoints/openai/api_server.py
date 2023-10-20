@@ -39,12 +39,23 @@ try:
 except ImportError:
     _fastchat_available = False
 
+try:
+    from aioprometheus import MetricsMiddleware
+    from aioprometheus.asgi.starlette import metrics
+    _prometheus_available = True
+except ImportError:
+    _prometheus_available = False
+
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 logger = init_logger(__name__)
 served_model = None
 app = fastapi.FastAPI()
 engine = None
+
+if _prometheus_available:
+    app.add_middleware(MetricsMiddleware)
+    app.add_route("/metrics", metrics)
 
 
 def create_error_response(status_code: HTTPStatus,

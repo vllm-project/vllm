@@ -18,6 +18,12 @@ from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
 
+try:
+    from aioprometheus import Gauge
+    _prometheus_available = True
+except ImportError:
+    _prometheus_available = False
+
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -28,6 +34,19 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _LOGGING_INTERVAL_SEC = 5
+if _prometheus_available:
+    gauge_avg_prompt_throughput = Gauge("vllm:avg_prompt_throughput",
+                                        "Avg prefill throughput")
+    gauge_avg_generation_throughput = Gauge("vllm:avg_generation_throughput",
+                                            "Avg prefill throughput")
+    gauge_scheduler_running = Gauge("vllm:scheduler_running",
+                                    "Num requests running")
+    gauge_scheduler_swapped = Gauge("vllm:scheduler_swapped",
+                                    "Num requests swapped")
+    gauge_scheduler_waiting = Gauge("vllm:scheduler_waiting",
+                                    "Num requests waiting")
+    gauge_gpu_cache_usage = Gauge("vllm:gpu_cache_usage", "GPU KV-cache usage")
+    gauge_cpu_cache_usage = Gauge("vllm:cpu_cache_usage", "CPU KV-cache usage")
 
 
 class LLMEngine:
@@ -581,8 +600,8 @@ class LLMEngine:
         else:
             self.num_generation_tokens.append((now, num_batched_tokens))
 
-        elapsed_time = now - self.last_logging_time
-        if elapsed_time < _LOGGING_INTERVAL_SEC:
+        should_log = now - self.last_logging_time >= _LOGGING_INTERVAL_SEC
+        if not (should_log or _prometheus_available):
             return
 
         # Discard the old stats.
@@ -621,16 +640,26 @@ class LLMEngine:
         else:
             cpu_cache_usage = 0.0
 
-        logger.info("Avg prompt throughput: "
-                    f"{avg_prompt_throughput:.1f} tokens/s, "
-                    "Avg generation throughput: "
-                    f"{avg_generation_throughput:.1f} tokens/s, "
-                    f"Running: {len(self.scheduler.running)} reqs, "
-                    f"Swapped: {len(self.scheduler.swapped)} reqs, "
-                    f"Pending: {len(self.scheduler.waiting)} reqs, "
-                    f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
-                    f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
-        self.last_logging_time = now
+        if _prometheus_available:
+            gauge_avg_prompt_throughput.set({}, avg_prompt_throughput)
+            gauge_avg_generation_throughput.set({}, avg_generation_throughput)
+            gauge_scheduler_running.set({}, len(self.scheduler.running))
+            gauge_scheduler_swapped.set({}, len(self.scheduler.swapped))
+            gauge_scheduler_waiting.set({}, len(self.scheduler.waiting))
+            gauge_gpu_cache_usage.set({}, gpu_cache_usage)
+            gauge_cpu_cache_usage.set({}, cpu_cache_usage)
+
+        if should_log:
+            logger.info("Avg prompt throughput: "
+                        f"{avg_prompt_throughput:.1f} tokens/s, "
+                        "Avg generation throughput: "
+                        f"{avg_generation_throughput:.1f} tokens/s, "
+                        f"Running: {len(self.scheduler.running)} reqs, "
+                        f"Swapped: {len(self.scheduler.swapped)} reqs, "
+                        f"Pending: {len(self.scheduler.waiting)} reqs, "
+                        f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
+                        f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%,")
+            self.last_logging_time = now
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
