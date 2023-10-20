@@ -29,7 +29,6 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import MistralConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -152,7 +151,7 @@ class MistralDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: MistralConfig,
+        config,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -210,7 +209,7 @@ class MistralModel(nn.Module):
 
     def __init__(
         self,
-        config: MistralConfig,
+        config,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -259,7 +258,7 @@ class MistralForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: MistralConfig,
+        config,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
