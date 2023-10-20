@@ -219,6 +219,16 @@ cuda_utils_extension = CUDAExtension(
 )
 ext_modules.append(cuda_utils_extension)
 
+topk_extension = CUDAExtension(
+    name="vllm.topk",
+    sources=["csrc/topk.cpp", "csrc/topk/topk_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(topk_extension)
+
 
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)

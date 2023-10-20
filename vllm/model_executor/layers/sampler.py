@@ -11,6 +11,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceData, SequenceGroupOutputs, SequenceOutputs)
 
+from vllm import topk
 _SAMPLING_EPS = 1e-5
 
 
@@ -73,7 +74,7 @@ class Sampler(nn.Module):
         do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
         do_top_k = any(k != self.vocab_size for k in top_ks)
         if do_top_p or do_top_k:
-            logits = _apply_top_p_top_k(logits, top_ps, top_ks)
+            logits =_apply_top_p_top_k_with_new_kernel(logits, top_ps, top_ks)
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
@@ -262,12 +263,40 @@ def _get_top_p_top_k(
         top_ks += [top_k] * len(seq_ids)
     return top_ps, top_ks
 
+def _apply_top_p_top_k_with_new_kernel(
+    logits: torch.Tensor,
+    top_ps: List[float],
+    top_ks: List[int],
+) -> torch.Tensor:
+    do_top_p=True
+    do_top_k=True
+    softmax_res=logits.softmax(dim=-1)
+    logit_dst=torch.full(logits.shape,-float("inf"),device=logits.device)
+    max_top_k=0
+    if top_ps: 
+        p = torch.tensor(top_ps, dtype=logits.dtype, device=logits.device)
+    else:
+        p=torch.Tensor()
+        do_top_p=False
+
+    if top_ks: 
+        max_top_k=max(top_ks)
+        k = torch.tensor(top_ks, dtype=torch.int32, device=logits.device)
+    else:
+        k=torch.Tensor()
+        do_top_k=False
+    topk.top_k(logits,softmax_res,logit_dst,do_top_k,max_top_k,k,do_top_p,p)
+    return logit_dst
+
+
+
 
 def _apply_top_p_top_k(
     logits: torch.Tensor,
     top_ps: List[float],
     top_ks: List[int],
 ) -> torch.Tensor:
+    
     p = torch.tensor(top_ps, dtype=logits.dtype, device=logits.device)
     k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
     logits_sort, logits_idx = logits.sort(dim=-1, descending=True)

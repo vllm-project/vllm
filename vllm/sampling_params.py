@@ -95,6 +95,7 @@ class SamplingParams:
         self.frequency_penalty = frequency_penalty
         self.temperature = temperature
         self.top_p = top_p
+        assert top_k<=1024
         self.top_k = top_k
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
