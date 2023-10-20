@@ -14,6 +14,7 @@ from vllm.model_executor.weight_utils import (get_quant_config,
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
     "AquilaModel": AquilaForCausalLM,
+    "AquilaForCausalLM": AquilaForCausalLM,  # AquilaChat2
     "BaiChuanForCausalLM": BaiChuanForCausalLM,  # baichuan-7b
     "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
     "BloomForCausalLM": BloomForCausalLM,
@@ -25,6 +26,7 @@ _MODEL_REGISTRY = {
     "InternLMForCausalLM": InternLMForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
     "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    "MistralForCausalLM": MistralForCausalLM,
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
@@ -34,6 +36,7 @@ _MODEL_REGISTRY = {
 # FIXME(woosuk): Remove this once all models support quantization.
 _MODEL_CLASSES_SUPPORT_QUANTIZATION = [
     LlamaForCausalLM,
+    MistralForCausalLM,
 ]
 
 

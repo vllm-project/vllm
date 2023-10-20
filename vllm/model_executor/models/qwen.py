@@ -8,7 +8,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -28,7 +28,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.parallel_utils.tensor_parallel import (
+from vllm.model_executor.parallel_utils.layers import (
     VocabParallelEmbedding,
     ColumnParallelLinear,
     RowParallelLinear,
@@ -53,14 +53,12 @@ class QWenMLP(nn.Module):
             2 * intermediate_size,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
         )
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
         )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -76,13 +74,12 @@ class QWenMLP(nn.Module):
 
 class QWenAttention(nn.Module):
 
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        max_position_embeddings: int,
-        rope_theta: float = 10000,
-    ):
+    def __init__(self,
+                 hidden_size: int,
+                 num_heads: int,
+                 max_position_embeddings: int,
+                 rope_theta: float = 10000,
+                 rope_scaling: Optional[Dict[str, Any]] = None):
         super().__init__()
         self.hidden_size = hidden_size
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
@@ -99,14 +96,12 @@ class QWenAttention(nn.Module):
             3 * hidden_size,
             bias=True,
             gather_output=False,
-            perform_initialization=False,
         )
         self.c_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
         )
         self.scaling = self.head_dim**-0.5
         self.attn = PagedAttentionWithRoPE(
@@ -116,7 +111,7 @@ class QWenAttention(nn.Module):
             rotary_dim=self.head_dim,
             base=rope_theta,
             max_position=max_position_embeddings,
-        )
+            rope_scaling=rope_scaling)
 
     def forward(
         self,
@@ -141,17 +136,19 @@ class QWenBlock(nn.Module):
 
     def __init__(self, config: QWenConfig):
         super().__init__()
-        self.ln_1 = RMSNorm(config.n_embd, eps=config.layer_norm_epsilon)
+        self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
         rope_theta = getattr(config, "rope_theta", 10000)
-        self.attn = QWenAttention(config.n_embd,
+        rope_scaling = getattr(config, "rope_scaling", None)
+        self.attn = QWenAttention(config.hidden_size,
                                   config.num_attention_heads,
                                   config.max_position_embeddings,
-                                  rope_theta=rope_theta)
+                                  rope_theta=rope_theta,
+                                  rope_scaling=rope_scaling)
 
-        self.ln_2 = RMSNorm(config.n_embd, eps=config.layer_norm_epsilon)
+        self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
-        self.mlp = QWenMLP(config.n_embd, config.ffn_hidden_size // 2)
+        self.mlp = QWenMLP(config.hidden_size, config.intermediate_size // 2)
 
     def forward(
         self,
@@ -189,12 +186,13 @@ class QWenModel(nn.Module):
         self.vocab_size = config.vocab_size
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.wte = VocabParallelEmbedding(vocab_size,
-                                          config.n_embd,
-                                          perform_initialization=False)
+        self.wte = VocabParallelEmbedding(
+            vocab_size,
+            config.hidden_size,
+        )
         self.h = nn.ModuleList(
             [QWenBlock(config) for _ in range(config.num_hidden_layers)])
-        self.ln_f = RMSNorm(config.n_embd, eps=config.layer_norm_epsilon)
+        self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -230,11 +228,10 @@ class QWenLMHeadModel(nn.Module):
         self.transformer = QWenModel(config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.lm_head = ColumnParallelLinear(
-            config.n_embd,
+            config.hidden_size,
             vocab_size,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
         )
         self.sampler = Sampler(config.vocab_size)
 

@@ -33,6 +33,7 @@ class AquilaConfig(PretrainedConfig):
         intermediate_size=11008,
         num_hidden_layers=32,
         num_attention_heads=32,
+        num_key_value_heads=None,
         hidden_act="silu",
         max_position_embeddings=2048,
         initializer_range=0.006,
@@ -49,6 +50,11 @@ class AquilaConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
+        # for backward compatibility
+        if num_key_value_heads is None:
+            num_key_value_heads = num_attention_heads
+
+        self.num_key_value_heads = num_key_value_heads
         self.num_attention_heads = num_attention_heads
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range

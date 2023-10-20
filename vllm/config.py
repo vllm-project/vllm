@@ -41,6 +41,9 @@ class ModelConfig:
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id. If unspecified, will use the default
             version.
+        tokenizer_revision: The specific tokenizer version to use. It can be a
+            branch name, a tag name, or a commit id. If unspecified, will use
+            the default version.
         max_model_len: Maximum length of a sequence (including prompt and
             output). If None, will be derived from the model.
         quantization: Quantization method that was used to quantize the model
@@ -58,6 +61,7 @@ class ModelConfig:
         dtype: str,
         seed: int,
         revision: Optional[str] = None,
+        tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
     ) -> None:
@@ -69,6 +73,7 @@ class ModelConfig:
         self.load_format = load_format
         self.seed = seed
         self.revision = revision
+        self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
 
         self.hf_config = get_config(model, trust_remote_code, revision)
@@ -138,7 +143,7 @@ class ModelConfig:
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU worker."""
         # For GPTBigCode & Falcon:
-        # Note: for falcon, when new_decoder_architecture is True, the
+        # NOTE: for falcon, when new_decoder_architecture is True, the
         # multi_query flag is ignored and we use n_head_kv for the number of
         # KV heads.
         falcon_model_types = ["falcon", "RefinedWeb", "RefinedWebModel"]
@@ -164,9 +169,6 @@ class ModelConfig:
         total_num_attention_heads = self.hf_config.num_attention_heads
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
-    def get_max_model_len(self) -> int:
-        return self.max_model_len
-
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
@@ -187,10 +189,12 @@ class CacheConfig:
         block_size: int,
         gpu_memory_utilization: float,
         swap_space: int,
+        sliding_window: Optional[int] = None,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
+        self.sliding_window = sliding_window
         self._verify_args()
 
         # Will be set after profiling.
@@ -264,13 +268,41 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
+        max_paddings: Maximum number of paddings to be added to a batch.
     """
 
-    def __init__(self, max_num_batched_tokens: int, max_num_seqs: int,
-                 max_model_len: int) -> None:
-        self.max_num_batched_tokens = max_num_batched_tokens
+    def __init__(
+        self,
+        max_num_batched_tokens: Optional[int],
+        max_num_seqs: int,
+        max_model_len: int,
+        max_paddings: int,
+    ) -> None:
+        if max_num_batched_tokens is not None:
+            self.max_num_batched_tokens = max_num_batched_tokens
+        else:
+            # If max_model_len is too short, use 2048 as the default value for
+            # higher throughput.
+            self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
+        self.max_paddings = max_paddings
+        self._verify_args()
+
+    def _verify_args(self) -> None:
+        if self.max_num_batched_tokens < self.max_model_len:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
+                f"smaller than max_model_len ({self.max_model_len}). "
+                "This effectively limits the maximum sequence length to "
+                "max_num_batched_tokens and makes vLLM reject longer "
+                "sequences. Please increase max_num_batched_tokens or "
+                "decrease max_model_len.")
+        if self.max_num_batched_tokens < self.max_num_seqs:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
+                "be greater than or equal to max_num_seqs "
+                f"({self.max_num_seqs}).")
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -316,15 +348,6 @@ def _get_and_verify_dtype(
             # Casting between float16 and bfloat16 is allowed with a warning.
             logger.warning(f"Casting {config_dtype} to {torch_dtype}.")
 
-    # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:
-        compute_capability = torch.cuda.get_device_capability()
-        if compute_capability[0] < 8:
-            gpu_name = torch.cuda.get_device_name()
-            raise ValueError(
-                "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}.")
     return torch_dtype
 
 
@@ -350,6 +373,24 @@ def _get_and_verify_max_len(
         max_len_key = getattr(hf_config, key, None)
         if max_len_key is not None:
             derived_max_model_len = min(derived_max_model_len, max_len_key)
+    if derived_max_model_len == float("inf"):
+        if max_model_len is not None:
+            # If max_model_len is specified, we use it.
+            return max_model_len
+
+        default_max_len = 2048
+        logger.warning(
+            "The model's config.json does not contain any of the following "
+            "keys to determine the original maximum length of the model: "
+            f"{possible_keys}. Assuming the model's maximum length is "
+            f"{default_max_len}.")
+        derived_max_model_len = default_max_len
+
+    rope_scaling = getattr(hf_config, "rope_scaling", None)
+    if rope_scaling is not None:
+        assert "factor" in rope_scaling
+        scaling_factor = rope_scaling["factor"]
+        derived_max_model_len *= scaling_factor
 
     if max_model_len is None:
         max_model_len = derived_max_model_len
@@ -360,4 +401,4 @@ def _get_and_verify_max_len(
             " in model's config.json). This may lead to incorrect model "
             "outputs or CUDA errors. Make sure the value is correct and "
             "within the model context size.")
-    return max_model_len
+    return int(max_model_len)

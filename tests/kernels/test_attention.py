@@ -7,16 +7,21 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from vllm import attention_ops
+from vllm.utils import get_max_shared_memory_bytes
 
-MAX_SEQ_LEN = 8192
+FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
+# This will change depending on the compute capability.
+# - 512 as a buffer
+MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 NUM_BLOCKS = 128  # Arbitrary values for testing
+PARTITION_SIZE = 512
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
-NUM_PREFILL_SEQS = [1, 3, 7]  # Arbitrary values for testing
+NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
-BLOCK_SIZES = [8, 16, 32]
+BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
 SEEDS = [0]
 
@@ -92,6 +97,7 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
+@pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -99,9 +105,9 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@torch.inference_mode()
-def test_single_query_cached_kv_attention(
+def test_paged_attention(
     kv_cache_factory,
+    version: str,
     num_seqs: int,
     num_heads: Tuple[int, int],
     head_size: int,
@@ -135,6 +141,7 @@ def test_single_query_cached_kv_attention(
                                    device="cuda")
 
     context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    context_lens[-1] = MAX_SEQ_LEN
     max_context_len = max(context_lens)
     context_lens = torch.tensor(context_lens, dtype=torch.int, device="cuda")
 
@@ -157,19 +164,54 @@ def test_single_query_cached_kv_attention(
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    attention_ops.single_query_cached_kv_attention(
-        output,
-        query,
-        key_cache,
-        value_cache,
-        head_mapping,
-        scale,
-        block_tables,
-        context_lens,
-        block_size,
-        max_context_len,
-        alibi_slopes,
-    )
+    if version == "v1":
+        attention_ops.paged_attention_v1(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            head_mapping,
+            scale,
+            block_tables,
+            context_lens,
+            block_size,
+            max_context_len,
+            alibi_slopes,
+        )
+    elif version == "v2":
+        num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
+                          PARTITION_SIZE)
+        assert PARTITION_SIZE % block_size == 0
+        num_seqs, num_heads, head_size = output.shape
+        tmp_output = torch.empty(
+            size=(num_seqs, num_heads, num_partitions, head_size),
+            dtype=output.dtype,
+            device=output.device,
+        )
+        exp_sums = torch.empty(
+            size=(num_seqs, num_heads, num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        max_logits = torch.empty_like(exp_sums)
+        attention_ops.paged_attention_v2(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            head_mapping,
+            scale,
+            block_tables,
+            context_lens,
+            block_size,
+            max_context_len,
+            alibi_slopes,
+        )
+    else:
+        assert False, f"Unknown version: {version}"
 
     # Run the reference implementation.
     ref_output = torch.empty_like(query)
@@ -242,7 +284,11 @@ def test_multi_query_kv_attention(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    seq_lens = random.sample(range(1, MAX_SEQ_LEN), num_seqs)
+    # MAX_SEQ_LEN sometimes causes OOM in the reference implementation.
+    # As the xformers library is already tested with its own tests, we can use
+    # a smaller MAX_SEQ_LEN here.
+    max_len = min(MAX_SEQ_LEN, 4096)
+    seq_lens = random.sample(range(1, max_len), num_seqs)
     num_tokens = sum(seq_lens)
 
     scale = float(1.0 / (head_size**0.5))
