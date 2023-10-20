@@ -296,13 +296,8 @@ class LlamaForCausalLM(nn.Module):
         self.sampler = Sampler(config.vocab_size)
 
         self._cuda_graph: Dict[int, torch.cuda.CUDAGraph] = {}
-        self._compiled_tensors: Dict[
-            int,
-            Tuple[
-                torch.Tensor,
-                torch.Tensor,
-            ],
-        ] = {}
+        self._compiled_tensors: Dict[int, Tuple[torch.Tensor,
+                                                torch.Tensor, ], ] = {}
         self._compiled_logits: Dict[int, torch.Tensor] = {}
         self._compiled_input_metadata: Dict[int, InputMetadata] = {}
         self._forward_time = 0

@@ -17,7 +17,9 @@ def make_predictions(engine: LLMEngine, prompts: list,
         request_outputs = engine.step()
         for request_output in request_outputs:
             if request_output.finished:
-                print(f"- {request_output.prompt}{request_output.outputs[0].text}")
+                print(
+                    f"- {request_output.prompt}{request_output.outputs[0].text}"
+                )
 
         if not (engine.has_unfinished_requests()):
             break

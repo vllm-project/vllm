@@ -273,7 +273,8 @@ class Worker:
             # Make size of block_tables and max_context_len static
             # TODO: how to dynamically change shared memory size for kernels with different max_context_len?
             block_tables_tensor = torch.zeros(
-                (len(generation_block_tables), self.model_config.max_model_len),
+                (len(generation_block_tables),
+                 self.model_config.max_model_len),
                 dtype=torch.int,
                 device="cuda")
             for i, block_table in enumerate(generation_block_tables):
@@ -287,9 +288,9 @@ class Worker:
                 for block_table in generation_block_tables
             ]
             block_tables_tensor = torch.tensor(padded_block_tables,
-                                           dtype=torch.int,
-                                           device="cuda")
-            
+                                               dtype=torch.int,
+                                               device="cuda")
+
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)
