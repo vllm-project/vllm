@@ -29,6 +29,8 @@ pip install -e .  # This may take several minutes.
 
 ```bash
 pip install -r requirements-dev.txt
+# Install pre-commit hooks
+pre-commit install
 
 # Static type checking
 mypy
