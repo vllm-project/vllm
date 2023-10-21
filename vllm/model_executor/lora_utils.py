@@ -54,6 +54,8 @@ def _create_and_replace(lora_config, adapter_name, target, target_name, parent):
 
 def add_lora_adapter(llm: LLMEngine, lora_path: str, adapter_name: str):
     for worker in llm.workers:
+        print(f"type of worker: {type(worker)}")
+        print(f"attr of worker: {dir(worker)}")
         model = worker.model
         lora_config = LoraConfig.from_pretrained(lora_path, revision=None, use_auth_token=None)
         key_list = [key for key, _ in model.named_modules()]
