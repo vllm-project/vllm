@@ -8,8 +8,6 @@ numpy
 torch == 2.0.1
 transformers >= 4.34.0  # Required for Mistral.
 xformers == 0.0.22  # Required for Mistral.
-fastapi==0.103.2
+fastapi
 uvicorn[standard]
-pydantic < 2  # Required for OpenAI server.
-typing-inspect==0.8.0
-typing_extensions==4.5.0
+pydantic == 1.10.13  # Required for OpenAI server.
