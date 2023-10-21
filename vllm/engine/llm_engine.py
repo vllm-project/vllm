@@ -4,7 +4,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, PrefixConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
@@ -17,6 +17,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
+from vllm.prefix import Prefix
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -65,6 +66,7 @@ class LLMEngine:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        prefix_config: PrefixConfig,
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
@@ -92,6 +94,7 @@ class LLMEngine:
             self.model_config.hf_config, "sliding_window", None)
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.prefix_config = prefix_config
         self.log_stats = log_stats
         self._verify_args()
 
@@ -102,6 +105,9 @@ class LLMEngine:
             tokenizer_revision=model_config.tokenizer_revision,
             revision=model_config.revision)
         self.seq_counter = Counter()
+
+        # ita: tokenize prefixes:
+        self.prefix_config.encode(self.tokenizer)
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -115,12 +121,22 @@ class LLMEngine:
         # Create the scheduler.
         self.scheduler = Scheduler(scheduler_config, cache_config)
 
+        # Prefix initialization
+        self._init_prefix()
+
+        self._run_workers(
+            "init_prefixes",
+            prefix_list=self.prefix_cache,
+            prefix_block_tables=self.prefix_block_tables
+        )
+
         # Logging.
         self.last_logging_time = 0.0
         # List of (timestamp, num_tokens)
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
+
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -135,6 +151,7 @@ class LLMEngine:
             self.model_config,
             self.parallel_config,
             self.scheduler_config,
+            self.prefix_config,
             0,
             distributed_init_method,
         )
@@ -169,12 +186,14 @@ class LLMEngine:
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
+        prefix_config = copy.deepcopy(self.prefix_config)
         self._run_workers("init_worker",
                           get_all_outputs=True,
                           worker_init_fn=lambda: Worker(
                               model_config,
                               parallel_config,
                               scheduler_config,
+                              prefix_config,
                               None,
                               None,
                           ))
@@ -217,6 +236,18 @@ class LLMEngine:
 
         # Initialize the cache.
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
+
+    def _init_prefix(self):
+        self.prefix_cache = []
+        self.prefix_block_tables = []
+        for idx, (string, tokens) in enumerate(zip(self.prefix_config.prefix_strings,
+                           self.prefix_config.prefix_tokens)):
+            new_prefix = Prefix(idx, string, tokens, self.cache_config.block_size)
+            self.scheduler.prefix_allocate(new_prefix)
+            self.prefix_cache.append(new_prefix)
+            self.prefix_block_tables.append(self.scheduler.get_prefix_block_table(new_prefix))
+
+
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":

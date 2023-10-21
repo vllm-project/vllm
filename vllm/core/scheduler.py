@@ -8,6 +8,7 @@ from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
+from vllm.prefix import Prefix
 
 logger = init_logger(__name__)
 
@@ -266,6 +267,10 @@ class Scheduler:
         )
         return scheduler_outputs
 
+    def get_prefix_block_table(self, prefix: Prefix) -> List[int]:
+        return self.block_manager.get_block_table_prefix(prefix)
+
+
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
@@ -308,6 +313,9 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs():
             seq.status = SequenceStatus.RUNNING
+
+    def prefix_allocate(self, prefix) -> None:
+        self.block_manager.prefix_allocate(prefix)
 
     def _append_slot(
         self,

@@ -6,7 +6,7 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, PrefixConfig)
 from vllm.model_executor import get_model, InputMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
@@ -14,7 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
-
+from vllm.prefix import Prefix, PrefixMetaData
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -29,12 +29,14 @@ class Worker:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        prefix_config: PrefixConfig,
         rank: Optional[int] = None,
         distributed_init_method: Optional[str] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.prefix_config = prefix_config
         self.rank = rank
         self.distributed_init_method = distributed_init_method
 
@@ -46,6 +48,7 @@ class Worker:
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
+        self.prefix_cache = None
 
     def init_model(self):
         # This env var set by Ray causes exceptions with graph building.
@@ -68,6 +71,22 @@ class Worker:
         # Initialize the model.
         set_random_seed(self.model_config.seed)
         self.model = get_model(self.model_config)
+
+    def init_prefixes(self, prefix_list, prefix_block_tables):
+        # ita:
+        input_tokens, input_positions, input_metadata = self._prepare_prefix(
+                prefix_list, prefix_block_tables)
+
+        # Execute the model.
+        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        self.model(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=self.gpu_cache,
+            input_metadata=input_metadata,
+            cache_events=None,
+            sampling=False
+        )
 
     @torch.inference_mode()
     def profile_num_available_blocks(
@@ -113,7 +132,7 @@ class Worker:
             positions=input_positions,
             kv_caches=[(None, None)] * num_layers,
             input_metadata=input_metadata,
-            cache_events=None,
+            cache_events=None
         )
 
         # Calculate the number of blocks that can be allocated with the
@@ -152,6 +171,85 @@ class Worker:
                                         self.parallel_config)
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
+
+    def _prepare_prefix(
+            self,
+            prefix_list: List[Prefix],
+            prefix_block_tables: List[List[int]],
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
+        input_tokens: List[List[int]] = []
+        input_positions: List[List[int]] = []
+        slot_mapping: List[List[int]] = []
+        prefix_lens: List[int] = []
+        max_block_table_length = max([
+            len(block_table) for block_table in prefix_block_tables
+        ])
+        for prefix, block_table in zip(prefix_list, prefix_block_tables):
+            prefix_tokens = prefix.token_ids
+            prefix_len = len(prefix_tokens)
+            prefix_lens.append(prefix_len)
+
+            input_tokens.append(prefix_tokens)
+            input_positions.append(list(range(prefix_len)))
+
+            slot_mapping.append([])
+            for i in range(prefix_len):
+                block_number = block_table[i // self.block_size]
+                block_offset = i % self.block_size
+                slot = block_number * self.block_size + block_offset
+                slot_mapping[-1].append(slot)
+        max_context_len = 0
+        max_num_blocks_per_seq = 0
+        context_lens: List[int] = []
+        generation_block_tables: List[List[int]] = []
+        max_seq_len = max(prefix_lens) if prefix_lens else 1
+        padded_input_tokens = [
+            _pad_to_max(positions, max_seq_len, pad=0) for positions in input_positions
+        ]
+        padded_input_positions = [
+            _pad_to_max(positions, max_seq_len, pad=0)
+            for positions in input_positions
+        ]
+        padded_slot_mapping = [
+            _pad_to_max(mapping, max_seq_len, pad=-1) for mapping in slot_mapping
+        ]
+
+        # ita: 뭔가 이상해...
+        padded_block_tables = [
+            _pad_to_max(block_table, max_block_table_length, pad=0) for block_table in generation_block_tables
+        ]
+        # Convert to tensors.
+        tokens_tensor = torch.tensor(padded_input_tokens,
+                                     dtype=torch.long,
+                                     device="cuda")
+        positions_tensor = torch.tensor(padded_input_positions,
+                                        dtype=torch.long,
+                                        device="cuda")
+        slot_mapping_tensor = torch.tensor(padded_slot_mapping,
+                                           dtype=torch.int,
+                                           device="cuda")
+        context_lens_tensor = torch.tensor(context_lens,
+                                           dtype=torch.int,
+                                           device="cuda")
+        block_tables_tensor = torch.tensor(padded_block_tables,
+                                           dtype=torch.int,
+                                           device="cuda")
+        print("tokens_tensors shape", tokens_tensor.shape)
+        print("context_lens_tensor shape", context_lens_tensor.shape)
+        print("block_tables_tensor shape", block_tables_tensor.shape)
+        input_metadata = InputMetadata(
+            seq_groups=None,
+            seq_data=None,
+            prompt_lens=prefix_lens,
+            slot_mapping=slot_mapping_tensor,
+            context_lens=context_lens_tensor,
+            max_context_len=max_context_len,
+            block_tables=block_tables_tensor,
+            sliding_window=None
+        )
+        print("input_metadata", input_metadata)
+        return tokens_tensor, positions_tensor, input_metadata
+
 
     def _prepare_inputs(
         self,

@@ -287,12 +287,16 @@ class OPTForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
+        sampling=True
     ) -> SamplerOutput:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   input_metadata)
-        return next_tokens
+        if sampling:
+            next_tokens = self.sampler(self.lm_head_weight, hidden_states,
+                                    input_metadata)
+            return next_tokens
+        else:
+            return hidden_states
 
     _column_parallel_weights = [
         "embed_tokens.weight", "fc1.weight", "fc1.bias"

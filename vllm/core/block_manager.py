@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from vllm.block import PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-
+from vllm.prefix import Prefix
 
 class BlockAllocator:
     """Manages free physical token blocks for a device.
@@ -86,6 +86,9 @@ class BlockSpaceManager:
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
+        # Mapping: prefix_id -> BlockTable.
+        self.prefix_block_tables: Dict[int, BlockTable] = {}
+
     def can_allocate(self, seq_group: SequenceGroup) -> bool:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
@@ -119,6 +122,14 @@ class BlockSpaceManager:
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs():
             self.block_tables[seq.seq_id] = block_table.copy()
+
+    def prefix_allocate(self, prefix) -> None:
+        block_table = BlockTable = []
+        for logical_idx in range(len(prefix.logical_token_blocks)):
+            block = self.gpu_allocator.allocate()
+            block.ref_count = 10000
+            block_table.append(block)
+        self.prefix_block_tables[prefix.prefix_id] = block_table.copy()
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
@@ -264,6 +275,10 @@ class BlockSpaceManager:
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         block_table = self.block_tables[seq.seq_id]
+        return [block.block_number for block in block_table]
+
+    def get_block_table_prefix(self, prefix: Prefix) -> List[int]:
+        block_table = self.prefix_block_tables[prefix.prefix_id]
         return [block.block_number for block in block_table]
 
     def get_num_free_gpu_blocks(self) -> int:

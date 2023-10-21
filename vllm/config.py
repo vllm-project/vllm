@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Dict, List, Tuple, Optional
 
 import torch
 from transformers import PretrainedConfig
@@ -303,6 +303,19 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+
+
+class PrefixConfig:
+    """
+        prefix configuration
+    """
+    def __init__(self,
+                 prefix_strings: Optional[List[str]]):
+        self.prefix_strings = prefix_strings
+
+    def encode(self, tokenizer):
+        if self.prefix_strings != None:
+            self.prefix_tokens = [tokenizer.encode(x) for x in self.prefix_strings]
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

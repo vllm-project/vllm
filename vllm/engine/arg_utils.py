@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, PrefixConfig)
 
 
 @dataclass
@@ -200,7 +200,13 @@ class EngineArgs:
                                            self.max_num_seqs,
                                            model_config.max_model_len,
                                            self.max_paddings)
-        return model_config, cache_config, parallel_config, scheduler_config
+        prefix_config = PrefixConfig(
+            [
+                "aaa bbb ccc ddd",
+                "김밥",
+             ]
+        )
+        return model_config, cache_config, parallel_config, scheduler_config, prefix_config
 
 
 @dataclass
