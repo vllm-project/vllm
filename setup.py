@@ -200,6 +200,7 @@ quantization_extension = CUDAExtension(
     sources=[
         "csrc/quantization.cpp",
         "csrc/quantization/awq/gemm_kernels.cu",
+        "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,
