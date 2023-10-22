@@ -8,79 +8,15 @@
 #include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDATensorMethods.cuh>
 
-// atomicAdd for double-precision floating-point numbers on hardware with
-// compute capability < 6.0 from:
-// https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#atomic-functions
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
-__device__ double atomicAdd(
-    double* address,
-    double val
-) {
-  unsigned long long int* address_as_ull = (unsigned long long int*)address;
-  unsigned long long int old = *address_as_ull, assumed;
+#define BLOCKWIDTH 128
+#define BLOCKHEIGHT4 16
 
-  do {
-    assumed = old;
-    old = atomicCAS(
-      address_as_ull,
-      assumed,
-      __double_as_longlong(val + __longlong_as_double(assumed))
-    );
-
-  // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
-  } while (assumed != old);
-
-  return __longlong_as_double(old);
-}
-#endif
+namespace vllm {
+namespace squeezellm {
 
 __device__ inline unsigned int as_unsigned(int i) {
   return *reinterpret_cast<unsigned int*>(&i);
 }
-
-const int BLOCKWIDTH  = 128;
-const int BLOCKHEIGHT3 =  12;
-const int BLOCKHEIGHT4 =  16;
-
-__global__ void NUQ4MatMulKernel(
-    const  half2* __restrict__ vec,
-    const    int* __restrict__ mat,
-           half2* __restrict__ mul,
-    const  __half* __restrict__ lookup_table,
-    int height,
-    int width,
-    int batch,
-    int vec_height
-);
-
-// 4-bit matvec kernel (LUT-based)
-void squeezellm_gemm(
-  torch::Tensor vec,
-  torch::Tensor mat,
-  torch::Tensor mul,
-  torch::Tensor lookup_table
-) {
-  int height = mat.size(0);
-  int width = mat.size(1);
-
-  int batch = vec.size(0);
-  int vec_height = vec.size(1);
-
-  dim3 blocks(
-    (height + BLOCKHEIGHT4 - 1) / BLOCKHEIGHT4,
-    (width + BLOCKWIDTH - 1) / BLOCKWIDTH
-  );
-  dim3 threads(BLOCKWIDTH);
-
-  NUQ4MatMulKernel<<<blocks, threads>>>(
-    (half2*) vec.data<at::Half>(),
-    mat.data_ptr<int>(),
-    (half2*) mul.data<at::Half>(),
-    (__half*) lookup_table.data<at::Half>(),
-    height, width, batch, vec_height
-  );
-}
-
 
 // 4-bit matvec kernel (LUT-based)
 __global__ void NUQ4MatMulKernel(
@@ -176,3 +112,37 @@ __global__ void NUQ4MatMulKernel(
     atomicAdd(&mul[b * width / 2 + col / 2], res3);
   }
 }
+
+} // namespace squeezellm
+} // namespace vllm
+
+// 4-bit matvec kernel (LUT-based)
+void squeezellm_gemm(
+  torch::Tensor vec,
+  torch::Tensor mat,
+  torch::Tensor mul,
+  torch::Tensor lookup_table
+) {
+  int height = mat.size(0);
+  int width = mat.size(1);
+
+  int batch = vec.size(0);
+  int vec_height = vec.size(1);
+
+  dim3 blocks(
+    (height + BLOCKHEIGHT4 - 1) / BLOCKHEIGHT4,
+    (width + BLOCKWIDTH - 1) / BLOCKWIDTH
+  );
+  dim3 threads(BLOCKWIDTH);
+
+  vllm::squeezellm::NUQ4MatMulKernel<<<blocks, threads>>>(
+    (half2*) vec.data<at::Half>(),
+    mat.data_ptr<int>(),
+    (half2*) mul.data<at::Half>(),
+    (__half*) lookup_table.data<at::Half>(),
+    height, width, batch, vec_height
+  );
+}
+
+#undef BLOCKWIDTH
+#undef BLOCKHEIGHT4
