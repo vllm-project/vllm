@@ -20,7 +20,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.models.bloom import _get_alibi_slopes
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import VocabParallelEmbedding
+from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
@@ -63,13 +63,11 @@ class RefactMLP(nn.Module):
                                                   2 * self.intermediate_size,
                                                   bias=False,
                                                   gather_output=False,
-                                                  perform_initialization=False,
                                                   quant_config=quant_config)
         self.c_proj = ParallelLinear.row(self.intermediate_size,
                                          hidden_size,
                                          bias=False,
                                          input_is_parallel=True,
-                                         perform_initialization=False,
                                          quant_config=quant_config)
         self.act_fn = SiluAndMul()
 
@@ -104,7 +102,6 @@ class RefactAttention(nn.Module):
             self.hidden_size,
             bias=False,
             gather_output=False,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         self.kv = nn.Linear(
@@ -117,7 +114,6 @@ class RefactAttention(nn.Module):
             self.hidden_size,
             bias=False,
             input_is_parallel=True,
-            perform_initialization=False,
             quant_config=quant_config,
         )
         head_start = tp_rank * self.num_heads
@@ -221,7 +217,9 @@ class RefactModel(nn.Module):
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.wte = VocabParallelEmbedding(
-            vocab_size, config.hidden_size, perform_initialization=False)
+            vocab_size,
+            config.hidden_size
+        )
         self.h = nn.ModuleList([
             RefactDecoderLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)
@@ -268,7 +266,6 @@ class GPTRefactForCausalLM(nn.Module):
                                              vocab_size,
                                              bias=False,
                                              gather_output=False,
-                                             perform_initialization=False,
                                              quant_config=None)
         self.sampler = Sampler(config.vocab_size)
 
