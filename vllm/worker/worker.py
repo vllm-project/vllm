@@ -59,6 +59,8 @@ class Worker:
             raise ValueError("Invalid or unspecified rank.")
         torch.cuda.set_device(self.device)
 
+        _check_if_gpu_supports_dtype(self.model_config.dtype)
+
         # Initialize the distributed environment.
         _init_distributed_environment(self.parallel_config, self.rank,
                                       self.distributed_init_method)
@@ -156,9 +158,9 @@ class Worker:
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
-        input_tokens: List[int] = []
-        input_positions: List[int] = []
-        slot_mapping: List[int] = []
+        input_tokens: List[List[int]] = []
+        input_positions: List[List[int]] = []
+        slot_mapping: List[List[int]] = []
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
@@ -178,24 +180,25 @@ class Worker:
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
-            input_tokens.extend(prompt_tokens)
+            input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(range(len(prompt_tokens)))
+            input_positions.append(list(range(prompt_len)))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
-                slot_mapping.extend([0] * prompt_len)
+                slot_mapping.append([0] * prompt_len)
                 continue
 
             # Compute the slot mapping.
+            slot_mapping.append([])
             block_table = seq_group_metadata.block_tables[seq_id]
             for i in range(prompt_len):
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                slot_mapping[-1].append(slot)
 
         # Add generation tokens.
         max_context_len = 0
@@ -213,13 +216,13 @@ class Worker:
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
-                input_tokens.append(generation_token)
+                input_tokens.append([generation_token])
 
                 context_len = seq_data.get_len()
                 position = context_len - 1
                 if self.sliding_window is not None:
                     context_len = min(context_len, self.sliding_window)
-                input_positions.append(position)
+                input_positions.append([position])
 
                 block_table = seq_group_metadata.block_tables[seq_id]
 
@@ -231,7 +234,7 @@ class Worker:
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                slot_mapping.append([slot])
 
                 if self.sliding_window is not None:
                     sliding_window_blocks = (self.sliding_window //
@@ -239,28 +242,36 @@ class Worker:
                     block_table = block_table[-sliding_window_blocks:]
                 generation_block_tables.append(block_table)
 
-        # Optimization: Pad the input length to be a multiple of 8.
-        # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
-        input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
-        input_positions = _pad_to_alignment(input_positions, multiple_of=8)
+        max_seq_len = max(prompt_lens) if prompt_lens else 1
+        padded_input_tokens = [
+            _pad_to_max(tokens, max_seq_len, pad=0) for tokens in input_tokens
+        ]
+        padded_input_positions = [
+            _pad_to_max(positions, max_seq_len, pad=0)
+            for positions in input_positions
+        ]
+        padded_slot_mapping = [
+            _pad_to_max(mapping, max_seq_len, pad=-1)
+            for mapping in slot_mapping
+        ]
+        padded_block_tables = [
+            _pad_to_max(block_table, max_num_blocks_per_seq, pad=0)
+            for block_table in generation_block_tables
+        ]
 
         # Convert to tensors.
-        tokens_tensor = torch.tensor(input_tokens,
+        tokens_tensor = torch.tensor(padded_input_tokens,
                                      dtype=torch.long,
                                      device="cuda")
-        positions_tensor = torch.tensor(input_positions,
+        positions_tensor = torch.tensor(padded_input_positions,
                                         dtype=torch.long,
                                         device="cuda")
-        slot_mapping_tensor = torch.tensor(slot_mapping,
+        slot_mapping_tensor = torch.tensor(padded_slot_mapping,
                                            dtype=torch.int,
                                            device="cuda")
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device="cuda")
-        padded_block_tables = [
-            _pad_to_max(block_table, max_num_blocks_per_seq)
-            for block_table in generation_block_tables
-        ]
         block_tables_tensor = torch.tensor(padded_block_tables,
                                            dtype=torch.int,
                                            device="cuda")
@@ -359,12 +370,12 @@ def _init_distributed_environment(
                               parallel_config.pipeline_parallel_size)
 
 
-def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
-    return x + [0] * ((-len(x)) % multiple_of)
+def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
+    return x + [pad] * ((-len(x)) % multiple_of)
 
 
-def _pad_to_max(x: List[int], max_len: int) -> List[int]:
-    return x + [0] * (max_len - len(x))
+def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
+    return x + [pad] * (max_len - len(x))
 
 
 def _check_if_can_support_max_seq_len(max_seq_len: int,
@@ -385,3 +396,15 @@ def _check_if_can_support_max_seq_len(max_seq_len: int,
             f"(required shared memory {required_shared_mem} > "
             f"available shared memory {max_shared_mem}). "
             "This will be fixed in a future release.")
+
+
+def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
+    # Check if the GPU supports the dtype.
+    if torch_dtype == torch.bfloat16:
+        compute_capability = torch.cuda.get_device_capability()
+        if compute_capability[0] < 8:
+            gpu_name = torch.cuda.get_device_name()
+            raise ValueError(
+                "Bfloat16 is only supported on GPUs with compute capability "
+                f"of at least 8.0. Your {gpu_name} GPU has compute capability "
+                f"{compute_capability[0]}.{compute_capability[1]}.")
