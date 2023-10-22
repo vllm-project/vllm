@@ -351,10 +351,10 @@ class LlamaForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            is_packed = False
+            packed_dim = None
             is_transposed = False
             if self.quant_config is not None:
-                is_packed = self.quant_config.is_packed(name)
+                packed_dim = self.quant_config.get_packed_dim(name)
                 is_transposed = self.quant_config.is_transposed(name)
             if is_transposed:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -368,9 +368,9 @@ class LlamaForCausalLM(nn.Module):
                 if is_transposed:
                     param = param.T
 
-                if is_packed:
-                    # needed due to different packing direction
-                    if not self.quant_config.get_name() == "squeezellm":
+                if packed_dim is not None:
+                    shard_dim = 0 if not is_transposed else 1
+                    if packed_dim == shard_dim:
                         shard_size //= self.quant_config.pack_factor
                         offset //= self.quant_config.pack_factor
 
@@ -378,21 +378,10 @@ class LlamaForCausalLM(nn.Module):
                     shard_id = tp_rank // num_kv_heads_replicas
                 else:
                     shard_id = tp_rank
-
-                # needed due to different packing direction
-                if (self.quant_config is not None
-                        and self.quant_config.get_name() == "squeezellm"
-                        and "lookup_table" not in name):
-                    loaded_weight = loaded_weight[:, shard_size *
-                                                  shard_id:shard_size *
-                                                  (shard_id + 1)]
-                    param_slice = param.data[:, offset:offset + shard_size]
-                else:
-                    loaded_weight = loaded_weight[shard_size *
-                                                  shard_id:shard_size *
-                                                  (shard_id + 1)]
-                    param_slice = param.data[offset:offset + shard_size]
-
+                loaded_weight = loaded_weight[shard_size *
+                                              shard_id:shard_size *
+                                              (shard_id + 1)]
+                param_slice = param.data[offset:offset + shard_size]
                 assert param_slice.shape == loaded_weight.shape
 
                 param_slice.copy_(loaded_weight)
@@ -409,26 +398,11 @@ class LlamaForCausalLM(nn.Module):
                 if is_transposed:
                     param = param.T
 
-                # needed due to different packing direction
-                if (self.quant_config is not None
-                        and self.quant_config.get_name() == "squeezellm"
-                        and "lookup_table" not in name):
-                    shard_size = param.shape[1] // 2
-                    loaded_weight = loaded_weight[:, shard_size *
-                                                  tp_rank:shard_size *
-                                                  (tp_rank + 1)]
-                    param_slice = param.data[:, shard_size *
-                                             stride_id:shard_size *
-                                             (stride_id + 1)]
-                else:
-                    shard_size = param.shape[0] // 2
-                    loaded_weight = loaded_weight[shard_size *
-                                                  tp_rank:shard_size *
-                                                  (tp_rank + 1)]
-                    param_slice = param.data[shard_size *
-                                             stride_id:shard_size *
-                                             (stride_id + 1)]
-
+                shard_size = param.shape[0] // 2
+                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
+                                              (tp_rank + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size *
+                                         (stride_id + 1)]
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_gate_up_weight = True
