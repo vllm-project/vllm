@@ -331,10 +331,10 @@ class MistralForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            is_packed = False
+            packed_dim = None
             is_transposed = False
             if self.quant_config is not None:
-                is_packed = self.quant_config.is_packed(name)
+                packed_dim = self.quant_config.get_packed_dim(name)
                 is_transposed = self.quant_config.is_transposed(name)
             if is_transposed:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -348,9 +348,11 @@ class MistralForCausalLM(nn.Module):
                 if is_transposed:
                     param = param.T
 
-                if is_packed:
-                    shard_size //= self.quant_config.pack_factor
-                    offset //= self.quant_config.pack_factor
+                if packed_dim is not None:
+                    shard_dim = 0 if not is_transposed else 1
+                    if packed_dim == shard_dim:
+                        shard_size //= self.quant_config.pack_factor
+                        offset //= self.quant_config.pack_factor
 
                 loaded_weight = loaded_weight[
                     shard_size * tensor_model_parallel_rank:shard_size *
