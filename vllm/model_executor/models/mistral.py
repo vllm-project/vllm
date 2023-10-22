@@ -298,17 +298,21 @@ class MistralForCausalLM(nn.Module):
                      load_format: str = "auto",
                      revision: Optional[str] = None):
         if self.quant_config is None:
-            weight_suffixes = ["weight"]
+            col_weight_suffixes = ["weight"]
+            row_weight_suffixes = ["weight"]
         else:
-            weight_suffixes = self.quant_config.get_tp_tensor_names()
+            col_weight_suffixes = (
+                self.quant_config.get_col_parallel_tensor_names())
+            row_weight_suffixes = (
+                self.quant_config.get_row_parallel_tensor_names())
 
         column_parallel_weights: List[str] = []
         for layer in self._column_parallel_layers:
-            for suffix in weight_suffixes:
+            for suffix in col_weight_suffixes:
                 column_parallel_weights.append(f"{layer}.{suffix}")
         row_parallel_weights: List[str] = []
         for layer in self._row_parallel_layers:
-            for suffix in weight_suffixes:
+            for suffix in row_weight_suffixes:
                 row_parallel_weights.append(f"{layer}.{suffix}")
 
         tp_size = get_tensor_model_parallel_world_size()

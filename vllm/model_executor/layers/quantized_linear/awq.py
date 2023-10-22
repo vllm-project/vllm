@@ -11,7 +11,7 @@ from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
 class AWQColumnParallelLinear(ColumnParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
-        assert self.input_size % self.quant_config.weight_bits == 0
+        assert self.input_size % self.quant_config.group_size == 0
         assert (self.output_size_per_partition %
                 self.quant_config.pack_factor == 0)
         self.qweight = Parameter(
@@ -63,7 +63,7 @@ class AWQRowParallelLinear(RowParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
         assert (self.input_size_per_partition %
-                self.quant_config.weight_bits == 0)
+                self.quant_config.group_size == 0)
         assert self.output_size % self.quant_config.pack_factor == 0
         self.qweight = Parameter(
             torch.empty(
