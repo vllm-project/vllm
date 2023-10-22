@@ -1,8 +1,8 @@
 from typing import Type
 
 from vllm.model_executor.quantization_utils.awq import AWQConfig
-from vllm.model_executor.quantization_utils.squeezellm import SqueezeLLMConfig
 from vllm.model_executor.quantization_utils.base import QuantizationConfig
+from vllm.model_executor.quantization_utils.squeezellm import SqueezeLLMConfig
 
 _QUANTIZATION_REGISTRY = {
     "awq": AWQConfig,
