@@ -38,7 +38,7 @@ class SqueezeLLMColumnParallelLinear(ColumnParallelLinear):
         x: torch.Tensor,
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        out_shape = (x.shape[-2], self.qweight.shape[-1])
+        out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
         quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
@@ -76,7 +76,7 @@ class SqueezeLLMRowParallelLinear(RowParallelLinear):
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
-        out_shape = (x.shape[-2], self.qweight.shape[-1])
+        out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
         quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
                                          self.lookup_table)
