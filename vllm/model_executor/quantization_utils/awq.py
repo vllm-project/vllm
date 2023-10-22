@@ -60,8 +60,8 @@ class AWQConfig(QuantizationConfig):
         return cls(weight_bits, group_size, zero_point)
 
     @classmethod
-    def get_packed_tensor_names(cls) -> List[str]:
-        return ["qweight", "qzeros"]
+    def get_packed_tensors(cls) -> Dict[str, int]:
+        return {"qweight": 1, "qzeros": 1}
 
     @classmethod
     def get_transposed_tensor_names(cls) -> List[str]:
