@@ -41,9 +41,7 @@ class SqueezeLLMConfig(QuantizationConfig):
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return [
-            "quant_config.json",
-        ]
+        return ["quant_config.json"]
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SqueezeLLMConfig":
