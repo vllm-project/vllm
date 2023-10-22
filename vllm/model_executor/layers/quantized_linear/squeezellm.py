@@ -51,8 +51,10 @@ class SqueezeLLMColumnParallelLinear(ColumnParallelLinear):
 class SqueezeLLMRowParallelLinear(RowParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
-        assert (self.input_size_per_partition %
-                self.quant_config.pack_factor == 0)
+        if self.input_size_per_partition % self.quant_config.pack_factor != 0:
+            raise ValueError(
+                "The tensor parallel size is not aligned with the quantized "
+                "weight shape. Please use a different tensor parallel size.")
         self.qweight = Parameter(
             torch.empty(
                 self.input_size_per_partition // self.quant_config.pack_factor,
