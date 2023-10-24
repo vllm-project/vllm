@@ -360,6 +360,8 @@ class LLMEngine:
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         existing_finished_seqs = seq_group.get_finished_seqs()
+        for seq in existing_finished_seqs:
+            print(f"existing_finished_seq: {seq.seq_id} -- {seq.output_text}")
         parent_child_dict = {
             parent_seq.seq_id: []
             for parent_seq in parent_seqs

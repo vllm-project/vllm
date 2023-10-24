@@ -183,11 +183,7 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        print("step method called")
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
-        print(f"len of seq_group_metadata_list: {len(seq_group_metadata_list)}")
-        for seq_group_metadata in seq_group_metadata_list:
-            print(f"len of seq_data: {len(seq_group_metadata.seq_data.keys())}")
         if scheduler_outputs.is_empty():
             return ignored
 
