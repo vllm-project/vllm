@@ -537,6 +537,7 @@ class LLMEngine:
                           scheduler_outputs.ignored_seq_groups):
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
+            print(f"request_output: {request_output.outputs[0].text}")
 
         if self.log_stats:
             # Log the system stats.
