@@ -538,7 +538,8 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
             for output in request_output.outputs:
-                print(f"request_output: {output.text}")
+                print(f"request_output text: {output.text}")
+                print(f"request_output token ids: {output.token_ids}")
                 print(f"request_output finish reason: {output.finish_reason}")
         print(f"len of request_outputs: {len(request_outputs)}")
         if self.log_stats:
