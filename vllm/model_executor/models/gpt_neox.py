@@ -262,8 +262,12 @@ class GPTNeoXForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        (column_parallel_weights, row_parallel_weights,
-         ignore_weight_suffixes) = get_parallel_weight(self)
+        column_parallel_weights, row_parallel_weights = get_parallel_weight(
+            self)
+        column_weight_suffixes = (
+            self.quant_config.get_col_parallel_tensor_names()
+        ) if self.quant_config is not None else ["weight", "bias"]
+
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
         )
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
@@ -272,8 +276,6 @@ class GPTNeoXForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
-                continue
-            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
                 continue
 
             is_transposed = False
@@ -288,7 +290,9 @@ class GPTNeoXForCausalLM(nn.Module):
             param = state_dict[name]
             if is_transposed:
                 param = param.T
-            if "query_key_value" in name and "g_idx" not in name:
+            if "query_key_value" in name and any(
+                    name.endswith(suffix)
+                    for suffix in column_weight_suffixes):
                 # NOTE(woosuk): GPT-NeoX's fused QKV has the shape of
                 # [num_heads * 3 * head_size, hidden_size], while the
                 # required shape is [3 * num_heads * head_size, hidden_size].

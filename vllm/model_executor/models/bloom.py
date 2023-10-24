@@ -306,16 +306,18 @@ class BloomForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        (column_parallel_weights, row_parallel_weights,
-         ignore_weight_suffixes) = get_parallel_weight(self)
+        column_parallel_weights, row_parallel_weights = get_parallel_weight(
+            self)
+        column_weight_suffixes = (
+            self.quant_config.get_col_parallel_tensor_names()
+        ) if self.quant_config is not None else ["weight", "bias"]
+
         tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
-                continue
             is_transposed = False
             if self.quant_config is not None:
                 is_transposed = self.quant_config.is_transposed(name)
@@ -335,7 +337,9 @@ class BloomForCausalLM(nn.Module):
                 if is_transposed:
                     param = param.T
 
-            if "query_key_value" in name and "g_idx" not in name:
+            if "query_key_value" in name and any(
+                    name.endswith(suffix)
+                    for suffix in column_weight_suffixes):
                 # NOTE(woosuk): BLOOM's fused QKV has the shape of
                 # [num_heads * 3 * head_size, hidden_size], while the
                 # required shape is [3 * num_heads * head_size, hidden_size].

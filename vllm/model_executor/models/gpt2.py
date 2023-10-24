@@ -247,8 +247,12 @@ class GPT2LMHeadModel(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        (column_parallel_weights, row_parallel_weights,
-         ignore_weight_suffixes) = get_parallel_weight(self)
+        column_parallel_weights, row_parallel_weights = get_parallel_weight(
+            self)
+        column_weight_suffixes = (
+            self.quant_config.get_col_parallel_tensor_names()
+        ) if self.quant_config is not None else ["weight", "bias"]
+
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
@@ -263,8 +267,6 @@ class GPT2LMHeadModel(nn.Module):
             if ".attn.bias" in name or ".attn.masked_bias" in name:
                 # Skip attention mask.
                 # NOTE: "c_attn.bias" should not be skipped.
-                continue
-            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
                 continue
 
             if not name.startswith("transformer."):
@@ -297,7 +299,9 @@ class GPT2LMHeadModel(nn.Module):
                 continue
 
             # For the fused QKV linear layer, manually shard the weights.
-            if "c_attn" in name and "g_idx" not in name:
+            if "c_attn" in name and any(
+                    name.endswith(suffix)
+                    for suffix in column_weight_suffixes):
                 # GPT-2's fused QKV has the shape of
                 # [3 * num_heads * head_size, hidden_size].
                 # When tensor parallelism is used, we shard the weights along

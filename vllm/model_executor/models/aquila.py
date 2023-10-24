@@ -318,8 +318,12 @@ class AquilaForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        (column_parallel_weights, row_parallel_weights,
-         ignore_weight_suffixes) = get_parallel_weight(self)
+        column_parallel_weights, row_parallel_weights = get_parallel_weight(
+            self)
+        column_weight_suffixes = (
+            self.quant_config.get_col_parallel_tensor_names()
+        ) if self.quant_config is not None else ["weight", "bias"]
+
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         q_proj_shard_size = (self.config.hidden_size // tp_size)
@@ -339,13 +343,11 @@ class AquilaForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
-            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
-                continue
 
-            is_packed = False
+            packed_dim = None
             is_transposed = False
             if self.quant_config is not None:
-                is_packed = self.quant_config.is_packed(name)
+                packed_dim = self.quant_config.get_packed_dim(name)
                 is_transposed = self.quant_config.is_transposed(name)
             if is_transposed:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -356,20 +358,28 @@ class AquilaForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, "qkv_proj")
-                if name not in state_dict or "g_idx" in name:
+                if name not in state_dict:
                     break
                 param = state_dict[name]
                 if is_transposed:
                     param = param.T
 
-                if is_packed:
-                    shard_size //= self.quant_config.pack_factor
-                    offset //= self.quant_config.pack_factor
+                if packed_dim is not None:
+                    shard_dim = 0 if not is_transposed else 1
+                    if packed_dim == shard_dim:
+                        shard_size //= self.quant_config.pack_factor
+                        offset //= self.quant_config.pack_factor
 
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[offset:offset + shard_size]
+                if any(
+                        name.endswith(suffix)
+                        for suffix in column_weight_suffixes):
+                    loaded_weight = loaded_weight[
+                        shard_size * tensor_model_parallel_rank:shard_size *
+                        (tensor_model_parallel_rank + 1)]
+                    param_slice = param.data[offset:offset + shard_size]
+                else:
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    param_slice = param.data
                 assert param_slice.shape == loaded_weight.shape
 
                 param_slice.copy_(loaded_weight)
@@ -383,17 +393,24 @@ class AquilaForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, "gate_up_proj")
-                if "g_idx" in name or name not in state_dict:
+                if name not in state_dict:
                     break
                 param = state_dict[name]
                 if is_transposed:
                     param = param.T
                 shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
+                if any(
+                        name.endswith(suffix)
+                        for suffix in column_weight_suffixes):
+                    loaded_weight = loaded_weight[
+                        shard_size * tensor_model_parallel_rank:shard_size *
+                        (tensor_model_parallel_rank + 1)]
+                    param_slice = param.data[shard_size *
+                                             stride_id:shard_size *
+                                             (stride_id + 1)]
+                else:
+                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                    param_slice = param.data
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_gate_up_weight = True

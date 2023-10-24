@@ -445,8 +445,12 @@ class FalconForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        (column_parallel_weights, row_parallel_weights,
-         ignore_weight_suffixes) = get_parallel_weight(self)
+        column_parallel_weights, row_parallel_weights = get_parallel_weight(
+            self)
+        column_weight_suffixes = (
+            self.quant_config.get_col_parallel_tensor_names()
+        ) if self.quant_config is not None else ["weight", "bias"]
+
         tp_size = (get_tensor_model_parallel_world_size())
         tp_rank = get_tensor_model_parallel_rank()
 
@@ -477,9 +481,6 @@ class FalconForCausalLM(nn.Module):
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
-                continue
-
             is_transposed = False
             if self.quant_config is not None:
                 is_transposed = self.quant_config.is_transposed(name)
@@ -490,16 +491,18 @@ class FalconForCausalLM(nn.Module):
             if "query_key_value" in name:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 loaded_weight_size = loaded_weight.size()
-                if "g_idx" in name:
+                if not any(
+                        name.endswith(suffix)
+                        for suffix in column_weight_suffixes):
                     if separated_q_kv:
-                        q_idx_name = name.replace("query_key_value", "query")
-                        kv_idx_name = name.replace("query_key_value",
-                                                   "key_value")
-                        state_dict[q_idx_name].data.copy_(loaded_weight)
-                        state_dict[kv_idx_name].data.copy_(loaded_weight)
+                        q_name = name.replace("query_key_value", "query")
+                        kv_name = name.replace("query_key_value", "key_value")
+                        state_dict[q_name].data.copy_(loaded_weight)
+                        state_dict[kv_name].data.copy_(loaded_weight)
                     else:
                         state_dict[name].data.copy_(loaded_weight)
                     continue
+
                 loaded_weight = loaded_weight.view(
                     total_num_kv_heads, num_query_heads_per_kv_head + 2, -1,
                     *loaded_weight_size[1:])

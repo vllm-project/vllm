@@ -66,7 +66,6 @@ class InputMetadata:
         else:
             self.max_num_blocks_per_seq = 0
         assert block_tables.shape[0] == self.num_generation_tokens
-        assert context_lens.shape[0] == self.num_generation_tokens
 
         # Set during the execution of the first attention op.
         self.attn_bias: Optional[AttentionBias] = None

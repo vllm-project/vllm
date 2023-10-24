@@ -281,8 +281,12 @@ class QWenLMHeadModel(nn.Module):
         load_format: str = "auto",
         revision: Optional[str] = None,
     ):
-        (column_parallel_weights, row_parallel_weights,
-         ignore_weight_suffixes) = get_parallel_weight(self)
+        column_parallel_weights, row_parallel_weights = get_parallel_weight(
+            self)
+        column_weight_suffixes = (
+            self.quant_config.get_col_parallel_tensor_names()
+        ) if self.quant_config is not None else ["weight", "bias"]
+
         tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
@@ -290,8 +294,6 @@ class QWenLMHeadModel(nn.Module):
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
-                continue
-            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
                 continue
 
             loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -302,7 +304,9 @@ class QWenLMHeadModel(nn.Module):
             if is_transposed:
                 loaded_weight = loaded_weight.T
 
-            if "c_attn" in name and "g_idx" not in name:
+            if "c_attn" in name and any(
+                    name.endswith(suffix)
+                    for suffix in column_weight_suffixes):
                 total_num_heads = self.config.num_attention_heads
                 num_heads = total_num_heads // tp_world_size
                 head_start = tp_rank * num_heads
@@ -319,18 +323,23 @@ class QWenLMHeadModel(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, "gate_up_proj")
-                if "g_idx" in name:
-                    break
                 if name not in state_dict:
                     continue
                 param = state_dict[name]
                 if is_transposed:
                     param = param.T
                 shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
-                                              (tp_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
+                if any(
+                        name.endswith(suffix)
+                        for suffix in column_weight_suffixes):
+                    loaded_weight = loaded_weight[shard_size *
+                                                  tp_rank:shard_size *
+                                                  (tp_rank + 1)]
+                    param_slice = param.data[shard_size *
+                                             stride_id:shard_size *
+                                             (stride_id + 1)]
+                else:
+                    param_slice = param.data
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_gate_up_weight = True

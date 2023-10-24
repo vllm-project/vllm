@@ -199,6 +199,7 @@ quantization_extension = CUDAExtension(
     name="vllm.quantization_ops",
     sources=[
         "csrc/quantization.cpp", "csrc/quantization/awq/gemm_kernels.cu",
+        "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
         "csrc/quantization/gptq/exllama_ext.cpp",
         "csrc/quantization/gptq/cuda_buffers.cu",
         "csrc/quantization/gptq/cuda_func/column_remap.cu",

@@ -274,8 +274,12 @@ class GPTBigCodeForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        (column_parallel_weights, row_parallel_weights,
-         ignore_weight_suffixes) = get_parallel_weight(self)
+        column_parallel_weights, row_parallel_weights = get_parallel_weight(
+            self)
+        column_weight_suffixes = (
+            self.quant_config.get_col_parallel_tensor_names()
+        ) if self.quant_config is not None else ["weight", "bias"]
+
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
@@ -291,16 +295,14 @@ class GPTBigCodeForCausalLM(nn.Module):
                 # Skip attention mask.
                 # NOTE: "c_attn.bias" should not be skipped.
                 continue
-            if any(name.endswith(suffix) for suffix in ignore_weight_suffixes):
-                continue
 
             if not name.startswith("transformer."):
                 name = "transformer." + name
 
-            is_packed = False
+            packed_dim = None
             is_transposed = False
             if self.quant_config is not None:
-                is_packed = self.quant_config.is_packed(name)
+                packed_dim = self.quant_config.get_packed_dim(name)
                 is_transposed = self.quant_config.is_transposed(name)
             if is_transposed:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -313,12 +315,14 @@ class GPTBigCodeForCausalLM(nn.Module):
                 # When tensor parallelism is used, we shard the weights along
                 # the head dimension.
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                if "g_idx" in name:
+                if not any(
+                        name.endswith(suffix)
+                        for suffix in column_weight_suffixes):
                     if self.config.multi_query:
-                        q_idx_name = name.replace("c_attn", "c_attn_q")
-                        kv_idx_name = name.replace("c_attn", "c_attn_kv")
-                        state_dict[q_idx_name].data.copy_(loaded_weight)
-                        state_dict[kv_idx_name].data.copy_(loaded_weight)
+                        q_name = name.replace("c_attn", "c_attn_q")
+                        kv_name = name.replace("c_attn", "c_attn_kv")
+                        state_dict[q_name].data.copy_(loaded_weight)
+                        state_dict[kv_name].data.copy_(loaded_weight)
                     else:
                         state_dict[name].data.copy_(loaded_weight)
                     continue
@@ -326,8 +330,10 @@ class GPTBigCodeForCausalLM(nn.Module):
                 total_num_kv_heads = (1 if self.config.multi_query else
                                       total_num_heads)
                 hidden_size = self.config.hidden_size
-                if is_packed:
-                    hidden_size //= self.quant_config.pack_factor
+                if packed_dim is not None:
+                    shard_dim = 0 if not is_transposed else 1
+                    if packed_dim == shard_dim:
+                        hidden_size //= self.quant_config.pack_factor
                 head_size = hidden_size // total_num_heads
                 total_kv_size = head_size * total_num_kv_heads
                 num_heads = total_num_heads // tensor_model_parallel_world_size

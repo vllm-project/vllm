@@ -38,6 +38,12 @@ void gptq_descact_matmul(
   torch::Tensor zeros,
   torch::Tensor g_idx);
 
+void squeezellm_gemm(
+  torch::Tensor vec,
+  torch::Tensor mat,
+  torch::Tensor mul,
+  torch::Tensor lookup_table);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
     "awq_gemm",
@@ -63,4 +69,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "gptq_descact_matmul",
     &gptq_descact_matmul,
     "Quantized GEMM for GPTQ for parallelized desc_act layer");
+  m.def(
+    "squeezellm_gemm",
+    &squeezellm_gemm,
+    "Quantized GEMM for SqueezeLLM");
 }
