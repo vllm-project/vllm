@@ -37,6 +37,7 @@ _MODEL_REGISTRY = {
 # FIXME(woosuk): Remove this once all models support quantization.
 _MODEL_CLASSES_SUPPORT_QUANTIZATION = {
     "awq": [LlamaForCausalLM, MistralForCausalLM],
+    "squeezellm": [LlamaForCausalLM, MistralForCausalLM],
     "gptq": [
         LlamaForCausalLM,
         QWenLMHeadModel,
