@@ -222,9 +222,6 @@ class Worker:
         slot_mapping_tensor = torch.tensor(padded_slot_mapping, dtype=torch.int, device="cuda")
         context_lens_tensor = torch.tensor(context_lens, dtype=torch.int, device="cuda")
         block_tables_tensor = torch.tensor(padded_block_tables, dtype=torch.int, device="cuda")
-        print("tokens_tensors shape", tokens_tensor.shape)
-        print("context_lens_tensor shape", context_lens_tensor.shape)
-        print("block_tables_tensor shape", block_tables_tensor.shape)
 
         # Create dummy sequences
         seq_groups = [([0], SamplingParams())]
@@ -239,7 +236,6 @@ class Worker:
             block_tables=block_tables_tensor,
             sliding_window=None
         )
-        print("input_metadata", input_metadata)
         return tokens_tensor, positions_tensor, input_metadata
 
 
