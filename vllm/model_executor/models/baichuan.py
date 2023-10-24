@@ -285,12 +285,8 @@ class BaiChuanModel(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        embd_start = time.time()
         hidden_states = self.embed_tokens(input_ids)
-        embd_end = time.time()
-        print(f"embd time cost: {embd_end - embd_start}")
         for i in range(len(self.layers)):
-            layer_start = time.time()
             if cache_events is None:
                 cache_event = None
             else:
@@ -303,8 +299,6 @@ class BaiChuanModel(nn.Module):
                 input_metadata,
                 cache_event,
             )
-            layer_end = time.time()
-            print(f"layer_{i} cost: {layer_end - layer_start}")
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -359,8 +353,6 @@ class BaiChuanBaseForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        time_start = time.time()
-
         # Set batch lora id and token length
         batch_lora_ids = []
         token_lengths = []
@@ -389,11 +381,6 @@ class BaiChuanBaseForCausalLM(nn.Module):
         lm_head_weight = self.lm_head.weight if self.version == "1" else self.lm_head.get_weight() 
         next_tokens = self.sampler(lm_head_weight, hidden_states,
                                    input_metadata)
-        
-
-        end = time.time()
-        print(f"time cost for one token: {end - time_start}")
-        print(f"generated token: {next_tokens}")
         return next_tokens
 
     _column_parallel_weights = []
