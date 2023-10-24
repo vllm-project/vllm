@@ -539,7 +539,8 @@ class LLMEngine:
             request_outputs.append(request_output)
             for output in request_output.outputs:
                 print(f"request_output: {output.text}")
-
+                print(f"request_output finish reason: {output.finish_reason}")
+        print(f"len of request_outputs: {len(request_outputs)}")
         if self.log_stats:
             # Log the system stats.
             self._log_system_stats(scheduler_outputs.prompt_run,
