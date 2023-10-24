@@ -525,7 +525,12 @@ class LLMEngine:
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
+
         print(f"len of scheduled_seq_groups: {len(scheduled_seq_groups)}")
+        for seq_group in scheduled_seq_groups:
+            seqs_dict = seq_group.seqs_dict
+            print(f"len of seq_dict before process: {len(seqs_dict.keys())}")
+
         for seq_group, outputs in zip(scheduled_seq_groups, output):
             self._process_sequence_group_outputs(seq_group, outputs)
 
