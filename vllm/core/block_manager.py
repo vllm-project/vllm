@@ -127,7 +127,7 @@ class BlockSpaceManager:
         block_table = BlockTable = []
         for logical_idx in range(len(prefix.logical_token_blocks)):
             block = self.gpu_allocator.allocate()
-            block.ref_count = 10000
+            block.ref_count = 100000
             block_table.append(block)
         self.prefix_block_tables[prefix.prefix_id] = block_table.copy()
 

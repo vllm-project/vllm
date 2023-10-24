@@ -65,6 +65,7 @@ class RequestOutput:
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
+        prefix: Optional[str] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -72,6 +73,7 @@ class RequestOutput:
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
+        self.prefix = prefix
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
@@ -107,13 +109,30 @@ class RequestOutput:
         prompt_token_ids = seq_group.prompt_token_ids
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
-        return cls(seq_group.request_id, prompt, prompt_token_ids,
+        if seq_group.prefix is not None:
+            prefix = seq_group.prefix.prefix_string
+        else:
+            prefix = None
+        if prefix is not None:
+            return cls(seq_group.request_id, prompt, prompt_token_ids,
+                   prompt_logprobs, outputs, finished, prefix)
+        else:
+            return cls(seq_group.request_id, prompt, prompt_token_ids,
                    prompt_logprobs, outputs, finished)
 
     def __repr__(self) -> str:
-        return (f"RequestOutput(request_id={self.request_id}, "
-                f"prompt={self.prompt!r}, "
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"prompt_logprobs={self.prompt_logprobs}, "
-                f"outputs={self.outputs}, "
-                f"finished={self.finished})")
+        if self.prefix is None:
+            return (f"RequestOutput(request_id={self.request_id}, "
+                    f"prompt={self.prompt!r}, "
+                    f"prompt_token_ids={self.prompt_token_ids}, "
+                    f"prompt_logprobs={self.prompt_logprobs}, "
+                    f"outputs={self.outputs}, "
+                    f"finished={self.finished})")
+        else:
+            return (f"RequestOutput(request_id={self.request_id}, "
+                    f"prompt={self.prompt!r}, "
+                    f"prefix={self.prefix!r}, "
+                    f"prompt_token_ids={self.prompt_token_ids}, "
+                    f"prompt_logprobs={self.prompt_logprobs}, "
+                    f"outputs={self.outputs}, "
+                    f"finished={self.finished})")

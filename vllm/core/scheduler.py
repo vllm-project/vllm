@@ -287,12 +287,21 @@ class Scheduler:
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
 
+            if seq_group.prefix is not None:
+                prefix = seq_group.prefix
+                prefix_block_table = self.get_prefix_block_table(seq_group.prefix)
+            else:
+                prefix = None
+                prefix_block_table = None
+
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
                 is_prompt=scheduler_outputs.prompt_run,
                 seq_data=seq_data,
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
+                prefix=prefix,
+                prefix_block_table=prefix_block_table
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs

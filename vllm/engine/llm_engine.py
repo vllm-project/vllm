@@ -271,7 +271,8 @@ class LLMEngine:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
-        arrival_time: Optional[float] = None,
+        prefix_id: Optional[int] = None,
+        arrival_time: Optional[float] = None
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -295,14 +296,23 @@ class LLMEngine:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
+        # Remove starting token if there's input prefix;
+        if prefix_id is not None:
+            prompt_token_ids = prompt_token_ids[1:]
+
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
 
+        # get prefix
+        if prefix_id is not None:
+            prefix = copy.deepcopy(self.prefix_cache[prefix_id])
+        else:
+            prefix = None
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time)
+                                  arrival_time, prefix)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)

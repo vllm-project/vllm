@@ -357,6 +357,7 @@ class AsyncLLMEngine:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
+        prefix_id: Optional[int] = None,
         arrival_time: Optional[float] = None,
     ) -> AsyncStream:
         if self.log_requests:
@@ -388,6 +389,7 @@ class AsyncLLMEngine:
             prompt=prompt,
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
+            prefix_id=prefix_id,
             arrival_time=arrival_time)
 
         return stream
@@ -397,7 +399,8 @@ class AsyncLLMEngine:
             prompt: Optional[str],
             sampling_params: SamplingParams,
             request_id: str,
-            prompt_token_ids: Optional[List[int]] = None) -> RequestOutput:
+            prompt_token_ids: Optional[List[int]] = None,
+            prefix_id: Optional[int] = None) -> RequestOutput:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -425,6 +428,7 @@ class AsyncLLMEngine:
                                             prompt,
                                             sampling_params,
                                             prompt_token_ids=prompt_token_ids,
+                                            prefix_id=prefix_id,
                                             arrival_time=arrival_time)
 
             async for request_output in stream:

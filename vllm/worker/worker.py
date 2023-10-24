@@ -84,8 +84,7 @@ class Worker:
             positions=input_positions,
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
-            cache_events=None,
-            sampling=False
+            cache_events=None
         )
 
     @torch.inference_mode()
@@ -118,7 +117,7 @@ class Worker:
                 is_prompt=True,
                 seq_data={group_id: seq_data},
                 sampling_params=sampling_params,
-                block_tables=None,
+                block_tables=None
             )
             seqs.append(seq)
 
@@ -204,7 +203,7 @@ class Worker:
         generation_block_tables: List[List[int]] = []
         max_seq_len = max(prefix_lens) if prefix_lens else 1
         padded_input_tokens = [
-            _pad_to_max(positions, max_seq_len, pad=0) for positions in input_positions
+            _pad_to_max(tokens, max_seq_len, pad=0) for tokens in input_tokens
         ]
         padded_input_positions = [
             _pad_to_max(positions, max_seq_len, pad=0)
@@ -214,32 +213,25 @@ class Worker:
             _pad_to_max(mapping, max_seq_len, pad=-1) for mapping in slot_mapping
         ]
 
-        # ita: 뭔가 이상해...
         padded_block_tables = [
             _pad_to_max(block_table, max_block_table_length, pad=0) for block_table in generation_block_tables
         ]
         # Convert to tensors.
-        tokens_tensor = torch.tensor(padded_input_tokens,
-                                     dtype=torch.long,
-                                     device="cuda")
-        positions_tensor = torch.tensor(padded_input_positions,
-                                        dtype=torch.long,
-                                        device="cuda")
-        slot_mapping_tensor = torch.tensor(padded_slot_mapping,
-                                           dtype=torch.int,
-                                           device="cuda")
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device="cuda")
-        block_tables_tensor = torch.tensor(padded_block_tables,
-                                           dtype=torch.int,
-                                           device="cuda")
+        tokens_tensor = torch.tensor(padded_input_tokens, dtype=torch.long, device="cuda")
+        positions_tensor = torch.tensor(padded_input_positions, dtype=torch.long, device="cuda")
+        slot_mapping_tensor = torch.tensor(padded_slot_mapping, dtype=torch.int, device="cuda")
+        context_lens_tensor = torch.tensor(context_lens, dtype=torch.int, device="cuda")
+        block_tables_tensor = torch.tensor(padded_block_tables, dtype=torch.int, device="cuda")
         print("tokens_tensors shape", tokens_tensor.shape)
         print("context_lens_tensor shape", context_lens_tensor.shape)
         print("block_tables_tensor shape", block_tables_tensor.shape)
+
+        # Create dummy sequences
+        seq_groups = [([0], SamplingParams())]
+        seq_data = {0: SequenceData(prompt_token_ids=[0])}
         input_metadata = InputMetadata(
-            seq_groups=None,
-            seq_data=None,
+            seq_groups=seq_groups,
+            seq_data=seq_data,
             prompt_lens=prefix_lens,
             slot_mapping=slot_mapping_tensor,
             context_lens=context_lens_tensor,
@@ -274,7 +266,11 @@ class Worker:
             seq_id = seq_ids[0]
 
             seq_data = seq_group_metadata.seq_data[seq_id]
-            prompt_tokens = seq_data.get_token_ids()
+            if seq_group_metadata.prefix is not None:
+                prompt_tokens = seq_group_metadata.prefix.get_token_ids() + seq_data.get_token_ids()
+            else:
+                prompt_tokens = seq_data.get_token_ids()
+
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
@@ -292,6 +288,9 @@ class Worker:
             # Compute the slot mapping.
             slot_mapping.append([])
             block_table = seq_group_metadata.block_tables[seq_id]
+            pad = 0
+            if seq_group_metadata.prefix_block_table is not None:
+                block_table = seq_group_metadata.prefix_block_table + seq_group_metadata.block_tables[seq_id]
             for i in range(prompt_len):
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
@@ -317,13 +316,16 @@ class Worker:
                 input_tokens.append([generation_token])
 
                 context_len = seq_data.get_len()
+                if seq_group_metadata.prefix is not None:
+                    context_len += seq_group_metadata.prefix.get_len()
                 position = context_len - 1
                 if self.sliding_window is not None:
                     context_len = min(context_len, self.sliding_window)
                 input_positions.append([position])
 
                 block_table = seq_group_metadata.block_tables[seq_id]
-
+                if seq_group_metadata.prefix_block_table is not None:
+                    block_table = seq_group_metadata.prefix_block_table + block_table
                 max_context_len = max(max_context_len, context_len)
                 max_num_blocks_per_seq = max(max_num_blocks_per_seq,
                                              len(block_table))

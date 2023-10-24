@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
-
+from vllm.prefix import Prefix
 PromptLogprobs = List[Optional[Dict[int, float]]]
 SampleLogprobs = List[Dict[int, float]]
 
@@ -236,10 +236,12 @@ class SequenceGroup:
         seqs: List[Sequence],
         sampling_params: SamplingParams,
         arrival_time: float,
+        prefix: Optional[Prefix] = None
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
+        self.prefix = prefix
         self.arrival_time = arrival_time
         self.prompt_logprobs: Optional[PromptLogprobs] = None
 
@@ -344,12 +346,16 @@ class SequenceGroupMetadata:
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
+        prefix: Optional[Prefix] = None,
+        prefix_block_table: Optional[List[int]] = None
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
         self.seq_data = seq_data
         self.sampling_params = sampling_params
         self.block_tables = block_tables
+        self.prefix = prefix
+        self.prefix_block_table = prefix_block_table
 
 
 class SequenceOutputs:

@@ -19,12 +19,12 @@ class Prefix:
     def __init__(
         self,
         prefix_id: int,
-        prefix_strings: str,
+        prefix_string: str,
         prefix_token_ids: List[int],
         block_size: int,
     ) -> None:
         self.prefix_id = prefix_id
-        self.prompt = prefix_strings
+        self.prefix_string = prefix_string
         self.block_size = block_size
 
         self.token_ids = prefix_token_ids
@@ -33,11 +33,8 @@ class Prefix:
         # Initialize the logical token blocks with the prompt token ids.
         self._append_tokens_to_blocks(prefix_token_ids)
 
-        # Used for incremental detokenization
-        self.prefix_offset = 0
-        self.read_offset = 0
-        # Input + output tokens
-        self.tokens: Optional[List[str]] = None
+    def get_prefix_offset(self):
+        return self.logical_token_blocks[-1].get_num_empty_slots()
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
@@ -62,24 +59,14 @@ class Prefix:
                                                num_empty_slots])
             cursor += num_empty_slots
 
-    def append_token_id(
-        self,
-        token_id: int,
-        logprobs: Dict[int, float],
-    ) -> None:
-        assert token_id in logprobs
-        self._append_tokens_to_blocks([token_id])
-        self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id])
-
     def get_len(self) -> int:
-        return len(self.data)
+        return len(self.token_ids)
 
     def get_token_ids(self) -> List[int]:
-        return self.data
+        return self.token_ids
 
     def get_last_token_id(self) -> int:
-        return self.data[-1]
+        return self.token_ids[-1]
 
 class PrefixMetaData:
     def __init__(

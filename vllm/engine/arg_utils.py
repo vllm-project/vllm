@@ -202,8 +202,7 @@ class EngineArgs:
                                            self.max_paddings)
         prefix_config = PrefixConfig(
             [
-                "aaa bbb ccc ddd",
-                "김밥",
+                '''You are given a long korean text (delimited by triple quotes) and a question. Read the text and answer the question at the end in Korean.\n"""\n\n   ''',
              ]
         )
         return model_config, cache_config, parallel_config, scheduler_config, prefix_config
