@@ -37,12 +37,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm, I8RMSNorm, DequantAddR
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, DequantPagedAttentionWithRoPEQuant
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.quantized_linear import ParallelLinear
-from vllm.model_executor.layers.int8_linear.w8a8linear import (
-    W8A8OFP32LinearWithSFactorCublas,
-    W8A8O32LinearCublas,
-    W8A8O32LinearCublasNoDequant,
-    W8A8OFP32LinearWithSFactorCublasNoQuant,
-    W8A8O32Linear)
 from vllm.model_executor.layers.fusion import DequantAddResidual
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
