@@ -310,14 +310,14 @@ class LLMEngine:
         early_stopping: Union[bool, str],
         sampling_params: SamplingParams,
         best_running_seq: Sequence,
-        current_worst_seq: Sequence,
+        current_best_seq: Sequence,
     ) -> bool:
         assert sampling_params.use_beam_search
         length_penalty = sampling_params.length_penalty
         if early_stopping is True:
             return True
 
-        current_worst_score = (current_worst_seq.get_beam_search_score(
+        current_best_score = (current_best_seq.get_beam_search_score(
             length_penalty=length_penalty,
             eos_token_id=self.tokenizer.eos_token_id))
         if early_stopping is False:
@@ -347,7 +347,7 @@ class LLMEngine:
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
                         eos_token_id=self.tokenizer.eos_token_id))
-        return current_worst_score >= highest_attainable_score
+        return current_best_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutputs) -> None:
