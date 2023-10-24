@@ -359,7 +359,10 @@ class LLMEngine:
         # Process samples
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        print(f"parent_seqs: {parent_seqs}")
         existing_finished_seqs = seq_group.get_finished_seqs()
+        print(f"existing_finished_seqs: {existing_finished_seqs}")
+        input()
         parent_child_dict = {
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
@@ -530,6 +533,9 @@ class LLMEngine:
         for seq_group in scheduled_seq_groups:
             seqs_dict = seq_group.seqs_dict
             print(f"len of seq_dict before process: {len(seqs_dict.keys())}")
+            for seq_id, seq in seqs_dict.items():
+                print(f"before -- {seq_id} stat: {seq.status}")
+                print(f"before -- {seq_id} is finished: {seq.is_finished()}")
 
         for seq_group, outputs in zip(scheduled_seq_groups, output):
             self._process_sequence_group_outputs(seq_group, outputs)
