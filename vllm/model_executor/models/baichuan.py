@@ -24,7 +24,7 @@ InputMetadata to extract the original 2D shape of the input.
 """
 import math
 from typing import List, Optional, Tuple
-
+import time
 import torch
 from torch import nn
 
@@ -285,8 +285,12 @@ class BaiChuanModel(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
+        embd_start = time.time()
         hidden_states = self.embed_tokens(input_ids)
+        embd_end = time.time()
+        print(f"embd time cost: {embd_end - embd_start}")
         for i in range(len(self.layers)):
+            layer_start = time.time()
             if cache_events is None:
                 cache_event = None
             else:
@@ -299,6 +303,8 @@ class BaiChuanModel(nn.Module):
                 input_metadata,
                 cache_event,
             )
+            layer_end = time.time()
+            print(f"layer_{i} cost: {layer_end - layer_start}")
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -353,22 +359,7 @@ class BaiChuanBaseForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        # #for debug
-        # seq_groups = input_metadata.seq_groups
-        # seq_data = input_metadata.seq_data
-        # seq_ids_num = 0
-        # for seq_group in seq_groups:
-        #     ids = seq_group[0]
-        #     seq_ids_num += len(ids)
-        # sed_ids_from_seqdata = len(seq_data.keys())
-        # print(f"seq_ids_num: {seq_ids_num}; sed_ids_from_seqdata: {sed_ids_from_seqdata}")
-        
-        # print(f"ids in seq_data: {seq_data.keys()}")
-        # print(f"ids in seq_groups: {[x[0] for x in seq_groups]}")
-        
-        # for id, s_data in seq_data.items():
-        #     print(f"id: {id}, prompt_token_ids: {s_data.prompt_token_ids}; output_token_ids: {s_data.output_token_ids}")
-        # # debug end
+        time_start = time.time()
 
         # Set batch lora id and token length
         batch_lora_ids = []
@@ -398,6 +389,10 @@ class BaiChuanBaseForCausalLM(nn.Module):
         lm_head_weight = self.lm_head.weight if self.version == "1" else self.lm_head.get_weight() 
         next_tokens = self.sampler(lm_head_weight, hidden_states,
                                    input_metadata)
+        
+
+        end = time.time()
+        print(f"time cost for one token: {end - time_start}")
         return next_tokens
 
     _column_parallel_weights = []
