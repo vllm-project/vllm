@@ -73,25 +73,22 @@ class LlamaMLP(nn.Module):
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                             "Only silu is supported for now.")
 
-        if self.use_int8:
-            self.gate_up_proj = W8A8O32Linear(hidden_size,
-                                            2 * intermediate_size)
-            self.down_proj = W8A8O32Linear(intermediate_size,
-                                                    hidden_size)
-            self.act_fn = DequantSiluAndMulQuant()
-        else:
-            self.gate_up_proj = ParallelLinear.column(hidden_size,
-                                                    2 * intermediate_size,
-                                                    bias=False,
-                                                    gather_output=False,
-                                                    perform_initialization=False,
-                                                    quant_config=quant_config)
-            self.down_proj = ParallelLinear.row(intermediate_size,
-                                                hidden_size,
+        self.gate_up_proj = ParallelLinear.column(hidden_size,
+                                                2 * intermediate_size,
                                                 bias=False,
-                                                input_is_parallel=True,
+                                                gather_output=False,
                                                 perform_initialization=False,
                                                 quant_config=quant_config)
+        self.down_proj = ParallelLinear.row(intermediate_size,
+                                            hidden_size,
+                                            bias=False,
+                                            input_is_parallel=True,
+                                            perform_initialization=False,
+                                            quant_config=quant_config)        
+        # kernel fusion for int8 inference
+        if self.use_int8:
+            self.act_fn = DequantSiluAndMulQuant()
+        else:
             self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -173,13 +170,26 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
 
+        self.qkv_proj = ParallelLinear.column(
+            hidden_size,
+            (self.total_num_heads + 2 * self.total_num_kv_heads) *
+            self.head_dim,
+            bias=False,
+            gather_output=False,
+            perform_initialization=False,
+            quant_config=quant_config,
+        )
+        self.o_proj = ParallelLinear.row(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+            perform_initialization=False,
+            quant_config=quant_config,
+        )
+
+        # kernel fusion for int8 inference
         if self.use_int8:
-            self.qkv_proj = W8A8O32Linear(
-                hidden_size,
-                (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim)
-            self.o_proj = W8A8O32Linear(
-                self.total_num_heads * self.head_dim,
-                hidden_size)
             self.attn = DequantPagedAttentionWithRoPEQuant(self.num_heads,
                                             self.head_dim,
                                             self.scaling,
@@ -188,25 +198,7 @@ class LlamaAttention(nn.Module):
                                             num_kv_heads=self.num_kv_heads,
                                             quant_kv_cache=quant_kv_cache,
                                             kv_quant_params=kv_quant_params)
-
         else:
-            self.qkv_proj = ParallelLinear.column(
-                hidden_size,
-                (self.total_num_heads + 2 * self.total_num_kv_heads) *
-                self.head_dim,
-                bias=False,
-                gather_output=False,
-                perform_initialization=False,
-                quant_config=quant_config,
-            )
-            self.o_proj = ParallelLinear.row(
-                self.total_num_heads * self.head_dim,
-                hidden_size,
-                bias=False,
-                input_is_parallel=True,
-                perform_initialization=False,
-                quant_config=quant_config,
-            )
             self.attn = PagedAttentionWithRoPE(self.num_heads,
                                             self.head_dim,
                                             self.scaling,
