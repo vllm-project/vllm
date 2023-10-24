@@ -537,12 +537,12 @@ class LLMEngine:
         for seq_group in (scheduled_seq_groups +
                           scheduler_outputs.ignored_seq_groups):
             request_output = RequestOutput.from_seq_group(seq_group)
+            print(f"request_output is finished: {request_output.finished}")
             request_outputs.append(request_output)
             for output in request_output.outputs:
                 print(f"request_output text: {output.text}")
                 print(f"request_output token ids: {output.token_ids}")
                 print(f"request_output finish reason: {output.finish_reason}")
-                print(f"request_output is finished: {output.finished}")
         print(f"len of request_outputs: {len(request_outputs)}")
         if self.log_stats:
             # Log the system stats.
@@ -559,10 +559,8 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        print("step method called")
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
-        print(f"len of seq_group_metadata_list: {len(seq_group_metadata_list)}")
-        print(f"seq_group_metadata_list: {seq_group_metadata_list}")
+        
         if scheduler_outputs.is_empty():
             return ignored
                 
