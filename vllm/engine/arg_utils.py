@@ -32,6 +32,7 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+    prefixes_json: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -171,6 +172,10 @@ class EngineArgs:
                             choices=['awq', None],
                             default=None,
                             help='Method used to quantize the weights')
+        parser.add_argument('--prefixes-json',
+                            type=str,
+                            default=None,
+                            help='path containing prefix json file')
         return parser
 
     @classmethod
@@ -200,11 +205,13 @@ class EngineArgs:
                                            self.max_num_seqs,
                                            model_config.max_model_len,
                                            self.max_paddings)
-        prefix_config = PrefixConfig(
-            [
-                '''You are given a long korean text (delimited by triple quotes) and a question. Read the text and answer the question at the end in Korean.\n"""\n\n   ''',
-             ]
-        )
+        if self.prefixes_json is not None:
+            import json
+            with open(self.prefixes_json) as f:
+                json_data = json.load(f)
+                prefix_config = PrefixConfig(json_data['prefix'])
+        else:
+            prefix_config = PrefixConfig([])
         return model_config, cache_config, parallel_config, scheduler_config, prefix_config
 
 
