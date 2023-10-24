@@ -362,7 +362,6 @@ class LLMEngine:
         print(f"parent_seqs: {parent_seqs}")
         existing_finished_seqs = seq_group.get_finished_seqs()
         print(f"existing_finished_seqs: {existing_finished_seqs}")
-        input()
         parent_child_dict = {
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
