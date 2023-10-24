@@ -400,7 +400,9 @@ class LLMEngine:
 
         for seq, _ in child_seqs:
             self._decode_sequence(seq, seq_group.sampling_params)
+            print(f"{seq.seq_id} --  last token id: {seq.get_last_token_id()}")
             self._check_stop(seq, seq_group.sampling_params)
+            print(f"{seq.seq_id} -- status: {seq.status}")
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:
