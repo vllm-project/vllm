@@ -536,6 +536,11 @@ class LLMEngine:
         request_outputs: List[RequestOutput] = []
         for seq_group in (scheduled_seq_groups +
                           scheduler_outputs.ignored_seq_groups):
+            seqs_dict = seq_group.seqs_dict
+            print(f"len of seq_dict: {len(seqs_dict.keys())}")
+            for seq_id, seq in seqs_dict.items():
+                print(f"{seq_id} stat: {seq.status}")
+                print(f"{seq_id} is finished: {seq.is_finished()}")
             request_output = RequestOutput.from_seq_group(seq_group)
             print(f"request_output is finished: {request_output.finished}")
             request_outputs.append(request_output)
