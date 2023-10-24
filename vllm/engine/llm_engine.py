@@ -360,8 +360,6 @@ class LLMEngine:
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         existing_finished_seqs = seq_group.get_finished_seqs()
-        for seq in existing_finished_seqs:
-            print(f"existing_finished_seq: {seq.seq_id} -- {seq.output_text}")
         parent_child_dict = {
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
@@ -401,7 +399,6 @@ class LLMEngine:
         for seq, _ in child_seqs:
             self._decode_sequence(seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
-            print(f"{seq.seq_id} --  last token id: {seq.get_last_token_id()}  status: {seq.status}  text: {seq.output_text}")
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:
@@ -481,10 +478,11 @@ class LLMEngine:
         else:
             # Check the early stopping criteria
             best_running_seq = running_child_seqs[0][0]
-            current_worst_seq = all_finished_seqs[beam_width - 1][0]
+            # current_worst_seq = all_finished_seqs[beam_width - 1][0]
+            current_best_seq = all_finished_seqs[0][0]
             stop_beam_search = self._check_beam_search_early_stopping(
                 seq_group.sampling_params.early_stopping,
-                seq_group.sampling_params, best_running_seq, current_worst_seq)
+                seq_group.sampling_params, best_running_seq, current_best_seq)
 
         if stop_beam_search:
             # Stop the beam search and remove all the running sequences from
