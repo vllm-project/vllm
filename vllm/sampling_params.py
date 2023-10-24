@@ -214,4 +214,5 @@ class SamplingParams:
                 f"max_tokens={self.max_tokens}, "
                 f"logprobs={self.logprobs}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
-                f"skip_special_tokens={self.skip_special_tokens})")
+                f"skip_special_tokens={self.skip_special_tokens}, "
+                f"lora_id={self.lora_id}")
