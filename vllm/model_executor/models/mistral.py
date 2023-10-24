@@ -20,7 +20,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights.
+"""Inference-only Mistral model compatible with HuggingFace weights.
 
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
@@ -29,6 +29,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers import MistralConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -45,7 +46,6 @@ from vllm.model_executor.weight_utils import (
     load_tensor_parallel_weights, load_padded_tensor_parallel_vocab,
     get_parallel_weight)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.mistral import MistralConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 

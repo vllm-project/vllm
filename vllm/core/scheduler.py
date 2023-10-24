@@ -131,7 +131,8 @@ class Scheduler:
             # requests in the generation phase.
             num_curr_seqs = sum(seq_group.get_max_num_running_seqs()
                                 for seq_group in self.running)
-            num_batched_tokens = 0
+            seq_lens: List[int] = []
+
             # Optimization: We do not sort the waiting queue since the preempted
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
@@ -157,7 +158,9 @@ class Scheduler:
                     break
 
                 # If the number of batched tokens exceeds the limit, stop.
-                if (num_batched_tokens + num_prompt_tokens >
+                new_seq_lens = seq_lens + [num_prompt_tokens]
+                num_batched_tokens = len(new_seq_lens) * max(new_seq_lens)
+                if (num_batched_tokens >
                         self.scheduler_config.max_num_batched_tokens):
                     break
 
@@ -168,10 +171,14 @@ class Scheduler:
                         self.scheduler_config.max_num_seqs):
                     break
 
+                num_paddings = num_batched_tokens - sum(new_seq_lens)
+                if num_paddings > self.scheduler_config.max_paddings:
+                    break
+                seq_lens = new_seq_lens
+
                 seq_group = self.waiting.pop(0)
                 self._allocate(seq_group)
                 self.running.append(seq_group)
-                num_batched_tokens += num_prompt_tokens
                 num_curr_seqs += num_new_seqs
                 scheduled.append(seq_group)
 
@@ -179,7 +186,7 @@ class Scheduler:
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
-                    num_batched_tokens=num_batched_tokens,
+                    num_batched_tokens=len(seq_lens) * max(seq_lens),
                     blocks_to_swap_in=blocks_to_swap_in,
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
