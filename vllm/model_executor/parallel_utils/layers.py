@@ -303,10 +303,12 @@ class RowParallelLinear(torch.nn.Module):
             output_bias = self.bias
         return output, output_bias
 
-
+import time
 def compulate_lora(obj: LoraLayer,x: torch.Tensor, output:torch.Tensor, batch_token_lengths: list, batch_lora_ids: list) -> torch.Tensor:
     # print(f"batch_token_lengths: {batch_token_lengths}; batch_lora_ids: {batch_lora_ids}")
     assert len(batch_token_lengths) == len(batch_lora_ids), (batch_token_lengths, batch_lora_ids)
+    print(f"batch_token_lengths: {batch_token_lengths}; batch_lora_ids: {batch_lora_ids}")
+    time_start = time.time()
     start = 0
     x_lists = []
     for token_length in batch_token_lengths:
@@ -326,6 +328,8 @@ def compulate_lora(obj: LoraLayer,x: torch.Tensor, output:torch.Tensor, batch_to
             # print(f"lora_result shape: {lora_result.shape}")
             lora_out[start: start + x_list.shape[0]] = lora_result
         start += x_list.shape[0]
+    time_end = time.time()
+    print(f"time cost: {time_end - time_start}")
     return lora_out
         
 
