@@ -426,6 +426,7 @@ class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
 
             batch_token_lengths = self.batch_token_lengths
             batch_lora_ids = self.batch_lora_ids
+            print(f"batch_lora_ids: {batch_lora_ids}")
             lora_out = compulate_lora(self, x, output, batch_token_lengths, batch_lora_ids)
             output += lora_out
 
