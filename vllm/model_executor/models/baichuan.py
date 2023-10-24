@@ -393,6 +393,7 @@ class BaiChuanBaseForCausalLM(nn.Module):
 
         end = time.time()
         print(f"time cost for one token: {end - time_start}")
+        print(f"generated token: {next_tokens}")
         return next_tokens
 
     _column_parallel_weights = []
