@@ -239,8 +239,13 @@ def find_version(filepath: str):
 
 
 def read_readme() -> str:
-    """Read the README file."""
-    return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+    """Read the README file if present."""
+    p = get_path("README.md")
+    try:
+        os.stat(p)
+        return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+    except:
+        return ""
 
 
 def get_requirements() -> List[str]:

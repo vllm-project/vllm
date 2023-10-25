@@ -12,23 +12,8 @@ COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-dev.txt
 
-FROM dev AS build_wheel
-
-ARG max_jobs=4
-
-COPY csrc csrc
-COPY vllm vllm
-COPY pyproject.toml pyproject.toml
-COPY README.md README.md
-COPY MANIFEST.in MANIFEST.in
-COPY setup.py setup.py
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    MAX_JOBS=$max_jobs python3 -m build
-
 FROM dev AS build
 
-RUN touch README.md
 COPY csrc csrc
 COPY setup.py setup.py
 COPY requirements.txt requirements.txt
