@@ -28,9 +28,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 FROM dev AS build
 
+RUN touch README.md
 COPY csrc csrc
 COPY setup.py setup.py
-COPY README.md README.md
 COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
