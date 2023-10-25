@@ -47,3 +47,7 @@ COPY vllm vllm
 EXPOSE 8000
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
 
+FROM api_server AS openai_api_server
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+
+
