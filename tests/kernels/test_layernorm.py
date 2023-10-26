@@ -154,7 +154,7 @@ def test_dequant_add_residual(
     out2 = torch.empty_like(x, dtype=dtype)
     fused_kernels.invoke_dequant_add_residual(out2, x, residual, scale)
 
-    assert torch.allclose(out1, out2, atol=0.001)
+    assert torch.allclose(out1, out2, atol=0.001), f"diff: {torch.max(out1 - out2)}"
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
