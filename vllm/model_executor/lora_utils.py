@@ -52,43 +52,41 @@ def _create_and_replace(lora_config, adapter_name, target, target_name, parent):
         target.update_layer(adapter_name, lora_config.r, lora_config.lora_alpha, lora_config.lora_dropout, lora_config.init_lora_weights)
 
 
-def add_lora_adapter(llm: LLMEngine, lora_path: str, adapter_name: str):
-    for worker in llm.workers:
-        model = worker.model
-        lora_config = LoraConfig.from_pretrained(lora_path, revision=None, use_auth_token=None)
-        key_list = [key for key, _ in model.named_modules()]
-        for key in key_list:
-            # find target module
-            target_module_found = any(
-                        re.match(f".*\.{target_key}$", key) for target_key in lora_config.target_modules
-                    ) or any(target_key == key for target_key in lora_config.target_modules)
-            if not target_module_found:
-                continue
-            parent, target, target_name = _get_submodules(model, key)
+def add_lora_adapter(model: torch.nn.Module, lora_path: str, adapter_name: str):
+    lora_config = LoraConfig.from_pretrained(lora_path, revision=None, use_auth_token=None)
+    key_list = [key for key, _ in model.named_modules()]
+    for key in key_list:
+        # find target module
+        target_module_found = any(
+                    re.match(f".*\.{target_key}$", key) for target_key in lora_config.target_modules
+                ) or any(target_key == key for target_key in lora_config.target_modules)
+        if not target_module_found:
+            continue
+        parent, target, target_name = _get_submodules(model, key)
 
-            # create and replace
-            _create_and_replace(lora_config, adapter_name, target, target_name, parent)
+        # create and replace
+        _create_and_replace(lora_config, adapter_name, target, target_name, parent)
 
-        adapters_weights = torch.load(f"{lora_path}/{WEIGHTS_NAME}")
+    adapters_weights = torch.load(f"{lora_path}/{WEIGHTS_NAME}")
 
-        processed_adapter_state_dict = {}
-        for key, value in adapters_weights.items():
-            if key.startswith(PREFIX):
-                new_key = key[len(PREFIX) :]
+    processed_adapter_state_dict = {}
+    for key, value in adapters_weights.items():
+        if key.startswith(PREFIX):
+            new_key = key[len(PREFIX) :]
+        else:
+            new_key = key
+        processed_adapter_state_dict[new_key] = value
+
+    state_dict = {}
+    for k, v in processed_adapter_state_dict.items():
+        if PARAMETER_PREFIX in k:
+            suffix = k.split(PARAMETER_PREFIX)[1]
+            if "." in suffix:
+                suffix_to_replace = ".".join(suffix.split(".")[1:])
+                k = k.replace(suffix_to_replace, f"{adapter_name}.{suffix_to_replace}")
             else:
-                new_key = key
-            processed_adapter_state_dict[new_key] = value
+                k = f"{k}.{adapter_name}"
+        state_dict[k] = v
 
-        state_dict = {}
-        for k, v in processed_adapter_state_dict.items():
-            if PARAMETER_PREFIX in k:
-                suffix = k.split(PARAMETER_PREFIX)[1]
-                if "." in suffix:
-                    suffix_to_replace = ".".join(suffix.split(".")[1:])
-                    k = k.replace(suffix_to_replace, f"{adapter_name}.{suffix_to_replace}")
-                else:
-                    k = f"{k}.{adapter_name}"
-            state_dict[k] = v
-
-        model.load_state_dict(state_dict, strict=False)
-        model.cuda()
+    model.load_state_dict(state_dict, strict=False)
+    model.cuda()
