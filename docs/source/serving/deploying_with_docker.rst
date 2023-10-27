@@ -7,7 +7,7 @@ You can build and run vLLM from source via the provided dockerfile. To build vLL
 
 .. code-block:: console
 
-    $ DOCKER_BUILDKIT=1 docker build . --target prod --tag vllm --build-arg max_jobs=8
+    $ DOCKER_BUILDKIT=1 docker build . --target vllm --tag vllm --build-arg max_jobs=8
 
 To run vLLM:
 
