@@ -4,21 +4,18 @@ Run `pytest tests/models/test_models.py --forked`.
 """
 import pytest
 
-# MODELS = [
-#     "facebook/opt-125m",
-#     "gpt2",
-#     "bigcode/tiny_starcoder_py",
-#     "EleutherAI/gpt-j-6b",
-#     "EleutherAI/pythia-70m",
-#     "bigscience/bloom-560m",
-#     "mosaicml/mpt-7b",
-#     "tiiuae/falcon-7b",
-#     "meta-llama/Llama-2-7b-hf",
-# ]
 MODELS = [
-    "/cephfs/group/taiji-ieg-bp-cdp/sifaxie/llm/models/baichuan2-13b",
-    "/cephfs/group/taiji-ieg-bp-cdp/sifaxie/llm/models/baichuan2-13b"
+    "facebook/opt-125m",
+    "gpt2",
+    "bigcode/tiny_starcoder_py",
+    "EleutherAI/gpt-j-6b",
+    "EleutherAI/pythia-70m",
+    "bigscience/bloom-560m",
+    "mosaicml/mpt-7b",
+    "tiiuae/falcon-7b",
+    "meta-llama/Llama-2-7b-hf",
 ]
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
