@@ -1,5 +1,6 @@
 from vllm.model_executor.parallel_utils.layers import BLoraColumnParallelLinear, BLoraRowParallelLinear, ColumnParallelLinear, RowParallelLinear
-from vllm.engine.llm_engine import LLMEngine
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from peft.tuners.lora import LoraLayer
 from peft import LoraConfig
 import re
@@ -22,12 +23,12 @@ def _create_new_module(lora_config, adapter_name, target):
     r = lora_config.r
     lora_dropout = lora_config.lora_dropout
     if isinstance(target, ColumnParallelLinear):
-        new_module = BLoraColumnParallelLinear(input_size=target.input_size,output_size=target.output_size, adapter_name=adapter_name,bias=target.bias,
+        new_module = BLoraColumnParallelLinear(input_size=target.input_size,output_size=target.output_size_per_partition, adapter_name=adapter_name,bias=target.bias,
                                                 gather_output=target.gather_output, skip_bias_add=target.skip_bias_add,
                                                 quant_config=target.quant_config, lora_alpha=lora_alpha, r=r, lora_dropout=lora_dropout)
         return new_module
     if isinstance(target, RowParallelLinear):
-        new_module = BLoraRowParallelLinear(input_size=target.input_size,output_size=target.output_size, adapter_name=adapter_name,bias=target.bias,
+        new_module = BLoraRowParallelLinear(input_size=target.input_size_per_partition,output_size=target.output_size, adapter_name=adapter_name,bias=target.bias,
                                                 input_is_parallel=target.input_is_parallel,reduce_results=target.reduce_results ,skip_bias_add=target.skip_bias_add,
                                                 quant_config=target.quant_config, lora_alpha=lora_alpha, r=r, lora_dropout=lora_dropout)
         return new_module
@@ -88,5 +89,5 @@ def add_lora_adapter(model: torch.nn.Module, lora_path: str, adapter_name: str):
                 k = f"{k}.{adapter_name}"
         state_dict[k] = v
 
-    model.load_state_dict(state_dict, strict=False)
+    model.load_lora_weights_parallel(state_dict)
     model.cuda()

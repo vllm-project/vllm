@@ -447,6 +447,33 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 self._row_parallel_weights,
                 tp_rank,
             )
+    
+    def load_lora_weights_parallel(self, lora_state_dict: dict):
+        model_state_dict = self.state_dict()
+        tp_rank = get_tensor_model_parallel_rank()
+        for name, loaded_weight in lora_state_dict.items():
+            if name not in model_state_dict.keys():
+                raise ValueError(f"No module named {name} in base model: {model_state_dict.keys()}")
+            param = model_state_dict[name]
+            column_parallel_weights = []
+            row_parallel_weights = []
+            if "W_pack" in name:
+                if "lora_B" in name:
+                    column_parallel_weights.append("lora_B")
+                
+            elif "o_proj" in name:
+                if "lora_A" in name:
+                     row_parallel_weights.append("lora_A")
+            else:
+                raise ValueError(f"Only support target module for W_pack and o_proj now! Target module:{name}")
+            load_tensor_parallel_weights(
+                param,
+                loaded_weight,
+                name,
+                column_parallel_weights,
+                row_parallel_weights,
+                tp_rank,
+            )
 
 
 class BaichuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 13b
