@@ -353,9 +353,6 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
     def forward(self, x: torch.Tensor):
         previous_dtype = x.dtype
         if self.active_adapter not in self.lora_A.keys():
-            # return F.linear(
-            #     x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
-            # )
             output, output_bias = ColumnParallelLinear.forward(self, x)
         if self.disable_adapters:
             if self.r[self.active_adapter] > 0 and self.merged:
@@ -364,7 +361,6 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
         elif self.r[self.active_adapter] > 0 and not self.merged:
             output, output_bias = ColumnParallelLinear.forward(self, x)
             x = x.to(self.lora_A[self.active_adapter].weight.dtype)
-            # assert x.size(0) == len(self.batch_lora_ids), (x.size(0), len(self.batch_lora_ids))
             batch_token_lengths = self.batch_token_lengths
             batch_lora_ids = self.batch_lora_ids
             lora_out = compulate_lora(self, x, output, batch_token_lengths, batch_lora_ids)
@@ -408,9 +404,6 @@ class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
     def forward(self, x: torch.Tensor):
         previous_dtype = x.dtype
         if self.active_adapter not in self.lora_A.keys():
-            # return F.linear(
-            #     x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias
-            # )
             output, output_bias = RowParallelLinear.forward(self, x)
         if self.disable_adapters:
             if self.r[self.active_adapter] > 0 and self.merged:
@@ -422,7 +415,6 @@ class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
 
             batch_token_lengths = self.batch_token_lengths
             batch_lora_ids = self.batch_lora_ids
-            # print(f"batch_lora_ids: {batch_lora_ids}")
             lora_out = compulate_lora(self, x, output, batch_token_lengths, batch_lora_ids)
             output += lora_out
 
