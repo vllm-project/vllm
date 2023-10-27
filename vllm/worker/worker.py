@@ -184,15 +184,6 @@ class Worker:
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
-            assert len(seq_ids) == 1, "Prompt input should have only one seq."
-            if sampling_params.prompt_logprobs is not None:
-                selected_token_indices.extend(
-                    range(selected_token_start_idx,
-                          selected_token_start_idx + prompt_len - 1))
-            selected_token_indices.append(selected_token_start_idx +
-                                          prompt_len - 1)
-            selected_token_start_idx += input_metadata.max_prompt_len
-
             if sampling_params.prompt_logprobs is not None:
                 # NOTE: prompt token positions do not need sample, skip
                 categorized_sample_indices_start_idx += prompt_len - 1
@@ -226,8 +217,19 @@ class Worker:
         max_num_blocks_per_seq = 0
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
+        max_seq_len = max(prompt_lens) if prompt_lens else 1
         for seq_group_metadata in seq_group_metadata_list:
             if seq_group_metadata.is_prompt:
+                # We need to do this in this loop as we need to know max_seq_len
+                assert len(seq_ids) == 1, "Prompt input should have only one seq."
+                sampling_params = seq_group_metadata.sampling_params
+                if sampling_params.prompt_logprobs is not None:
+                    selected_token_indices.extend(
+                        range(selected_token_start_idx,
+                            selected_token_start_idx + prompt_len - 1))
+                selected_token_indices.append(selected_token_start_idx +
+                                            prompt_len - 1)
+                selected_token_start_idx += max_seq_len
                 continue
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -274,7 +276,6 @@ class Worker:
                     block_table = block_table[-sliding_window_blocks:]
                 generation_block_tables.append(block_table)
 
-        max_seq_len = max(prompt_lens) if prompt_lens else 1
         padded_input_tokens = [
             _pad_to_max(tokens, max_seq_len, pad=0) for tokens in input_tokens
         ]
