@@ -42,7 +42,6 @@ ENTRYPOINT ["python3", "-m", "pytest", "tests"]
 
 # use CUDA base as CUDA runtime dependencies are already installed via pip
 FROM nvidia/cuda:11.8.0-base-ubuntu22.04 AS vllm-base
-FROM vllm-base AS vllm
 
 # libnccl required for ray
 RUN apt-get update -y \
@@ -53,6 +52,7 @@ COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
+FROM vllm-base AS vllm
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
 
@@ -61,14 +61,6 @@ ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
 
 # openai api server alternative
 FROM vllm-base AS vllm-openai
-RUN apt-get update -y \
-    && apt-get install -y python3-pip libnccl2
-
-# install dev requirements
-WORKDIR /workspace
-COPY requirements.txt requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate fschat
