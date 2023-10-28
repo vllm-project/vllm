@@ -578,9 +578,9 @@ if __name__ == "__main__":
             content = f.read()
             try:
                 # Try to parse as JSON and if chat_template exists, use value
-                data = json.loads(content)
-                if "chat_template" in data:
-                    chat_template = data["chat_template"]
+                json_data = json.loads(content)
+                if "chat_template" in json_data:
+                    chat_template = json_data["chat_template"]
                 else:
                     chat_template = content
             except json.JSONDecodeError:
