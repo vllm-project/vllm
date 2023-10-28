@@ -14,7 +14,6 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from packaging import version
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -31,20 +30,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import random_uuid
 
-try:
-    import fastchat
-    from fastchat.conversation import Conversation, SeparatorStyle
-    from fastchat.model.model_adapter import get_conversation_template
-    _fastchat_available = True
-except ImportError:
-    _fastchat_available = False
-
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 logger = init_logger(__name__)
 served_model = None
 app = fastapi.FastAPI()
 engine = None
+chat_template = None
 
 
 def create_error_response(status_code: HTTPStatus,
@@ -70,50 +62,17 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 
 async def get_gen_prompt(request) -> str:
-    if not _fastchat_available:
-        raise ModuleNotFoundError(
-            "fastchat is not installed. Please install fastchat to use "
-            "the chat completion and conversation APIs: `$ pip install fschat`"
-        )
-    if version.parse(fastchat.__version__) < version.parse("0.2.23"):
-        raise ImportError(
-            f"fastchat version is low. Current version: {fastchat.__version__} "
-            "Please upgrade fastchat to use: `$ pip install -U fschat`")
-
-    conv = get_conversation_template(request.model)
-    conv = Conversation(
-        name=conv.name,
-        system_template=conv.system_template,
-        system_message=conv.system_message,
-        roles=conv.roles,
-        messages=list(conv.messages),  # prevent in-place modification
-        offset=conv.offset,
-        sep_style=SeparatorStyle(conv.sep_style),
-        sep=conv.sep,
-        sep2=conv.sep2,
-        stop_str=conv.stop_str,
-        stop_token_ids=conv.stop_token_ids,
-    )
-
-    if isinstance(request.messages, str):
-        prompt = request.messages
+    if chat_template is not None:
+        return tokenizer.apply_chat_template(conversation=request.messages,
+                                             chat_template=chat_template,
+                                             tokenize=False)
+    elif tokenizer.chat_template is not None:
+        return tokenizer.apply_chat_template(conversation=request.messages,
+                                             tokenize=False)
     else:
-        for message in request.messages:
-            msg_role = message["role"]
-            if msg_role == "system":
-                conv.system_message = message["content"]
-            elif msg_role == "user":
-                conv.append_message(conv.roles[0], message["content"])
-            elif msg_role == "assistant":
-                conv.append_message(conv.roles[1], message["content"])
-            else:
-                raise ValueError(f"Unknown role: {msg_role}")
-
-        # Add a blank message for the assistant.
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
-
-    return prompt
+        raise ValueError("No chat template defined. Please use a tokenizer "
+                         "that includes a chat template, or pass in "
+                         "a jinja template using the --chat-template flag.")
 
 
 async def check_length(
@@ -590,6 +549,11 @@ if __name__ == "__main__":
                         help="The model name used in the API. If not "
                         "specified, the model name will be the same as "
                         "the huggingface name.")
+    parser.add_argument("--chat-template",
+                        type=str,
+                        default=None,
+                        help="The path to the chat template to use "
+                        "with the specified model.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -609,6 +573,20 @@ if __name__ == "__main__":
     else:
         served_model = args.model
 
+    if args.chat_template is not None:
+        with open(args.chat_template, "r") as f:
+            content = f.read()
+            try:
+                # Try to parse as JSON and if chat_template exists, use value
+                data = json.loads(content)
+                if "chat_template" in data:
+                    chat_template = data["chat_template"]
+                else:
+                    chat_template = content
+            except json.JSONDecodeError:
+                # If parsing as JSON fails, use the file content as raw text
+                chat_template = content
+
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     engine_model_config = asyncio.run(engine.get_model_config())
@@ -618,6 +596,13 @@ if __name__ == "__main__":
     tokenizer = get_tokenizer(engine_args.tokenizer,
                               tokenizer_mode=engine_args.tokenizer_mode,
                               trust_remote_code=engine_args.trust_remote_code)
+
+    if chat_template or tokenizer.chat_template:
+        logger.info(
+            f"Chat template:\n{chat_template or tokenizer.chat_template}")
+    else:
+        logger.warning(
+            "No chat template loaded, the chat endpoint will be disabled.")
 
     uvicorn.run(app,
                 host=args.host,
