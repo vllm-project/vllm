@@ -142,6 +142,10 @@ class ColumnParallelLinear(torch.nn.Module):
                 torch.empty(self.output_size_per_partition,
                             device=torch.cuda.current_device(),
                             dtype=params_dtype))
+
+            # Always initialize bias to zero.
+            with torch.no_grad():
+                self.bias.zero_()
         else:
             self.register_parameter('bias', None)
 
