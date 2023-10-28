@@ -81,10 +81,7 @@ def _convert_tokens_to_string_with_added_encoders(
     # even when the loop body is very simple.
     sub_texts = []
     current_sub_text = []
-    all_special_tokens = set(tokenizer.all_special_tokens)
     for token in output_tokens:
-        if skip_special_tokens and token in all_special_tokens:
-            continue
         if token in tokenizer.get_added_vocab():
             if current_sub_text:
                 sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
@@ -120,7 +117,11 @@ def detokenize_incrementally(
         # tokenizers (bigger = more conservative).
         # Subtract 1 extra to account for the generated token.
         prefix_offset = max(len(output_tokens) - 6, 0)
-        read_offset = max(len(output_tokens) - 1, 0)
+        # If the first new token is a special token, we can't skip 1 extra token
+        if skip_special_tokens and new_token_id in tokenizer.all_special_ids:
+            read_offset = max(len(output_tokens), 0)
+        else:
+            read_offset = max(len(output_tokens) - 1, 0)
     else:
         # Put new_token_id in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(
