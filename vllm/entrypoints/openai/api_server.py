@@ -69,7 +69,7 @@ async def check_model(request) -> Optional[JSONResponse]:
     return ret
 
 
-async def get_gen_prompt(request) -> str:
+async def get_gen_prompt_and_conv(request) -> str:
     if not _fastchat_available:
         raise ModuleNotFoundError(
             "fastchat is not installed. Please install fastchat to use "
@@ -113,7 +113,7 @@ async def get_gen_prompt(request) -> str:
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-    return prompt
+    return prompt, conv
 
 
 async def check_length(
@@ -179,6 +179,13 @@ def create_logprobs(token_ids: List[int],
         })
     return logprobs
 
+def _add_to_set(s, new_stop):
+    if not s:
+        return
+    if isinstance(s, str):
+        new_stop.add(s)
+    else:
+        new_stop.update(s)
 
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
@@ -203,7 +210,24 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "logit_bias is not currently supported")
 
-    prompt = await get_gen_prompt(request)
+    prompt, conv = await get_gen_prompt_and_conv(request)
+
+    # Merge stop token from the conversation template.
+    stop_token_ids = list(request.stop_token_ids) if request.stop_token_ids is not None else []
+    if conv.stop_token_ids is not None:
+        stop_token_ids = set(stop_token_ids)
+        _add_to_set(conv.stop_token_ids, stop_token_ids)
+        stop_token_ids = list(stop_token_ids)
+
+    stop = request.stop
+    if conv.stop_str is not None:
+        # https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/openai_api_server.py#L297-L301
+        new_stop = set()
+        _add_to_set(stop, new_stop)
+        _add_to_set(conv.stop_str, new_stop)
+        stop = list(new_stop)
+        print(f"Saw stop tokens: {stop}")
+
     token_ids, error_check_ret = await check_length(request, prompt=prompt)
     if error_check_ret is not None:
         return error_check_ret
@@ -218,8 +242,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
             frequency_penalty=request.frequency_penalty,
             temperature=request.temperature,
             top_p=request.top_p,
-            stop=request.stop,
-            stop_token_ids=request.stop_token_ids,
+            stop=stop,
+            stop_token_ids=stop_token_ids,
             max_tokens=request.max_tokens,
             best_of=request.best_of,
             top_k=request.top_k,
