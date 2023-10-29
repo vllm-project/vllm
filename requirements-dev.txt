@@ -13,5 +13,3 @@ pytest
 pytest-forked
 pytest-asyncio
 
-# distribution
-build
