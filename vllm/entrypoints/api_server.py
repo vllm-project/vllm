@@ -17,8 +17,13 @@ app = FastAPI()
 engine = None
 
 
+class RequestInput(SamplingParams):
+    prompt: str
+    stream: bool = False
+
+
 @app.post("/generate")
-async def generate(request: Request) -> Response:
+async def generate(request: RequestInput, raw_request: Request) -> Response:
     """Generate completion for the request.
 
     The request should be a JSON object with the following fields:
@@ -26,7 +31,7 @@ async def generate(request: Request) -> Response:
     - stream: whether to stream the results or not.
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
-    request_dict = await request.json()
+    request_dict = request.dict()
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
@@ -50,7 +55,7 @@ async def generate(request: Request) -> Response:
     # Non-streaming case
     final_output = None
     async for request_output in results_generator:
-        if await request.is_disconnected():
+        if await raw_request.is_disconnected():
             # Abort the request if the client disconnects.
             await engine.abort(request_id)
             return Response(status_code=499)
