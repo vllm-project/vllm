@@ -5,6 +5,7 @@ from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
+from vllm.sequence import PromptLogprobs
 from vllm.utils import random_uuid
 
 
@@ -104,8 +105,7 @@ class LogProbs(BaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
-    top_logprobs: List[Optional[Dict[str,
-                                     float]]] = Field(default_factory=list)
+    top_logprobs: Optional[PromptLogprobs] = None
 
 
 class CompletionResponseChoice(BaseModel):
