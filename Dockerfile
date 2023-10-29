@@ -45,7 +45,7 @@ FROM nvidia/cuda:11.8.0-base-ubuntu22.04 AS vllm-base
 
 # libnccl required for ray
 RUN apt-get update -y \
-    && apt-get install -y python3-pip libnccl2
+    && apt-get install -y python3-pip
 
 WORKDIR /workspace
 COPY requirements.txt requirements.txt
