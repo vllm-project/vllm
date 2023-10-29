@@ -179,6 +179,7 @@ def create_logprobs(token_ids: List[int],
         })
     return logprobs
 
+
 def _add_to_set(s, new_stop):
     if not s:
         return
@@ -186,6 +187,7 @@ def _add_to_set(s, new_stop):
         new_stop.add(s)
     else:
         new_stop.update(s)
+
 
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
@@ -213,7 +215,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
     prompt, conv = await get_gen_prompt_and_conv(request)
 
     # Merge stop token from the conversation template.
-    stop_token_ids = list(request.stop_token_ids) if request.stop_token_ids is not None else []
+    if request.stop_token_ids is not None:
+        stop_token_ids = list(request.stop_token_ids)
+    else:
+        stop_token_ids = []
     if conv.stop_token_ids is not None:
         stop_token_ids = set(stop_token_ids)
         _add_to_set(conv.stop_token_ids, stop_token_ids)
