@@ -25,12 +25,12 @@ class Worker:
     """
 
     def __init__(
-        self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        rank: Optional[int] = None,
-        distributed_init_method: Optional[str] = None,
+            self,
+            model_config: ModelConfig,
+            parallel_config: ParallelConfig,
+            scheduler_config: SchedulerConfig,
+            rank: Optional[int] = None,
+            distributed_init_method: Optional[str] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -71,10 +71,10 @@ class Worker:
 
     @torch.inference_mode()
     def profile_num_available_blocks(
-        self,
-        block_size: int,
-        gpu_memory_utilization: float,
-        cpu_swap_space: int,
+            self,
+            block_size: int,
+            gpu_memory_utilization: float,
+            cpu_swap_space: int,
     ) -> Tuple[int, int]:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
@@ -147,8 +147,8 @@ class Worker:
         self.gpu_cache = self.cache_engine.gpu_cache
 
     def _prepare_inputs(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[List[int]] = []
@@ -330,11 +330,11 @@ class Worker:
 
     @torch.inference_mode()
     def execute_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            blocks_to_swap_in: Dict[int, int],
+            blocks_to_swap_out: Dict[int, int],
+            blocks_to_copy: Dict[int, List[int]],
     ) -> SamplerOutput:
         # Issue cache operations.
         issued_cache_op = False
@@ -365,6 +365,9 @@ class Worker:
             seq_group_metadata_list)
 
         # Execute the model.
+        # print("aaaaaaaaa")
+        # print(input_tokens)
+        # print(input_positions)
         output = self.model(
             input_ids=input_tokens,
             positions=input_positions,
@@ -372,13 +375,16 @@ class Worker:
             input_metadata=input_metadata,
             cache_events=cache_events,
         )
+
+        # print(output)
+        # print("bbbbbbbbbbb")
         return output
 
 
 def _init_distributed_environment(
-    parallel_config: ParallelConfig,
-    rank: int,
-    distributed_init_method: Optional[str] = None,
+        parallel_config: ParallelConfig,
+        rank: int,
+        distributed_init_method: Optional[str] = None,
 ) -> None:
     """Initialize the distributed environment."""
     if torch.distributed.is_initialized():
@@ -412,6 +418,26 @@ def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
 
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     return x + [pad] * (max_len - len(x))
+
+
+def _check_if_can_support_max_seq_len(max_seq_len: int,
+                                      block_size: int) -> None:
+    # Follows the logic in
+    # attention_kernels.cu::single_query_cached_kv_attention_launcher
+    max_shared_mem = get_max_shared_memory_bytes()
+    float32_bytes = torch.finfo(torch.float).bits // 8
+    padded_max_seq_len = (
+                                 (max_seq_len + block_size - 1) / block_size) * block_size
+    # padded_max_seq_len + extra buffer
+    required_shared_mem = (padded_max_seq_len + 512) * float32_bytes
+    if padded_max_seq_len * float32_bytes > max_shared_mem:
+        raise RuntimeError(
+            f"vLLM cannot currently support max_model_len={max_seq_len} "
+            f"with block_size={block_size} on GPU with compute "
+            f"capability {torch.cuda.get_device_capability()} "
+            f"(required shared memory {required_shared_mem} > "
+            f"available shared memory {max_shared_mem}). "
+            "This will be fixed in a future release.")
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

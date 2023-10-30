@@ -115,6 +115,10 @@ def detokenize_incrementally(
     skip_special_tokens: bool = False,
     spaces_between_special_tokens: bool = True,
 ) -> Tuple[List[str], str, int, int]:
+    # print("111111111111111")
+    # print(all_input_ids)
+    # print(prev_tokens)
+    # print(skip_special_tokens)
     new_token_id = all_input_ids[-1]
     # This is the first iteration for this sequence
     if prev_tokens is None:

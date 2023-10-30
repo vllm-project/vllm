@@ -161,6 +161,9 @@ class ModelConfig:
             # Multi-query attention, only one KV head.
             # Currently, tensor parallelism is not supported in this case.
             return 1
+        if getattr(self.hf_config, "model_type", None) == 'chatglm':
+            return (self.hf_config.multi_query_group_num //
+                    parallel_config.tensor_parallel_size)
         # For Falcon:
         if getattr(self.hf_config, "n_head_kv", None) is not None:
             return (self.hf_config.n_head_kv //
@@ -370,6 +373,8 @@ def _get_and_verify_max_len(
         "n_positions",
         # MPT
         "max_seq_len",
+        # ChatGLM
+        'seq_length',
         # Others
         "max_sequence_length",
         "max_seq_length",

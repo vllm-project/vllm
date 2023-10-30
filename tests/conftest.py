@@ -58,7 +58,7 @@ class HfRunner:
     ) -> List[Tuple[List[int], str]]:
         outputs: List[Tuple[List[int], str]] = []
         for prompt in prompts:
-            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+            input_ids = self.tokenizer(prompt, add_special_tokens=False, return_tensors="pt").input_ids
             output_ids = self.model.generate(
                 input_ids.cuda(),
                 use_cache=True,

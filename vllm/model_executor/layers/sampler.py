@@ -46,6 +46,7 @@ class Sampler(nn.Module):
         # Get the logits for the next tokens.
         logits = _get_logits(hidden_states, embedding, embedding_bias,
                              self.vocab_size)
+        # print("8888888888888", torch.argmax(logits, dim=-1))
 
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, input_metadata)

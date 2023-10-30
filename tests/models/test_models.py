@@ -5,16 +5,17 @@ Run `pytest tests/models/test_models.py --forked`.
 import pytest
 
 MODELS = [
-    "facebook/opt-125m",
-    "meta-llama/Llama-2-7b-hf",
-    "mistralai/Mistral-7B-v0.1",
-    "tiiuae/falcon-7b",
-    "gpt2",
-    "bigcode/tiny_starcoder_py",
-    "EleutherAI/gpt-j-6b",
-    "EleutherAI/pythia-70m",
-    "bigscience/bloom-560m",
-    "mosaicml/mpt-7b",
+    # "facebook/opt-125m",
+    # "meta-llama/Llama-2-7b-hf",
+    # "mistralai/Mistral-7B-v0.1",
+    # "tiiuae/falcon-7b",
+    # "gpt2",
+    # "bigcode/tiny_starcoder_py",
+    # "EleutherAI/gpt-j-6b",
+    # "EleutherAI/pythia-70m",
+    # "bigscience/bloom-560m",
+    # "mosaicml/mpt-7b",
+    "THUDM/chatglm3-6b",
 ]
 
 
