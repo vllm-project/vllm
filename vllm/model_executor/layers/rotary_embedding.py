@@ -40,13 +40,15 @@ class RotaryEmbedding(nn.Module):
         max_position_embeddings: int,
         base: int,
         is_neox_style: bool,
+        is_glm_style: bool,
     ) -> None:
         super().__init__()
         self.head_size = head_size
-        self.rotary_dim = rotary_dim
+        self.rotary_dim = rotary_dim//2 if is_glm_style else rotary_dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         self.is_neox_style = is_neox_style
+        self.is_glm_style = is_glm_style
 
         cache = self._compute_cos_sin_cache()
         cache = cache.to(torch.get_default_dtype())
@@ -78,7 +80,10 @@ class RotaryEmbedding(nn.Module):
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
         sin = freqs.sin()
-        cache = torch.cat((cos, sin), dim=-1)
+        if self.is_glm_style:
+            cache = torch.cat((cos, torch.ones_like(cos), sin, torch.zeros_like(sin)), dim=-1)
+        else:
+            cache = torch.cat((cos, sin), dim=-1)
         return cache
 
     def forward(
@@ -91,7 +96,7 @@ class RotaryEmbedding(nn.Module):
         # updates the query and key tensors.
         pos_encoding_ops.rotary_embedding(positions, query, key,
                                           self.head_size, self.cos_sin_cache,
-                                          self.is_neox_style)
+                                          False if self.is_glm_style else self.is_neox_style)
         return query, key
 
 

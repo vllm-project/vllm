@@ -311,6 +311,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         base: int = 10000,
         num_kv_heads: Optional[int] = None,
         is_neox_style: bool = True,
+        is_glm_style: bool = False,
         rope_scaling: Optional[Dict[str, Any]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
@@ -322,7 +323,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         if rope_scaling is None:
             self.rotary_emb = RotaryEmbedding(head_size, rotary_dim,
                                               max_position, base,
-                                              is_neox_style)
+                                              is_neox_style, is_glm_style)
         else:
             scaling_type = rope_scaling["type"]
             scaling_factor = rope_scaling["factor"]
