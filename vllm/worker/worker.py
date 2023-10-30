@@ -47,6 +47,8 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
+        self.force_paged_attention_v2 = False
+
     def init_model(self):
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
@@ -146,7 +148,8 @@ class Worker:
         else:
             max_seq_len = min(self.scheduler_config.max_model_len,
                               self.sliding_window)
-        _check_if_can_support_max_seq_len(max_seq_len, self.block_size)
+        self.force_paged_attention_v2 = _should_force_paged_attention_v2(
+            max_seq_len, self.block_size)
 
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
@@ -332,6 +335,7 @@ class Worker:
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
             sliding_window=self.sliding_window,
+            force_paged_attention_v2=self.force_paged_attention_v2,
         )
         return tokens_tensor, positions_tensor, input_metadata
 
@@ -421,24 +425,17 @@ def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     return x + [pad] * (max_len - len(x))
 
 
-def _check_if_can_support_max_seq_len(max_seq_len: int,
-                                      block_size: int) -> None:
+def _should_force_paged_attention_v2(max_seq_len: int,
+                                     block_size: int) -> bool:
     # Follows the logic in
-    # attention_kernels.cu::single_query_cached_kv_attention_launcher
+    # attention_kernels.cu::paged_attention_kernel
     max_shared_mem = get_max_shared_memory_bytes()
     float32_bytes = torch.finfo(torch.float).bits // 8
     padded_max_seq_len = (
         (max_seq_len + block_size - 1) / block_size) * block_size
     # padded_max_seq_len + extra buffer
     required_shared_mem = (padded_max_seq_len + 512) * float32_bytes
-    if padded_max_seq_len * float32_bytes > max_shared_mem:
-        raise RuntimeError(
-            f"vLLM cannot currently support max_model_len={max_seq_len} "
-            f"with block_size={block_size} on GPU with compute "
-            f"capability {torch.cuda.get_device_capability()} "
-            f"(required shared memory {required_shared_mem} > "
-            f"available shared memory {max_shared_mem}). "
-            "This will be fixed in a future release.")
+    return required_shared_mem > max_shared_mem
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

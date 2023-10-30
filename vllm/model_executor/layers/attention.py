@@ -156,7 +156,8 @@ class PagedAttention(nn.Module):
         # sequences or heads is large, we use V1 since there is enough work
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
-        use_v1 = max_num_partitions == 1 or num_seqs * num_heads > 512
+        use_v1 = not input_metadata.force_paged_attention_v2 and (
+            max_num_partitions == 1 or num_seqs * num_heads > 512)
         if use_v1:
             # Run PagedAttention V1.
             attention_ops.paged_attention_v1(
