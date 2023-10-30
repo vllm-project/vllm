@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from xformers.ops import AttentionBias
 
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData
 
 
@@ -29,6 +29,8 @@ class InputMetadata:
         context_lens: torch.Tensor,
         max_context_len: int,
         block_tables: torch.Tensor,
+        selected_token_indices: torch.Tensor,
+        categorized_sample_indices: Dict[SamplingType, torch.Tensor],
         sliding_window: Optional[int] = None,
     ) -> None:
         self.seq_groups = seq_groups
@@ -38,6 +40,8 @@ class InputMetadata:
         self.context_lens = context_lens
         self.max_context_len = max_context_len
         self.block_tables = block_tables
+        self.selected_token_indices = selected_token_indices
+        self.categorized_sample_indices = categorized_sample_indices
 
         self.max_prompt_len = max(prompt_lens) if prompt_lens else 0
         self.to_cache = None
@@ -72,13 +76,16 @@ class InputMetadata:
 
     def __repr__(self) -> str:
         # Print only useful metadata.
-        return (f'InputMetadata('
-                f'num_prompt_tokens={self.num_prompt_tokens}, '
-                f'num_prompts={self.num_prompts}, '
-                f'prompt_lens={self.prompt_lens}, '
-                f'num_generation_tokens={self.num_generation_tokens}, '
-                f'context_lens={self.context_lens}, '
-                f'max_context_len={self.max_context_len}, '
-                f'max_num_blocks_per_seq={self.max_num_blocks_per_seq}, '
-                f'block_tables={self.block_tables}, '
-                f'slot_mapping={self.slot_mapping})')
+        return (
+            f'InputMetadata('
+            f'num_prompt_tokens={self.num_prompt_tokens}, '
+            f'num_prompts={self.num_prompts}, '
+            f'prompt_lens={self.prompt_lens}, '
+            f'num_generation_tokens={self.num_generation_tokens}, '
+            f'context_lens={self.context_lens}, '
+            f'max_context_len={self.max_context_len}), '
+            f'max_num_blocks_per_seq={self.max_num_blocks_per_seq}, '
+            f'block_tables={self.block_tables}, '
+            f'selected_token_indices={self.selected_token_indices}, '
+            f'categorized_sample_indices={self.categorized_sample_indices}, '
+            f'slot_mapping={self.slot_mapping})')
