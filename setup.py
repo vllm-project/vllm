@@ -98,9 +98,7 @@ i8cugemm_extension = CUDAExtension(
         'csrc/int8gemm/cublas/bindings.cpp',
         'csrc/int8gemm/cublas/cublasAlgoMap.cc',
         'csrc/int8gemm/cublas/cublasINT8MMWrapper.cc',
-        'csrc/int8gemm/cublas/cublasMMWrapper.cc',
-        'csrc/int8gemm/cublas/cuda_utils.cc',
-        'csrc/int8gemm/cublas/transform_layout.cu'
+        'csrc/int8gemm/cublas/cuda_utils.cc'
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,

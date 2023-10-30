@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 
+#include "allocator.h"
 #include "cublasAlgoMap.h"
-#include "cublasMMWrapper.h"
-#include "cuda_utils.h"
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -26,7 +25,15 @@
 
 #pragma once
 
-class cublasINT8MMWrapper : public cublasMMWrapper {
+class cublasINT8MMWrapper{
+protected:
+  cublasHandle_t cublas_handle_;
+  cublasLtHandle_t cublaslt_handle_;
+  cudaStream_t stream_;
+  cublasAlgoMap *cublas_algo_map_;
+  std::mutex *mu_;
+  IAllocator *allocator_ = nullptr;
+  
 private:
   bool use_ORDER_COL32_2R_4R4_;
 
