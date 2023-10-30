@@ -35,6 +35,10 @@ class SamplingParams(BaseModel):
             frequency in the generated text so far. Values > 0 encourage the
             model to use new tokens, while values < 0 encourage the model to
             repeat tokens.
+        repetition_penalty: Float that penalizes new tokens based on whether
+            they appear in the generated text so far. Values > 1 encourage the
+            model to use new tokens, while values < 1 encourage the model to
+            repeat tokens.
         temperature: Float that controls the randomness of the sampling. Lower
             values make the model more deterministic, while higher values make
             the model more random. Zero means greedy sampling.
@@ -74,6 +78,7 @@ class SamplingParams(BaseModel):
     best_of: Optional[int] = Field(None, ge=1)
     presence_penalty: float = Field(0.0, ge=-2.0, le=2.0)
     frequency_penalty: float = Field(0.0, ge=-2.0, le=2.0)
+    repetition_penalty: float = Field(1.0, ge=0.0, le=2.0)
     temperature: float = Field(1.0, ge=0.0)
     top_p: float = Field(1.0, gt=0.0, le=1.0)
     top_k: int = Field(-1)
@@ -123,6 +128,9 @@ class SamplingParams(BaseModel):
         if not -2.0 <= self.frequency_penalty <= 2.0:
             raise ValueError("frequency_penalty must be in [-2, 2], got "
                              f"{self.frequency_penalty}.")
+        if not 0.0 < self.repetition_penalty <= 2.0:
+            raise ValueError("repetition_penalty must be in (0, 2], got "
+                             f"{self.repetition_penalty}.")
         if self.temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negative, got {self.temperature}.")
@@ -191,6 +199,7 @@ class SamplingParams(BaseModel):
                 f"best_of={self.best_of}, "
                 f"presence_penalty={self.presence_penalty}, "
                 f"frequency_penalty={self.frequency_penalty}, "
+                f"repetition_penalty={self.repetition_penalty}, "
                 f"temperature={self.temperature}, "
                 f"top_p={self.top_p}, "
                 f"top_k={self.top_k}, "
