@@ -102,16 +102,16 @@ class ChatGLM3Attention(nn.Module):
             ],
             dim=-1,
         )
-        query_layer = query_layer.view(
-            query_layer.size()[:-1] + (self.num_attention_heads_per_partition, self.hidden_size_per_attention_head)
-        )
-        key_layer = key_layer.view(
-            key_layer.size()[:-1] + (self.num_multi_query_groups_per_partition, self.hidden_size_per_attention_head)
-        )
-        value_layer = value_layer.view(
-            value_layer.size()[:-1]
-            + (self.num_multi_query_groups_per_partition, self.hidden_size_per_attention_head)
-        )
+        # query_layer = query_layer.view(
+        #     query_layer.size()[:-1] + (self.num_attention_heads_per_partition, self.hidden_size_per_attention_head)
+        # )
+        # key_layer = key_layer.view(
+        #     key_layer.size()[:-1] + (self.num_multi_query_groups_per_partition, self.hidden_size_per_attention_head)
+        # )
+        # value_layer = value_layer.view(
+        #     value_layer.size()[:-1]
+        #     + (self.num_multi_query_groups_per_partition, self.hidden_size_per_attention_head)
+        # )
 
         k_cache, v_cache = kv_cache
         attn_output = self.attn(
