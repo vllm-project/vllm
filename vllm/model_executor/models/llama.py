@@ -91,50 +91,6 @@ class LlamaMLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-    
-    def trans_int8(self):
-        int8_gate_up = Linear8bitLt(
-            self.gate_up_proj.in_features,
-            self.gate_up_proj.out_features,
-            self.gate_up_proj.bias is not None,
-            has_fp16_weights=False,
-            threshold=6.0,
-        )
-        int8_gate_up.weight = bnb.nn.Int8Params(
-            self.gate_up_proj.weight.data.clone(), requires_grad=False, has_fp16_weights=False
-            ).to(self.gate_up_proj.weight.dtype)
-        self.gate_up_proj = int8_gate_up
-
-        int8_down = Linear8bitLt(
-            self.down_proj.in_features,
-            self.down_proj.out_features,
-            self.down_proj.bias is not None,
-            has_fp16_weights=False,
-            threshold=6.0,
-        )
-        int8_down.weight = bnb.nn.Int8Params(
-            self.down_proj.weight.data.clone(), requires_grad=False, has_fp16_weights=False
-            ).to(self.down_proj.weight.dtype)
-        self.down_proj = int8_down
-    
-    def trans_fp4(self):
-        int8_gate_up = LinearFP4(
-            self.gate_up_proj.in_features,
-            self.gate_up_proj.out_features,
-            self.gate_up_proj.bias is not None
-        )
-        int8_gate_up.weight = bnb.nn.Params4bit(
-            self.gate_up_proj.weight.data.clone(), requires_grad=False).to(self.gate_up_proj.weight.dtype)
-        self.gate_up_proj = int8_gate_up
-
-        int8_down = LinearFP4(
-            self.down_proj.in_features,
-            self.down_proj.out_features,
-            self.down_proj.bias is not None
-        )
-        int8_down.weight = bnb.nn.Params4bit(
-            self.down_proj.weight.data.clone(), requires_grad=False).to(self.down_proj.weight.dtype)
-        self.down_proj = int8_down
 
 
 class LlamaAttention(nn.Module):
@@ -149,8 +105,7 @@ class LlamaAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        # tp_size = get_tensor_model_parallel_world_size()
-        tp_size = 1
+        tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -189,18 +144,14 @@ class LlamaAttention(nn.Module):
                                             self.scaling,
                                             base=self.rope_theta,
                                             rotary_dim=self.head_dim,
-                                            num_kv_heads=self.num_kv_heads,
-                                            quant_kv_cache=quant_kv_cache,
-                                            kv_quant_params=kv_quant_params)
+                                            num_kv_heads=self.num_kv_heads)
         else:
             self.attn = PagedAttentionWithRoPE(self.num_heads,
                                             self.head_dim,
                                             self.scaling,
                                             base=self.rope_theta,
                                             rotary_dim=self.head_dim,
-                                            num_kv_heads=self.num_kv_heads,
-                                            quant_kv_cache=quant_kv_cache,
-                                            kv_quant_params=kv_quant_params)
+                                            num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -220,50 +171,7 @@ class LlamaAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         # output = output.half()
         return output
-    
-    def trans_int8(self):
-        int8_qkv = Linear8bitLt(
-            self.qkv_proj.in_features,
-            self.qkv_proj.out_features,
-            self.qkv_proj.bias is not None,
-            has_fp16_weights=False,
-            threshold=6.0,
-        )
-        int8_qkv.weight = bnb.nn.Int8Params(
-            self.qkv_proj.weight.data.clone(), requires_grad=False, has_fp16_weights=False
-            ).to(self.qkv_proj.weight.dtype)
-        self.qkv_proj = int8_qkv
 
-        int8_o = Linear8bitLt(
-            self.o_proj.in_features,
-            self.o_proj.out_features,
-            self.o_proj.bias is not None,
-            has_fp16_weights=False,
-            threshold=6.0,
-        )
-        int8_o.weight = bnb.nn.Int8Params(
-            self.o_proj.weight.data.clone(), requires_grad=False, has_fp16_weights=False
-            ).to(self.o_proj.weight.dtype)
-        self.o_proj = int8_o
-
-    def trans_fp4(self):
-        int8_qkv = LinearFP4(
-            self.qkv_proj.in_features,
-            self.qkv_proj.out_features,
-            self.qkv_proj.bias is not None
-        )
-        int8_qkv.weight = bnb.nn.Params4bit(
-            self.qkv_proj.weight.data.clone(), requires_grad=False).to(self.qkv_proj.weight.dtype)
-        self.qkv_proj = int8_qkv
-
-        int8_o = LinearFP4(
-            self.o_proj.in_features,
-            self.o_proj.out_features,
-            self.o_proj.bias is not None
-        )
-        int8_o.weight = bnb.nn.Params4bit(
-            self.o_proj.weight.data.clone(), requires_grad=False).to(self.o_proj.weight.dtype)
-        self.o_proj = int8_o
 
 class LlamaDecoderLayer(nn.Module):
 
@@ -352,6 +260,7 @@ class LlamaModel(nn.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
             vocab_size, config.hidden_size, perform_initialization=False)
+
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)

@@ -344,12 +344,10 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
         base: int = 10000,
         num_kv_heads: Optional[int] = None,
         is_neox_style: bool = True,
-        quant_kv_cache: bool = False,
-        kv_quant_params: torch.Tensor = None,
         dequant_scale: float = 1.0,
         quant_scale: float = 1.0
     ) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads, quant_kv_cache, kv_quant_params)
+        super().__init__(num_heads, head_size, scale, num_kv_heads)
         self.is_neox_style = is_neox_style
 
         # Create the cos and sin cache.

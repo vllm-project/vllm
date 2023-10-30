@@ -2,7 +2,7 @@
 #include <torch/extension.h>
 
 #include "dispatch_utils.h"
-#include "quant_utils.cuh"
+#include "utils.cuh"
 #include <cassert>
 
 namespace vllm {
