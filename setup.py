@@ -278,4 +278,5 @@ setuptools.setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
+    package_data={"vllm": ["py.typed"]},
 )
