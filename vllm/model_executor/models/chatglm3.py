@@ -118,7 +118,7 @@ class ChatGLM3Attention(nn.Module):
             positions, query_layer, key_layer, value_layer, k_cache, v_cache,
             input_metadata, cache_event)
 
-        output, _ = self.dense(attn_output)
+        output = self.dense(attn_output)
         return output
 
 
