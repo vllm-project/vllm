@@ -36,10 +36,10 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.quantized_linear import ParallelLinear
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
+from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
+                                                       ColumnParallelLinear, RowParallelLinear)
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
@@ -59,12 +59,12 @@ class MistralMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = ParallelLinear.column(hidden_size,
+        self.gate_up_proj = ColumnParallelLinear(hidden_size,
                                                   2 * intermediate_size,
                                                   bias=False,
                                                   gather_output=False,
                                                   quant_config=quant_config)
-        self.down_proj = ParallelLinear.row(intermediate_size,
+        self.down_proj = RowParallelLinear(intermediate_size,
                                             hidden_size,
                                             bias=False,
                                             input_is_parallel=True,
@@ -107,7 +107,7 @@ class MistralAttention(nn.Module):
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window
 
-        self.qkv_proj = ParallelLinear.column(
+        self.qkv_proj = ColumnParallelLinear(
             hidden_size,
             (self.total_num_heads + 2 * self.total_num_kv_heads) *
             self.head_dim,
@@ -115,7 +115,7 @@ class MistralAttention(nn.Module):
             gather_output=False,
             quant_config=quant_config,
         )
-        self.o_proj = ParallelLinear.row(
+        self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
@@ -268,7 +268,7 @@ class MistralForCausalLM(nn.Module):
         self.model = MistralModel(config, quant_config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         # NOTE: The LM head is not quantized.
-        self.lm_head = ParallelLinear.column(config.hidden_size,
+        self.lm_head = ColumnParallelLinear(config.hidden_size,
                                              vocab_size,
                                              bias=False,
                                              gather_output=False,

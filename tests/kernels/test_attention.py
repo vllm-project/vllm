@@ -3,8 +3,8 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
-from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
+from vllm.xformers.ops.fmha import memory_efficient_attention_forward
+from vllm.xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from vllm import attention_ops
 from vllm.utils import get_max_shared_memory_bytes
@@ -308,7 +308,7 @@ def test_multi_query_kv_attention(
         key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
         value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
     attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
-    output = xops.memory_efficient_attention_forward(
+    output = memory_efficient_attention_forward(
         query.unsqueeze(0),
         key.unsqueeze(0),
         value.unsqueeze(0),

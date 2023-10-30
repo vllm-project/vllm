@@ -1,7 +1,7 @@
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from xformers.ops import AttentionBias
+from vllm.xformers.ops.fmha.attn_bias import AttentionBias
 
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData
