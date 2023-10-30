@@ -67,6 +67,7 @@ class ChatGLM3Attention(nn.Module):
             scale=scaling,
             rotary_dim=self.head_dim,
             base=self.rope_theta,
+            is_glm_style=True,
             num_kv_heads=config.multi_query_group_num,
             max_position=config.seq_length)
 
@@ -102,16 +103,6 @@ class ChatGLM3Attention(nn.Module):
             ],
             dim=-1,
         )
-        # query_layer = query_layer.view(
-        #     query_layer.size()[:-1] + (self.num_attention_heads_per_partition, self.hidden_size_per_attention_head)
-        # )
-        # key_layer = key_layer.view(
-        #     key_layer.size()[:-1] + (self.num_multi_query_groups_per_partition, self.hidden_size_per_attention_head)
-        # )
-        # value_layer = value_layer.view(
-        #     value_layer.size()[:-1]
-        #     + (self.num_multi_query_groups_per_partition, self.hidden_size_per_attention_head)
-        # )
 
         k_cache, v_cache = kv_cache
         attn_output = self.attn(
@@ -261,7 +252,6 @@ class ChatGLM3ForCausalLM(nn.Module):
                 continue
 
             vname = name_mapping(name)
-            print(f"from {name} to {vname}")
             param = state_dict[vname]
             load_tensor_parallel_weights(
                 param,
@@ -271,53 +261,3 @@ class ChatGLM3ForCausalLM(nn.Module):
                 self._row_parallel_weights,
                 tensor_model_parallel_rank,
             )
-
-
-"""
-model.embedding.weight torch.Size([65024, 4096])
-model.final_layernorm.weight torch.Size([4096])
-lm_head.weight torch.Size([65024, 4096])
-
-transformer.embedding.word_embeddings.weight torch.Size([65024, 4096])
-transformer.encoder.final_layernorm.weight torch.Size([4096])
-transformer.output_layer.weight torch.Size([65024, 4096])
-
-model.layers.26.self_attention.dense.weight torch.Size([4096, 4096])
-model.layers.26.post_attention_layernorm.weight torch.Size([4096])
-model.layers.26.mlp.dense_h_to_4h.weight torch.Size([27392, 4096])
-model.layers.26.mlp.dense_4h_to_h.weight torch.Size([4096, 13696])
-model.layers.27.input_layernorm.weight torch.Size([4096])
-model.layers.27.self_attention.query_key_value.weight torch.Size([4608, 4096])
-model.layers.27.self_attention.query_key_value.bias torch.Size([4608])
-model.layers.27.self_attention.dense.weight torch.Size([4096, 4096])
-model.layers.27.post_attention_layernorm.weight torch.Size([4096])
-model.layers.27.mlp.dense_h_to_4h.weight torch.Size([27392, 4096])
-model.layers.27.mlp.dense_4h_to_h.weight torch.Size([4096, 13696])
-model.final_layernorm.weight torch.Size([4096])
-lm_head.weight torch.Size([65024, 4096])
-
-transformer.encoder.layers.24.mlp.dense_4h_to_h.weight torch.Size([4096, 13696])
-transformer.encoder.layers.25.input_layernorm.weight torch.Size([4096])
-transformer.encoder.layers.25.self_attention.query_key_value.weight torch.Size([4608, 4096])
-transformer.encoder.layers.25.self_attention.query_key_value.bias torch.Size([4608])
-transformer.encoder.layers.25.self_attention.dense.weight torch.Size([4096, 4096])
-transformer.encoder.layers.25.post_attention_layernorm.weight torch.Size([4096])
-transformer.encoder.layers.25.mlp.dense_h_to_4h.weight torch.Size([27392, 4096])
-transformer.encoder.layers.25.mlp.dense_4h_to_h.weight torch.Size([4096, 13696])
-transformer.encoder.layers.26.input_layernorm.weight torch.Size([4096])
-transformer.encoder.layers.26.self_attention.query_key_value.weight torch.Size([4608, 4096])
-transformer.encoder.layers.26.self_attention.query_key_value.bias torch.Size([4608])
-transformer.encoder.layers.26.self_attention.dense.weight torch.Size([4096, 4096])
-transformer.encoder.layers.26.post_attention_layernorm.weight torch.Size([4096])
-transformer.encoder.layers.26.mlp.dense_h_to_4h.weight torch.Size([27392, 4096])
-transformer.encoder.layers.26.mlp.dense_4h_to_h.weight torch.Size([4096, 13696])
-transformer.encoder.layers.27.input_layernorm.weight torch.Size([4096])
-transformer.encoder.layers.27.self_attention.query_key_value.weight torch.Size([4608, 4096])
-transformer.encoder.layers.27.self_attention.query_key_value.bias torch.Size([4608])
-transformer.encoder.layers.27.self_attention.dense.weight torch.Size([4096, 4096])
-transformer.encoder.layers.27.post_attention_layernorm.weight torch.Size([4096])
-transformer.encoder.layers.27.mlp.dense_h_to_4h.weight torch.Size([27392, 4096])
-transformer.encoder.layers.27.mlp.dense_4h_to_h.weight torch.Size([4096, 13696])
-transformer.encoder.final_layernorm.weight torch.Size([4096])
-transformer.output_layer.weight torch.Size([65024, 4096])
-    """
