@@ -73,6 +73,7 @@ def _convert_tokens_to_string_with_added_encoders(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     output_tokens: List[str],
     skip_special_tokens: bool,
+    spaces_between_special_tokens: bool,
 ) -> str:
     # Adapted from
     # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
@@ -96,7 +97,10 @@ def _convert_tokens_to_string_with_added_encoders(
     if current_sub_text:
         sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
         sub_texts.append(sub_text)
-    return " ".join(sub_texts)
+    if spaces_between_special_tokens:
+        return " ".join(sub_texts)
+    else:
+        return "".join(sub_texts)
 
 
 # Based on
@@ -109,6 +113,7 @@ def detokenize_incrementally(
     prefix_offset: int = 0,
     read_offset: int = 0,
     skip_special_tokens: bool = False,
+    spaces_between_special_tokens: bool = True,
 ) -> Tuple[List[str], str, int, int]:
     new_token_id = all_input_ids[-1]
     # This is the first iteration for this sequence
@@ -143,11 +148,15 @@ def detokenize_incrementally(
         prefix_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,
             output_tokens[prefix_offset:read_offset],
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+        )
         new_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,
             output_tokens[prefix_offset:],
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+        )
 
     if len(new_text) > len(prefix_text) and not new_text.endswith("�"):
         # utf-8 char at the end means it's a potential unfinished byte sequence
