@@ -113,6 +113,12 @@ class ModelConfig:
                 f"{supported_quantization}.")
         self.quantization = quantization
 
+    @staticmethod
+    def hf_config_get_num_layers(hf_config):
+        if hf_config.model_type == 'chatglm':
+            return hf_config.num_layers
+        return hf_config.num_hidden_layers
+
     def verify_with_parallel_config(
         self,
         parallel_config: "ParallelConfig",
@@ -125,7 +131,7 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        total_num_hidden_layers = self.hf_config.num_hidden_layers
+        total_num_hidden_layers = self.hf_config_get_num_layers(self.hf_config)
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if total_num_hidden_layers % pipeline_parallel_size != 0:
             raise ValueError(
@@ -170,7 +176,7 @@ class ModelConfig:
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
-        total_num_hidden_layers = self.hf_config.num_hidden_layers
+        total_num_hidden_layers = self.hf_config_get_num_layers(self.hf_config)
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
 
 
