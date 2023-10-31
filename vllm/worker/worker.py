@@ -31,12 +31,14 @@ class Worker:
         scheduler_config: SchedulerConfig,
         rank: Optional[int] = None,
         distributed_init_method: Optional[str] = None,
+        lora_configs: list[tuple[str, str]] = None
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.lora_configs = lora_configs
 
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
@@ -67,7 +69,7 @@ class Worker:
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
-        self.model = get_model(self.model_config)
+        self.model = get_model(self.model_config, self.lora_configs)
 
     @torch.inference_mode()
     def profile_num_available_blocks(
