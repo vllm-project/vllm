@@ -72,6 +72,8 @@ class SamplingParams(BaseModel):
             `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
         skip_special_tokens: Whether to skip special tokens in the output.
+        spaces_between_special_tokens: Whether to add spaces between special
+            tokens in the output.  Defaults to True.
     """
 
     n: int = Field(1, ge=1)
@@ -92,6 +94,7 @@ class SamplingParams(BaseModel):
     logprobs: Optional[int] = Field(None, ge=0)
     prompt_logprobs: Optional[int] = Field(None, ge=0)
     skip_special_tokens: bool = Field(True)
+    spaces_between_special_tokens: bool = Field(True)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -211,4 +214,6 @@ class SamplingParams(BaseModel):
                 f"max_tokens={self.max_tokens}, "
                 f"logprobs={self.logprobs}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
-                f"skip_special_tokens={self.skip_special_tokens})")
+                f"skip_special_tokens={self.skip_special_tokens}, "
+                "spaces_between_special_tokens="
+                f"{self.spaces_between_special_tokens})")
