@@ -391,7 +391,6 @@ class PagedAttentionWithALiBi(PagedAttention):
         assert len(slopes) == num_heads
 
         slopes = torch.tensor(slopes, dtype=torch.float32)
-        #slopes = torch.tensor(_get_interleave(num_heads),dtype=torch.float32)
         self.register_buffer("alibi_slopes", slopes, persistent=False)
 
     def set_attn_bias(self, input_metadata: InputMetadata,

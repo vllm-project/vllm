@@ -24,7 +24,6 @@ InputMetadata to extract the original 2D shape of the input.
 """
 import math
 from typing import List, Optional, Tuple
-import time
 import torch
 from torch import nn
 
