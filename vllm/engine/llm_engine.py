@@ -328,14 +328,14 @@ class LLMEngine:
         early_stopping: Union[bool, str],
         sampling_params: SamplingParams,
         best_running_seq: Sequence,
-        current_best_seq: Sequence,
+        current_worst_seq: Sequence,
     ) -> bool:
         assert sampling_params.use_beam_search
         length_penalty = sampling_params.length_penalty
         if early_stopping is True:
             return True
 
-        current_best_score = (current_best_seq.get_beam_search_score(
+        current_worst_score = (current_worst_seq.get_beam_search_score(
             length_penalty=length_penalty,
             eos_token_id=self.tokenizer.eos_token_id))
         if early_stopping is False:
@@ -365,7 +365,7 @@ class LLMEngine:
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
                         eos_token_id=self.tokenizer.eos_token_id))
-        return current_best_score >= highest_attainable_score
+        return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutputs) -> None:
@@ -497,10 +497,10 @@ class LLMEngine:
             # Check the early stopping criteria
             best_running_seq = running_child_seqs[0][0]
             # current_worst_seq = all_finished_seqs[beam_width - 1][0]
-            current_best_seq = all_finished_seqs[0][0]
+            current_worst_seq = all_finished_seqs[beam_width - 1][0]
             stop_beam_search = self._check_beam_search_early_stopping(
                 seq_group.sampling_params.early_stopping,
-                seq_group.sampling_params, best_running_seq, current_best_seq)
+                seq_group.sampling_params, best_running_seq, current_worst_seq)
 
         if stop_beam_search:
             # Stop the beam search and remove all the running sequences from
