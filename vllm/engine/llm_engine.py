@@ -496,7 +496,6 @@ class LLMEngine:
         else:
             # Check the early stopping criteria
             best_running_seq = running_child_seqs[0][0]
-            # current_worst_seq = all_finished_seqs[beam_width - 1][0]
             current_worst_seq = all_finished_seqs[beam_width - 1][0]
             stop_beam_search = self._check_beam_search_early_stopping(
                 seq_group.sampling_params.early_stopping,
@@ -544,7 +543,6 @@ class LLMEngine:
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-
         for seq_group, outputs in zip(scheduled_seq_groups, output):
             self._process_sequence_group_outputs(seq_group, outputs)
 
@@ -557,12 +555,13 @@ class LLMEngine:
                           scheduler_outputs.ignored_seq_groups):
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
+
         if self.log_stats:
             # Log the system stats.
             self._log_system_stats(scheduler_outputs.prompt_run,
                                    scheduler_outputs.num_batched_tokens)
         return request_outputs
-    
+
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
 
@@ -576,7 +575,7 @@ class LLMEngine:
         
         if scheduler_outputs.is_empty():
             return ignored
-                
+
         # Execute the model.
         output = self._run_workers(
             "execute_model",
