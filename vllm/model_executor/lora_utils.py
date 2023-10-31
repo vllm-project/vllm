@@ -1,6 +1,4 @@
 from vllm.model_executor.parallel_utils.layers import BLoraColumnParallelLinear, BLoraRowParallelLinear, ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from peft.tuners.lora import LoraLayer
 from peft import LoraConfig
 import re
@@ -59,7 +57,7 @@ def add_lora_adapter(model: torch.nn.Module, lora_path: str, adapter_name: str):
     for key in key_list:
         # find target module
         target_module_found = any(
-                    re.match(f".*\.{target_key}$", key) for target_key in lora_config.target_modules
+                    re.match(f".*\\.{target_key}$", key) for target_key in lora_config.target_modules
                 ) or any(target_key == key for target_key in lora_config.target_modules)
         if not target_module_found:
             continue
