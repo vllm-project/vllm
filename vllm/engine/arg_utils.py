@@ -22,7 +22,7 @@ class EngineArgs:
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
-    tensor_parallel_model_load_batch_size: Optional[int] = None
+    max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
@@ -130,7 +130,7 @@ class EngineArgs:
                             default=EngineArgs.tensor_parallel_size,
                             help='number of tensor parallel replicas')
         parser.add_argument(
-            '--tensor-parallel-model-load-batch-size',
+            '--max-parallel-loading-workers',
             type=int,
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
@@ -200,9 +200,10 @@ class EngineArgs:
         cache_config = CacheConfig(
             self.block_size, self.gpu_memory_utilization, self.swap_space,
             getattr(model_config.hf_config, 'sliding_window', None))
-        parallel_config = ParallelConfig(
-            self.pipeline_parallel_size, self.tensor_parallel_size,
-            self.worker_use_ray, self.tensor_parallel_model_load_batch_size)
+        parallel_config = ParallelConfig(self.pipeline_parallel_size,
+                                         self.tensor_parallel_size,
+                                         self.worker_use_ray,
+                                         self.max_parallel_loading_workers)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,

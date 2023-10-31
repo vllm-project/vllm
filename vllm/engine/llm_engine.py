@@ -146,7 +146,8 @@ class LLMEngine:
         self._run_workers(
             "load_model",
             get_all_outputs=True,
-            batch_size=self.parallel_config.model_load_batch_size,
+            max_concurrent_workers=self.parallel_config.
+            max_parallel_loading_workers,
         )
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
@@ -190,7 +191,8 @@ class LLMEngine:
         self._run_workers(
             "load_model",
             get_all_outputs=True,
-            batch_size=self.parallel_config.model_load_batch_size,
+            max_concurrent_workers=self.parallel_config.
+            max_parallel_loading_workers,
         )
 
     def _verify_args(self) -> None:
@@ -717,15 +719,15 @@ class LLMEngine:
         method: str,
         *args,
         get_all_outputs: bool = False,
-        batch_size: Optional[int] = None,
+        max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
         all_outputs = []
-        if batch_size:
+        if max_concurrent_workers:
             work_groups = [
-                self.workers[i:i + batch_size]
-                for i in range(0, len(self.workers), batch_size)
+                self.workers[i:i + max_concurrent_workers]
+                for i in range(0, len(self.workers), max_concurrent_workers)
             ]
         else:
             work_groups = [self.workers]
