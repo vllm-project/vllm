@@ -135,7 +135,6 @@ class SamplingParams:
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
-        
         self._verify_args()
         if self.use_beam_search:
             self._verify_beam_search()
