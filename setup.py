@@ -200,6 +200,7 @@ quantization_extension = CUDAExtension(
     sources=[
         "csrc/quantization.cpp",
         "csrc/quantization/awq/gemm_kernels.cu",
+        "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,
@@ -277,4 +278,5 @@ setuptools.setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
+    package_data={"vllm": ["py.typed"]},
 )

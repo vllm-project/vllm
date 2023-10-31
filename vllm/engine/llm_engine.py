@@ -647,8 +647,7 @@ class LLMEngine:
                     f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         self.last_logging_time = now
 
-    def _decode_sequence(self, seq: Sequence,
-                         sampling_params: SamplingParams) -> None:
+    def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
 
         # if data has prompt embeds, all_input_ids are only output token ids
@@ -664,7 +663,8 @@ class LLMEngine:
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
-             skip_special_tokens=sampling_params.skip_special_tokens,
+             skip_special_tokens=prms.skip_special_tokens,
+             spaces_between_special_tokens=prms.spaces_between_special_tokens,
          )
         if seq.tokens is None:
             seq.tokens = new_tokens
