@@ -4,15 +4,6 @@ import torch.nn as nn
 import math
 from vllm.model_executor.models.baichuan import NormHead as vllm_NormHead
 
-import torch.distributed as dist
-import os
-from vllm.model_executor.parallel_utils.parallel_state import initialize_model_parallel
-os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-os.environ.setdefault("MASTER_PORT", "8000")
-dist.init_process_group(rank=0, world_size=1)
-initialize_model_parallel()
-torch.cuda.init()
-
 
 class NormHead(nn.Module):
     def __init__(self, hidden_size, vocab_size, bias=False):
