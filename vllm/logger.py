@@ -52,4 +52,5 @@ def init_logger(name: str):
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
     logger.addHandler(_default_handler)
+    logger.propagate = False
     return logger
