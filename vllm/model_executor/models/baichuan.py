@@ -102,28 +102,9 @@ class BaiChuanMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        # print(f"vllm_gate_up: {gate_up}")
         x = self.act_fn(gate_up)
-        # print(f"vllm_act: {x}")
         x, _ = self.down_proj(x)
-        # print(f"vllm_down: {x}")
         return x
-# from transformers.activations import ACT2FN
-# class BaiChuanMLP(torch.nn.Module):
-#     def __init__(
-#             self,
-#             hidden_size: int,
-#             intermediate_size: int,
-#             hidden_act: str,
-#     ):
-#         super().__init__()
-#         self.gate_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
-#         self.down_proj = torch.nn.Linear(intermediate_size, hidden_size, bias=False)
-#         self.up_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
-#         self.act_fn = ACT2FN[hidden_act]
-
-#     def forward(self, x):
-#         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class BaiChuanAttention(nn.Module):

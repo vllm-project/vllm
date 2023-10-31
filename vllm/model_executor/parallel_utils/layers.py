@@ -327,7 +327,6 @@ def compulate_lora(obj: LoraLayer,x: torch.Tensor, output:torch.Tensor, batch_to
     return lora_out
         
 
-
 class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
 
     def __init__(
