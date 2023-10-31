@@ -175,7 +175,10 @@ __device__ void paged_attention_kernel(
   // dot product with the query.
   const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
-    const int physical_block_number = block_table[block_idx];
+    // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
+    // because int32 can lead to overflow when this variable is multiplied by large numbers
+    // (e.g., kv_block_stride).
+    const int64_t physical_block_number = static_cast<int64_t>(block_table[block_idx]);
 
     // Load a key to registers.
     // Each thread in a thread group has a different part of the key.
@@ -285,7 +288,10 @@ __device__ void paged_attention_kernel(
   scalar_t zero_value;
   zero(zero_value);
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
-    const int physical_block_number = block_table[block_idx];
+    // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
+    // because int32 can lead to overflow when this variable is multiplied by large numbers
+    // (e.g., kv_block_stride).
+    const int64_t physical_block_number = static_cast<int64_t>(block_table[block_idx]);
     const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
     const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
     L_vec logits_vec;
