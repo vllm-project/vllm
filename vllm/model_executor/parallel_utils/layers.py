@@ -346,7 +346,7 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
         lora_dropout: float = 0.0,
         **kwargs,
     ):
-        init_lora_weights = kwargs.pop("init_lora_weights", True)
+        init_lora_weights = kwargs.pop('init_lora_weights', True)
 
         ColumnParallelLinear.__init__(self, input_size, output_size, bias,
                                       gather_output, skip_bias_add,
@@ -403,7 +403,7 @@ class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
         lora_dropout: float = 0.0,
         **kwargs,
     ):
-        init_lora_weights = kwargs.pop("init_lora_weights", True)
+        init_lora_weights = kwargs.pop('init_lora_weights', True)
 
         RowParallelLinear.__init__(self, input_size, output_size, bias,
                                    input_is_parallel, skip_bias_add,
