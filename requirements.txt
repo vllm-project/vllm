@@ -11,3 +11,4 @@ xformers == 0.0.22  # Required for Mistral.
 fastapi
 uvicorn[standard]
 pydantic == 1.10.13  # Required for OpenAI server.
+peft == 0.4.0

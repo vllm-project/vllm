@@ -483,6 +483,17 @@ class AsyncLLMEngine:
         # Initialize the cluster.
         distributed_init_method, placement_group = initialize_cluster(
             parallel_config, engine_args.engine_use_ray)
+
+        lora_paths: list = engine_args.lora_paths
+        adapter_names: list = engine_args.adapter_names
+        lora_configs = None
+        if lora_paths is not None and adapter_names is not None:
+            assert len(lora_paths) == len(adapter_names), (len(lora_paths),
+                                                           len(adapter_names))
+            lora_configs = []
+            for lora_path, adapter_name in zip(lora_paths, adapter_names):
+                lora_configs.append((lora_path, adapter_name))
+
         # Create the async LLM engine.
         engine = cls(parallel_config.worker_use_ray,
                      engine_args.engine_use_ray,
@@ -492,5 +503,6 @@ class AsyncLLMEngine:
                      log_requests=not engine_args.disable_log_requests,
                      log_stats=not engine_args.disable_log_stats,
                      max_log_len=engine_args.max_log_len,
-                     start_engine_loop=start_engine_loop)
+                     start_engine_loop=start_engine_loop,
+                     lora_configs=lora_configs)
         return engine

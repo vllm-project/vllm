@@ -106,6 +106,7 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
+        lora_id: str = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -118,6 +119,7 @@ class SamplingParams:
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
+        self.lora_id = lora_id
         if stop is None:
             self.stop = []
         elif isinstance(stop, str):
