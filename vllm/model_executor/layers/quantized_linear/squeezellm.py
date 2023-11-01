@@ -39,13 +39,15 @@ class SqueezeLLMColumnParallelLinear(ColumnParallelLinear):
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         # NOTE: The output tensor should be zero-initialized.
-        #out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
-        #quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
-        #                                 self.lookup_table)
-        out_float = torch.zeros(out_shape, device="cuda", dtype=torch.float)
-        quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out_float,
-                                         self.lookup_table)
-        out = out_float.to(device="cuda", dtype=torch.float16)
+        if torch.version.hip:
+            out_float = torch.zeros(out_shape, device="cuda", dtype=torch.float)
+            quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out_float,
+                                            self.lookup_table)
+            out = out_float.to(dtype=torch.float16)
+        else:
+            out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
+            quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
+                                            self.lookup_table)
 
         if bias is not None:
             out = out + bias
@@ -82,12 +84,13 @@ class SqueezeLLMRowParallelLinear(RowParallelLinear):
         reshaped_x = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         # NOTE: The output tensor should be zero-initialized.
-        #out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
-        #quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out_float,
-        #                                 self.lookup_table)
-        #return out.reshape(out_shape)
-        out_float = torch.zeros(out_shape, device="cuda", dtype=torch.float)
-        quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out_float,
-                                         self.lookup_table)
-        out = out_float.to(device="cuda", dtype=torch.float16)
-        return out.reshape(out_shape)
+        if torch.version.hip:
+            out = torch.zeros(out_shape, device="cuda", dtype=torch.float)
+            quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
+                                            self.lookup_table)
+            return out.to(dtype=torch.float16).reshape(out_shape)
+        else:
+            out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
+            quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
+                                            self.lookup_table)
+            return out.reshape(out_shape)
