@@ -137,6 +137,7 @@ class LLMEngine:
             self.scheduler_config,
             0,
             distributed_init_method,
+            self.lora_configs,
         )
         self.workers.append(worker)
         self._run_workers(
