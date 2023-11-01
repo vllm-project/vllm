@@ -384,8 +384,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     for the API specification. This API mimics the OpenAI Completion API.
 
     NOTE: Currently we do not support the following features:
-        - get_prompt_logprobs (since the vLLM engine does not currently support
-          getting the logprobs of prompt tokens)
         - suffix (the language models we currently support do not support
           suffix)
         - logit_bias (to be supported by vLLM engine)
@@ -397,7 +395,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return error_check_ret
 
     # OpenAI API supports echoing the prompt when max_tokens is 0.
-    echo_self = request.echo and request.max_tokens == 0
+    echo_without_generation = request.echo and request.max_tokens == 0
 
     if request.suffix is not None:
         # The language models we currently support do not support suffix.
@@ -453,7 +451,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             stop=request.stop,
             stop_token_ids=request.stop_token_ids,
             ignore_eos=request.ignore_eos,
-            max_tokens=request.max_tokens if not echo_self else 1,
+            max_tokens=request.max_tokens
+            if not echo_without_generation else 1,
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
             prompt_logprobs=request.logprobs if request.echo else None,
@@ -512,7 +511,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 top_logprobs = output.logprobs[previous_num_tokens[i]:]
                 offsets = len(previous_texts[i])
                 if request.echo and not has_echoed[i]:
-                    if not echo_self:
+                    if not echo_without_generation:
                         delta_text = res.prompt + delta_text
                         token_ids = res.prompt_token_ids + token_ids
                         top_logprobs = res.prompt_logprobs + top_logprobs
@@ -533,8 +532,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 previous_texts[i] = output.text
                 previous_num_tokens[i] = len(output.token_ids)
                 finish_reason = output.finish_reason
-                if output.finish_reason is None and echo_self and has_echoed[i]:
-                    finish_reason = "length"
                 response_json = create_stream_response_json(
                     index=i,
                     text=delta_text,
@@ -542,6 +539,16 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                     finish_reason=finish_reason,
                 )
                 yield f"data: {response_json}\n\n"
+                if output.finish_reason is not None:
+                    logprobs = (LogProbs()
+                                if request.logprobs is not None else None)
+                    response_json = create_stream_response_json(
+                        index=i,
+                        text="",
+                        logprobs=logprobs,
+                        finish_reason=output.finish_reason,
+                    )
+                    yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"
 
     # Streaming response
@@ -566,7 +573,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     prompt_text = final_res.prompt
     for output in final_res.outputs:
         if request.logprobs is not None:
-            if not echo_self:
+            if not echo_without_generation:
                 token_ids = output.token_ids
                 top_logprobs = output.logprobs
                 if request.echo:
@@ -582,7 +589,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             )
         else:
             logprobs = None
-        if not echo_self:
+        if not echo_without_generation:
             output_text = output.text
             if request.echo:
                 output_text = prompt_text + output_text
