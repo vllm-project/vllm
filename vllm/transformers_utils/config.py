@@ -1,11 +1,11 @@
 from typing import Optional
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig, MptConfig, PretrainedConfig
 
 from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
 
 _CONFIG_REGISTRY = {
-    "mpt": MPTConfig,
+    "mpt": MptConfig,
     "baichuan": BaiChuanConfig,
     "aquila": AquilaConfig,
     "qwen": QWenConfig,
