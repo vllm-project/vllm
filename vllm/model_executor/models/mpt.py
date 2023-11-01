@@ -105,7 +105,7 @@ class MptAttention(nn.Module):
         return output
 
 
-class MPTMLP(nn.Module):
+class MptMLP(nn.Module):
 
     def __init__(self, config: MptConfig):
         super().__init__()
@@ -141,7 +141,7 @@ class MptBlock(nn.Module):
         self.norm_1 = nn.LayerNorm(hidden_size)
         self.attn = MptAttention(config)
         self.norm_2 = nn.LayerNorm(hidden_size)
-        self.ffn = MPTMLP(config)
+        self.ffn = MptMLP(config)
 
     def forward(
         self,
