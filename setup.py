@@ -204,21 +204,20 @@ activation_extension = CUDAExtension(
 )
 ext_modules.append(activation_extension)
 
-# # Quantization kernels.
-# quantization_extension = CUDAExtension(
-#     name="vllm.quantization_ops",
-#     sources=[
-#         "csrc/quantization.cpp",
-#         "csrc/quantization/awq/gemm_kernels.cu",
-#         "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
-#     ],
-#     extra_compile_args={
-#         "cxx": CXX_FLAGS,
-#         "nvcc": NVCC_FLAGS,
-#     },
-# )
-# if not torch.version.hip:
-#     ext_modules.append(quantization_extension)
+# Quantization kernels.
+quantization_extension = CUDAExtension(
+    name="vllm.quantization_ops",
+    sources=[
+        "csrc/quantization.cpp",
+        # "csrc/quantization/awq/gemm_kernels.cu",
+        "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
+    ],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(quantization_extension)
 
 # Misc. CUDA utils.
 cuda_utils_extension = CUDAExtension(

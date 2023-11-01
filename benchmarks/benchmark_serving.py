@@ -104,6 +104,7 @@ async def send_request(
     output_len: int,
     best_of: int,
     use_beam_search: bool,
+    repetition_penalty: float = 1.0,
 ) -> None:
     request_start_time = time.perf_counter()
 
@@ -119,6 +120,7 @@ async def send_request(
             "max_tokens": output_len,
             "ignore_eos": True,
             "stream": False,
+            "repetition_penalty": repetition_penalty,
         }
     elif backend == "tgi":
         assert not use_beam_search
@@ -160,13 +162,15 @@ async def benchmark(
     best_of: int,
     use_beam_search: bool,
     request_rate: float,
+    repetition_penalty: float = 1.0,
 ) -> None:
     tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len = request
         task = asyncio.create_task(send_request(backend, api_url, prompt,
                                                 prompt_len, output_len,
-                                                best_of, use_beam_search))
+                                                best_of, use_beam_search,
+                                                repetition_penalty=repetition_penalty,))
         tasks.append(task)
     await asyncio.gather(*tasks)
 
@@ -182,7 +186,7 @@ def main(args: argparse.Namespace):
 
     benchmark_start_time = time.perf_counter()
     asyncio.run(benchmark(args.backend, api_url, input_requests, args.best_of,
-                          args.use_beam_search, args.request_rate))
+                          args.use_beam_search, args.request_rate, args.repetition_penalty))
     benchmark_end_time = time.perf_counter()
     benchmark_time = benchmark_end_time - benchmark_start_time
     print(f"Total time: {benchmark_time:.2f} s")
@@ -229,5 +233,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument('--trust-remote-code', action='store_true',
                         help='trust remote code from huggingface')
+    parser.add_argument("--repetition-penalty", type=float, default=1.0,
+                        help="Set >1 to penalize repetition and <1 to reward repetition")
     args = parser.parse_args()
     main(args)

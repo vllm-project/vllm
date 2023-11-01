@@ -17,7 +17,8 @@ def clear_line(n: int = 1) -> None:
 def post_http_request(prompt: str,
                       api_url: str,
                       n: int = 1,
-                      stream: bool = False) -> requests.Response:
+                      stream: bool = False,
+                      repetition_penalty = 1.0) -> requests.Response:
     headers = {"User-Agent": "Test Client"}
     pload = {
         "prompt": prompt,
@@ -26,6 +27,7 @@ def post_http_request(prompt: str,
         "temperature": 0.0,
         "max_tokens": 1024,
         "stream": stream,
+        "repetition_penalty": repetition_penalty,
     }
     response = requests.post(api_url, headers=headers, json=pload, stream=True)
     return response
@@ -54,6 +56,8 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=4)
     parser.add_argument("--prompt", type=str, default="San Francisco is a")
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--repetition-penalty", type=float, default=1.0, 
+                        help="Set >1 to penalize repetition and <1 to reward repetition")
     args = parser.parse_args()
     prompt = args.prompt
     api_url = f"http://{args.host}:{args.port}/generate"
@@ -61,7 +65,7 @@ if __name__ == "__main__":
     stream = args.stream
 
     print(f"Prompt: {prompt!r}\n", flush=True)
-    response = post_http_request(prompt, api_url, n, stream)
+    response = post_http_request(prompt, api_url, n, stream, repetition_penalty=args.repetition_penalty)
 
     if stream:
         num_printed_lines = 0

@@ -40,6 +40,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
                                                        ColumnParallelLinear, RowParallelLinear)
+from vllm.model_executor.layers.quantized_linear import ParallelLinear
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
@@ -59,12 +60,12 @@ class LlamaMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
+        self.gate_up_proj = ParallelLinear.column(hidden_size,
                                                   2 * intermediate_size,
                                                   bias=False,
                                                   gather_output=False,
                                                   quant_config=quant_config)
-        self.down_proj = RowParallelLinear(intermediate_size,
+        self.down_proj = ParallelLinear.row(intermediate_size,
                                             hidden_size,
                                             bias=False,
                                             input_is_parallel=True,
@@ -117,7 +118,7 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = ColumnParallelLinear(
+        self.qkv_proj = ParallelLinear.column(
             hidden_size,
             (self.total_num_heads +
              2 * self.total_num_kv_heads * num_kv_heads_replicas) *
@@ -126,7 +127,7 @@ class LlamaAttention(nn.Module):
             gather_output=False,
             quant_config=quant_config,
         )
-        self.o_proj = RowParallelLinear(
+        self.o_proj = ParallelLinear.row(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
@@ -284,7 +285,7 @@ class LlamaForCausalLM(nn.Module):
         self.model = LlamaModel(config, quant_config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         # NOTE: The LM head is not quantized.
-        self.lm_head = ColumnParallelLinear(config.hidden_size,
+        self.lm_head = ParallelLinear.column(config.hidden_size,
                                              vocab_size,
                                              bias=False,
                                              gather_output=False,

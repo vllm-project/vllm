@@ -674,6 +674,15 @@ void paged_attention_v1_launcher(
 // 1, 2, 4, 64, 128, 256.
 #define CALL_V1_LAUNCHER_BLOCK_SIZE(T)                              \
   switch (block_size) {                                             \
+    case 1:                                                         \
+      CALL_V1_LAUNCHER(T, 1);                                       \
+      break;                                                        \
+    case 2:                                                         \
+      CALL_V1_LAUNCHER(T, 2);                                       \
+      break;                                                        \
+    case 4:                                                         \
+      CALL_V1_LAUNCHER(T, 4);                                       \
+      break;                                                        \
     case 8:                                                         \
       CALL_V1_LAUNCHER(T, 8);                                       \
       break;                                                        \
@@ -682,6 +691,15 @@ void paged_attention_v1_launcher(
       break;                                                        \
     case 32:                                                        \
       CALL_V1_LAUNCHER(T, 32);                                      \
+      break;                                                        \
+    case 64:                                                        \
+      CALL_V1_LAUNCHER(T, 64);                                      \
+      break;                                                        \
+    case 128:                                                       \
+      CALL_V1_LAUNCHER(T, 128);                                     \
+      break;                                                        \
+    case 256:                                                       \
+      CALL_V1_LAUNCHER(T, 256);                                     \
       break;                                                        \
     default:                                                        \
       TORCH_CHECK(false, "Unsupported block size: ", block_size);   \
@@ -846,6 +864,15 @@ void paged_attention_v2_launcher(
 // 1, 2, 4, 64, 128, 256.
 #define CALL_V2_LAUNCHER_BLOCK_SIZE(T)                              \
   switch (block_size) {                                             \
+    case 1:                                                         \
+      CALL_V2_LAUNCHER(T, 1);                                       \
+      break;                                                        \
+    case 2:                                                         \
+      CALL_V2_LAUNCHER(T, 2);                                       \
+      break;                                                        \
+    case 4:                                                         \
+      CALL_V2_LAUNCHER(T, 4);                                       \
+      break;                                                        \
     case 8:                                                         \
       CALL_V2_LAUNCHER(T, 8);                                       \
       break;                                                        \
@@ -854,6 +881,15 @@ void paged_attention_v2_launcher(
       break;                                                        \
     case 32:                                                        \
       CALL_V2_LAUNCHER(T, 32);                                      \
+      break;                                                        \
+    case 64:                                                        \
+      CALL_V2_LAUNCHER(T, 64);                                      \
+      break;                                                        \
+    case 128:                                                       \
+      CALL_V2_LAUNCHER(T, 128);                                     \
+      break;                                                        \
+    case 256:                                                       \
+      CALL_V2_LAUNCHER(T, 256);                                     \
       break;                                                        \
     default:                                                        \
       TORCH_CHECK(false, "Unsupported block size: ", block_size);   \

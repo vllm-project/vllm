@@ -65,6 +65,9 @@ def run_vllm(
     use_beam_search: bool,
     trust_remote_code: bool,
     dtype: str,
+    block_size: int = 16,
+    max_num_seqs: int = 256,
+    repetition_penalty = 1.0,
 ) -> float:
     llm = LLM(
         model=model,
@@ -74,7 +77,11 @@ def run_vllm(
         seed=seed,
         trust_remote_code=trust_remote_code,
         dtype=dtype,
+        block_size=block_size,
+        max_num_seqs=max_num_seqs
     )
+
+    print("Using repetition penalty: {}".format(repetition_penalty))
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
@@ -85,6 +92,7 @@ def run_vllm(
             use_beam_search=use_beam_search,
             ignore_eos=True,
             max_tokens=output_len,
+            repetition_penalty=repetition_penalty,
         )
         # FIXME(woosuk): Do not use internal method.
         llm._add_request(
@@ -170,10 +178,13 @@ def main(args: argparse.Namespace):
     requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
 
     if args.backend == "vllm":
+        print("Using block_size={}, batch_size={}".format(args.block_size, args.max_num_seqs))
         elapsed_time = run_vllm(requests, args.model, args.tokenizer,
                                 args.quantization, args.tensor_parallel_size,
                                 args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype)
+                                args.trust_remote_code, args.dtype,
+                                block_size=args.block_size, max_num_seqs=args.max_num_seqs,
+                                repetition_penalty=args.repetition_penalty)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -230,6 +241,16 @@ if __name__ == "__main__":
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
+    parser.add_argument('--block-size',
+                        type=int,
+                        default=16,
+                        choices=[1, 2, 4, 8, 16, 32, 64, 128, 256],
+                        help='token block size')
+    parser.add_argument("--max-num-seqs",
+                        type=int,
+                        default=256)
+    parser.add_argument("--repetition-penalty", type=float, default=1.0,
+                        help="Set >1 to penalize repetition and <1 to reward repetition")
     args = parser.parse_args()
 
     if args.backend == "vllm":

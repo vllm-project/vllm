@@ -18,6 +18,7 @@ from .attn_bias import (
     BlockDiagonalCausalMask,
     BlockDiagonalMask,
     LowerTriangularMask,
+    LowerTriangularMaskWithTensorBias,
 )
 from .common import (
     AttentionFwOpBase,
@@ -29,9 +30,14 @@ from .common import (
 FLASH_VERSION = "0.0.0"
 try:
     import flash_attn
-    from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
+    from flash_attn.flash_attn_interface import (_flash_attn_forward, 
+                                                 _flash_attn_varlen_forward,
+                                                 _flash_attn_backward,
+                                                 _flash_attn_varlen_backward)
 
     FLASH_VERSION = flash_attn.__version__
+
+    print("========== flash attention version: {}".format(FLASH_VERSION))
 
     # create library so that flash-attn goes through the PyTorch Dispatcher
     _flash_lib = torch.library.Library("xformers_flash", "DEF")
@@ -66,25 +72,70 @@ try:
         window_size,
         return_softmax,
     ):
-        out = query.new_empty(query.shape[0], query.shape[1], value.shape[2])
-        out, softmax_lse, S_dmask = _flash_attn_forward(
-            query,
-            key,
-            value,
-            out,
-            cu_seq_lens_q,
-            cu_seq_lens_k,
-            max_seq_len_q,
-            max_seq_len_k,
-            p,
-            softmax_scale,
-            is_causal,
-            return_softmax,
-            0,
-            None
-        )
-        # If this doesn't work, try using torch.empty((2,), dtype=torch.int64) instead of None
-        return out, softmax_lse, None
+        # out = query.new_empty(query.shape[0], query.shape[1], value.shape[2])
+        # out, softmax_lse, S_dmask = _flash_attn_forward(
+        #     query,
+        #     key,
+        #     value,
+        #     out,
+        #     cu_seq_lens_q,
+        #     cu_seq_lens_k,
+        #     max_seq_len_q,
+        #     max_seq_len_k,
+        #     p,
+        #     softmax_scale,
+        #     is_causal,
+        #     return_softmax,
+        #     0,
+        #     None
+        # )
+        # return out, softmax_lse, None
+        
+        if cu_seq_lens_q is None:
+            assert cu_seq_lens_k is None
+            (
+                out,
+                q_padded,
+                k_padded,
+                v_padded,
+                out_padded,
+                softmax_lse,
+                S_dmask,
+                rng_state,
+            ) = _flash_attn_forward(
+                query,
+                key,
+                value,
+                p,
+                softmax_scale,
+                is_causal,
+                return_softmax
+            )
+        else:
+            out = query.new_empty(query.shape[0], query.shape[1], value.shape[2])
+            (
+                out,
+                q_padded,
+                k_padded,
+                v_padded,
+                out_padded,
+                softmax_lse,
+                S_dmask,
+                rng_state,
+            ) = _flash_attn_varlen_forward(
+                query,
+                key,
+                value,
+                cu_seq_lens_q,
+                cu_seq_lens_k,
+                max_seq_len_q,
+                max_seq_len_k,
+                p,
+                softmax_scale,
+                is_causal,
+                return_softmax,
+            )
+        return out, softmax_lse, rng_state
 
     def _flash_bwd(
         grad,
@@ -106,26 +157,69 @@ try:
         window_size,
         rng_state,
     ):
-        _flash_attn_backward(
-            grad,
-            query,
-            key,
-            value,
-            out,
-            lse,
-            dq,
-            dk,
-            dv,
-            cu_seq_lens_q,
-            cu_seq_lens_k,
-            max_seq_len_q,
-            max_seq_len_k,
-            p,
-            softmax_scale,
-            is_causal,
-            0,
-            None
-        )
+        # _flash_attn_backward(
+        #     grad,
+        #     query,
+        #     key,
+        #     value,
+        #     out,
+        #     lse,
+        #     dq,
+        #     dk,
+        #     dv,
+        #     cu_seq_lens_q,
+        #     cu_seq_lens_k,
+        #     max_seq_len_q,
+        #     max_seq_len_k,
+        #     p,
+        #     softmax_scale,
+        #     is_causal,
+        #     0,
+        #     None
+        # )
+        # return dq, dk, dv
+
+        if cu_seq_lens_k is None:
+            assert cu_seq_lens_q is None
+            (
+                dq, dk, dv, softmax_d
+            ) = _flash_attn_backward(
+                grad,
+                query,
+                key,
+                value,
+                out,
+                lse,
+                dq,
+                dk,
+                dv,
+                p,
+                softmax_scale,
+                is_causal,
+                rng_state,
+            )
+        else:
+            (
+                dq, dk, dv, softmax_d
+            ) = _flash_attn_varlen_backward(
+                grad,
+                query,
+                key,
+                value,
+                out,
+                lse,
+                dq,
+                dk,
+                dv,
+                cu_seq_lens_q,
+                cu_seq_lens_k,
+                max_seq_len_q,
+                max_seq_len_k,
+                p,
+                softmax_scale,
+                is_causal,
+                rng_state,
+            )
         return dq, dk, dv
 
     _flash_lib.impl("flash_fwd", _flash_fwd, "CUDA")
@@ -193,10 +287,10 @@ def _convert_input_format(
         query = query.reshape([batch * seqlen_q, -1, head_dim_q])
         key = key.reshape([batch * seqlen_kv, -1, head_dim_q])
         value = value.reshape([batch * seqlen_kv, -1, head_dim_v])
-    if query.is_contiguous() or key.is_contiguous() or value.is_contiguous():
-        query = query.contiguous()
-        key = key.contiguous()
-        value = value.contiguous()
+    #if query.is_contiguous() or key.is_contiguous() or value.is_contiguous():
+    #    query = query.contiguous()
+    #    key = key.contiguous()
+    #    value = value.contiguous()
     new_inp = replace(
         inp,
         query=query,
@@ -290,6 +384,7 @@ class FwOp(AttentionFwOpBase):
         BlockDiagonalCausalLocalAttentionMask,
         BlockDiagonalCausalLocalAttentionFromBottomRightMask,
         BlockDiagonalCausalFromBottomRightMask,
+        LowerTriangularMaskWithTensorBias,
     }
     SUPPORTS_DROPOUT = True
     SUPPORTS_CUSTOM_SCALE = True
@@ -339,7 +434,7 @@ class FwOp(AttentionFwOpBase):
             inp.p,
             softmax_scale,
             _is_causal(inp.attn_bias),
-            0,
+            _window_size(inp.attn_bias),
             return_softmax,
         )
 

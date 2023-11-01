@@ -10,7 +10,6 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple, Union
 
 import torch
 
-
 class AttentionBias:
     """Base class for a custom bias that can be applied \
         as the attn_bias argument in

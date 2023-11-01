@@ -177,3 +177,12 @@ _build/
 # vim swap files
 *.swo
 *.swp
+
+# Dataset files
+*.json
+*.json.[0-9]
+
+# Hipified files
+*.hip
+*_hip.h
+*_hip.cuh
