@@ -174,7 +174,7 @@ class EngineArgs:
                             default=None,
                             help='Method used to quantize the weights')
         parser.add_argument('--lora-paths',
-                            metavar="path",
+                            metavar='path',
                             type=str,
                             default=None,
                             nargs='+',
@@ -183,7 +183,7 @@ class EngineArgs:
 
         parser.add_argument(
             '--adapter-names',
-            metavar="adapter_name",
+            metavar='adapter_name',
             type=str,
             default=None,
             nargs='+',
