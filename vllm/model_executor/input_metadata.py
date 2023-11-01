@@ -32,7 +32,6 @@ class InputMetadata:
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Dict[SamplingType, torch.Tensor],
         sliding_window: Optional[int] = None,
-        force_paged_attention_v2: bool = False,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
@@ -43,7 +42,6 @@ class InputMetadata:
         self.block_tables = block_tables
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
-        self.force_paged_attention_v2 = force_paged_attention_v2
 
         self.max_prompt_len = max(prompt_lens) if prompt_lens else 0
         self.to_cache = None
