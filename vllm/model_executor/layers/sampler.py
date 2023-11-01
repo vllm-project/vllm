@@ -163,8 +163,8 @@ def _apply_logits_processors(logits: torch.Tensor,
     found_logits_processors = False
     for seq_ids, sampling_params in input_metadata.seq_groups:
         logits_processors = sampling_params.logits_processors
-        for seq_id in seq_ids:
-            if logits_processors:
+        if logits_processors:
+            for seq_id in seq_ids:
                 found_logits_processors = True
                 logits_row = logits[logits_row_idx]
                 token_ids = input_metadata.seq_data[seq_id].output_token_ids
@@ -172,6 +172,8 @@ def _apply_logits_processors(logits: torch.Tensor,
                     logits_row = logits_processor(token_ids, logits_row)
                 logits[logits_row_idx] = logits_row
             logits_row_idx += 1
+        else:
+            logits_row_idx += len(seq_ids)
     if found_logits_processors:
         assert logits_row_idx == logits.shape[0]
     return logits
