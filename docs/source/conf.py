@@ -14,13 +14,11 @@
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 
-
 # -- Project information -----------------------------------------------------
 
 project = 'vLLM'
 copyright = '2023, vLLM Team'
 author = 'the vLLM Team'
-
 
 # -- General configuration ---------------------------------------------------
 
