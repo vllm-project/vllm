@@ -13,7 +13,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
-from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
+from vllm.utils import get_gpu_memory
 
 
 class Worker:
@@ -140,12 +140,6 @@ class Worker:
         self.cache_config = cache_config
         self.block_size = cache_config.block_size
         self.sliding_window = cache_config.sliding_window
-
-        if self.sliding_window is None:
-            max_seq_len = self.scheduler_config.max_model_len
-        else:
-            max_seq_len = min(self.scheduler_config.max_model_len,
-                              self.sliding_window)
 
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
