@@ -6,6 +6,7 @@ from vllm.model_executor.models.baichuan import NormHead as vllm_NormHead
 
 
 class NormHead(nn.Module):
+
     def __init__(self, hidden_size, vocab_size):
         super().__init__()
         self.weight = nn.Parameter(torch.empty((vocab_size, hidden_size)))
