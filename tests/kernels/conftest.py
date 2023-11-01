@@ -3,6 +3,16 @@ from typing import List, Tuple
 import pytest
 import torch
 
+import torch.distributed as dist
+import os
+from vllm.model_executor.parallel_utils.parallel_state import initialize_model_parallel
+
+os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+os.environ.setdefault("MASTER_PORT", "8000")
+dist.init_process_group(rank=0, world_size=1)
+initialize_model_parallel()
+torch.cuda.init()
+
 
 def create_kv_caches(
     num_blocks: int,

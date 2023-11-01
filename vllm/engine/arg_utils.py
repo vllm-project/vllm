@@ -32,6 +32,8 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+    lora_paths: Optional[list[str]] = None
+    adapter_names: Optional[list[str]] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -171,6 +173,23 @@ class EngineArgs:
                             choices=['awq', 'squeezellm', None],
                             default=None,
                             help='Method used to quantize the weights')
+        parser.add_argument('--lora-paths',
+                            metavar="path",
+                            type=str,
+                            default=None,
+                            nargs='+',
+                            help='the paths of lora model you want to load:' +
+                            '[lora_path1 lora_path2 ...]')
+
+        parser.add_argument(
+            '--adapter-names',
+            metavar="adapter_name",
+            type=str,
+            default=None,
+            nargs='+',
+            help='the adapter names of lora model you want to load, each name'
+            + ' should be unique and needs to correspond to the path ' +
+            'one-to-one: [name1 name2 ...]')
         return parser
 
     @classmethod

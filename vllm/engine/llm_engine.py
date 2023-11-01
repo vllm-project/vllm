@@ -59,16 +59,15 @@ class LLMEngine:
         log_stats: Whether to log statistics.
     """
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        distributed_init_method: str,
-        placement_group: Optional["PlacementGroup"],
-        log_stats: bool,
-    ) -> None:
+    def __init__(self,
+                 model_config: ModelConfig,
+                 cache_config: CacheConfig,
+                 parallel_config: ParallelConfig,
+                 scheduler_config: SchedulerConfig,
+                 distributed_init_method: str,
+                 placement_group: Optional["PlacementGroup"],
+                 log_stats: bool,
+                 lora_configs: List[Tuple[str, str]] = None) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
@@ -93,6 +92,7 @@ class LLMEngine:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
+        self.lora_configs = lora_configs
         self._verify_args()
 
         self.tokenizer = get_tokenizer(
@@ -169,6 +169,7 @@ class LLMEngine:
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
+        lora_configs = copy.deepcopy(self.lora_configs)
         self._run_workers("init_worker",
                           get_all_outputs=True,
                           worker_init_fn=lambda: Worker(
@@ -177,6 +178,7 @@ class LLMEngine:
                               scheduler_config,
                               None,
                               None,
+                              lora_configs,
                           ))
         self._run_workers(
             "init_model",
@@ -227,11 +229,23 @@ class LLMEngine:
         # Initialize the cluster.
         distributed_init_method, placement_group = initialize_cluster(
             parallel_config)
+
+        lora_paths: list = engine_args.lora_paths
+        adapter_names: list = engine_args.adapter_names
+        lora_configs = None
+        if lora_paths is not None and adapter_names is not None:
+            assert len(lora_paths) == len(adapter_names), (len(lora_paths),
+                                                           len(adapter_names))
+            lora_configs = []
+            for lora_path, adapter_name in zip(lora_paths, adapter_names):
+                lora_configs.append((lora_path, adapter_name))
+
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      distributed_init_method,
                      placement_group,
-                     log_stats=not engine_args.disable_log_stats)
+                     log_stats=not engine_args.disable_log_stats,
+                     lora_configs=lora_configs)
         return engine
 
     def add_request(
