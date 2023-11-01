@@ -17,6 +17,12 @@ app = FastAPI()
 engine = None
 
 
+@app.get("/health")
+async def health() -> Response:
+    """Health check."""
+    return Response(status_code=200)
+
+
 @app.post("/generate")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
