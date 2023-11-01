@@ -36,13 +36,13 @@ def run_hf():
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )
-    # print("333333333", output_str)
+    print(output_str)
     del model
 
 
-def run_llm():
+def run_llm(checkpoint):
     from vllm import LLM, SamplingParams
-    llm = LLM(model="THUDM/chatglm3-6b", trust_remote_code=True)
+    llm = LLM(model=checkpoint, trust_remote_code=True, max_model_len=8192)
     prompt = "给六岁小朋友解释一下万有引"
     sampling_params = SamplingParams(temperature=0.0, max_tokens=16)
     outputs = llm.generate(prompt, sampling_params)
@@ -58,6 +58,8 @@ def run_llm():
 
 if __name__ == '__main__':
     # demo()
-    run_hf()
+    # run_hf()
+    # print("-" * 100)
+    # run_llm("THUDM/chatglm2-6b")
     print("-" * 100)
-    run_llm()
+    run_llm("THUDM/chatglm3-6b")

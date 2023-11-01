@@ -102,15 +102,15 @@ def run_llm():
     llm = LLM(model="THUDM/chatglm3-6b", trust_remote_code=True, dtype='float32')
     # print(len(llm.llm_engine.workers), llm.llm_engine.workers[0].model)
     prompts = [
-        # "Hello, my name is",
-        # "The president of the United States is",
-        # "The capital of France is",
-        # "The future of AI is",
-        # "希望这篇文章能",
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+        "希望这篇文章能",
         "给六岁小朋友解释一下万有引",
     ]
     # sampling_params = SamplingParams(temperature=0.1, top_p=0.95)
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=16)
     outputs = llm.generate(prompts, sampling_params)
 
     # Print the outputs.
@@ -118,7 +118,7 @@ def run_llm():
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        print(output)
+        # print(output)
 
 
 def run_transformer():

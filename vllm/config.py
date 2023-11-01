@@ -115,7 +115,7 @@ class ModelConfig:
 
     @staticmethod
     def hf_config_get_num_layers(hf_config):
-        if hf_config.model_type == 'chatglm':
+        if getattr(hf_config, "model_type", None) == 'chatglm':
             return hf_config.num_layers
         return hf_config.num_hidden_layers
 
