@@ -24,11 +24,9 @@ class ChatGLM3MLP(nn.Module):
             config: ChatGLMConfig
     ):
         super().__init__()
-
         def swiglu(x):
             x = torch.chunk(x, 2, dim=-1)
             return torch.nn.functional.silu(x[0]) * x[1]
-
         self.activation_func = swiglu
 
         self.dense_h_to_4h = nn.Linear(
@@ -59,27 +57,23 @@ class ChatGLM3Attention(nn.Module):
         super().__init__()
         self.rope_theta = 10000
 
-        self.head_dim = config.hidden_size // config.num_attention_heads
-        scaling = self.head_dim ** -0.5
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.multi_query_group_num
+        self.head_dim = config.hidden_size // self.num_heads
+
         self.attn = PagedAttentionWithRoPE(
-            num_heads=config.num_attention_heads,
+            num_heads=self.num_heads,
             head_size=self.head_dim,
-            scale=scaling,
+            scale=self.head_dim ** -0.5,
             rotary_dim=self.head_dim,
             base=self.rope_theta,
             is_glm_style=True,
             is_neox_style=False,
-            num_kv_heads=config.multi_query_group_num,
+            num_kv_heads=self.num_kv_heads,
             max_position=config.seq_length)
 
-        self.num_attention_heads_per_partition = config.num_attention_heads
-        self.num_multi_query_groups_per_partition = config.multi_query_group_num
         self.projection_size = config.kv_channels * config.num_attention_heads
-        self.hidden_size_per_attention_head = self.projection_size // config.num_attention_heads
-        self.qkv_hidden_size = (
-                self.projection_size + 2 * self.hidden_size_per_attention_head * config.multi_query_group_num
-        )
-
+        self.qkv_hidden_size = self.projection_size + 2 * self.head_dim * self.num_kv_heads
         self.query_key_value = nn.Linear(
             config.hidden_size, self.qkv_hidden_size,
             bias=config.add_bias_linear or config.add_qkv_bias)
@@ -95,19 +89,19 @@ class ChatGLM3Attention(nn.Module):
             input_metadata: InputMetadata,
             cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        mixed_x_layer = self.query_key_value(hidden_states)
-        (query_layer, key_layer, value_layer) = mixed_x_layer.split(
+        hidden_states = self.query_key_value(hidden_states)
+        query, key, value = hidden_states.split(
             [
-                self.num_attention_heads_per_partition * self.hidden_size_per_attention_head,
-                self.num_multi_query_groups_per_partition * self.hidden_size_per_attention_head,
-                self.num_multi_query_groups_per_partition * self.hidden_size_per_attention_head,
+                self.num_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
             ],
             dim=-1,
         )
 
         k_cache, v_cache = kv_cache
         attn_output = self.attn(
-            positions, query_layer, key_layer, value_layer, k_cache, v_cache,
+            positions, query, key, value, k_cache, v_cache,
             input_metadata, cache_event)
 
         output = self.dense(attn_output)
