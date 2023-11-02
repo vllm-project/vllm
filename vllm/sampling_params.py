@@ -34,6 +34,10 @@ class SamplingParams:
             frequency in the generated text so far. Values > 0 encourage the
             model to use new tokens, while values < 0 encourage the model to
             repeat tokens.
+        repetition_penalty: Float that penalizes new tokens based on whether
+            they appear in the generated text so far. Values > 1 encourage the
+            model to use new tokens, while values < 1 encourage the model to
+            repeat tokens.
         temperature: Float that controls the randomness of the sampling. Lower
             values make the model more deterministic, while higher values make
             the model more random. Zero means greedy sampling.
@@ -60,6 +64,15 @@ class SamplingParams:
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
         logprobs: Number of log probabilities to return per output token.
+            Note that the implementation follows the OpenAI API: The return
+            result includes the log probabilities on the `logprobs` most likely
+            tokens, as well the chosen tokens. The API will always return the
+            log probability of the sampled token, so there  may be up to
+            `logprobs+1` elements in the response.
+        prompt_logprobs: Number of log probabilities to return per prompt token.
+        skip_special_tokens: Whether to skip special tokens in the output.
+        spaces_between_special_tokens: Whether to add spaces between special
+            tokens in the output.  Defaults to True.
     """
 
     def __init__(
@@ -68,22 +81,27 @@ class SamplingParams:
         best_of: Optional[int] = None,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
+        repetition_penalty: float = 1.0,
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
-        stop: Union[None, str, List[str]] = None,
-        stop_token_ids: List[int] = None,
+        stop: Optional[Union[str, List[str]]] = None,
+        stop_token_ids: Optional[List[int]] = None,
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
+        prompt_logprobs: Optional[int] = None,
+        skip_special_tokens: bool = True,
+        spaces_between_special_tokens: bool = True,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty
+        self.repetition_penalty = repetition_penalty
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
@@ -103,6 +121,9 @@ class SamplingParams:
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs
+        self.prompt_logprobs = prompt_logprobs
+        self.skip_special_tokens = skip_special_tokens
+        self.spaces_between_special_tokens = spaces_between_special_tokens
 
         self._verify_args()
         if self.use_beam_search:
@@ -125,6 +146,9 @@ class SamplingParams:
         if not -2.0 <= self.frequency_penalty <= 2.0:
             raise ValueError("frequency_penalty must be in [-2, 2], got "
                              f"{self.frequency_penalty}.")
+        if not 0.0 < self.repetition_penalty <= 2.0:
+            raise ValueError("repetition_penalty must be in (0, 2], got "
+                             f"{self.repetition_penalty}.")
         if self.temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negative, got {self.temperature}.")
@@ -139,6 +163,9 @@ class SamplingParams:
         if self.logprobs is not None and self.logprobs < 0:
             raise ValueError(
                 f"logprobs must be non-negative, got {self.logprobs}.")
+        if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
+            raise ValueError(f"prompt_logprobs must be non-negative, got "
+                             f"{self.prompt_logprobs}.")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
@@ -187,6 +214,7 @@ class SamplingParams:
                 f"best_of={self.best_of}, "
                 f"presence_penalty={self.presence_penalty}, "
                 f"frequency_penalty={self.frequency_penalty}, "
+                f"repetition_penalty={self.repetition_penalty}, "
                 f"temperature={self.temperature}, "
                 f"top_p={self.top_p}, "
                 f"top_k={self.top_k}, "
@@ -196,4 +224,8 @@ class SamplingParams:
                 f"stop={self.stop}, "
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
-                f"logprobs={self.logprobs})")
+                f"logprobs={self.logprobs}, "
+                f"prompt_logprobs={self.prompt_logprobs}, "
+                f"skip_special_tokens={self.skip_special_tokens}, "
+                "spaces_between_special_tokens="
+                f"{self.spaces_between_special_tokens})")
