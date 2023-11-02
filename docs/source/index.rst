@@ -64,6 +64,8 @@ Documentation
 
    serving/distributed_serving
    serving/run_on_sky
+   serving/deploying_with_triton
+   serving/deploying_with_docker
 
 .. toctree::
    :maxdepth: 1

@@ -49,6 +49,7 @@ jobs:
       matrix:
           os: ['ubuntu-20.04']
           python-version: ['3.8', '3.9', '3.10', '3.11']
+          pytorch-version: ['2.0.1']
           cuda-version: ['11.8'] # Github runner can't build anything older than 11.8
 
     steps:
@@ -69,9 +70,9 @@ jobs:
         run: |
           bash -x .github/workflows/scripts/cuda-install.sh ${{ matrix.cuda-version }} ${{ matrix.os }}
 
-      - name: Install PyTorch-cu${{ matrix.cuda-version }}
+      - name: Install PyTorch ${{ matrix.pytorch-version }} with CUDA ${{ matrix.cuda-version }}
         run: |
-          bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
+          bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.pytorch-version }} ${{ matrix.cuda-version }}
 
       - name: Build wheel
         shell: bash

@@ -12,8 +12,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
+                                                       RowParallelLinear,
+                                                       VocabParallelEmbedding)
 from vllm.model_executor.weight_utils import (
     hf_model_weights_iterator, load_padded_tensor_parallel_vocab,
     load_tensor_parallel_weights)
@@ -31,16 +32,18 @@ class InternLMMLP(nn.Module):
         hidden_act: str,
     ):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                 2 * intermediate_size,
-                                                 bias=False,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           input_is_parallel=True,
-                                           perform_initialization=False)
+        self.gate_up_proj = ColumnParallelLinear(
+            hidden_size,
+            2 * intermediate_size,
+            bias=False,
+            gather_output=False,
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+        )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -59,6 +62,9 @@ class InternLMAttention(nn.Module):
         self,
         hidden_size: int,
         num_heads: int,
+        bias: bool,
+        rope_theta: float = 10000,
+        max_position_embeddings: int = 8192,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -70,25 +76,28 @@ class InternLMAttention(nn.Module):
                           tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
         self.scaling = self.head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = ColumnParallelLinear(
             hidden_size,
             3 * self.total_num_heads * self.head_dim,
-            bias=True,
+            bias=bias,
             gather_output=False,
-            perform_initialization=False,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=True,
+            bias=bias,
             input_is_parallel=True,
-            perform_initialization=False,
         )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           rotary_dim=self.head_dim)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            base=self.rope_theta,
+            max_position=self.max_position_embeddings,
+            rotary_dim=self.head_dim)
 
     def forward(
         self,
@@ -112,9 +121,15 @@ class InternLMDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
+        rope_theta = getattr(config, "rope_theta", 10000)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         self.self_attn = InternLMAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
+            bias=config.bias,
+            rope_theta=rope_theta,
+            max_position_embeddings=max_position_embeddings,
         )
         self.mlp = InternLMMLP(
             hidden_size=self.hidden_size,
@@ -164,7 +179,9 @@ class InternLMModel(nn.Module):
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
-            vocab_size, config.hidden_size, perform_initialization=False)
+            vocab_size,
+            config.hidden_size,
+        )
         self.layers = nn.ModuleList([
             InternLMDecoderLayer(config)
             for _ in range(config.num_hidden_layers)
@@ -204,11 +221,12 @@ class InternLMForCausalLM(nn.Module):
         self.config = config
         self.model = InternLMModel(config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.lm_head = ColumnParallelLinear(config.hidden_size,
-                                            vocab_size,
-                                            bias=False,
-                                            gather_output=False,
-                                            perform_initialization=False)
+        self.lm_head = ColumnParallelLinear(
+            config.hidden_size,
+            vocab_size,
+            bias=False,
+            gather_output=False,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(

@@ -6,6 +6,9 @@ from typing import Dict, List, Optional, Union
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
 
+PromptLogprobs = List[Optional[Dict[int, float]]]
+SampleLogprobs = List[Dict[int, float]]
+
 
 class SequenceStatus(enum.Enum):
     """Status of a sequence."""
@@ -35,6 +38,9 @@ class SequenceStatus(enum.Enum):
         elif status == SequenceStatus.FINISHED_ABORTED:
             finish_reason = "abort"
         elif status == SequenceStatus.FINISHED_IGNORED:
+            # The ignored sequences are the sequences whose prompt lengths
+            # are longer than the model's length cap. Therefore, the stop
+            # reason should also be "length" as in OpenAI API.
             finish_reason = "length"
         else:
             finish_reason = None
@@ -113,7 +119,7 @@ class Sequence:
         self.block_size = block_size
 
         self.data = SequenceData(prompt_token_ids)
-        self.output_logprobs: List[Dict[int, float]] = []
+        self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
@@ -193,7 +199,7 @@ class Sequence:
         """
         if seq_len is None:
             seq_len = self.get_len()
-            # Note: HF implementation does not count the EOS token
+            # NOTE: HF implementation does not count the EOS token
             # towards the length, we align with that here for testing.
             if (eos_token_id is not None
                     and self.get_last_token_id() == eos_token_id):
@@ -235,6 +241,19 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
+        self.prompt_logprobs: Optional[PromptLogprobs] = None
+
+    @property
+    def prompt(self) -> str:
+        # All sequences in the group should have the same prompt.
+        # We use the prompt of an arbitrary sequence.
+        return next(iter(self.seqs_dict.values())).prompt
+
+    @property
+    def prompt_token_ids(self) -> List[int]:
+        # All sequences in the group should have the same prompt.
+        # We use the prompt of an arbitrary sequence.
+        return next(iter(self.seqs_dict.values())).data.prompt_token_ids
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
@@ -356,8 +375,8 @@ class SequenceOutputs:
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
-                f"output_token={self.output_token}), "
-                f"logprobs={self.logprobs}")
+                f"output_token={self.output_token}, "
+                f"logprobs={self.logprobs})")
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
@@ -367,6 +386,28 @@ class SequenceOutputs:
                 and self.logprobs == other.logprobs)
 
 
+class SequenceGroupOutputs:
+    """The model outputs associated with a sequence group."""
+
+    def __init__(
+        self,
+        samples: List[SequenceOutputs],
+        prompt_logprobs: Optional[PromptLogprobs],
+    ) -> None:
+        self.samples = samples
+        self.prompt_logprobs = prompt_logprobs
+
+    def __repr__(self) -> str:
+        return (f"SequenceGroupOutputs(samples={self.samples}, "
+                f"prompt_logprobs={self.prompt_logprobs})")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SequenceGroupOutputs):
+            raise NotImplementedError()
+        return (self.samples == other.samples
+                and self.prompt_logprobs == other.prompt_logprobs)
+
+
 # For each sequence group, we generate a list of SequenceOutputs object,
 # each of which contains one possible candidate for the next token.
-SamplerOutput = List[List[SequenceOutputs]]
+SamplerOutput = List[SequenceGroupOutputs]
