@@ -24,9 +24,9 @@ ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
-# if torch.version.hip:
-#     if ROCM_HOME is not None:
-#         NVCC_FLAGS += [f"-DUSE_ROCM"]
+if torch.version.hip:
+    if ROCM_HOME is not None:
+        NVCC_FLAGS += [f"-DUSE_ROCM"]
 
 if not torch.version.hip:
     if CUDA_HOME is None:

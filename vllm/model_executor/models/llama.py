@@ -351,6 +351,8 @@ class LlamaForCausalLM(nn.Module):
         ]
         state_dict = self.state_dict()
 
+        load_format = load_format if load_format != "auto" else "pt"
+
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
