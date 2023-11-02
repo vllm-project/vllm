@@ -12,7 +12,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_rank
 from vllm.model_executor.weight_utils import hf_model_weights_iterator, load_tensor_parallel_weights
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.chatglm3 import ChatGLM3Config
+from vllm.transformers_utils.configs.chatglm3 import ChatGLMConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -21,7 +21,7 @@ class ChatGLM3MLP(nn.Module):
 
     def __init__(
             self,
-            config: ChatGLM3Config
+            config: ChatGLMConfig
     ):
         super().__init__()
 
@@ -54,7 +54,7 @@ class ChatGLM3MLP(nn.Module):
 class ChatGLM3Attention(nn.Module):
     def __init__(
             self,
-            config: ChatGLM3Config
+            config: ChatGLMConfig
     ):
         super().__init__()
         self.rope_theta = 10000
@@ -116,7 +116,7 @@ class ChatGLM3Attention(nn.Module):
 
 class ChatGLM3DecoderLayer(nn.Module):
 
-    def __init__(self, config: ChatGLM3Config):
+    def __init__(self, config: ChatGLMConfig):
         super().__init__()
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
         self.self_attention = ChatGLM3Attention(config)
@@ -153,7 +153,7 @@ class ChatGLM3DecoderLayer(nn.Module):
 
 class ChatGLM3Model(nn.Module):
 
-    def __init__(self, config: ChatGLM3Config):
+    def __init__(self, config: ChatGLMConfig):
         super().__init__()
         # self.embedding = VocabParallelEmbedding(
         self.embedding = nn.Embedding(
@@ -208,7 +208,7 @@ def name_mapping(name: str):
 
 class ChatGLM3ForCausalLM(nn.Module):
 
-    def __init__(self, config: ChatGLM3Config):
+    def __init__(self, config: ChatGLMConfig):
         super().__init__()
         self.config = config
         self.model = ChatGLM3Model(config)

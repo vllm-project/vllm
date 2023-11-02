@@ -1,7 +1,7 @@
 from transformers import PretrainedConfig
 
 
-class ChatGLM3Config(PretrainedConfig):
+class ChatGLMConfig(PretrainedConfig):
     model_type = "chatglm"
 
     def __init__(

@@ -26,7 +26,7 @@ from transformers.generation.logits_process import LogitsProcessor
 from transformers.generation.utils import LogitsProcessorList, StoppingCriteriaList, GenerationConfig, ModelOutput
 
 # from .configuration_chatglm import ChatGLMConfig
-from vllm.transformers_utils.configs.chatglm3 import ChatGLM3Config as ChatGLMConfig
+from vllm.transformers_utils.configs.chatglm3 import ChatGLMConfig as ChatGLMConfig
 
 # flags required to enable jit fusion kernels
 

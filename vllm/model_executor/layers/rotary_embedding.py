@@ -44,7 +44,12 @@ class RotaryEmbedding(nn.Module):
     ) -> None:
         super().__init__()
         self.head_size = head_size
-        self.rotary_dim = rotary_dim // 2 if is_glm_style else rotary_dim
+        if is_glm_style:
+            assert not is_neox_style
+            assert rotary_dim % 4 == 0
+            rotary_dim //= 2
+        self.rotary_dim = rotary_dim
+        assert self.rotary_dim % 2 == 0
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         self.is_neox_style = is_neox_style
