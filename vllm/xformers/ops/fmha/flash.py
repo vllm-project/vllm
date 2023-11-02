@@ -288,10 +288,10 @@ def _convert_input_format(
         query = query.reshape([batch * seqlen_q, -1, head_dim_q])
         key = key.reshape([batch * seqlen_kv, -1, head_dim_q])
         value = value.reshape([batch * seqlen_kv, -1, head_dim_v])
-    #if query.is_contiguous() or key.is_contiguous() or value.is_contiguous():
-    #    query = query.contiguous()
-    #    key = key.contiguous()
-    #    value = value.contiguous()
+    if query.is_contiguous() or key.is_contiguous() or value.is_contiguous():
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
     new_inp = replace(
         inp,
         query=query,
