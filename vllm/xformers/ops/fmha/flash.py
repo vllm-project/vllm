@@ -38,8 +38,6 @@ try:
 
     FLASH_VERSION = flash_attn.__version__
 
-    print("========== flash attention version: {}".format(FLASH_VERSION))
-
     # create library so that flash-attn goes through the PyTorch Dispatcher
     _flash_lib = torch.library.Library("xformers_flash", "DEF")
 
