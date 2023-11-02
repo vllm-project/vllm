@@ -205,11 +205,6 @@ def _apply_penalties(
     presence_penalties = torch.tensor(presence_penalties,
                                       dtype=logits.dtype,
                                       device=logits.device)
-    
-    repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
-    repetition_penalties[~mask] = 1.0
-    logits = torch.where(logits > 0, logits / repetition_penalties,
-                         logits * repetition_penalties)
 
     repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
     repetition_penalties[~mask] = 1.0
