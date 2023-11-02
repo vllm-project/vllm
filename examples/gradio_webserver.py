@@ -39,7 +39,7 @@ def build_demo():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="localhost")
+    parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--model-url",
                         type=str,
