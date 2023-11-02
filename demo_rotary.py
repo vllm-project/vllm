@@ -99,7 +99,7 @@ def check_rope():
 
 def run_llm():
     from vllm import LLM, SamplingParams
-    llm = LLM(model="THUDM/chatglm3-6b", trust_remote_code=True)
+    llm = LLM(model="THUDM/chatglm3-6b", trust_remote_code=True,  max_model_len=8192)
     # print(len(llm.llm_engine.workers), llm.llm_engine.workers[0].model)
     prompts = [
         "Hello, my name is",
