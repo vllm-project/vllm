@@ -7,8 +7,8 @@ from vllm.model_executor import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import Sampler
-# from vllm.model_executor.parallel_utils.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
-# from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_world_size
+from vllm.model_executor.parallel_utils.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
+from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_world_size
 from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_rank
 from vllm.model_executor.weight_utils import hf_model_weights_iterator, load_tensor_parallel_weights
 from vllm.sequence import SamplerOutput
@@ -24,28 +24,32 @@ class ChatGLM3MLP(nn.Module):
             config: ChatGLMConfig
     ):
         super().__init__()
+
         def swiglu(x):
             x = torch.chunk(x, 2, dim=-1)
             return torch.nn.functional.silu(x[0]) * x[1]
+
         self.activation_func = swiglu
 
-        self.dense_h_to_4h = nn.Linear(
+        self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
             config.ffn_hidden_size * 2,
             bias=config.add_bias_linear,
+            gather_output=False,
         )
-        self.dense_4h_to_h = nn.Linear(
+        self.dense_4h_to_h = RowParallelLinear(
             config.ffn_hidden_size,
             config.hidden_size,
             bias=config.add_bias_linear,
+            input_is_parallel=True,
         )
 
     def forward(self, hidden_states: torch.Tensor):
         # [s, b, 4hp]
-        intermediate_parallel = self.dense_h_to_4h(hidden_states)
+        intermediate_parallel, _ = self.dense_h_to_4h(hidden_states)
         intermediate_parallel = self.activation_func(intermediate_parallel)
         # [s, b, h]
-        output = self.dense_4h_to_h(intermediate_parallel)
+        output, _ = self.dense_4h_to_h(intermediate_parallel)
         return output
 
 
@@ -72,14 +76,19 @@ class ChatGLM3Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             max_position=config.seq_length)
 
-        self.projection_size = config.kv_channels * config.num_attention_heads
-        self.qkv_hidden_size = self.projection_size + 2 * self.head_dim * self.num_kv_heads
-        self.query_key_value = nn.Linear(
-            config.hidden_size, self.qkv_hidden_size,
-            bias=config.add_bias_linear or config.add_qkv_bias)
-        self.dense = nn.Linear(
-            self.projection_size, config.hidden_size,
-            bias=config.add_bias_linear)
+        self.qkv_hidden_size = config.hidden_size + 2 * self.head_dim * self.num_kv_heads
+        self.query_key_value = ColumnParallelLinear(
+            config.hidden_size,
+            self.qkv_hidden_size,
+            bias=config.add_bias_linear or config.add_qkv_bias,
+            gather_output=False,
+        )
+        self.dense = RowParallelLinear(
+            config.hidden_size,
+            config.hidden_size,
+            bias=config.add_bias_linear,
+            input_is_parallel=True,
+        )
 
     def forward(
             self,
@@ -149,15 +158,13 @@ class ChatGLM3Model(nn.Module):
 
     def __init__(self, config: ChatGLMConfig):
         super().__init__()
-        # self.embedding = VocabParallelEmbedding(
-        self.embedding = nn.Embedding(
+        self.embedding = VocabParallelEmbedding(
             config.padded_vocab_size,
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
             ChatGLM3DecoderLayer(config) for _ in range(config.num_layers)
         ])
-
         self.final_layernorm = RMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
 
     def forward(
@@ -206,10 +213,11 @@ class ChatGLM3ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = ChatGLM3Model(config)
-        self.lm_head = nn.Linear(
+        self.lm_head = ColumnParallelLinear(
             config.hidden_size,
             config.padded_vocab_size,
             bias=False,
+            gather_output=False,
         )
         self.sampler = Sampler(config.padded_vocab_size)
 
@@ -223,7 +231,6 @@ class ChatGLM3ForCausalLM(nn.Module):
     ) -> SamplerOutput:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
-
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
         return next_tokens
