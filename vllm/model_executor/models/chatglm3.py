@@ -61,7 +61,6 @@ class ChatGLM3Attention(nn.Module):
 
         self.head_dim = config.hidden_size // config.num_attention_heads
         scaling = self.head_dim ** -0.5
-        # print("nnnnnnnn1", config.num_attention_heads, config.multi_query_group_num)
         self.attn = PagedAttentionWithRoPE(
             num_heads=config.num_attention_heads,
             head_size=self.head_dim,
@@ -107,19 +106,9 @@ class ChatGLM3Attention(nn.Module):
         )
 
         k_cache, v_cache = kv_cache
-        # print("meta", input_metadata)
-        # print("qkv", query_layer.size(), key_layer.size(), value_layer.size())
-        # if k_cache is not None and v_cache is not None:
-        #     print("kkkkkkkk1", k_cache.size(), v_cache.size())
-        # else:
-        #     print("kkkkkkkk1", k_cache, v_cache)
         attn_output = self.attn(
             positions, query_layer, key_layer, value_layer, k_cache, v_cache,
             input_metadata, cache_event)
-        # if k_cache is not None and v_cache is not None:
-        #     print("kkkkkkkk2", k_cache.size(), v_cache.size())
-        # else:
-        #     print("kkkkkkkk2", k_cache, v_cache)
 
         output = self.dense(attn_output)
         return output
@@ -185,9 +174,7 @@ class ChatGLM3Model(nn.Module):
             input_metadata: InputMetadata,
             cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        # print("11111", input_ids)
         hidden_states = self.embedding(input_ids)
-        # print("22222", hidden_states[..., :5])
         for i in range(len(self.layers)):
             if cache_events is None:
                 cache_event = None
@@ -201,9 +188,7 @@ class ChatGLM3Model(nn.Module):
                 input_metadata,
                 cache_event,
             )
-            # print(f"layer {i}", hidden_states[..., :5])
         hidden_states = self.final_layernorm(hidden_states)
-        # print("33333", hidden_states[..., :5])
         return hidden_states
 
 
@@ -245,14 +230,6 @@ class ChatGLM3ForCausalLM(nn.Module):
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
 
-        # logits = self.lm_head(hidden_states)
-        # outputs = torch.argmax(logits, dim=-1).tolist()[0]
-        # print("999999", outputs)
-
-        # print(input_ids.size(), positions.size())
-        # torch.save(input_ids, f'input{positions[0, -1]}.pt')
-        # print(hidden_states.size())
-        # torch.save(hidden_states, f'out{positions[0, -1]}.pt')
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
         return next_tokens

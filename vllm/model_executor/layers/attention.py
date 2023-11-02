@@ -50,7 +50,6 @@ class PagedAttention(nn.Module):
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
-        # print("nnnnnnnn3", num_heads, num_kv_heads)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
 
@@ -316,7 +315,6 @@ class PagedAttentionWithRoPE(PagedAttention):
         rope_scaling: Optional[Dict[str, Any]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
-        # print("nnnnnnnn2", num_heads, num_kv_heads)
         super().__init__(num_heads,
                          head_size,
                          scale,

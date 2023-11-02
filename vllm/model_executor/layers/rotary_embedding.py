@@ -34,13 +34,13 @@ class RotaryEmbedding(nn.Module):
     """Original rotary positional embedding."""
 
     def __init__(
-            self,
-            head_size: int,
-            rotary_dim: int,
-            max_position_embeddings: int,
-            base: int,
-            is_neox_style: bool,
-            is_glm_style: bool = False,
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        is_glm_style: bool = False,
     ) -> None:
         super().__init__()
         self.head_size = head_size
@@ -65,9 +65,9 @@ class RotaryEmbedding(nn.Module):
         # use CPU to compute the cache and then move it to GPU. However, we
         # create the cache on GPU for faster initialization. This may cause
         # a slight numerical difference between the HF implementation and ours.
-        inv_freq = 1.0 / (base ** (torch.arange(
+        inv_freq = 1.0 / (base**(torch.arange(
             0, self.rotary_dim, 2, dtype=torch.float, device="cuda") /
-                                   self.rotary_dim))
+                                 self.rotary_dim))
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
@@ -87,16 +87,16 @@ class RotaryEmbedding(nn.Module):
         return cache
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            query: torch.Tensor,
-            key: torch.Tensor,
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pos_encoding_ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
         pos_encoding_ops.rotary_embedding(positions, query, key,
                                           self.head_size, self.cos_sin_cache,
-                                          False if self.is_glm_style else self.is_neox_style)
+                                          self.is_neox_style)
         return query, key
 
 
@@ -107,13 +107,13 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
     """
 
     def __init__(
-            self,
-            head_size: int,
-            rotary_dim: int,
-            max_position_embeddings: int,
-            base: int,
-            is_neox_style: bool,
-            scaling_factor: float,
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        scaling_factor: float,
     ) -> None:
         self.scaling_factor = scaling_factor
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
@@ -143,13 +143,13 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
     """
 
     def __init__(
-            self,
-            head_size: int,
-            rotary_dim: int,
-            max_position_embeddings: int,
-            base: int,
-            is_neox_style: bool,
-            scaling_factor: float,
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        scaling_factor: float,
     ) -> None:
         self.scaling_factor = scaling_factor
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
@@ -162,9 +162,9 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         # self.max_position_embeddings * self.scaling_factor.
         max_len = self.max_position_embeddings * self.scaling_factor
         base = self.base * (
-                (self.scaling_factor * max_len / self.max_position_embeddings) -
-                (self.scaling_factor - 1)) ** (self.rotary_dim /
-                                               (self.rotary_dim - 2))
+            (self.scaling_factor * max_len / self.max_position_embeddings) -
+            (self.scaling_factor - 1))**(self.rotary_dim /
+                                         (self.rotary_dim - 2))
         inv_freq = self._compute_inv_freq(base)
         t = torch.arange(max_len, dtype=torch.float, device="cuda")
 

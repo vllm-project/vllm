@@ -60,14 +60,14 @@ class LLMEngine:
     """
 
     def __init__(
-            self,
-            model_config: ModelConfig,
-            cache_config: CacheConfig,
-            parallel_config: ParallelConfig,
-            scheduler_config: SchedulerConfig,
-            distributed_init_method: str,
-            placement_group: Optional["PlacementGroup"],
-            log_stats: bool,
+        self,
+        model_config: ModelConfig,
+        cache_config: CacheConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        distributed_init_method: str,
+        placement_group: Optional["PlacementGroup"],
+        log_stats: bool,
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -235,12 +235,12 @@ class LLMEngine:
         return engine
 
     def add_request(
-            self,
-            request_id: str,
-            prompt: Optional[str],
-            sampling_params: SamplingParams,
-            prompt_token_ids: Optional[List[int]] = None,
-            arrival_time: Optional[float] = None,
+        self,
+        request_id: str,
+        prompt: Optional[str],
+        sampling_params: SamplingParams,
+        prompt_token_ids: Optional[List[int]] = None,
+        arrival_time: Optional[float] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -263,10 +263,6 @@ class LLMEngine:
         if prompt_token_ids is None:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
-        # print("encode prompt", prompt, self.tokenizer)
-        # print(prompt_token_ids)
-
-        # prompt_token_ids = prompt_token_ids[2:]
 
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -301,7 +297,7 @@ class LLMEngine:
         return self.scheduler.has_unfinished_seqs()
 
     def _schedule(
-            self
+        self
     ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs,
                List[RequestOutput]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
@@ -311,11 +307,11 @@ class LLMEngine:
         ]
 
     def _check_beam_search_early_stopping(
-            self,
-            early_stopping: Union[bool, str],
-            sampling_params: SamplingParams,
-            best_running_seq: Sequence,
-            current_worst_seq: Sequence,
+        self,
+        early_stopping: Union[bool, str],
+        sampling_params: SamplingParams,
+        best_running_seq: Sequence,
+        current_worst_seq: Sequence,
     ) -> bool:
         assert sampling_params.use_beam_search
         length_penalty = sampling_params.length_penalty
@@ -574,9 +570,9 @@ class LLMEngine:
         return self._process_model_outputs(output, scheduler_outputs) + ignored
 
     def _log_system_stats(
-            self,
-            prompt_run: bool,
-            num_batched_tokens: int,
+        self,
+        prompt_run: bool,
+        num_batched_tokens: int,
     ) -> None:
         now = time.monotonic()
         # Log the number of batched input tokens.
@@ -687,11 +683,11 @@ class LLMEngine:
             return
 
     def _run_workers(
-            self,
-            method: str,
-            *args,
-            get_all_outputs: bool = False,
-            **kwargs,
+        self,
+        method: str,
+        *args,
+        get_all_outputs: bool = False,
+        **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
         all_outputs = []
