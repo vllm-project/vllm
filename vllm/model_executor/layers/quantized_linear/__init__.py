@@ -1,14 +1,18 @@
 from vllm.model_executor.layers.quantized_linear.awq import (
     AWQColumnParallelLinear, AWQRowParallelLinear)
+from vllm.model_executor.layers.quantized_linear.squeezellm import (
+    SqueezeLLMColumnParallelLinear, SqueezeLLMRowParallelLinear)
 from vllm.model_executor.layers.quantized_linear.smoothquant import (
     SQColumnParallelLinear, SQRowParallelLinear)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    ColumnParallelLinear, RowParallelLinear)
+from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
+                                                       RowParallelLinear)
 
 
 _QUANTIZED_LINEAR_REGISTRY = {
     "awq": (AWQColumnParallelLinear, AWQRowParallelLinear),
-    "smoothquant": (SQColumnParallelLinear, SQRowParallelLinear)
+    "squeezellm":
+    (SqueezeLLMColumnParallelLinear, SqueezeLLMRowParallelLinear),
+    "smoothquant": (SQColumnParallelLinear, SQRowParallelLinear),
 }
 
 

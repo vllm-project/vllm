@@ -6,13 +6,13 @@ import torch
 from vllm import cache_ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
-NUM_LAYERS = [5]  # Arbitrary values for testing
+NUM_TOKENS = [83]  # Arbitrary values for testing
+NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
-NUM_BLOCKS = [1024]  # Arbitrary values for testing
-NUM_MAPPINGS = [32, 256]  # Arbitrary values for testing
+NUM_BLOCKS = [1024, 36000]  # Arbitrary values for testing
+NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 
 
@@ -69,9 +69,9 @@ def test_copy_blocks(
     for src, dsts in block_mapping.items():
         for dst in dsts:
             for cloned_key_cache in cloned_key_caches:
-                cloned_key_cache[dst] = cloned_key_cache[src]
+                cloned_key_cache[dst].copy_(cloned_key_cache[src])
             for cloned_value_cache in cloned_value_caches:
-                cloned_value_cache[dst] = cloned_value_cache[src]
+                cloned_value_cache[dst].copy_(cloned_value_cache[src])
 
     # Compare the results.
     for key_cache, cloned_key_cache in zip(key_caches, cloned_key_caches):
@@ -106,14 +106,14 @@ def test_reshape_and_cache(
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.int, device='cuda')
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device="cuda")
 
     qkv = torch.randn(num_tokens,
                       3,
                       num_heads,
                       head_size,
                       dtype=dtype,
-                      device='cuda')
+                      device="cuda")
     _, key, value = qkv.unbind(dim=1)
 
     # Create the KV caches.
@@ -132,7 +132,7 @@ def test_reshape_and_cache(
 
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
-    block_indicies = torch.div(slot_mapping, block_size, rounding_mode='floor')
+    block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")
     block_indicies = block_indicies.cpu().tolist()
     block_offsets = slot_mapping % block_size
     block_offsets = block_offsets.cpu().tolist()

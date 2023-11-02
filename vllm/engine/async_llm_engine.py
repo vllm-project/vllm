@@ -417,7 +417,8 @@ class AsyncLLMEngine:
             request.
         """
         # Preprocess the request.
-        arrival_time = time.time()
+        # This should not be used for logging, as it is monotonic time.
+        arrival_time = time.monotonic()
 
         try:
             stream = await self.add_request(request_id,
@@ -483,7 +484,7 @@ class AsyncLLMEngine:
         distributed_init_method, placement_group = initialize_cluster(
             parallel_config, engine_args.engine_use_ray)
         # Create the async LLM engine.
-        engine = cls(engine_args.worker_use_ray,
+        engine = cls(parallel_config.worker_use_ray,
                      engine_args.engine_use_ray,
                      *engine_configs,
                      distributed_init_method,

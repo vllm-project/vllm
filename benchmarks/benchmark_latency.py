@@ -23,6 +23,7 @@ def main(args: argparse.Namespace):
         max_num_seqs=args.batch_size,
         max_num_batched_tokens=args.batch_size * args.input_len,
         trust_remote_code=args.trust_remote_code,
+        dtype=args.dtype,
     )
 
     sampling_params = SamplingParams(
@@ -39,13 +40,13 @@ def main(args: argparse.Namespace):
     def run_to_completion(profile: bool = False):
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         llm.generate(prompt_token_ids=dummy_prompt_token_ids,
                      sampling_params=sampling_params,
                      use_tqdm=False)
 
-        end_time = time.time()
+        end_time = time.perf_counter()
         latency = end_time - start_time
         if profile:
             torch.cuda.cudart().cudaProfilerStop()
@@ -69,7 +70,7 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
-                        choices=['awq', None],
+                        choices=['awq', 'squeezellm', None],
                         default=None)
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
     parser.add_argument('--input-len', type=int, default=32)
@@ -87,5 +88,14 @@ if __name__ == '__main__':
     parser.add_argument('--trust-remote-code',
                         action='store_true',
                         help='trust remote code from huggingface')
+    parser.add_argument(
+        '--dtype',
+        type=str,
+        default='auto',
+        choices=['auto', 'half', 'float16', 'bfloat16', 'float', 'float32'],
+        help='data type for model weights and activations. '
+        'The "auto" option will use FP16 precision '
+        'for FP32 and FP16 models, and BF16 precision '
+        'for BF16 models.')
     args = parser.parse_args()
     main(args)

@@ -8,13 +8,14 @@
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
-template <typename scalar_t>
-__global__ void
-rms_norm_kernel(scalar_t *__restrict__ out,         // [num_tokens, hidden_size]
-                const scalar_t *__restrict__ input, // [num_tokens, hidden_size]
-                const scalar_t *__restrict__ weight, // [hidden_size]
-                const float epsilon, const int num_tokens,
-                const int hidden_size) {
+template<typename scalar_t>
+__global__ void rms_norm_kernel(
+  scalar_t* __restrict__ out,             // [..., hidden_size]
+  const scalar_t* __restrict__ input,     // [..., hidden_size]
+  const scalar_t* __restrict__ weight,    // [hidden_size]
+  const float epsilon,
+  const int num_tokens,
+  const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
@@ -98,12 +99,14 @@ __global__ void dequant_add_residual_rms_norm_quant_kernel(
 
 } // namespace vllm
 
-void rms_norm(torch::Tensor &out,    // [num_tokens, hidden_size]
-              torch::Tensor &input,  // [num_tokens, hidden_size]
-              torch::Tensor &weight, // [hidden_size]
-              float epsilon) {
-  int num_tokens = input.size(0);
-  int hidden_size = input.size(1);
+
+void rms_norm(
+  torch::Tensor& out,      // [..., hidden_size]
+  torch::Tensor& input,    // [..., hidden_size]
+  torch::Tensor& weight,   // [hidden_size]
+  float epsilon) {
+  int hidden_size = input.size(-1);
+  int num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
