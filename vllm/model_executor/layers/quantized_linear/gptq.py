@@ -8,6 +8,29 @@ from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
                                                        RowParallelLinear)
 
 
+class ExLlamaV2DeviceTensors:
+
+    def __init__(self, device_idx, scratch_bytes):
+        self.device_idx = device_idx
+        self.scratch_bytes = scratch_bytes
+        self.scratch = None
+
+    def prepare(self):
+        self.scratch = torch.empty(
+            (self.scratch_bytes // 2, ),
+            dtype=torch.half,
+            device=f"cuda:{self.device_idx}",
+        )
+
+    def get_scratch_slice(self, size_bytes):
+        if self.scratch is None:
+            self.prepare()
+        size_bytes = ((size_bytes + 127) // 128) * 128
+        size_half = size_bytes // 2
+        scratch_slice = self.scratch.narrow(0, 0, size_half)
+        return scratch_slice
+
+
 class GPTQLinear(torch.nn.Module):
 
     def __init__(self,
@@ -69,19 +92,36 @@ class GPTQLinear(torch.nn.Module):
         else:
             self.register_parameter("bias", None)
 
-    def post_init(self):
+    def post_init(self, temp_dq):
         assert self.qweight.device.type == "cuda"
         assert self.qweight.device.index is not None
 
-        # make_q4 segfaults if g_idx is not on cpu in the act-order case.
-        # In the non act-order case, None needs to be passed for g_idx.
+        none_tensor = torch.empty((1, 1), device="meta")
+        temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())
         if not self.quant_config.desc_act:
-            g_idx = torch.empty((1, 1), device="meta")
+            self.q4 = quantization_ops.make_q_matrix(
+                self.qweight,
+                none_tensor,
+                none_tensor,
+                self.qzeros,
+                self.scales,
+                none_tensor,
+                temp_dq,
+            )
         else:
-            g_idx = self.g_idx.to("cpu")
-        self.q4 = quantization_ops.gptq_make_q4(self.qweight, self.qzeros,
-                                                self.scales, g_idx,
-                                                self.qweight.device.index)
+            self.q_perm = torch.empty((self.input_size, ),
+                                      dtype=torch.short,
+                                      device=self.qweight.device)
+            self.q_invperm = torch.empty_like(self.q_perm)
+            self.q4 = quantization_ops.make_q_matrix(
+                self.qweight,
+                self.q_perm,
+                self.q_invperm,
+                self.qzeros,
+                self.scales,
+                self.g_idx.cpu(),
+                temp_dq,
+            )
 
     def forward(self, input_):
         out_shape = input_.shape[:-1] + (self.qweight.shape[-1], )
@@ -89,11 +129,20 @@ class GPTQLinear(torch.nn.Module):
         output = torch.empty((reshaped_x.shape[0], self.qweight.shape[-1]),
                              dtype=torch.float16,
                              device=input_.device)
-        quantization_ops.gptq_q4_matmul(reshaped_x, self.q4, output)
+        quantization_ops.gemm_half_q_half(reshaped_x, self.q4, output, False)
         output = output.reshape(out_shape)
 
         output = output + self.bias if self.bias is not None else output
         return output
+
+    def temp_dq_size(self):
+        return self.input_size * self.output_size * 2 + 128
+
+    def temp_fwd_size(self, max_tokens):
+        return self.output_size * max_tokens * 4 + 128
+
+    def scratch_space_fixed(self, max_tokens):
+        return self.temp_dq_size() + self.temp_fwd_size(max_tokens)
 
 
 class GPTQColumnParallelLinear(ColumnParallelLinear):
@@ -143,19 +192,36 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
             requires_grad=False,
         )
 
-    def post_init(self):
+    def post_init(self, temp_dq):
         assert self.qweight.device.type == "cuda"
         assert self.qweight.device.index is not None
 
-        # make_q4 segfaults if g_idx is not on cpu in the act-order case.
-        # In the non act-order case, None needs to be passed for g_idx.
+        none_tensor = torch.empty((1, 1), device="meta")
+        temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())
         if not self.quant_config.desc_act:
-            g_idx = torch.empty((1, 1), device="meta")
+            self.q4 = quantization_ops.make_q_matrix(
+                self.qweight,
+                none_tensor,
+                none_tensor,
+                self.qzeros,
+                self.scales,
+                none_tensor,
+                temp_dq,
+            )
         else:
-            g_idx = self.g_idx.to("cpu")
-        self.q4 = quantization_ops.gptq_make_q4(self.qweight, self.qzeros,
-                                                self.scales, g_idx,
-                                                self.qweight.device.index)
+            self.q_perm = torch.empty((self.input_size, ),
+                                      dtype=torch.short,
+                                      device=self.qweight.device)
+            self.q_invperm = torch.empty_like(self.q_perm)
+            self.q4 = quantization_ops.make_q_matrix(
+                self.qweight,
+                self.q_perm,
+                self.q_invperm,
+                self.qzeros,
+                self.scales,
+                self.g_idx.cpu(),
+                temp_dq,
+            )
 
     def apply_weights(
         self,
@@ -167,10 +233,19 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
         output = torch.empty((reshaped_x.shape[0], self.qweight.shape[-1]),
                              dtype=torch.float16,
                              device=x.device)
-        quantization_ops.gptq_q4_matmul(reshaped_x, self.q4, output)
+        quantization_ops.gemm_half_q_half(reshaped_x, self.q4, output, False)
         if bias is not None:
             output = output + bias
         return output.reshape(out_shape)
+
+    def temp_dq_size(self):
+        return self.input_size * self.output_size_per_partition * 2 + 128
+
+    def temp_fwd_size(self, max_tokens):
+        return self.output_size_per_partition * max_tokens * 4 + 128
+
+    def scratch_space_fixed(self, max_tokens):
+        return self.temp_dq_size() + self.temp_fwd_size(max_tokens)
 
 
 class GPTQRowParallelLinear(RowParallelLinear):
@@ -228,21 +303,38 @@ class GPTQRowParallelLinear(RowParallelLinear):
             requires_grad=False,
         )
 
-    def post_init(self):
+    def post_init(self, temp_dq):
         if not self.use_exllama:
             return
         assert self.qweight.device.type == "cuda"
         assert self.qweight.device.index is not None
 
-        # make_q4 segfaults if g_idx is not on cpu in the act-order case.
-        # In the non act-order case, None needs to be passed for g_idx.
+        none_tensor = torch.empty((1, 1), device="meta")
+        temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())
         if not self.quant_config.desc_act:
-            g_idx = torch.empty((1, 1), device="meta")
+            self.q4 = quantization_ops.make_q_matrix(
+                self.qweight,
+                none_tensor,
+                none_tensor,
+                self.qzeros,
+                self.scales,
+                none_tensor,
+                temp_dq,
+            )
         else:
-            g_idx = self.g_idx.to("cpu")
-        self.q4 = quantization_ops.gptq_make_q4(self.qweight, self.qzeros,
-                                                self.scales, g_idx,
-                                                self.qweight.device.index)
+            self.q_perm = torch.empty((self.input_size, ),
+                                      dtype=torch.short,
+                                      device=self.qweight.device)
+            self.q_invperm = torch.empty_like(self.q_perm)
+            self.q4 = quantization_ops.make_q_matrix(
+                self.qweight,
+                self.q_perm,
+                self.q_invperm,
+                self.qzeros,
+                self.scales,
+                self.g_idx.cpu(),
+                temp_dq,
+            )
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
@@ -252,7 +344,8 @@ class GPTQRowParallelLinear(RowParallelLinear):
             output = torch.empty((reshaped_x.shape[0], self.qweight.shape[-1]),
                                  dtype=torch.float16,
                                  device=x.device)
-            quantization_ops.gptq_q4_matmul(reshaped_x, self.q4, output)
+            quantization_ops.gemm_half_q_half(reshaped_x, self.q4, output,
+                                              False)
         else:
             output = torch.zeros((reshaped_x.shape[0], self.qweight.shape[-1]),
                                  dtype=torch.float32,
@@ -263,3 +356,18 @@ class GPTQRowParallelLinear(RowParallelLinear):
                                                  self.qzeros, self.g_idx)
             output = output.half()
         return output.reshape(out_shape)
+
+    def temp_dq_size(self):
+        if not self.use_exllama:
+            return 0
+        return self.input_size_per_partition * self.output_size * 2 + 128
+
+    def temp_fwd_size(self, max_tokens):
+        if not self.use_exllama:
+            return 0
+        return self.output_size * max_tokens * 4 + 128
+
+    def scratch_space_fixed(self, max_tokens):
+        if not self.use_exllama:
+            return 0
+        return self.temp_dq_size() + self.temp_fwd_size(max_tokens)

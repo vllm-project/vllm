@@ -1,9 +1,10 @@
 #include <torch/all.h>
 #include <torch/python.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include "cu_compat.cuh"
+#include "compat.cuh"
 
 const int BLOCKWIDTH  = 256;
 const int BLOCKHEIGHT =  32;
@@ -108,4 +109,17 @@ void vecquant4matmul_cuda(
             );
         })
     );
+}
+
+void gptq_descact_matmul(
+  torch::Tensor vec,
+  torch::Tensor mat,
+  torch::Tensor mul,
+  torch::Tensor scales,
+  torch::Tensor zeros,
+  torch::Tensor g_idx
+)
+{
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
+  vecquant4matmul_cuda(vec, mat, mul, scales, zeros, g_idx);
 }
