@@ -495,7 +495,7 @@ class AsyncLLMEngine:
                 lora_configs.append((lora_path, adapter_name))
 
         # Create the async LLM engine.
-        engine = cls(engine_args.worker_use_ray,
+        engine = cls(parallel_config.worker_use_ray,
                      engine_args.engine_use_ray,
                      *engine_configs,
                      distributed_init_method,

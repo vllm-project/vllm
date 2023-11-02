@@ -13,7 +13,7 @@ import uvicorn
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 from packaging import version
 
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -143,6 +143,12 @@ async def check_length(
         )
     else:
         return input_ids, None
+
+
+@app.get("/health")
+async def health() -> Response:
+    """Health check."""
+    return Response(status_code=200)
 
 
 @app.get("/v1/models")
