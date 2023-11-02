@@ -42,6 +42,7 @@ except ImportError:
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 logger = init_logger(__name__)
+no_check_model = False
 served_model = None
 app = fastapi.FastAPI()
 engine = None
@@ -200,9 +201,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
     """
     logger.info(f"Received chat completion request: {request}")
 
-    error_check_ret = await check_model(request)
-    if error_check_ret is not None:
-        return error_check_ret
+    if not no_check_model:
+        error_check_ret = await check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
 
     if request.logit_bias is not None and len(request.logit_bias) > 0:
         # TODO: support logit_bias in vLLM engine.
@@ -369,9 +371,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     """
     logger.info(f"Received completion request: {request}")
 
-    error_check_ret = await check_model(request)
-    if error_check_ret is not None:
-        return error_check_ret
+    if not no_check_model:
+        error_check_ret = await check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
 
     if request.echo:
         # We do not support echo since the vLLM engine does not
@@ -594,6 +597,14 @@ if __name__ == "__main__":
                         type=json.loads,
                         default=["*"],
                         help="allowed headers")
+    parser.add_argument("--no-check-model",
+                        type=bool,
+                        default=False,
+                        help="Do not check whether model name provided in the "
+                        "request matches the served model name. By default "
+                        "this check is done and error is thrown if the model "
+                        "in the request does not matched the served model "
+                        "name. Setting this flag will disable the check.")
     parser.add_argument("--served-model-name",
                         type=str,
                         default=None,
@@ -618,6 +629,8 @@ if __name__ == "__main__":
         served_model = args.served_model_name
     else:
         served_model = args.model
+
+    no_check_model = args.no_check_model
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
