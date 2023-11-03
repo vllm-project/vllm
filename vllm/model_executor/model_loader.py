@@ -97,7 +97,8 @@ def get_model(model_config: ModelConfig, parallel_config: ParallelConfig,
         kv_quant_params_list = []
         if model_config.quant_kv_cache:
             for i in range(num_layers):
-                path = model_config.kv_quant_params_path + f"/layers.{i}.past_kv_scale.{rank}.weight"
+                path = model_config.kv_quant_params_path + \
+                       f"/layers.{i}.past_kv_scale.{rank}.weight"
                 kv_quant_params = list(np.fromfile(path, dtype=np.float32))
                 kv_quant_params_list.append(kv_quant_params)
         if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
