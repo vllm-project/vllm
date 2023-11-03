@@ -144,11 +144,3 @@ class AWQLinearMethod(LinearMethodBase):
         if bias is not None:
             out = out + bias
         return out.reshape(out_shape)
-
-
-class AWQColumnParallelLinear:
-    pass
-
-
-class AWQRowParallelLinear:
-    pass
