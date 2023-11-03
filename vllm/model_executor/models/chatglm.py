@@ -125,7 +125,7 @@ class Attention(nn.Module):
             input_metadata: InputMetadata,
             cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        hidden_states = self.query_key_value(hidden_states)
+        hidden_states, _ = self.query_key_value(hidden_states)
         query, key, value = hidden_states.split(
             [
                 self.num_heads * self.head_dim,
@@ -140,7 +140,7 @@ class Attention(nn.Module):
             positions, query, key, value, k_cache, v_cache,
             input_metadata, cache_event)
 
-        output = self.dense(attn_output)
+        output, _ = self.dense(attn_output)
         return output
 
 
