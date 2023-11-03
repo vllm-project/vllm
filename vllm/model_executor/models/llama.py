@@ -435,7 +435,7 @@ class LlamaForCausalLM(nn.Module):
 
             if int8_fusion:
                 is_fusion_weight = False
-                for weight_name in self._int8_scale_params.keys():
+                for weight_name, _ in self._int8_scale_params.items():
                     if weight_name not in name:
                         continue
                     param = state_dict[name.replace(

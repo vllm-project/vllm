@@ -12,6 +12,7 @@ class SQColumnParallelLinear(ColumnParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
         assert self.input_size % self.quant_config.weight_bits == 0
+        assert dtype in [torch.half, torch.float16, torch.float]
         self.register_buffer(
             'weight',
             torch.randint(-127,
@@ -25,6 +26,7 @@ class SQColumnParallelLinear(ColumnParallelLinear):
         x: torch.Tensor,
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        assert bias is not None
 
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
@@ -41,6 +43,7 @@ class SQRowParallelLinear(RowParallelLinear):
     def create_weights(self, dtype: torch.dtype) -> None:
         assert (self.input_size_per_partition %
                 self.quant_config.weight_bits == 0)
+        assert dtype in [torch.half, torch.float16, torch.float]
         self.register_buffer(
             'weight',
             torch.randint(-127,
