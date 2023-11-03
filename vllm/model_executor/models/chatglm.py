@@ -18,7 +18,7 @@ from vllm.transformers_utils.configs.chatglm3 import ChatGLMConfig
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class ChatGLM3MLP(nn.Module):
+class MLP(nn.Module):
 
     def __init__(
             self,
@@ -76,7 +76,7 @@ def compute_tp_num_kv_heads(config, tp_world_size):
     return total_num_kv_heads, num_kv_heads, kv_heads_replicas
 
 
-class ChatGLM3Attention(nn.Module):
+class Attention(nn.Module):
     def __init__(
             self,
             config: ChatGLMConfig
@@ -144,14 +144,14 @@ class ChatGLM3Attention(nn.Module):
         return output
 
 
-class ChatGLM3DecoderLayer(nn.Module):
+class DecoderLayer(nn.Module):
 
     def __init__(self, config: ChatGLMConfig):
         super().__init__()
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
-        self.self_attention = ChatGLM3Attention(config)
+        self.self_attention = Attention(config)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
-        self.mlp = ChatGLM3MLP(config)
+        self.mlp = MLP(config)
 
     def forward(
             self,
@@ -181,7 +181,7 @@ class ChatGLM3DecoderLayer(nn.Module):
         return hidden_states
 
 
-class ChatGLM3Model(nn.Module):
+class ChatGLMModel(nn.Module):
 
     def __init__(self, config: ChatGLMConfig):
         super().__init__()
@@ -190,7 +190,7 @@ class ChatGLM3Model(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            ChatGLM3DecoderLayer(config) for _ in range(config.num_layers)
+            DecoderLayer(config) for _ in range(config.num_layers)
         ])
         self.final_layernorm = RMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
 
@@ -234,12 +234,12 @@ def name_mapping(name: str):
     assert False, f"unknow param {name}"
 
 
-class ChatGLM3ForCausalLM(nn.Module):
+class ChatGLMForCausalLM(nn.Module):
 
     def __init__(self, config: ChatGLMConfig):
         super().__init__()
         self.config = config
-        self.model = ChatGLM3Model(config)
+        self.model = ChatGLMModel(config)
         self.lm_head = ColumnParallelLinear(
             config.hidden_size,
             config.padded_vocab_size,
