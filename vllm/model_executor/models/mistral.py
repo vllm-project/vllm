@@ -34,12 +34,15 @@ from transformers import MistralConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.quantized_linear import ParallelLinear
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
@@ -56,19 +59,19 @@ class MistralMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = ParallelLinear.column(hidden_size,
+        self.gate_up_proj = ColumnParallelLinear(hidden_size,
                                                   2 * intermediate_size,
                                                   bias=False,
                                                   gather_output=False,
-                                                  quant_config=quant_config)
-        self.down_proj = ParallelLinear.row(intermediate_size,
+                                                  linear_method=linear_method)
+        self.down_proj = RowParallelLinear(intermediate_size,
                                             hidden_size,
                                             bias=False,
                                             input_is_parallel=True,
-                                            quant_config=quant_config)
+                                            linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -89,7 +92,7 @@ class MistralAttention(nn.Module):
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
-                 quant_config: Optional[QuantizationConfig] = None,
+                 linear_method: Optional[LinearMethodBase] = None,
                  sliding_window: Optional[int] = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -107,20 +110,20 @@ class MistralAttention(nn.Module):
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window
 
-        self.qkv_proj = ParallelLinear.column(
+        self.qkv_proj = ColumnParallelLinear(
             hidden_size,
             (self.total_num_heads + 2 * self.total_num_kv_heads) *
             self.head_dim,
             bias=False,
             gather_output=False,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
-        self.o_proj = ParallelLinear.row(
+        self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             input_is_parallel=True,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         self.attn = PagedAttentionWithRoPE(self.num_heads,
                                            self.head_dim,
@@ -153,7 +156,7 @@ class MistralDecoderLayer(nn.Module):
     def __init__(
         self,
         config: MistralConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -165,13 +168,13 @@ class MistralDecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
-            quant_config=quant_config,
+            linear_method=linear_method,
             sliding_window=config.sliding_window)
         self.mlp = MistralMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -211,7 +214,7 @@ class MistralModel(nn.Module):
     def __init__(
         self,
         config: MistralConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -224,7 +227,7 @@ class MistralModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            MistralDecoderLayer(config, quant_config)
+            MistralDecoderLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -265,14 +268,17 @@ class MistralForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = MistralModel(config, quant_config)
+        if quant_config is not None:
+            linear_method = quant_config.get_linear_method()
+        else:
+            linear_method = None
+        self.model = MistralModel(config, linear_method)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         # NOTE: The LM head is not quantized.
-        self.lm_head = ParallelLinear.column(config.hidden_size,
+        self.lm_head = ColumnParallelLinear(config.hidden_size,
                                              vocab_size,
                                              bias=False,
-                                             gather_output=False,
-                                             quant_config=None)
+                                             gather_output=False)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
