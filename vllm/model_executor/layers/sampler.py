@@ -171,7 +171,7 @@ def _apply_logits_processors(logits: torch.Tensor,
                 for logits_processor in logits_processors:
                     logits_row = logits_processor(token_ids, logits_row)
                 logits[logits_row_idx] = logits_row
-            logits_row_idx += 1
+                logits_row_idx += 1
         else:
             logits_row_idx += len(seq_ids)
     if found_logits_processors:
