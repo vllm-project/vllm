@@ -72,8 +72,8 @@ def compute_tp_num_kv_heads(config, tp_world_size):
         # the KV heads across multiple tensor parallel GPUs.
         assert tp_world_size % total_num_kv_heads == 0
     num_kv_heads = max(1, total_num_kv_heads // tp_world_size)
-    kv_heads_replicas = max(1, tp_world_size // total_num_kv_heads)
-    return total_num_kv_heads, num_kv_heads, kv_heads_replicas
+    num_kv_heads_replicas = max(1, tp_world_size // total_num_kv_heads)
+    return total_num_kv_heads, num_kv_heads, num_kv_heads_replicas
 
 
 class Attention(nn.Module):
@@ -86,7 +86,7 @@ class Attention(nn.Module):
 
         tp_world_size = get_tensor_model_parallel_world_size()
         self.total_num_heads, self.num_heads = compute_tp_num_heads(config, tp_world_size)
-        self.head_dim = config.hidden_size // self.total_num_kv_heads
+        self.head_dim = config.hidden_size // self.total_num_heads
         self.total_num_kv_heads, self.num_kv_heads, num_kv_heads_replicas = \
             compute_tp_num_kv_heads(config, tp_world_size)
 
@@ -101,8 +101,8 @@ class Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             max_position=config.seq_length)
 
-        self.qkv_hidden_size = ((self.total_num_kv_heads +
-                                 2 * num_kv_heads_replicas * self.num_kv_heads) *
+        self.qkv_hidden_size = ((self.total_num_heads +
+                                 2 * num_kv_heads_replicas * self.total_num_kv_heads) *
                                 self.head_dim)
         self.query_key_value = ColumnParallelLinear(
             config.hidden_size,
@@ -285,7 +285,31 @@ class ChatGLMForCausalLM(nn.Module):
             vname = name_mapping(name)
             param = state_dict[vname]
 
-            if "word_embeddings" in name or "lm_head" in name:
+            if 'query_key_value' in vname:
+                total_num_heads, num_heads = compute_tp_num_heads(self.config, tp_world_size)
+                head_dim = self.config.hidden_size // total_num_heads
+                total_num_kv_heads, num_kv_heads, num_kv_heads_replicas = \
+                    compute_tp_num_kv_heads(self.config, tp_world_size)
+                query_shard_size = num_heads * head_dim
+                kv_proj_shard_size = num_kv_heads * head_dim
+
+                base = tp_rank * num_heads * head_dim
+                param_query = param.data[:query_shard_size]
+                weight_query = loaded_weight[base:base + query_shard_size]
+                param_query.copy_(weight_query)
+
+                base = (total_num_heads + (tp_rank % total_num_kv_heads)) * head_dim
+                param_key = param.data[query_shard_size:query_shard_size + kv_proj_shard_size]
+                weight_key = loaded_weight[base:base + kv_proj_shard_size]
+                param_key.copy_(weight_key)
+
+                base = (total_num_heads + total_num_kv_heads + (tp_rank % total_num_kv_heads)) * head_dim
+                param_value = param.data[query_shard_size + kv_proj_shard_size:]
+                weight_value = loaded_weight[base:base + kv_proj_shard_size]
+                param_value.copy_(weight_value)
+                continue
+
+            if "word_embeddings" in vname or "lm_head" in vname:
                 load_padded_tensor_parallel_vocab(
                     param, loaded_weight, tp_rank)
                 continue
