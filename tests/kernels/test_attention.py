@@ -17,10 +17,10 @@ NUM_BLOCKS = 40000  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
 DTYPES = [
-    torch.half, 
-    # torch.bfloat16, 
+    torch.half,
+    # torch.bfloat16,
     torch.float,
-    ]
+]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
@@ -340,18 +340,18 @@ def test_multi_query_kv_attention(
 #     torch.random.manual_seed(TEST_SEED)
 #     torch.cuda.manual_seed(TEST_SEED)
 #     for dtype in [
-#                   torch.half, 
-#                   torch.bfloat16, 
+#                   torch.half,
+#                   torch.bfloat16,
 #                   torch.float,
 #                   ]:
-#         for block_size in [8, 
+#         for block_size in [8,
 #                            16,
 #                            ]:
-#             for head_size in [64, 
-#                               80, 
-#                               96, 
-#                               112,  
-#                               128, 
+#             for head_size in [64,
+#                               80,
+#                               96,
+#                               112,
+#                               128,
 #                               256,
 #                               ]:
 #                 print(f'Testing single_query_cached_kv_attention with '
@@ -496,18 +496,21 @@ def test_single_query_cached_kv_attention_quantized(
 
     # Create the KV caches.
 
-    # key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
-    #                                             num_kv_heads, head_size, dtype,
-    #                                             seed)
-    # key_cache, value_cache = key_caches[0], value_caches[0]
-
-    x = 16 // torch.tensor([], dtype=torch.int8).element_size() ## use int8 dtype
+    x = 16 // torch.tensor([],
+                           dtype=torch.int8).element_size()  ## use int8 dtype
     key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x, block_size, x)
-    key_cache = torch.randint(-10, 10, size=key_cache_shape, dtype=torch.int8, device='cuda')
+    key_cache = torch.randint(-10,
+                              10,
+                              size=key_cache_shape,
+                              dtype=torch.int8,
+                              device="cuda")
     value_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size, block_size)
-    value_cache = torch.randint(-10, 10, size=value_cache_shape,
-                              dtype=torch.int8, ## change to int8
-                              device='cuda')
+    value_cache = torch.randint(
+        -10,
+        10,
+        size=value_cache_shape,
+        dtype=torch.int8,  ## change to int8
+        device="cuda")
     # Call the paged attention kernel.
     output = torch.empty_like(query)
     attention_ops.single_query_cached_kv_quantized_attention(

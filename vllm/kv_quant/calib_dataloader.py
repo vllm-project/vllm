@@ -22,8 +22,12 @@ def get_wikitext2(tokenizer, nsamples, seed, seqlen, path=None):
         test_enc: Full tokenized Wikitext-2 test set.
     """
     from datasets import load_dataset
-    traindata = load_dataset(path if path else 'wikitext', 'wikitext-2-raw-v1', split='train')
-    testdata = load_dataset(path if path else 'wikitext', 'wikitext-2-raw-v1', split='test')
+    traindata = load_dataset(path if path else 'wikitext',
+                             'wikitext-2-raw-v1',
+                             split='train')
+    testdata = load_dataset(path if path else 'wikitext',
+                            'wikitext-2-raw-v1',
+                            split='test')
 
     trainenc = tokenizer('\n\n'.join(traindata['text']), return_tensors='pt')
     testenc = tokenizer('\n\n'.join(testdata['text']), return_tensors='pt')
@@ -282,7 +286,12 @@ def get_pileval(tokenizer, nsamples, seed, seqlen=512):
     ], None
 
 
-def get_calib_loaders(name, tokenizer, nsamples=128, seed=0, seqlen=2048, path=None):
+def get_calib_loaders(name,
+                      tokenizer,
+                      nsamples=128,
+                      seed=0,
+                      seqlen=2048,
+                      path=None):
     """Get calibration data loaders for a dataset.
 
     Args:
@@ -297,15 +306,15 @@ def get_calib_loaders(name, tokenizer, nsamples=128, seed=0, seqlen=2048, path=N
       test_data: Full tokenized validation set.
     """
     if 'wikitext2' in name:
-        return get_wikitext2(tokenizer, nsamples, seed, seqlen, path)
+        return get_wikitext2(tokenizer, nsamples, seed, seqlen)
     if 'ptb' in name:
         if 'new' in name:
-            return get_ptb_new(tokenizer, nsamples, seed, seqlen, path)
-        return get_ptb(tokenizer, nsamples, seed, seqlen, path)
+            return get_ptb_new(tokenizer, nsamples, seed, seqlen)
+        return get_ptb(tokenizer, nsamples, seed, seqlen)
     if 'c4' in name:
         if 'new' in name:
-            return get_c4_new(tokenizer, nsamples, seed, seqlen, path)
-        return get_c4(tokenizer, nsamples, seed, seqlen, path)
+            return get_c4_new(tokenizer, nsamples, seed, seqlen)
+        return get_c4(tokenizer, nsamples, seed, seqlen)
 
     if 'pileval' in name:
-        return get_pileval(tokenizer, nsamples, seed, seqlen, path)
+        return get_pileval(tokenizer, nsamples, seed, seqlen)

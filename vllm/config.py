@@ -51,21 +51,23 @@ class ModelConfig:
     """
 
     def __init__(
-        self,
-        model: str,
-        tokenizer: str,
-        tokenizer_mode: str,
-        trust_remote_code: bool,
-        download_dir: Optional[str],
-        load_format: str,
-        dtype: str,
-        seed: int,
-        revision: Optional[str] = None,
-        tokenizer_revision: Optional[str] = None,
-        max_model_len: Optional[int] = None,
-        quantization: Optional[str] = None,
-        kv_cache_dtype: str = None, ## for kv cache quantization, only for int8 right now
-        kv_quant_params_path: str = None, ## path for kv scales and zero points
+            self,
+            model: str,
+            tokenizer: str,
+            tokenizer_mode: str,
+            trust_remote_code: bool,
+            download_dir: Optional[str],
+            load_format: str,
+            dtype: str,
+            seed: int,
+            revision: Optional[str] = None,
+            tokenizer_revision: Optional[str] = None,
+            max_model_len: Optional[int] = None,
+            quantization: Optional[str] = None,
+            kv_cache_dtype:
+        str = None,  ## for kv cache quantization, only for int8 right now
+            kv_quant_params_path:
+        str = None,  ## path for kv scales and zero points
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -84,7 +86,8 @@ class ModelConfig:
                                                      max_model_len)
         self._verify_load_format()
         ## for kv cache quantization
-        self.kv_cache_dtype = _STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype] if kv_cache_dtype else self.dtype
+        self.kv_cache_dtype = _STR_DTYPE_TO_TORCH_DTYPE[
+            kv_cache_dtype] if kv_cache_dtype else self.dtype
         self.quant_kv_cache = not self.kv_cache_dtype == self.dtype
         self.kv_quant_params_path = kv_quant_params_path
         self._verify_tokenizer_mode()

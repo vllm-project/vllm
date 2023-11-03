@@ -222,8 +222,7 @@ class PagedAttention(nn.Module):
                 block_size,
                 input_metadata.max_context_len,
                 alibi_slopes,
-              )
-
+            )
 
     def forward(
         self,
@@ -351,7 +350,7 @@ class PagedAttentionWithRoPE(PagedAttention):
                          scale,
                          num_kv_heads,
                          sliding_window=sliding_window,
-                         quant_kv_cache=quant_kv_cache, 
+                         quant_kv_cache=quant_kv_cache,
                          kv_quant_params=kv_quant_params)
         if rope_scaling is None:
             self.rotary_emb = RotaryEmbedding(head_size, rotary_dim,

@@ -103,11 +103,12 @@ def concat_decoder_layer_outputs(
     return tuple(new_outputs)
 
 
-def collect_target_modules(model: nn.Module,
-                        #    target: Union[str, type],
-                           target: str,
-                           skip_names: List[str] = [],
-                           prefix: str = '') -> Dict[str, nn.Module]:
+def collect_target_modules(
+        model: nn.Module,
+        #    target: Union[str, type],
+        target: str,
+        skip_names: List[str] = [],
+        prefix: str = '') -> Dict[str, nn.Module]:
     """Collects the specific target modules from the model.
 
     Args:
