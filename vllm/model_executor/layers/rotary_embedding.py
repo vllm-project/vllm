@@ -86,7 +86,9 @@ class RotaryEmbedding(nn.Module):
         cos = freqs.cos()
         sin = freqs.sin()
         if self.is_glm_style:
-            cache = torch.cat((cos, torch.ones_like(cos), sin, torch.zeros_like(sin)), dim=-1)
+            cache = torch.cat(
+                (cos, torch.ones_like(cos), sin, torch.zeros_like(sin)),
+                dim=-1)
         else:
             cache = torch.cat((cos, sin), dim=-1)
         return cache
