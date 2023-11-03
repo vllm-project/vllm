@@ -262,7 +262,7 @@ class ChatGLMForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = ["dense_h_to_4h.weight"]
+    _column_parallel_weights = []
     _row_parallel_weights = ["dense_4h_to_h.weight", "dense.weight"]
 
     def load_weights(
@@ -284,6 +284,15 @@ class ChatGLMForCausalLM(nn.Module):
 
             vname = name_mapping(name)
             param = state_dict[vname]
+            if 'dense_h_to_4h' in vname:
+                shard_size = param.shape[0] // 2
+                base = 0
+                weight1 = loaded_weight[base + shard_size * tp_rank:base + shard_size * (tp_rank + 1)]
+                param.data[:shard_size].copy_(weight1)
+                base = loaded_weight[0] // 2
+                weight2 = loaded_weight[base + shard_size * tp_rank:base + shard_size * (tp_rank + 1)]
+                param.data[shard_size:].copy_(weight2)
+                continue
 
             if 'query_key_value' in vname:
                 total_num_heads, num_heads = compute_tp_num_heads(self.config, tp_world_size)
