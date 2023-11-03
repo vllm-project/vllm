@@ -4,81 +4,53 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import quantization_ops
-from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
-                                                       RowParallelLinear)
+from vllm.model_executor.layers.linear import LinearMethodBase
 
 
-class SqueezeLLMColumnParallelLinear(ColumnParallelLinear):
+class SqueezeLLMLinearMethod(LinearMethodBase):
 
-    def create_weights(self, dtype: torch.dtype) -> None:
-        assert self.input_size % self.quant_config.pack_factor == 0
-        self.qweight = Parameter(
+    def __init__(self, quant_config):
+        self.quant_config = quant_config
+
+    def create_weights(self, module: torch.nn.Module, input_size: int,
+                       output_size: int, params_dtype: torch.dtype) -> None:
+        if input_size % self.quant_config.group_size != 0:
+            raise ValueError(
+                "The input size is not aligned with the quantized "
+                "weight shape. This can be caused by too large "
+                "tensor parallel size.")
+        qweight = Parameter(
             torch.empty(
-                self.input_size // self.quant_config.pack_factor,
-                self.output_size_per_partition,
+                input_size // self.quant_config.pack_factor,
+                output_size,
                 device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
         )
-        self.lookup_table = Parameter(
+        lookup_table = Parameter(
             torch.empty(
-                self.output_size_per_partition,
+                output_size,
                 self.quant_config.weight_bits**2,
                 device="cuda",
-                dtype=dtype,
+                dtype=params_dtype,
             ),
             requires_grad=False,
         )
+        module.register_parameter("qweight", qweight)
+        module.register_parameter("lookup_table", lookup_table)
 
-    def apply_weights(
-        self,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
+    def apply_weights(self,
+                      module: torch.nn.Module,
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        out_shape = x.shape[:-1] + (module.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         # NOTE: The output tensor should be zero-initialized.
         out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
-        quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
-                                         self.lookup_table)
+        quantization_ops.squeezellm_gemm(reshaped_x, module.qweight, out,
+                                         module.lookup_table)
 
         if bias is not None:
             out = out + bias
-        return out.reshape(out_shape)
-
-
-class SqueezeLLMRowParallelLinear(RowParallelLinear):
-
-    def create_weights(self, dtype: torch.dtype) -> None:
-        if self.input_size_per_partition % self.quant_config.pack_factor != 0:
-            raise ValueError(
-                "The tensor parallel size is not aligned with the quantized "
-                "weight shape. Please use a different tensor parallel size.")
-        self.qweight = Parameter(
-            torch.empty(
-                self.input_size_per_partition // self.quant_config.pack_factor,
-                self.output_size,
-                device="cuda",
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        self.lookup_table = Parameter(
-            torch.empty(
-                self.output_size,
-                self.quant_config.weight_bits**2,
-                device="cuda",
-                dtype=dtype,
-            ),
-            requires_grad=False,
-        )
-
-    def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
-        reshaped_x = x.reshape(-1, x.shape[-1])
-        out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
-        # NOTE: The output tensor should be zero-initialized.
-        out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
-        quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
-                                         self.lookup_table)
         return out.reshape(out_shape)
