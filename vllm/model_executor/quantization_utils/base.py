@@ -2,6 +2,8 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from vllm.model_executor.layers.linear import LinearMethodBase
+
 
 class QuantizationConfig:
 
@@ -82,4 +84,7 @@ class QuantizationConfig:
 
     @classmethod
     def get_row_parallel_tensor_names(cls) -> List[str]:
+        raise NotImplementedError
+
+    def get_linear_method(self) -> LinearMethodBase:
         raise NotImplementedError

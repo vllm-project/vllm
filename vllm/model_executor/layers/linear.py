@@ -42,8 +42,8 @@ class FullPrecisionLinearMethod(LinearMethodBase):
 
     def create_weights(self, module: torch.nn.Module, input_size: int,
                        output_size: int, params_dtype: torch.dtype) -> None:
-        weight = Parameter(torch.empty(input_size,
-                                       output_size,
+        weight = Parameter(torch.empty(output_size,
+                                       input_size,
                                        device=torch.cuda.current_device(),
                                        dtype=params_dtype),
                            requires_grad=False)
@@ -229,6 +229,7 @@ class RowParallelLinear(torch.nn.Module):
         self.reduce_results = reduce_results
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
 
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -237,8 +238,7 @@ class RowParallelLinear(torch.nn.Module):
         if linear_method is None:
             linear_method = FullPrecisionLinearMethod()
         self.linear_method = linear_method
-
-        self.linear_method.create_weights(self.input_size_per_partition,
+        self.linear_method.create_weights(self, self.input_size_per_partition,
                                           self.output_size, self.params_dtype)
 
         if not reduce_results and (bias and not skip_bias_add):
@@ -275,7 +275,8 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = splitted_input[tp_rank].contiguous()
 
         # Matrix multiply.
-        output_parallel = self.linear_method.apply_weights(input_parallel)
+        output_parallel = self.linear_method.apply_weights(
+            self, input_parallel)
         if self.reduce_results and self.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
