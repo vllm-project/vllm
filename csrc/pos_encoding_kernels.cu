@@ -84,7 +84,7 @@ void rotary_embedding(
   int head_size,
   torch::Tensor& cos_sin_cache,     // [max_position, rot_dim]
   bool is_neox) {
-  int num_tokens = query.numel() / query.size(-1);
+  int64_t num_tokens = query.numel() / query.size(-1);
   int rot_dim = cos_sin_cache.size(1);
   int num_heads = query.size(-1) / head_size;
   int num_kv_heads = key.size(-1) / head_size;
