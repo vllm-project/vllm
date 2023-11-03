@@ -63,15 +63,15 @@ class MistralMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                  2 * intermediate_size,
-                                                  bias=False,
-                                                  gather_output=False,
-                                                  linear_method=linear_method)
+                                                 2 * intermediate_size,
+                                                 bias=False,
+                                                 gather_output=False,
+                                                 linear_method=linear_method)
         self.down_proj = RowParallelLinear(intermediate_size,
-                                            hidden_size,
-                                            bias=False,
-                                            input_is_parallel=True,
-                                            linear_method=linear_method)
+                                           hidden_size,
+                                           bias=False,
+                                           input_is_parallel=True,
+                                           linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -276,9 +276,9 @@ class MistralForCausalLM(nn.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         # NOTE: The LM head is not quantized.
         self.lm_head = ColumnParallelLinear(config.hidden_size,
-                                             vocab_size,
-                                             bias=False,
-                                             gather_output=False)
+                                            vocab_size,
+                                            bias=False,
+                                            gather_output=False)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
