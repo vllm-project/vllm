@@ -10,7 +10,8 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_world_size
 from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_rank
-from vllm.model_executor.weight_utils import hf_model_weights_iterator, load_tensor_parallel_weights
+from vllm.model_executor.weight_utils import hf_model_weights_iterator, load_tensor_parallel_weights, \
+    load_padded_tensor_parallel_vocab
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.chatglm3 import ChatGLMConfig
 
@@ -53,6 +54,28 @@ class ChatGLM3MLP(nn.Module):
         return output
 
 
+def compute_tp_num_heads(config, tp_world_size):
+    total_num_heads = config.num_attention_heads
+    assert total_num_heads % tp_world_size == 0
+    num_heads = total_num_heads // tp_world_size
+    return total_num_heads, num_heads
+
+
+def compute_tp_num_kv_heads(config, tp_world_size):
+    total_num_kv_heads = config.multi_query_group_num
+    if total_num_kv_heads >= tp_world_size:
+        # Number of KV heads is greater than TP size, so we partition
+        # the KV heads across multiple tensor parallel GPUs.
+        assert total_num_kv_heads % tp_world_size == 0
+    else:
+        # Number of KV heads is less than TP size, so we replicate
+        # the KV heads across multiple tensor parallel GPUs.
+        assert tp_world_size % total_num_kv_heads == 0
+    num_kv_heads = max(1, total_num_kv_heads // tp_world_size)
+    kv_heads_replicas = max(1, tp_world_size // total_num_kv_heads)
+    return total_num_kv_heads, num_kv_heads, kv_heads_replicas
+
+
 class ChatGLM3Attention(nn.Module):
     def __init__(
             self,
@@ -61,9 +84,11 @@ class ChatGLM3Attention(nn.Module):
         super().__init__()
         self.rope_theta = 10000
 
-        self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.multi_query_group_num
-        self.head_dim = config.hidden_size // self.num_heads
+        tp_world_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads, self.num_heads = compute_tp_num_heads(config, tp_world_size)
+        self.head_dim = config.hidden_size // self.total_num_kv_heads
+        self.total_num_kv_heads, self.num_kv_heads, num_kv_heads_replicas = \
+            compute_tp_num_kv_heads(config, tp_world_size)
 
         self.attn = PagedAttentionWithRoPE(
             num_heads=self.num_heads,
@@ -76,7 +101,9 @@ class ChatGLM3Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             max_position=config.seq_length)
 
-        self.qkv_hidden_size = config.hidden_size + 2 * self.head_dim * self.num_kv_heads
+        self.qkv_hidden_size = ((self.total_num_kv_heads +
+                                 2 * num_kv_heads_replicas * self.num_kv_heads) *
+                                self.head_dim)
         self.query_key_value = ColumnParallelLinear(
             config.hidden_size,
             self.qkv_hidden_size,
@@ -84,7 +111,7 @@ class ChatGLM3Attention(nn.Module):
             gather_output=False,
         )
         self.dense = RowParallelLinear(
-            config.hidden_size,
+            self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=config.add_bias_linear,
             input_is_parallel=True,
@@ -158,7 +185,7 @@ class ChatGLM3Model(nn.Module):
 
     def __init__(self, config: ChatGLMConfig):
         super().__init__()
-        self.embedding = VocabParallelEmbedding(
+        self.word_embeddings = VocabParallelEmbedding(
             config.padded_vocab_size,
             config.hidden_size,
         )
@@ -175,7 +202,7 @@ class ChatGLM3Model(nn.Module):
             input_metadata: InputMetadata,
             cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        hidden_states = self.embedding(input_ids)
+        hidden_states = self.word_embeddings(input_ids)
         for i in range(len(self.layers)):
             if cache_events is None:
                 cache_event = None
@@ -203,7 +230,7 @@ def name_mapping(name: str):
     if name == 'transformer.encoder.final_layernorm.weight':
         return 'model.final_layernorm.weight'
     if name == 'transformer.embedding.word_embeddings.weight':
-        return 'model.embedding.weight'
+        return 'model.word_embeddings.weight'
     assert False, f"unknow param {name}"
 
 
@@ -235,8 +262,8 @@ class ChatGLM3ForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = []
-    _row_parallel_weights = []
+    _column_parallel_weights = ["dense_h_to_4h.weight"]
+    _row_parallel_weights = ["dense_4h_to_h.weight", "dense.weight"]
 
     def load_weights(
             self,
@@ -245,7 +272,8 @@ class ChatGLM3ForCausalLM(nn.Module):
             load_format: str = "auto",
             revision: Optional[str] = None,
     ):
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+        tp_world_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
@@ -256,11 +284,17 @@ class ChatGLM3ForCausalLM(nn.Module):
 
             vname = name_mapping(name)
             param = state_dict[vname]
+
+            if "word_embeddings" in name or "lm_head" in name:
+                load_padded_tensor_parallel_vocab(
+                    param, loaded_weight, tp_rank)
+                continue
+
             load_tensor_parallel_weights(
                 param,
                 loaded_weight,
                 vname,
                 self._column_parallel_weights,
                 self._row_parallel_weights,
-                tensor_model_parallel_rank,
+                tp_rank,
             )
