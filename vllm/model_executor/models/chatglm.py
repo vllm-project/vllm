@@ -13,7 +13,7 @@ from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_p
 from vllm.model_executor.weight_utils import hf_model_weights_iterator, load_tensor_parallel_weights, \
     load_padded_tensor_parallel_vocab
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.chatglm3 import ChatGLMConfig
+from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -307,14 +307,14 @@ class ChatGLMForCausalLM(nn.Module):
                 param_query.copy_(weight_query)
 
                 base = (total_num_heads +
-                        (tp_rank % total_num_kv_heads)) * head_dim
+                        (tp_rank // num_kv_heads_replicas)) * head_dim
                 param_key = param.data[query_shard_size:query_shard_size +
                                        kv_proj_shard_size]
                 weight_key = loaded_weight[base:base + kv_proj_shard_size]
                 param_key.copy_(weight_key)
 
                 base = (total_num_heads + total_num_kv_heads +
-                        (tp_rank % total_num_kv_heads)) * head_dim
+                        (tp_rank // num_kv_heads_replicas)) * head_dim
                 param_value = param.data[query_shard_size +
                                          kv_proj_shard_size:]
                 weight_value = loaded_weight[base:base + kv_proj_shard_size]

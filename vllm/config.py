@@ -162,8 +162,9 @@ class ModelConfig:
             # Currently, tensor parallelism is not supported in this case.
             return 1
         if getattr(self.hf_config, "model_type", None) == 'chatglm':
-            return (self.hf_config.multi_query_group_num //
-                    parallel_config.tensor_parallel_size)
+            # in case of tensor_parallel_size > multi_query_group_num
+            return max(1, self.hf_config.multi_query_group_num //
+                       parallel_config.tensor_parallel_size)
         # For Falcon:
         if getattr(self.hf_config, "n_head_kv", None) is not None:
             return (self.hf_config.n_head_kv //
