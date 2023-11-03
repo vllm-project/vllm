@@ -59,9 +59,10 @@ def test_dequant_silu_and_mul_quant(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     # x = torch.randn(num_tokens, 2 * d, dtype=dtype, device='cuda')
-    x = torch.randint(
-        -1000, 1000, (num_tokens, 2 * d), dtype=torch.int32, device="cuda"
-    )
+    x = torch.randint(-1000,
+                      1000, (num_tokens, 2 * d),
+                      dtype=torch.int32,
+                      device="cuda")
     x_ = torch.empty_like(x, dtype=dtype)
     x_[:, :d] = x[:, :d] * scale_gate
     x_[:, d:] = x[:, d:] * scale_up
@@ -71,9 +72,8 @@ def test_dequant_silu_and_mul_quant(
     # ref_out = ref_silu_and_mul(x)
 
     out2 = torch.empty(num_tokens, d, dtype=torch.int8, device="cuda")
-    activation_ops.invoke_dequant_silu_and_mul_quant(
-        out2, x, scale_gate, scale_up, scale_out
-    )
+    activation_ops.invoke_dequant_silu_and_mul_quant(out2, x, scale_gate,
+                                                     scale_up, scale_out)
     assert torch.allclose(out1, out2, atol=2)
 
 

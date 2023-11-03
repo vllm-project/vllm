@@ -7,7 +7,6 @@ from vllm.model_executor.layers.quantized_linear.smoothquant import (
 from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
                                                        RowParallelLinear)
 
-
 _QUANTIZED_LINEAR_REGISTRY = {
     "awq": (AWQColumnParallelLinear, AWQRowParallelLinear),
     "squeezellm":

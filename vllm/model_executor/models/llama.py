@@ -60,11 +60,12 @@ class LlamaMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
+        self.use_int8 = quant_config is not None and quant_config.get_name(
+        ) == "smoothquant"
 
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
-                            "Only silu is supported for now.")
+                             "Only silu is supported for now.")
 
         self.gate_up_proj = ParallelLinear.column(hidden_size,
                                                   2 * intermediate_size,
@@ -75,7 +76,7 @@ class LlamaMLP(nn.Module):
                                             hidden_size,
                                             bias=False,
                                             input_is_parallel=True,
-                                            quant_config=quant_config)        
+                                            quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -85,10 +86,9 @@ class LlamaMLP(nn.Module):
         else:
             self.act_fn = SiluAndMul()
 
-
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        # FIXME: currently gate up share same scale, plan to use seperate scales 
+        # FIXME: currently gate up share same scale, plan to use seperate scales
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -129,7 +129,8 @@ class LlamaAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-        self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
+        self.use_int8 = quant_config is not None and quant_config.get_name(
+        ) == "smoothquant"
 
         self.qkv_proj = ParallelLinear.column(
             hidden_size,
@@ -151,12 +152,12 @@ class LlamaAttention(nn.Module):
         # kernel fusion for int8 inference
         if self.use_int8:
             self.attn = DequantPagedAttentionWithRoPEQuant(
-                                            self.num_heads,
-                                            self.head_dim,
-                                            self.scaling,
-                                            base=self.rope_theta,
-                                            rotary_dim=self.head_dim,
-                                            num_kv_heads=self.num_kv_heads)
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                base=self.rope_theta,
+                rotary_dim=self.head_dim,
+                num_kv_heads=self.num_kv_heads)
         else:
             self.attn = PagedAttentionWithRoPE(
                 self.num_heads,
@@ -178,7 +179,7 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         # qkv = qkv.half()
-        # FIXME: currently qkv share same scale, plan to use seperate scales 
+        # FIXME: currently qkv share same scale, plan to use seperate scales
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
@@ -197,7 +198,8 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.use_int8 = quant_config is not None and quant_config.get_name() == "smoothquant"
+        self.use_int8 = quant_config is not None and quant_config.get_name(
+        ) == "smoothquant"
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -220,14 +222,14 @@ class LlamaDecoderLayer(nn.Module):
         )
         if self.use_int8:
             self.input_layernorm = I8RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+                                             eps=config.rms_norm_eps)
             # kernel fusion, post_attention_layernorm are fused into DequantAddResidualI8RMSNormQuant
-            self.dequant_add_residual_layernorm_quant = DequantAddResidualI8RMSNormQuant(config.hidden_size,
-                                                    eps=config.rms_norm_eps)
+            self.dequant_add_residual_layernorm_quant = DequantAddResidualI8RMSNormQuant(
+                config.hidden_size, eps=config.rms_norm_eps)
             self.dequant_add_residual = DequantAddResidual()
         else:
             self.input_layernorm = RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+                                           eps=config.rms_norm_eps)
             self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                     eps=config.rms_norm_eps)
 
@@ -251,7 +253,8 @@ class LlamaDecoderLayer(nn.Module):
         )
 
         if self.use_int8:
-            residual, hidden_states = self.dequant_add_residual_layernorm_quant(residual, hidden_states)
+            residual, hidden_states = self.dequant_add_residual_layernorm_quant(
+                residual, hidden_states)
             hidden_states = self.mlp(hidden_states)
             hidden_states = self.dequant_add_residual(residual, hidden_states)
         else:
@@ -261,7 +264,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.mlp(hidden_states)
             hidden_states = residual + hidden_states
-        
+
         return hidden_states
 
 
@@ -351,17 +354,18 @@ class LlamaForCausalLM(nn.Module):
     _column_parallel_layers = []
     _row_parallel_layers = ["o_proj", "down_proj"]
     _int8_scale_params = {
-                "self_attn.q_proj.a": "self_attn.attn.a",
-                "self_attn.k_proj.a": "self_attn.attn.a",
-                "self_attn.v_proj.a": "self_attn.attn.a",
-                "self_attn.o_proj.inscale": "self_attn.attn.inscale",
-                "self_attn.o_proj.a": "dequant_add_residual_layernorm_quant.a",
-                "post_attention_layernorm.weight": "dequant_add_residual_layernorm_quant.weight",
-                "mlp.gate_proj.a": "mlp.act_fn.a",
-                "mlp.up_proj.a": "mlp.act_fn.a",
-                "mlp.down_proj.inscale": "mlp.act_fn.inscale",
-                "mlp.down_proj.a": "dequant_add_residual.a"
-            }
+        "self_attn.q_proj.a": "self_attn.attn.a",
+        "self_attn.k_proj.a": "self_attn.attn.a",
+        "self_attn.v_proj.a": "self_attn.attn.a",
+        "self_attn.o_proj.inscale": "self_attn.attn.inscale",
+        "self_attn.o_proj.a": "dequant_add_residual_layernorm_quant.a",
+        "post_attention_layernorm.weight":
+        "dequant_add_residual_layernorm_quant.weight",
+        "mlp.gate_proj.a": "mlp.act_fn.a",
+        "mlp.up_proj.a": "mlp.act_fn.a",
+        "mlp.down_proj.inscale": "mlp.act_fn.inscale",
+        "mlp.down_proj.a": "dequant_add_residual.a"
+    }
 
     def load_weights(self,
                      model_name_or_path: str,
@@ -369,9 +373,10 @@ class LlamaForCausalLM(nn.Module):
                      load_format: str = "auto",
                      revision: Optional[str] = None):
         int8_fusion = False
-        if self.quant_config is not None and self.quant_config.get_name() == "smoothquant":
+        if self.quant_config is not None and self.quant_config.get_name(
+        ) == "smoothquant":
             int8_fusion = True
-        
+
         if self.quant_config is None:
             col_weight_suffixes = ["weight"]
             row_weight_suffixes = ["weight"]
@@ -431,7 +436,8 @@ class LlamaForCausalLM(nn.Module):
                 for weight_name in self._int8_scale_params.keys():
                     if weight_name not in name:
                         continue
-                    param = state_dict[name.replace(weight_name, self._int8_scale_params[weight_name])]
+                    param = state_dict[name.replace(
+                        weight_name, self._int8_scale_params[weight_name])]
                     param.copy_(loaded_weight)
                     is_fusion_weight = True
                 if is_fusion_weight:

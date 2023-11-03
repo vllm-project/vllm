@@ -11,11 +11,9 @@ class SmoothQuantConfig(QuantizationConfig):
     Reference: https://github.com/mit-han-lab/smoothquant
     """
 
-    def __init__(
-        self,
-        weight_bits: int = 8,
-        quant_type: str = "tensor"
-    ) -> None:
+    def __init__(self,
+                 weight_bits: int = 8,
+                 quant_type: str = "tensor") -> None:
         self.weight_bits = weight_bits
         self.quant_type = quant_type
 
@@ -50,7 +48,7 @@ class SmoothQuantConfig(QuantizationConfig):
         """List of filenames to search for in the model directory."""
         return [
             "quant_config.json",
-            "quantize_config.json", 
+            "quantize_config.json",
         ]
 
     @classmethod
@@ -70,4 +68,3 @@ class SmoothQuantConfig(QuantizationConfig):
     @classmethod
     def get_tp_tensor_names(cls) -> List[str]:
         return ["weight"]
-    

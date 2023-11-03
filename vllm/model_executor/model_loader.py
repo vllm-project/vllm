@@ -89,7 +89,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
                 f"{supported_dtypes}")
 
     with _set_default_torch_dtype(model_config.dtype):
-       # Create a model instance.
+        # Create a model instance.
         # The weights will be initialized as empty tensors.
         if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
             model = model_class(model_config.hf_config, quant_config)

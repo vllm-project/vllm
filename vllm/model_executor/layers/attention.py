@@ -385,19 +385,17 @@ class PagedAttentionWithRoPE(PagedAttention):
 class DequantPagedAttentionWithRoPEQuant(PagedAttention):
     """PagedAttention with rotary embedding."""
 
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        rotary_dim: int,
-        max_position: int = 8192,
-        base: int = 10000,
-        num_kv_heads: Optional[int] = None,
-        is_neox_style: bool = True,
-        dequant_scale: float = 1.0,
-        quant_scale: float = 1.0
-    ) -> None:
+    def __init__(self,
+                 num_heads: int,
+                 head_size: int,
+                 scale: float,
+                 rotary_dim: int,
+                 max_position: int = 8192,
+                 base: int = 10000,
+                 num_kv_heads: Optional[int] = None,
+                 is_neox_style: bool = True,
+                 dequant_scale: float = 1.0,
+                 quant_scale: float = 1.0) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
         self.is_neox_style = is_neox_style
 
@@ -417,9 +415,16 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
         cache = cache.to(torch_dtype)
         # Embedding size: [max_position, rotary_dim]
         self.register_buffer("cos_sin_cache", cache, persistent=False)
-        self.register_buffer('a', torch.tensor(dequant_scale, dtype=torch.float32, requires_grad=False))
-        self.register_buffer('inscale', torch.tensor(quant_scale, dtype=torch.float32, requires_grad=False))
-    
+        self.register_buffer(
+            'a',
+            torch.tensor(dequant_scale,
+                         dtype=torch.float32,
+                         requires_grad=False))
+        self.register_buffer(
+            'inscale',
+            torch.tensor(quant_scale, dtype=torch.float32,
+                         requires_grad=False))
+
     def _apply(self, fn):
         super()._apply(fn)
         self.a = self.a.cpu()
