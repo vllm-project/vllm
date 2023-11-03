@@ -237,9 +237,9 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
+        # Get n-d magnitude scaling corrected for interpolation
         self.mscale = float(
-            _yarn_get_mscale(self.scaling_factor) * attn_factor
-        )  # Get n-d magnitude scaling corrected for interpolation
+            _yarn_get_mscale(self.scaling_factor) * attn_factor)
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style)
 
