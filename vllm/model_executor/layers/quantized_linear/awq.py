@@ -84,7 +84,7 @@ class AWQConfig(QuantizationConfig):
 
 class AWQLinearMethod(LinearMethodBase):
 
-    def __init__(self, quant_config):
+    def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
 
     def create_weights(self, module: torch.nn.Module, input_size: int,
