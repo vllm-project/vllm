@@ -183,3 +183,37 @@ def test_sampler_mixed(seed: int):
             continue
         for nth_output in sequence_output.samples:
             assert nth_output.output_token in expected_tokens
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_logits_processors(seed: int):
+    set_random_seed(seed)
+    batch_size = random.randint(1, 256)
+    input_tensor, _, sampler, worker = _prepare_test(batch_size)
+
+    # This sample logits processor gives infinite score to the i-th token,
+    # where i is the length of the input sequence.
+    # We therefore expect the output token sequence to be [0, 1, 2, ...]
+    def pick_ith(token_ids, logits):
+        logits[len(token_ids)] = float("inf")
+        return logits
+
+    seq_group_metadata_list = []
+    for i in range(batch_size):
+        seq_group_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=f"test_{i}",
+                is_prompt=True,
+                seq_data={0: SequenceData([1, 2, 3])},
+                sampling_params=SamplingParams(temperature=0,
+                                               logits_processors=[pick_ith]),
+                block_tables={0: [1]},
+            ))
+
+    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    sampler_output = sampler(embedding=None,
+                             hidden_states=input_tensor,
+                             input_metadata=input_metadata)
+    for i, sequence_output in enumerate(sampler_output):
+        for idx, nth_output in enumerate(sequence_output.samples):
+            assert nth_output.output_token == idx
