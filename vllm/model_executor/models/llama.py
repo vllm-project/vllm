@@ -223,9 +223,11 @@ class LlamaDecoderLayer(nn.Module):
         if self.use_int8:
             self.input_layernorm = I8RMSNorm(config.hidden_size,
                                              eps=config.rms_norm_eps)
-            # kernel fusion, post_attention_layernorm are fused into DequantAddResidualI8RMSNormQuant
-            self.dequant_add_residual_layernorm_quant = DequantAddResidualI8RMSNormQuant(
-                config.hidden_size, eps=config.rms_norm_eps)
+            # kernel fusion, post_attention_layernorm
+            # are fused into DequantAddResidualI8RMSNormQuant
+            self.dequant_add_residual_layernorm_quant = \
+                DequantAddResidualI8RMSNormQuant(config.hidden_size,
+                                                 eps=config.rms_norm_eps)
             self.dequant_add_residual = DequantAddResidual()
         else:
             self.input_layernorm = RMSNorm(config.hidden_size,

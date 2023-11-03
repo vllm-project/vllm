@@ -1,7 +1,6 @@
 from typing import Optional
 
 import torch
-from torch.nn.parameter import Parameter
 from vllm.model_executor.parallel_utils.tensor_parallel.layers import (
     ColumnParallelLinear, RowParallelLinear)
 from vllm.i8cugemm import I8CUGEMM

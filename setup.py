@@ -141,12 +141,12 @@ ext_modules = []
 
 # int8gemm
 i8cugemm_extension = CUDAExtension(
-    name='vllm.i8cugemm',
+    name="vllm.i8cugemm",
     sources=[
-        'csrc/int8gemm/cublas/bindings.cpp',
-        'csrc/int8gemm/cublas/cublasAlgoMap.cc',
-        'csrc/int8gemm/cublas/cublasINT8MMWrapper.cc',
-        'csrc/int8gemm/cublas/cuda_utils.cc'
+        "csrc/int8gemm/cublas/bindings.cpp",
+        "csrc/int8gemm/cublas/cublasAlgoMap.cc",
+        "csrc/int8gemm/cublas/cublasINT8MMWrapper.cc",
+        "csrc/int8gemm/cublas/cuda_utils.cc"
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,

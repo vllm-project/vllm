@@ -36,10 +36,10 @@ class DequantSiluAndMulQuant(nn.Module):
     def __init__(self, scale_in: float = 1.0, scale_out: float = 1.0) -> None:
         super().__init__()
         self.register_buffer(
-            'a',
+            "a",
             torch.tensor(scale_in, dtype=torch.float32, requires_grad=False))
         self.register_buffer(
-            'inscale',
+            "inscale",
             torch.tensor(scale_out, dtype=torch.float32, requires_grad=False))
 
     def _apply(self, fn):

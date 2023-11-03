@@ -416,12 +416,12 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
         # Embedding size: [max_position, rotary_dim]
         self.register_buffer("cos_sin_cache", cache, persistent=False)
         self.register_buffer(
-            'a',
+            "a",
             torch.tensor(dequant_scale,
                          dtype=torch.float32,
                          requires_grad=False))
         self.register_buffer(
-            'inscale',
+            "inscale",
             torch.tensor(quant_scale, dtype=torch.float32,
                          requires_grad=False))
 

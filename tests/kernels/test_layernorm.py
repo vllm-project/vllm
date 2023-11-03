@@ -106,7 +106,6 @@ def test_dequant_add_residual_rms_norm_quant(num_tokens: int, hidden_size: int,
 
     s = float(hidden_size**-0.5)
     residual = torch.empty(num_tokens, hidden_size, dtype=dtype, device="cuda")
-    # x = torch.randint(torch.iinfo(torch.int32).min, torch.iinfo(torch.int32).max, (num_tokens, hidden_size), dtype=torch.int32, device="cuda")
     x = torch.randint(-1000,
                       1000, (num_tokens, hidden_size),
                       dtype=torch.int32,
@@ -172,8 +171,6 @@ def test_dequant(num_tokens: int, hidden_size: int, dtype: torch.dtype,
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    s = float(hidden_size**-0.5)
-    # residual = torch.empty(num_tokens, hidden_size, dtype=dtype, device="cuda")
     x = torch.randint(
         torch.iinfo(torch.int32).min,
         torch.iinfo(torch.int32).max,
@@ -181,7 +178,6 @@ def test_dequant(num_tokens: int, hidden_size: int, dtype: torch.dtype,
         dtype=torch.int32,
         device="cuda",
     )
-    # residual.uniform_(-s, s)
     out1 = (x * scale).to(dtype)
 
     out2 = torch.empty_like(x, dtype=dtype)
@@ -200,10 +196,7 @@ def test_quant(num_tokens: int, hidden_size: int, dtype: torch.dtype,
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    s = float(hidden_size**-0.5)
-    # residual = torch.empty(num_tokens, hidden_size, dtype=dtype, device="cuda")
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
-    # residual.uniform_(-s, s)
     out1 = (x / scale).round().clamp(-128, 127).to(torch.int8)
 
     out2 = torch.empty_like(x, dtype=torch.int8)
