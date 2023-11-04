@@ -218,8 +218,8 @@ class ChatGLMModel(nn.Module):
 
 
 def name_mapping(name: str):
-    if name.startswith("transformer.encoder.layers."):
-        prefix = "model.layers."
+    if name.startswith('transformer.encoder.layers.'):
+        prefix = 'model.layers.'
         arr = name.split('.')
         return prefix + '.'.join(arr[3:])
     if name == 'transformer.output_layer.weight':
@@ -228,7 +228,7 @@ def name_mapping(name: str):
         return 'model.final_layernorm.weight'
     if name == 'transformer.embedding.word_embeddings.weight':
         return 'model.word_embeddings.weight'
-    assert False, f"unknow param {name}"
+    assert False, f'unknow param {name}'
 
 
 class ChatGLMForCausalLM(nn.Module):
@@ -260,13 +260,13 @@ class ChatGLMForCausalLM(nn.Module):
         return next_tokens
 
     _column_parallel_weights = []
-    _row_parallel_weights = ["dense_4h_to_h.weight", "dense.weight"]
+    _row_parallel_weights = ['dense_4h_to_h.weight', 'dense.weight']
 
     def load_weights(
         self,
         model_name_or_path: str,
         cache_dir: Optional[str] = None,
-        load_format: str = "auto",
+        load_format: str = 'auto',
         revision: Optional[str] = None,
     ):
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -275,7 +275,7 @@ class ChatGLMForCausalLM(nn.Module):
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if "rotary_pos_emb.inv_freq" in name:
+            if 'rotary_pos_emb.inv_freq' in name:
                 continue
 
             vname = name_mapping(name)
@@ -321,7 +321,7 @@ class ChatGLMForCausalLM(nn.Module):
                 param_value.copy_(weight_value)
                 continue
 
-            if "word_embeddings" in vname or "lm_head" in vname:
+            if 'word_embeddings' in vname or 'lm_head' in vname:
                 load_padded_tensor_parallel_vocab(param, loaded_weight,
                                                   tp_rank)
                 continue

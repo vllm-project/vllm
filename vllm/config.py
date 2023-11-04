@@ -115,7 +115,7 @@ class ModelConfig:
 
     @staticmethod
     def hf_config_get_num_layers(hf_config):
-        if getattr(hf_config, "model_type", None) == 'chatglm':
+        if getattr(hf_config, "model_type", None) == "chatglm":
             return hf_config.num_layers
         return hf_config.num_hidden_layers
 
@@ -161,10 +161,11 @@ class ModelConfig:
             # Multi-query attention, only one KV head.
             # Currently, tensor parallelism is not supported in this case.
             return 1
-        if getattr(self.hf_config, "model_type", None) == 'chatglm':
+        if getattr(self.hf_config, "model_type", None) == "chatglm":
             # in case of tensor_parallel_size > multi_query_group_num
-            return max(1, self.hf_config.multi_query_group_num //
-                       parallel_config.tensor_parallel_size)
+            return max(
+                1, self.hf_config.multi_query_group_num //
+                parallel_config.tensor_parallel_size)
         # For Falcon:
         if getattr(self.hf_config, "n_head_kv", None) is not None:
             return (self.hf_config.n_head_kv //
@@ -375,7 +376,7 @@ def _get_and_verify_max_len(
         # MPT
         "max_seq_len",
         # ChatGLM
-        'seq_length',
+        "seq_length",
         # Others
         "max_sequence_length",
         "max_seq_length",
