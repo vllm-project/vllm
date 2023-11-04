@@ -13,7 +13,6 @@ from vllm.model_executor.models.mistral import MistralForCausalLM
 from vllm.model_executor.models.mpt import MptForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
-from vllm.model_executor.models.mistral import MistralForCausalLM
 from vllm.model_executor.models.chatglm import ChatGLMForCausalLM
 
 __all__ = [
