@@ -55,26 +55,26 @@ template<typename scalar_t>
 __global__ void copy_blocks_kernel(
   int64_t* key_cache_ptrs,
   int64_t* value_cache_ptrs,
-  const int* __restrict__ block_mapping,
+  const int64_t* __restrict__ block_mapping,
   const int numel_per_block) {
   const int layer_idx = blockIdx.x;
   const int pair_idx = blockIdx.y;
 
   scalar_t* key_cache = reinterpret_cast<scalar_t*>(key_cache_ptrs[layer_idx]);
   scalar_t* value_cache = reinterpret_cast<scalar_t*>(value_cache_ptrs[layer_idx]);
-  int src_block_number = block_mapping[2 * pair_idx];
-  int dst_block_number = block_mapping[2 * pair_idx + 1];
+  int64_t src_block_number = block_mapping[2 * pair_idx];
+  int64_t dst_block_number = block_mapping[2 * pair_idx + 1];
 
-  const int src_block_offset = src_block_number * numel_per_block;
-  const int dst_block_offset = dst_block_number * numel_per_block;
+  const int64_t src_block_offset = src_block_number * numel_per_block;
+  const int64_t dst_block_offset = dst_block_number * numel_per_block;
   for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
-    int src_offset = src_block_offset + i;
-    int dst_offset = dst_block_offset + i;
+    int64_t src_offset = src_block_offset + i;
+    int64_t dst_offset = dst_block_offset + i;
     key_cache[dst_offset] = key_cache[src_offset];
   }
   for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
-    int src_offset = src_block_offset + i;
-    int dst_offset = dst_block_offset + i;
+    int64_t src_offset = src_block_offset + i;
+    int64_t dst_offset = dst_block_offset + i;
     value_cache[dst_offset] = value_cache[src_offset];
   }
 }
@@ -102,15 +102,15 @@ void copy_blocks(
     value_cache_ptrs[layer_idx] = reinterpret_cast<int64_t>(value_caches[layer_idx].data_ptr());
   }
   // Create block mapping array.
-  std::vector<int> block_mapping_vec;
+  std::vector<int64_t> block_mapping_vec;
   for (const auto& pair : block_mapping) {
-    int src_block_number = pair.first;
-    for (int dst_block_number : pair.second) {
+    int64_t src_block_number = pair.first;
+    for (int64_t dst_block_number : pair.second) {
       block_mapping_vec.push_back(src_block_number);
       block_mapping_vec.push_back(dst_block_number);
     }
   }
-  int* block_mapping_array = block_mapping_vec.data();
+  int64_t* block_mapping_array = block_mapping_vec.data();
   int num_pairs = block_mapping_vec.size() / 2;
 
   // Move the data structures to the GPU.
@@ -120,7 +120,7 @@ void copy_blocks(
   torch::Tensor value_cache_ptrs_tensor = torch::from_blob(
     value_cache_ptrs, {num_layers}, torch::kInt64).to(cache_device);
   torch::Tensor block_mapping_tensor = torch::from_blob(
-    block_mapping_array, {2 * num_pairs}, torch::kInt).to(cache_device);
+    block_mapping_array, {2 * num_pairs}, torch::kInt64).to(cache_device);
 
   // Launch the kernel.
   const int numel_per_block = key_caches[0][0].numel();
@@ -132,7 +132,7 @@ void copy_blocks(
       vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
         key_cache_ptrs_tensor.data_ptr<int64_t>(),
         value_cache_ptrs_tensor.data_ptr<int64_t>(),
-        block_mapping_tensor.data_ptr<int>(),
+        block_mapping_tensor.data_ptr<int64_t>(),
         numel_per_block);
     }));
 }
@@ -141,43 +141,48 @@ namespace vllm {
 
 template<typename scalar_t>
 __global__ void reshape_and_cache_kernel(
-  const scalar_t* __restrict__ key,     // [num_tokens, num_heads, head_size]
-  const scalar_t* __restrict__ value,   // [num_tokens, num_heads, head_size]
-  scalar_t* __restrict__ key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
-  scalar_t* __restrict__ value_cache,   // [num_blocks, num_heads, head_size, block_size]
-  const int* __restrict__ slot_mapping, // [num_tokens]
+  const scalar_t* __restrict__ key,           // [num_tokens, num_heads, head_size]
+  const scalar_t* __restrict__ value,         // [num_tokens, num_heads, head_size]
+  scalar_t* __restrict__ key_cache,           // [num_blocks, num_heads, head_size/x, block_size, x]
+  scalar_t* __restrict__ value_cache,         // [num_blocks, num_heads, head_size, block_size]
+  const int64_t* __restrict__ slot_mapping,   // [num_tokens]
   const int key_stride,
   const int value_stride,
   const int num_heads,
   const int head_size,
   const int block_size,
   const int x) {
-  const int token_idx = blockIdx.x;
-  const int slot_idx = slot_mapping[token_idx];
-  const int block_idx = slot_idx / block_size;
-  const int block_offset = slot_idx % block_size;
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  if (slot_idx < 0) {
+    // Padding token that should be ignored.
+    return;
+  }
+
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
 
   const int n = num_heads * head_size;
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
-    const int src_key_idx = token_idx * key_stride + i;
-    const int src_value_idx = token_idx * value_stride + i;
+    const int64_t src_key_idx = token_idx * key_stride + i;
+    const int64_t src_value_idx = token_idx * value_stride + i;
 
     const int head_idx = i / head_size;
     const int head_offset = i % head_size;
     const int x_idx = head_offset / x;
     const int x_offset = head_offset % x;
 
-    const int tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
-                            + head_idx * (head_size / x) * block_size * x
-                            + x_idx * block_size * x
-                            + block_offset * x
-                            + x_offset;
-    const int tgt_value_idx = block_idx * num_heads * head_size * block_size
-                              + head_idx * head_size * block_size
-                              + head_offset * block_size
-                              + block_offset;
-    key_cache[tgt_key_idx] = __ldg(&key[src_key_idx]);
-    value_cache[tgt_value_idx] = __ldg(&value[src_value_idx]);
+    const int64_t tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
+                                + head_idx * (head_size / x) * block_size * x
+                                + x_idx * block_size * x
+                                + block_offset * x
+                                + x_offset;
+    const int64_t tgt_value_idx = block_idx * num_heads * head_size * block_size
+                                  + head_idx * head_size * block_size
+                                  + head_offset * block_size
+                                  + block_offset;
+    key_cache[tgt_key_idx] = key[src_key_idx];
+    value_cache[tgt_value_idx] = value[src_value_idx];
   }
 }
 
@@ -211,7 +216,7 @@ void reshape_and_cache(
         value.data_ptr<scalar_t>(),
         key_cache.data_ptr<scalar_t>(),
         value_cache.data_ptr<scalar_t>(),
-        slot_mapping.data_ptr<int>(),
+        slot_mapping.data_ptr<int64_t>(),
         key_stride,
         value_stride,
         num_heads,

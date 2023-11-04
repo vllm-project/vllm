@@ -103,7 +103,7 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq"]
+        supported_quantization = ["awq", "squeezellm"]
         if self.quantization is None:
             return
         quantization = self.quantization.lower()
@@ -143,7 +143,7 @@ class ModelConfig:
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU worker."""
         # For GPTBigCode & Falcon:
-        # Note: for falcon, when new_decoder_architecture is True, the
+        # NOTE: for falcon, when new_decoder_architecture is True, the
         # multi_query flag is ignored and we use n_head_kv for the number of
         # KV heads.
         falcon_model_types = ["falcon", "RefinedWeb", "RefinedWebModel"]
@@ -272,6 +272,7 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
+        max_paddings: Maximum number of paddings to be added to a batch.
     """
 
     def __init__(
@@ -279,6 +280,7 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
+        max_paddings: int,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -288,6 +290,7 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
+        self.max_paddings = max_paddings
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -349,15 +352,6 @@ def _get_and_verify_dtype(
             # Casting between float16 and bfloat16 is allowed with a warning.
             logger.warning(f"Casting {config_dtype} to {torch_dtype}.")
 
-    # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:
-        compute_capability = torch.cuda.get_device_capability()
-        if compute_capability[0] < 8:
-            gpu_name = torch.cuda.get_device_name()
-            raise ValueError(
-                "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}.")
     return torch_dtype
 
 
@@ -400,6 +394,9 @@ def _get_and_verify_max_len(
     if rope_scaling is not None:
         assert "factor" in rope_scaling
         scaling_factor = rope_scaling["factor"]
+        if rope_scaling["type"] == "yarn":
+            derived_max_model_len = rope_scaling[
+                "original_max_position_embeddings"]
         derived_max_model_len *= scaling_factor
 
     if max_model_len is None:

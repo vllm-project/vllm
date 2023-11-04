@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -45,19 +45,25 @@ class QuantizationConfig:
                          "quantization config.")
 
     @classmethod
-    def get_packed_tensor_names(cls) -> List[str]:
+    def get_packed_tensors(cls) -> Dict[str, int]:
+        """Returns a dictionary of packed tensor names and their pack dims."""
         raise NotImplementedError
 
     @classmethod
-    def is_packed(cls, tensor_name: str) -> bool:
-        """Returns True if a tensor is packed.
+    def get_packed_dim(cls, tensor_name: str) -> Optional[int]:
+        """Returns the pack dim of a tensor if it is packed.
 
         A tensor is considered packed if each element in the tensor is a
         packed representation of multiple elements in the original tensor.
         For example, an INT32 element in the tensor may represent 8 INT4
         elements in the original tensor.
+        If the tensor is not packed, returns None.
         """
-        return any(tag in tensor_name for tag in cls.get_packed_tensor_names())
+        packed_tensors = cls.get_packed_tensors()
+        for packed_tensor_name, pack_dim in packed_tensors.items():
+            if packed_tensor_name in tensor_name:
+                return pack_dim
+        return None
 
     @classmethod
     def get_transposed_tensor_names(cls) -> List[str]:
@@ -71,5 +77,9 @@ class QuantizationConfig:
                    for tag in cls.get_transposed_tensor_names())
 
     @classmethod
-    def get_tp_tensor_names(cls) -> List[str]:
+    def get_col_parallel_tensor_names(cls) -> List[str]:
+        raise NotImplementedError
+
+    @classmethod
+    def get_row_parallel_tensor_names(cls) -> List[str]:
         raise NotImplementedError
