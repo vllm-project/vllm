@@ -16,20 +16,10 @@ from vllm.model_executor.models.qwen import QWenLMHeadModel
 from vllm.model_executor.models.chatglm import ChatGLMForCausalLM
 
 __all__ = [
-    "AquilaForCausalLM",
-    "BaiChuanForCausalLM",
-    "BaichuanForCausalLM",
-    "BloomForCausalLM",
-    "FalconForCausalLM",
-    "GPT2LMHeadModel",
-    "GPTBigCodeForCausalLM",
-    "GPTJForCausalLM",
-    "GPTNeoXForCausalLM",
-    "InternLMForCausalLM",
-    "LlamaForCausalLM",
-    "MptForCausalLM",
-    "OPTForCausalLM",
-    "QWenLMHeadModel",
-    "MistralForCausalLM",
+    "AquilaForCausalLM", "BaiChuanForCausalLM", "BaichuanForCausalLM",
+    "BloomForCausalLM", "FalconForCausalLM", "GPT2LMHeadModel",
+    "GPTBigCodeForCausalLM", "GPTJForCausalLM", "GPTNeoXForCausalLM",
+    "InternLMForCausalLM", "LlamaForCausalLM", "MptForCausalLM",
+    "OPTForCausalLM", "QWenLMHeadModel", "MistralForCausalLM",
     "ChatGLMForCausalLM"
 ]

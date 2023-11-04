@@ -26,8 +26,10 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
-from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
-                                                       RowParallelLinear)
+from vllm.model_executor.parallel_utils.layers import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 from vllm.sequence import SequenceOutputs
 
 from vllm.transformers_utils.configs import ChatGLMConfig
@@ -36,6 +38,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GLMAttention(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -44,7 +47,9 @@ class GLMAttention(nn.Module):
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.multi_query_attention = config.multi_query_attention
-        self.total_num_kv_heads = config.multi_query_group_num if config.multi_query_attention else config.num_attention_heads
+        self.total_num_kv_heads = (config.multi_query_group_num
+                                   if config.multi_query_attention else
+                                   config.num_attention_heads)
         assert self.total_num_kv_heads % tp_size == 0
         self.num_kv_heads = self.total_num_kv_heads // tp_size
         self.head_dim = config.hidden_size // self.total_num_heads
@@ -99,7 +104,6 @@ class GLMAttention(nn.Module):
             cache_event,
         )
 
-
         attn_output, _ = self.dense(context_layer)
 
         return attn_output
@@ -118,7 +122,7 @@ class GLMMLP(nn.Module):
 
         self.add_bias = config.add_bias_linear
 
-        # Project to 4h. If using swiglu double the output width, see https://arxiv.org/pdf/2002.05202.pdf
+        # Project to 4h.
         self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
             config.ffn_hidden_size * 2,
@@ -158,16 +162,14 @@ class GLMBlock(nn.Module):
     ):
         super(GLMBlock, self).__init__()
         self.apply_residual_connection_post_layernorm = (
-            config.apply_residual_connection_post_layernorm
-        )
+            config.apply_residual_connection_post_layernorm)
 
         self.fp32_residual_connection = config.fp32_residual_connection
 
         LayerNormFunc = RMSNorm if config.rmsnorm else LayerNorm
         # Layernorm on the input data.
-        self.input_layernorm = LayerNormFunc(
-            config.hidden_size, eps=config.layernorm_epsilon
-        )
+        self.input_layernorm = LayerNormFunc(config.hidden_size,
+                                             eps=config.layernorm_epsilon)
 
         # Self attention.
         self.self_attention = GLMAttention(config)
@@ -175,8 +177,7 @@ class GLMBlock(nn.Module):
 
         # Layernorm on the attention output
         self.post_attention_layernorm = LayerNormFunc(
-            config.hidden_size, eps=config.layernorm_epsilon
-        )
+            config.hidden_size, eps=config.layernorm_epsilon)
 
         # MLP
         self.mlp = GLMMLP(config)
@@ -234,14 +235,14 @@ class GLMTransformer(nn.Module):
         self.num_layers = config.num_layers
 
         # Transformer layers.
-        self.layers = nn.ModuleList([GLMBlock(config) for i in range(self.num_layers)])
+        self.layers = nn.ModuleList(
+            [GLMBlock(config) for i in range(self.num_layers)])
 
         if self.post_layer_norm:
             LayerNormFunc = RMSNorm if config.rmsnorm else LayerNorm
             # Final layer norm before output.
-            self.final_layernorm = LayerNormFunc(
-                config.hidden_size, eps=config.layernorm_epsilon
-            )
+            self.final_layernorm = LayerNormFunc(config.hidden_size,
+                                                 eps=config.layernorm_epsilon)
 
     def forward(
         self,
@@ -272,12 +273,12 @@ class GLMTransformer(nn.Module):
 
 
 class ChatGLMModel(nn.Module):
+
     def __init__(self, config):
         super().__init__()
 
-        self.embedding = VocabParallelEmbedding(
-            config.padded_vocab_size, config.hidden_size
-        )
+        self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
+                                                config.hidden_size)
 
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
@@ -315,6 +316,7 @@ class ChatGLMModel(nn.Module):
 
 
 class ChatGLMForCausalLM(nn.Module):
+
     def __init__(self, config: ChatGLMConfig):
         super().__init__()
         self.config: ChatGLMConfig = config
@@ -330,20 +332,17 @@ class ChatGLMForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> Dict[int, SequenceOutputs]:
-        hidden_states = self.transformer(
-            input_ids, positions, kv_caches, input_metadata, cache_events
-        )
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states, input_metadata)
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         input_metadata, cache_events)
+        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
+                                   input_metadata)
         return next_tokens
 
     _column_parallel_weights = [
         "output_layer.weight",
         "embedding.weight",
     ]
-    _row_parallel_weights = [
-        "dense_4h_to_h", 
-        "self_attention.dense"
-    ]
+    _row_parallel_weights = ["dense_4h_to_h", "self_attention.dense"]
 
     def load_weights(
         self,
@@ -355,7 +354,7 @@ class ChatGLMForCausalLM(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
 
-        q_proj_shard_size = (self.config.hidden_size // tp_size)
+        q_proj_shard_size = self.config.hidden_size // tp_size
         kv_proj_shard_size = (self.config.hidden_size //
                               self.config.num_attention_heads *
                               self.config.multi_query_group_num // tp_size)
@@ -364,17 +363,18 @@ class ChatGLMForCausalLM(nn.Module):
 
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+                model_name_or_path, cache_dir, load_format, revision):
             if "word_embeddings" in name:
                 name = name.replace(".word_embeddings", "")
-            
+
             if name in state_dict:
                 param = state_dict[name]
                 if "query_key_value" in name:
                     q_offset = q_proj_shard_size * tp_rank
-                    k_offset = q_proj_shard_size * tp_size + kv_proj_shard_size * tp_rank
-                    v_offset = q_proj_shard_size * tp_size + kv_proj_shard_size * (tp_size + tp_rank)
+                    k_offset = (q_proj_shard_size * tp_size +
+                                kv_proj_shard_size * tp_rank)
+                    v_offset = q_proj_shard_size * tp_size + \
+                        kv_proj_shard_size * (tp_size + tp_rank)
                     wq = loaded_weight[q_offset:q_offset + q_proj_shard_size]
                     wk = loaded_weight[k_offset:k_offset + kv_proj_shard_size]
                     wv = loaded_weight[v_offset:v_offset + kv_proj_shard_size]
@@ -383,8 +383,13 @@ class ChatGLMForCausalLM(nn.Module):
                     continue
 
                 if "dense_h_to_4h" in name:
-                    w_gate = loaded_weight[mlp_hidden_shard_size * tp_rank:mlp_hidden_shard_size * (tp_rank + 1)]
-                    w_proj = loaded_weight[mlp_hidden_shard_size * (tp_size + tp_rank):mlp_hidden_shard_size * (tp_size + tp_rank + 1)]
+                    w_gate = loaded_weight[mlp_hidden_shard_size *
+                                           tp_rank:mlp_hidden_shard_size *
+                                           (tp_rank + 1)]
+                    w_proj = loaded_weight[mlp_hidden_shard_size *
+                                           (tp_size +
+                                            tp_rank):mlp_hidden_shard_size *
+                                           (tp_size + tp_rank + 1)]
                     loaded_weight = torch.cat([w_gate, w_proj], dim=0)
                     param.data.copy_(loaded_weight)
                     continue
@@ -397,7 +402,7 @@ class ChatGLMForCausalLM(nn.Module):
                     self._row_parallel_weights,
                     tp_rank,
                 )
-            elif name == 'transformer.rotary_pos_emb.inv_freq':
+            elif name == "transformer.rotary_pos_emb.inv_freq":
                 continue
             else:
                 print("Warning never found tensor's name:", name)

@@ -50,7 +50,8 @@ class ChatGLMConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.layernorm_epsilon = layernorm_epsilon
         self.rmsnorm = rmsnorm
-        self.apply_residual_connection_post_layernorm = apply_residual_connection_post_layernorm
+        self.apply_residual_connection_post_layernorm = (
+            apply_residual_connection_post_layernorm)
         self.post_layer_norm = post_layer_norm
         self.add_bias_linear = add_bias_linear
         self.add_qkv_bias = add_qkv_bias

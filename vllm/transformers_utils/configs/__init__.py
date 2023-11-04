@@ -8,9 +8,5 @@ from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 
 __all__ = [
-    "BaiChuanConfig",
-    "AquilaConfig",
-    "QWenConfig",
-    "RWConfig",
-    "ChatGLMConfig"
+    "BaiChuanConfig", "AquilaConfig", "QWenConfig", "RWConfig", "ChatGLMConfig"
 ]
