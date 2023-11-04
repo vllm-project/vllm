@@ -118,14 +118,26 @@ def test_column_blora(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     scale = float(input_size**-0.5)
-    x = torch.empty(len(adapter_names), input_size, device="cuda")
+    x = torch.empty(len(adapter_names), input_size, input_size, device="cuda")
     x.uniform_(-scale, scale)
     setattr(ref_blinear, "batch_lora_ids", adapter_names)
-    setattr(column_blora, "batch_lora_ids", adapter_names)
-    batch_token_length = []
+
+    token_lengths = []
     for i in range(len(adapter_names)):
-        batch_token_length.append(1)
-    setattr(column_blora, "batch_token_lengths", batch_token_length)
+        token_lengths.append(1)
+    batch_lora_ids = {}
+    for index, adapter_name in enumerate(adapter_names):
+        index_set = {index}
+        batch_lora_ids[adapter_name] = index_set
+    lora_masks = {}
+    total_length = x.shape[0]
+    for lora_id, pos in batch_lora_ids.items():
+        mask = torch.zeros(total_length, device='cuda:0')
+        for i in range(total_length):
+            if i in pos:
+                mask[i] = 1
+        lora_masks[lora_id] = mask
+    setattr(column_blora, "lora_masks", lora_masks)
 
     # align weights
     column_blora.weight.copy_(ref_blinear.weight)
@@ -219,14 +231,26 @@ def test_row_blora(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     scale = float(input_size**-0.5)
-    x = torch.empty(len(adapter_names), input_size, device="cuda")
+    x = torch.empty(len(adapter_names), input_size, input_size, device="cuda")
     x.uniform_(-scale, scale)
     setattr(ref_blinear, "batch_lora_ids", adapter_names)
-    setattr(row_blora, "batch_lora_ids", adapter_names)
-    batch_token_length = []
+
+    token_lengths = []
     for i in range(len(adapter_names)):
-        batch_token_length.append(1)
-    setattr(row_blora, "batch_token_lengths", batch_token_length)
+        token_lengths.append(1)
+    batch_lora_ids = {}
+    for index, adapter_name in enumerate(adapter_names):
+        index_set = {index}
+        batch_lora_ids[adapter_name] = index_set
+    lora_masks = {}
+    total_length = x.shape[0]
+    for lora_id, pos in batch_lora_ids.items():
+        mask = torch.zeros(total_length, device='cuda:0')
+        for i in range(total_length):
+            if i in pos:
+                mask[i] = 1
+        lora_masks[lora_id] = mask
+    setattr(row_blora, "lora_masks", lora_masks)
 
     # align weights
     row_blora.weight.copy_(ref_blinear.weight)

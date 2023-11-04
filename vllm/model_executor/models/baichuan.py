@@ -343,29 +343,32 @@ class BaiChuanBaseForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        # Set batch lora id and token length
-        batch_lora_ids = []
-        token_lengths = []
+        # create and set lora mask
+        batch_lora_ids = {}
+        total_length = input_ids.shape[0]
+        index = 0
         for seq_groups in input_metadata.seq_groups:
             seq_ids = seq_groups[0]
             sampling_params = seq_groups[1]
             for i in range(len(seq_ids)):
-                seq_id = seq_ids[i]
-                s_data = input_metadata.seq_data.get(seq_id)
-                batch_lora_ids.append(sampling_params.lora_id)
-                if s_data.get_output_len() == 0:
-                    # prompt stage
-                    prompt_len = s_data.get_prompt_len()
-                    token_lengths.append(prompt_len)
-                else:
-                    # generation stage
-                    token_lengths.append(1)
+                lora_id = sampling_params.lora_id
+                index_set = batch_lora_ids.get(lora_id, set())
+                index_set.add(index)
+                batch_lora_ids[lora_id] = index_set
+                index += 1
+        # lora mask for compute lora in a batch: lora_id -> mask
+        lora_masks = {}
+        for lora_id, pos in batch_lora_ids.items():
+            mask = torch.zeros(total_length, device=input_ids.device)
+            for i in range(total_length):
+                if i in pos:
+                    mask[i] = 1
+            lora_masks[lora_id] = mask
 
         for _, module in self.model.named_modules():
             if isinstance(module,
                           (BLoraColumnParallelLinear, BLoraRowParallelLinear)):
-                module.batch_lora_ids = batch_lora_ids
-                module.batch_token_lengths = token_lengths
+                module.lora_masks = lora_masks
 
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
