@@ -305,27 +305,14 @@ class RowParallelLinear(torch.nn.Module):
 
 
 def compulate_lora(obj: LoraLayer, x: torch.Tensor, output: torch.Tensor,
-                   batch_token_lengths: list,
-                   batch_lora_ids: list) -> torch.Tensor:
-    assert len(batch_token_lengths) == len(batch_lora_ids), (
-        batch_token_lengths, batch_lora_ids)
-    start = 0
-    x_lists = []
-    # get each input tokens
-    for token_length in batch_token_lengths:
-        x_list = x[start:start + token_length]
-        x_lists.append(x_list)
-        start += token_length
-    batch = list(zip(x_lists, batch_lora_ids))
+                   lora_masks: dict[str, torch.Tensor]) -> torch.Tensor:
     lora_out = torch.zeros_like(output)
-    start = 0
-    # compute lora separately
-    for _, (x_list, lora_id) in enumerate(batch):
+    for lora_id, lora_mask in lora_masks.items():
+        # compute lora separately and use mask to filter
         if lora_id in obj.lora_A.keys():
             lora_result = obj.scaling[lora_id] * obj.lora_B[lora_id](
-                obj.lora_A[lora_id](obj.lora_dropout[lora_id](x_list)))
-            lora_out[start:start + x_list.shape[0]] = lora_result
-        start += x_list.shape[0]
+                obj.lora_A[lora_id](x))
+            lora_out += (lora_result * lora_mask.unsqueeze(1).unsqueeze(2))
     return lora_out
 
 
@@ -360,24 +347,10 @@ class BLoraColumnParallelLinear(ColumnParallelLinear, LoraLayer):
 
     def forward(self, x: torch.Tensor):
         previous_dtype = x.dtype
-        if self.active_adapter not in self.lora_A.keys():
-            output, output_bias = ColumnParallelLinear.forward(self, x)
-        if self.disable_adapters:
-            if self.r[self.active_adapter] > 0 and self.merged:
-                self.unmerge()
-            output, output_bias = ColumnParallelLinear.forward(self, x)
-        elif self.r[self.active_adapter] > 0 and not self.merged:
-            output, output_bias = ColumnParallelLinear.forward(self, x)
-            x = x.to(self.lora_A[self.active_adapter].weight.dtype)
-            batch_token_lengths = self.batch_token_lengths
-            batch_lora_ids = self.batch_lora_ids
-            lora_out = compulate_lora(self, x, output, batch_token_lengths,
-                                      batch_lora_ids)
-            output += lora_out
-
-        else:
-            output, output_bias = ColumnParallelLinear.forward(self, x)
-
+        output, output_bias = ColumnParallelLinear.forward(self, x)
+        x = x.to(self.lora_A[self.active_adapter].weight.dtype)
+        lora_out = compulate_lora(self, x, output, self.lora_masks)
+        output += lora_out
         output = output.to(previous_dtype)
         if output_bias is not None:
             output_bias = output_bias.to(previous_dtype)
@@ -417,24 +390,10 @@ class BLoraRowParallelLinear(RowParallelLinear, LoraLayer):
 
     def forward(self, x: torch.Tensor):
         previous_dtype = x.dtype
-        if self.active_adapter not in self.lora_A.keys():
-            output, output_bias = RowParallelLinear.forward(self, x)
-        if self.disable_adapters:
-            if self.r[self.active_adapter] > 0 and self.merged:
-                self.unmerge()
-            output, output_bias = RowParallelLinear.forward(self, x)
-        elif self.r[self.active_adapter] > 0 and not self.merged:
-            output, output_bias = RowParallelLinear.forward(self, x)
-            x = x.to(self.lora_A[self.active_adapter].weight.dtype)
-
-            batch_token_lengths = self.batch_token_lengths
-            batch_lora_ids = self.batch_lora_ids
-            lora_out = compulate_lora(self, x, output, batch_token_lengths,
-                                      batch_lora_ids)
-            output += lora_out
-
-        else:
-            output, output_bias = RowParallelLinear.forward(self, x)
+        output, output_bias = RowParallelLinear.forward(self, x)
+        x = x.to(self.lora_A[self.active_adapter].weight.dtype)
+        lora_out = compulate_lora(self, x, output, self.lora_masks)
+        output += lora_out
 
         output = output.to(previous_dtype)
         if output_bias is not None:
