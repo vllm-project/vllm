@@ -64,4 +64,5 @@ class ChatGLMConfig(PretrainedConfig):
         self.quantization_bit = quantization_bit
         self.pre_seq_len = pre_seq_len
         self.prefix_projection = prefix_projection
+        self.interleaved_qkv = interleaved_qkv
         super().__init__(**kwargs)

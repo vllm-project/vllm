@@ -118,7 +118,7 @@ class GLMMLP(nn.Module):
     """
 
     def __init__(self, config):
-        super(GLMMLP, self).__init__()
+        super().__init__()
 
         self.add_bias = config.add_bias_linear
 
@@ -160,23 +160,23 @@ class GLMBlock(nn.Module):
         self,
         config,
     ):
-        super(GLMBlock, self).__init__()
+        super().__init__()
         self.apply_residual_connection_post_layernorm = (
             config.apply_residual_connection_post_layernorm)
 
         self.fp32_residual_connection = config.fp32_residual_connection
 
-        LayerNormFunc = RMSNorm if config.rmsnorm else LayerNorm
+        layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
         # Layernorm on the input data.
-        self.input_layernorm = LayerNormFunc(config.hidden_size,
-                                             eps=config.layernorm_epsilon)
+        self.input_layernorm = layer_norm_func(config.hidden_size,
+                                               eps=config.layernorm_epsilon)
 
         # Self attention.
         self.self_attention = GLMAttention(config)
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
-        self.post_attention_layernorm = LayerNormFunc(
+        self.post_attention_layernorm = layer_norm_func(
             config.hidden_size, eps=config.layernorm_epsilon)
 
         # MLP
@@ -228,7 +228,7 @@ class GLMTransformer(nn.Module):
     """Transformer class."""
 
     def __init__(self, config):
-        super(GLMTransformer, self).__init__()
+        super().__init__()
         self.post_layer_norm = config.post_layer_norm
 
         # Number of layers.
@@ -239,10 +239,10 @@ class GLMTransformer(nn.Module):
             [GLMBlock(config) for i in range(self.num_layers)])
 
         if self.post_layer_norm:
-            LayerNormFunc = RMSNorm if config.rmsnorm else LayerNorm
+            layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
             # Final layer norm before output.
-            self.final_layernorm = LayerNormFunc(config.hidden_size,
-                                                 eps=config.layernorm_epsilon)
+            self.final_layernorm = layer_norm_func(
+                config.hidden_size, eps=config.layernorm_epsilon)
 
     def forward(
         self,
