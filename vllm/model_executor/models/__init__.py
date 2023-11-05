@@ -13,6 +13,7 @@ from vllm.model_executor.models.mistral import MistralForCausalLM
 from vllm.model_executor.models.mpt import MptForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
+from vllm.model_executor.models.yi import YiForCausalLM
 
 __all__ = [
     "AquilaForCausalLM",
@@ -30,4 +31,5 @@ __all__ = [
     "OPTForCausalLM",
     "QWenLMHeadModel",
     "MistralForCausalLM",
+    "YiForCausalLM",
 ]
