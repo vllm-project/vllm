@@ -70,26 +70,7 @@ try:
         is_causal,
         window_size,
         return_softmax,
-    ):
-        # out = query.new_empty(query.shape[0], query.shape[1], value.shape[2])
-        # out, softmax_lse, S_dmask = _flash_attn_forward(
-        #     query,
-        #     key,
-        #     value,
-        #     out,
-        #     cu_seq_lens_q,
-        #     cu_seq_lens_k,
-        #     max_seq_len_q,
-        #     max_seq_len_k,
-        #     p,
-        #     softmax_scale,
-        #     is_causal,
-        #     return_softmax,
-        #     0,
-        #     None
-        # )
-        # return out, softmax_lse, None
-        
+    ):        
         if cu_seq_lens_q is None:
             assert cu_seq_lens_k is None
             (
@@ -156,28 +137,6 @@ try:
         window_size,
         rng_state,
     ):
-        # _flash_attn_backward(
-        #     grad,
-        #     query,
-        #     key,
-        #     value,
-        #     out,
-        #     lse,
-        #     dq,
-        #     dk,
-        #     dv,
-        #     cu_seq_lens_q,
-        #     cu_seq_lens_k,
-        #     max_seq_len_q,
-        #     max_seq_len_k,
-        #     p,
-        #     softmax_scale,
-        #     is_causal,
-        #     0,
-        #     None
-        # )
-        # return dq, dk, dv
-
         if cu_seq_lens_k is None:
             assert cu_seq_lens_q is None
             (

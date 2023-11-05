@@ -45,7 +45,7 @@ RUN mkdir libs \
 RUN cd /app \
     && git clone https://github.com/EmbeddedLLM/vllm-rocm.git \
     && cd vllm-rocm \
-    && git checkout v0.2.x-rocm-dev \
+    && git checkout v0.2.1.post1-rocm \
     && python3 setup.py install \
     && cd ..
 

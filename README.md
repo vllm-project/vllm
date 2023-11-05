@@ -13,7 +13,21 @@
 vLLM ROCm port
 </h1>
 
-This version of vLLM supports model inferencing and serving on AMD GPUs with ROCm. This ROCm port was adapted from [vLLM](https://github.com/vllm-project/vllm), a ROCm [community port](https://github.com/pcmoritz/vllm-public/tree/port-to-rocm) and [xformers](https://github.com/facebookresearch/xformers), replacing the attention forward method employed in xformers by the ROCm realization of [flash attention](https://github.com/ROCmSoftwarePlatform/flash-attention). Currently this port does not support AWQ quantization yet, but SqueezeLLM has been incorporated.
+This version of vLLM 0.2.x supports model inferencing and serving on AMD GPUs with ROCm. This ROCm port was adapted from [vLLM](https://github.com/vllm-project/vllm), a ROCm [community port](https://github.com/pcmoritz/vllm-public/tree/port-to-rocm) and [xformers](https://github.com/facebookresearch/xformers), replacing the attention forward method employed in xformers by the ROCm realization of [flash attention](https://github.com/ROCmSoftwarePlatform/flash-attention). Currently this port does not support AWQ quantization yet, but SqueezeLLM has been incorporated.
+
+This port is an extension of our previous [vLLM v0.1.4 ROCm port](https://github.com/EmbeddedLLM/vllm-rocm/tree/v0.1.4-rocm). Compared with our previous port, vLLM v0.2.x achieves speedup of > 2x for LLaMA-70B model, and > 3x for LLaMA-7B/13B on MI210 thanks to the introduction of [efficient de-tokenization, vectorized sampling](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit#slide=id.g24c1f26d37c_10_117) and [paged attention v2](https://github.com/vllm-project/vllm/pull/1348).
+
+<p align="center">
+  <picture>
+    <img alt="throughput_tokens" src="docs/source/assets/benchmarks/throughput_tokens.png" width=70%>
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <img alt="throughput_requests" src="docs/source/assets/benchmarks/throughput_requests.png" width=70%>
+  </picture>
+</p>
 
 ---
 
@@ -69,6 +83,24 @@ docker run -it \
        bash
 ```
 
+Alternatively, you can pull from our pre-built docker image:
+
+```bash
+docker pull embeddedllminfo/vllm-rocm:vllm-v0.2.x
+
+docker run -it \
+       --network=host \
+       --group-add=video \
+       --ipc=host \
+       --cap-add=SYS_PTRACE \
+       --security-opt seccomp=unconfined \
+       --shm-size 8G \
+       --device /dev/kfd \
+       --device /dev/dri \
+       embeddedllminfo/vllm-rocm \
+       bash
+```
+
 ## Serving
 
 The project supports native vLLM serving
@@ -81,21 +113,7 @@ python -m vllm.entrypoints.api_server \
 
 ## Benchmarking
 
-We benchmarked the inference throughput against our vLLM 0.1.4 port on various LLaMA2 models including LLaMA2-70B on 4 GPUs, LLaMA2-13B on 2 GPUs, and LLaMA2-7B on a single GPU. Our tests show that our vLLM 0.2.x port has > 2x speedup for LLaMA-70B, and > 3x for LLaMA-7B/13B compared with our previous 0.1.4 port.
-
-<p align="center">
-  <picture>
-    <img alt="throughput_tokens" src="docs/source/assets/benchmarks/throughput_tokens.png" width=70%>
-  </picture>
-</p>
-
-<p align="center">
-  <picture>
-    <img alt="throughput_requests" src="docs/source/assets/benchmarks/throughput_requests.png" width=70%>
-  </picture>
-</p>
-
-The benchmark were obtained by running the vLLM benchmark scripts under the *benchmark* directory.
+The benchmark results were obtained by running the vLLM benchmark scripts under the *benchmark* directory.
 
 If your vLLM is installed using the provided [docker environment](#using-docker), you can benchmark the inferencing throughput following the steps below:
 - Download the model you would like to evaluate to a directory of your choice (say a vicuna-7b model is downloaded to /path/to/your/model/vicuna-7b-v1.5)
@@ -119,7 +137,6 @@ Inside the container, run
 ```bash
 bash /app/benchmark_throughput.sh
 ```
-
 
 ## Acknowledgement
 
