@@ -13,16 +13,12 @@
 vLLM ROCm port
 </h1>
 
-This version of vLLM supports model inferencing and serving on AMD GPUs with ROCm. This ROCm port was adapted from [vLLM](https://github.com/vllm-project/vllm), a ROCm [community port](https://github.com/pcmoritz/vllm-public/tree/port-to-rocm) and [xformers](https://github.com/facebookresearch/xformers), replacing the attention forward method employed in xformers by the ROCm realization of [flash attention](https://github.com/ROCmSoftwarePlatform/flash-attention). Currently LLaMA/Vicuna models have been tested.
-
-For more details, please visit our [blog post](https://embeddedllm.com/blog/vllm_rocm/).
-
-Currently this port does not support AWQ quantization yet, but SqueezeLLM has been incorporated.
+This version of vLLM supports model inferencing and serving on AMD GPUs with ROCm. This ROCm port was adapted from [vLLM](https://github.com/vllm-project/vllm), a ROCm [community port](https://github.com/pcmoritz/vllm-public/tree/port-to-rocm) and [xformers](https://github.com/facebookresearch/xformers), replacing the attention forward method employed in xformers by the ROCm realization of [flash attention](https://github.com/ROCmSoftwarePlatform/flash-attention). Currently this port does not support AWQ quantization yet, but SqueezeLLM has been incorporated.
 
 ---
 
 *Latest News*
-- [2023/11] We released our ROCm port for vLLM 0.2.x. Models can be served on AMD GPUs.
+- [2023/11] We have updated our ROCm port for vLLM v0.2.x.
 - [2023/10] LLaMA-2 models are now supported. 7B/13B/70B models can be run and served on AMD GPUs!
 
 ---
@@ -85,7 +81,21 @@ python -m vllm.entrypoints.api_server \
 
 ## Benchmarking
 
-The benchmark results can be obtained by running the vLLM benchmark scripts under the *benchmark* directory. For our benchmark results, please visit our [blog post](https://embeddedllm.com/blog/vllm_rocm/) for more details.
+We benchmarked the inference throughput against our vLLM 0.1.4 port on various LLaMA2 models including LLaMA2-70B on 4 GPUs, LLaMA2-13B on 2 GPUs, and LLaMA2-7B on a single GPU. Our tests show that our vLLM 0.2.x port has > 2x speedup for LLaMA-70B, and > 3x for LLaMA-7B/13B compared with our previous 0.1.4 port.
+
+<p align="center">
+  <picture>
+    <img alt="throughput_tokens" src="docs/source/assets/benchmarks/throughput_tokens.png" width=70%>
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <img alt="throughput_requests" src="docs/source/assets/benchmarks/throughput_requests.png" width=70%>
+  </picture>
+</p>
+
+The benchmark were obtained by running the vLLM benchmark scripts under the *benchmark* directory.
 
 If your vLLM is installed using the provided [docker environment](#using-docker), you can benchmark the inferencing throughput following the steps below:
 - Download the model you would like to evaluate to a directory of your choice (say a vicuna-7b model is downloaded to /path/to/your/model/vicuna-7b-v1.5)
@@ -115,6 +125,6 @@ bash /app/benchmark_throughput.sh
 
 This ROCm port was built upon the following amazing projects:
 
-- [vLLM](https://github.com/vllm-project/vllm), [ROCm fork](https://github.com/pcmoritz/vllm-public/tree/port-to-rocm)
+- [vLLM](https://github.com/vllm-project/vllm) and [pcmoritz's ROCm fork](https://github.com/pcmoritz/vllm-public/tree/port-to-rocm)
 - [flash-attention](https://github.com/ROCmSoftwarePlatform/flash-attention)
 - [xformers](https://github.com/facebookresearch/xformers)
