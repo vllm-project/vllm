@@ -73,3 +73,9 @@ Documentation
 
    models/supported_models
    models/adding_model
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Quantization
+
+   quantization/auto_awq
