@@ -189,10 +189,8 @@ class YiDecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             quant_config=quant_config,
         )
-        self.ln1 = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.ln2 = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.ln1 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.ln2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
