@@ -124,8 +124,8 @@ class LLMEngine:
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
         
-        self.speculative_decoding = True
-        if self.speculative_decoding:
+        self.spec_handler = None
+        if spec_decoding_config is not None:
             self.spec_handler = SpeculativeHandler(spec_decoding_config)
 
     def _init_workers(self, distributed_init_method: str):
@@ -565,7 +565,7 @@ class LLMEngine:
             return ignored
 
         draft_tokens = None
-        if self.speculative_decoding:
+        if self.spec_handler:
             draft_tokens = self.spec_handler.propose()
         
         # Execute the model.
@@ -578,7 +578,7 @@ class LLMEngine:
             draft_tokens=draft_tokens
         )
         
-        if self.speculative_decoding:
+        if self.spec_handler:
             self.spec_handler.accept(output)
             self.spec_handler.invalidate_draft_kv()
             self.spec_handler.invalidate_target_kv()
