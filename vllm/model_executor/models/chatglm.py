@@ -4,12 +4,13 @@ import torch
 from torch import nn
 
 from vllm.model_executor import InputMetadata
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
-from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_world_size
 from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_rank
+from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_world_size
 from vllm.model_executor.weight_utils import hf_model_weights_iterator, load_tensor_parallel_weights, \
     load_padded_tensor_parallel_vocab
 from vllm.sequence import SamplerOutput
@@ -23,11 +24,7 @@ class MLP(nn.Module):
     def __init__(self, config: ChatGLMConfig):
         super().__init__()
 
-        def swiglu(x):
-            x = torch.chunk(x, 2, dim=-1)
-            return torch.nn.functional.silu(x[0]) * x[1]
-
-        self.activation_func = swiglu
+        self.activation_func = SiluAndMul()
 
         self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
