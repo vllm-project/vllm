@@ -1,4 +1,5 @@
-# copy from https://huggingface.co/THUDM/chatglm3-6b/blob/main/configuration_chatglm.py
+# copy from
+# https://huggingface.co/THUDM/chatglm3-6b/blob/main/configuration_chatglm.py
 
 from transformers import PretrainedConfig
 

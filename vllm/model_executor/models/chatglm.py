@@ -111,7 +111,7 @@ class Attention(nn.Module):
         )
 
         self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim,
+        self.kv_size = self.num_kv_heads * self.head_dim
 
     def forward(
         self,
@@ -122,8 +122,7 @@ class Attention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
-        q, k, v = qkv.split(
-            [self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
