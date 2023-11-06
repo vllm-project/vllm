@@ -110,6 +110,9 @@ class Attention(nn.Module):
             input_is_parallel=True,
         )
 
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim,
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -118,18 +121,12 @@ class Attention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        hidden_states, _ = self.query_key_value(hidden_states)
-        query, key, value = hidden_states.split(
-            [
-                self.num_heads * self.head_dim,
-                self.num_kv_heads * self.head_dim,
-                self.num_kv_heads * self.head_dim,
-            ],
-            dim=-1,
-        )
+        qkv, _ = self.query_key_value(hidden_states)
+        q, k, v = qkv.split(
+            [self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, query, key, value, k_cache, v_cache,
+        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
 
         output, _ = self.dense(attn_output)
