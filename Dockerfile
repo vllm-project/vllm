@@ -31,19 +31,22 @@ ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
 ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/libtorch/lib:
 ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include/:/opt/rocm/include/:
+ENV PYTORCH_ROCM_ARCH=gfx900;gfx906;gfx908;gfx90a;gfx1030;gfx1101
 
 # Install ROCm flash-attention
-# The adaptation of a new flash attention interface seems imminent, so check out the last commit before such request is merged
 RUN mkdir libs \
     && cd libs \
-    && git clone https://github.com/ROCmSoftwarePlatform/flash-attention.git --recursive \
+    && git clone https://github.com/ROCmSoftwarePlatform/flash-attention.git \
     && cd flash-attention \
+    && git submodule update --init \
+    && sed -i -e "s/--offload-arch=native/--offload-arch=$(/opt/rocm/llvm/bin/amdgpu-offload-arch)/g" setup.py \
     && patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch \
     && python3 setup.py install \
     && cd ..
 
+COPY ./ /app/vllm-rocm/
+
 RUN cd /app \
-    && git clone https://github.com/EmbeddedLLM/vllm-rocm.git \
     && cd vllm-rocm \
     && git checkout v0.2.1.post1-rocm \
     && python3 setup.py install \

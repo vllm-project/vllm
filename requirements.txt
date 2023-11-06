@@ -4,7 +4,7 @@ ray >= 2.5.1
 pandas  # Required for Ray data.
 pyarrow  # Required for Ray data.
 sentencepiece  # Required for LLaMA tokenizer.
-numpy
+numpy >= 1.22.4
 torch == 2.0.1
 transformers >= 4.34.0  # Required for Mistral.
 #xformers == 0.0.22  # Required for Mistral.
