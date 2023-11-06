@@ -5,10 +5,12 @@ from vllm.transformers_utils.configs.qwen import QWenConfig
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
+from vllm.transformers_utils.configs.yi import YiConfig
 
 __all__ = [
     "BaiChuanConfig",
     "AquilaConfig",
     "QWenConfig",
     "RWConfig",
+    "YiConfig",
 ]
