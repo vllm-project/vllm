@@ -1,3 +1,12 @@
+# coding=utf-8
+# Adapted from
+# https://huggingface.co/THUDM/chatglm3-6b/blob/main/modeling_chatglm.py
+# LICENSE: https://huggingface.co/THUDM/chatglm3-6b/blob/main/MODEL_LICENSE
+"""Inference-only ChatGLM model compatible with HuggingFace weights.
+
+The input of the model is flattened to a 1D tensor of tokens. The model uses
+InputMetadata to extract the original 2D shape of the input.
+"""
 from typing import List, Optional, Tuple
 
 import torch
