@@ -86,7 +86,7 @@ docker run -it \
 Alternatively, you can pull from our pre-built docker image:
 
 ```bash
-docker pull embeddedllminfo/vllm-rocm:vllm-v0.2.x
+docker pull embeddedllminfo/vllm-rocm:vllm-v0.2.1.post1
 
 docker run -it \
        --network=host \
