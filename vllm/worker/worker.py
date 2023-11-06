@@ -288,6 +288,7 @@ class Worker:
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        draft_tokens: Optional[torch.Tensor]
     ) -> SamplerOutput:
         # Issue cache operations.
         issued_cache_op = False
@@ -324,6 +325,7 @@ class Worker:
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
             cache_events=cache_events,
+            draft_tokens=draft_tokens,
         )
         return output
 

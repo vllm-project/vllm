@@ -302,6 +302,14 @@ class SchedulerConfig:
                 f"({self.max_num_seqs}).")
 
 
+class SpecDecodingConfig:
+    def __init__(self,
+                 draft_model_config: ModelConfig,
+                 draft_cnt: int) -> None:
+        self.draft_model_config = draft_model_config
+        self.draft_cnt = draft_cnt
+
+
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
     "float16": torch.float16,
