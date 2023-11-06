@@ -200,6 +200,7 @@ quantization_extension = CUDAExtension(
     sources=[
         "csrc/quantization.cpp",
         "csrc/quantization/awq/gemm_kernels.cu",
+        "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,
@@ -238,8 +239,12 @@ def find_version(filepath: str):
 
 
 def read_readme() -> str:
-    """Read the README file."""
-    return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+    """Read the README file if present."""
+    p = get_path("README.md")
+    if os.path.isfile(p):
+        return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+    else:
+        return ""
 
 
 def get_requirements() -> List[str]:
@@ -277,4 +282,5 @@ setuptools.setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
+    package_data={"vllm": ["py.typed"]},
 )

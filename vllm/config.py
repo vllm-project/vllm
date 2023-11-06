@@ -103,7 +103,7 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq"]
+        supported_quantization = ["awq", "squeezellm"]
         if self.quantization is None:
             return
         quantization = self.quantization.lower()
@@ -390,6 +390,9 @@ def _get_and_verify_max_len(
     if rope_scaling is not None:
         assert "factor" in rope_scaling
         scaling_factor = rope_scaling["factor"]
+        if rope_scaling["type"] == "yarn":
+            derived_max_model_len = rope_scaling[
+                "original_max_position_embeddings"]
         derived_max_model_len *= scaling_factor
 
     if max_model_len is None:
