@@ -110,7 +110,7 @@ class ModelConfig:
         # Parse quantization method from the HF model config, if available.
         hf_quant_config = getattr(self.hf_config, "quantization_config", None)
         if hf_quant_config is not None:
-            hf_quant_method = str(hf_quant_config.quant_method).lower()
+            hf_quant_method = str(hf_quant_config["quant_method"]).lower()
             if self.quantization is None:
                 self.quantization = hf_quant_method
             elif self.quantization != hf_quant_method:
