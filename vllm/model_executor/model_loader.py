@@ -18,6 +18,7 @@ _MODEL_REGISTRY = {
     "BaiChuanForCausalLM": BaiChuanForCausalLM,  # baichuan-7b
     "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
     "BloomForCausalLM": BloomForCausalLM,
+    "ChatGLMModel": ChatGLMForCausalLM,
     "FalconForCausalLM": FalconForCausalLM,
     "GPT2LMHeadModel": GPT2LMHeadModel,
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
@@ -33,6 +34,7 @@ _MODEL_REGISTRY = {
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
     "RWForCausalLM": FalconForCausalLM,
+    "YiForCausalLM": YiForCausalLM,
 }
 
 # FIXME(woosuk): Remove this once all models support quantization.
