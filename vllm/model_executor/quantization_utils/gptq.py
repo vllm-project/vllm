@@ -8,7 +8,7 @@ from vllm.model_executor.quantization_utils.base import QuantizationConfig
 class GPTQConfig(QuantizationConfig):
     """Config class for GPTQ.
 
-    Reference: https://arxiv.org/abs/2306.00978
+    Reference: https://arxiv.org/abs/2210.17323
     """
 
     def __init__(
@@ -57,7 +57,7 @@ class GPTQConfig(QuantizationConfig):
 
     @classmethod
     def get_packed_tensors(cls) -> Dict[str, int]:
-        return {"qzeros": 1}
+        return {"qweight": 1, "qzeros": 1}
 
     @classmethod
     def get_transposed_tensor_names(cls) -> List[str]:
