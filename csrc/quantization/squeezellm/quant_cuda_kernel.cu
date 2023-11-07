@@ -4,15 +4,14 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-// half-tensor
 #include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDATensorMethods.cuh>
 
-#define BLOCKWIDTH 128
-#define BLOCKHEIGHT4 16
-
 namespace vllm {
 namespace squeezellm {
+
+const int BLOCKWIDTH = 128;
+const int BLOCKHEIGHT4 = 16;
 
 __device__ inline unsigned int as_unsigned(int i) {
   return *reinterpret_cast<unsigned int*>(&i);
@@ -130,10 +129,10 @@ void squeezellm_gemm(
   int vec_height = vec.size(1);
 
   dim3 blocks(
-    (height + BLOCKHEIGHT4 - 1) / BLOCKHEIGHT4,
-    (width + BLOCKWIDTH - 1) / BLOCKWIDTH
+    (height + vllm::squeezellm::BLOCKHEIGHT4 - 1) / vllm::squeezellm::BLOCKHEIGHT4,
+    (width + vllm::squeezellm::BLOCKWIDTH - 1) / vllm::squeezellm::BLOCKWIDTH
   );
-  dim3 threads(BLOCKWIDTH);
+  dim3 threads(vllm::squeezellm::BLOCKWIDTH);
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vllm::squeezellm::NUQ4MatMulKernel<<<blocks, threads, 0, stream>>>(
@@ -144,6 +143,3 @@ void squeezellm_gemm(
     height, width, batch, vec_height
   );
 }
-
-#undef BLOCKWIDTH
-#undef BLOCKHEIGHT4
