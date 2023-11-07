@@ -20,8 +20,8 @@ class GPTQConfig(QuantizationConfig):
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
+
         self.pack_factor = 32 // self.weight_bits
-        # exllama kernel v1 only supports 4 bit
         if self.weight_bits != 4:
             raise ValueError(
                 "Currently, only 4-bit weight quantization is supported for "
@@ -38,18 +38,15 @@ class GPTQConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.half]
+        return [torch.half, torch.bfloat16, torch.float]
 
     @classmethod
-    # Need to figure it out
     def get_min_capability(cls) -> int:
-        return 60
+        return 70
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return [
-            "quantize_config.json",
-        ]
+        return ["quantize_config.json"]
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQConfig":
@@ -66,10 +63,10 @@ class GPTQConfig(QuantizationConfig):
     def get_transposed_tensor_names(cls) -> List[str]:
         return ["qweight", "qzeros", "scales"]
 
-    def get_row_parallel_tensor_names(self) -> List[str]:
-        if self.desc_act or self.group_size == -1:
-            return ["qweight", "g_idx"]
-        return ["qweight", "qzeros", "scales", "g_idx"]
+    @classmethod
+    def get_col_parallel_tensor_names(cls) -> List[str]:
+        return ["qweight", "qzeros", "scales"]
 
-    def get_col_parallel_tensor_names(self) -> List[str]:
-        return ["qweight", "qzeros", "scales", "bias"]
+    @classmethod
+    def get_row_parallel_tensor_names(cls) -> List[str]:
+        return ["qweight", "qzeros", "scales", "g_idx"]
