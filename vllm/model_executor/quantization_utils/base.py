@@ -76,8 +76,10 @@ class QuantizationConfig:
         return any(tag in tensor_name
                    for tag in cls.get_transposed_tensor_names())
 
-    def get_col_parallel_tensor_names(self) -> List[str]:
+    @classmethod
+    def get_col_parallel_tensor_names(cls) -> List[str]:
         raise NotImplementedError
 
-    def get_row_parallel_tensor_names(self) -> List[str]:
+    @classmethod
+    def get_row_parallel_tensor_names(cls) -> List[str]:
         raise NotImplementedError

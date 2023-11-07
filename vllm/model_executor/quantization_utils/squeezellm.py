@@ -56,8 +56,10 @@ class SqueezeLLMConfig(QuantizationConfig):
     def get_transposed_tensor_names(cls) -> List[str]:
         return ["qweight"]
 
-    def get_col_parallel_tensor_names(self) -> List[str]:
+    @classmethod
+    def get_col_parallel_tensor_names(cls) -> List[str]:
         return ["qweight", "lookup_table"]
 
-    def get_row_parallel_tensor_names(self) -> List[str]:
+    @classmethod
+    def get_row_parallel_tensor_names(cls) -> List[str]:
         return ["qweight"]
