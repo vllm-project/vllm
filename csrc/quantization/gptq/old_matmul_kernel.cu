@@ -1,18 +1,19 @@
 #include <torch/all.h>
 #include <torch/python.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <ATen/cuda/Atomic.cuh>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-#include "dispatch_utils.h"
-
-#define BLOCKWIDTH 256
-#define BLOCKHEIGHT 32
+#include "../../dispatch_utils.h"
 
 namespace vllm {
 namespace gptq {
+
+const int BLOCKWIDTH = 256;
+const int BLOCKHEIGHT = 32;
 
 __device__ inline unsigned int as_unsigned(int i) {
   return *reinterpret_cast<unsigned int*>(&i);
@@ -79,7 +80,7 @@ __global__ void VecQuant4MatMulKernel(
 	        for (k = 0; k < h_range; ++k){
 	            res += weight[k] * blockvec[k];
             }
-            atomicAdd(&mul[b * width + w], res);
+            gpuAtomicAdd(&mul[b * width + w], res);
         }
         __syncthreads();
     }
@@ -103,10 +104,10 @@ void gptq_descact_matmul(
     int zero_width = zeros.size(1);
 
     dim3 blocks(
-        (height + BLOCKHEIGHT - 1) / BLOCKHEIGHT,
-        (width + BLOCKWIDTH - 1) / BLOCKWIDTH
+        (height + vllm::gptq::BLOCKHEIGHT - 1) / vllm::gptq::BLOCKHEIGHT,
+        (width + vllm::gptq::BLOCKWIDTH - 1) / vllm::gptq::BLOCKWIDTH
     );
-    dim3 threads(BLOCKWIDTH);
+    dim3 threads(vllm::gptq::BLOCKWIDTH);
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     VLLM_DISPATCH_FLOATING_TYPES(
         vec.type(), "vecquant4matmul_cuda", ([&] {
@@ -118,6 +119,3 @@ void gptq_descact_matmul(
         })
     );
 }
-
-#undef BLOCKWIDTH
-#undef BLOCKHEIGHT
