@@ -7,11 +7,11 @@ from collections import defaultdict
 from typing import Any, Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download
-from safetensors.torch import load_file, save_file, safe_open
 import numpy as np
+from safetensors.torch import load_file, save_file, safe_open
 import torch
-from tqdm.auto import tqdm
 from transformers import PretrainedConfig
+from tqdm.auto import tqdm
 
 from vllm.logger import init_logger
 from vllm.model_executor.quantization_utils import get_quant_class
@@ -88,10 +88,13 @@ def get_quant_config(
     hf_config: PretrainedConfig,
     cache_dir: Optional[str] = None,
 ) -> QuantizationConfig:
-    if quantization == "gptq" and hasattr(hf_config, "quantization_config"):
-        config = hf_config.quantization_config
-        return get_quant_class(quantization).from_config(config)
+    quant_cls = get_quant_class(quantization)
+    # Read the quantization config from the HF model config, if available.
+    hf_quant_config = getattr(hf_config, "quantization_config", None)
+    if hf_quant_config is not None:
+        return quant_cls.from_config(hf_quant_config)
 
+    # Download the quantization config file from the model directory.
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
@@ -104,7 +107,6 @@ def get_quant_config(
         hf_folder = model_name_or_path
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
-    quant_cls = get_quant_class(quantization)
     quant_config_files = [
         f for f in config_files if any(
             f.endswith(x) for x in quant_cls.get_config_filenames())
@@ -330,30 +332,5 @@ def initialize_dummy_weights(
     """
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
+            # TODO(woosuk): Randomly initialize the integer weights as well.
             param.data.uniform_(low, high)
-
-
-def get_parallel_weight(model: torch.nn.Module):
-    if model.quant_config is None:
-        column_weight_suffixes = ["weight", "bias"]
-        row_weight_suffixes = ["weight"]
-    else:
-        column_weight_suffixes = (
-            model.quant_config.get_col_parallel_tensor_names())
-        row_weight_suffixes = (
-            model.quant_config.get_row_parallel_tensor_names())
-
-    column_parallel_weights: List[str] = []
-    for layer in model.column_parallel_layers:
-        for suffix in column_weight_suffixes:
-            column_parallel_weights.append(f"{layer}.{suffix}")
-    row_parallel_weights: List[str] = []
-    for layer in model.row_parallel_layers:
-        for suffix in row_weight_suffixes:
-            row_parallel_weights.append(f"{layer}.{suffix}")
-
-    if hasattr(model, "parallel_vocab_layers"):
-        for layer in model.parallel_vocab_layers:
-            for suffix in ["weight", "bias"]:
-                column_parallel_weights.append(f"{layer}.{suffix}")
-    return column_parallel_weights, row_parallel_weights
