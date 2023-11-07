@@ -2,7 +2,6 @@ from typing import Optional
 
 import torch
 from transformers import PretrainedConfig
-from transformers.utils.quantization_config import QuantizationMethod
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
@@ -105,19 +104,25 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = ["awq", "gptq", "squeezellm"]
-        if hasattr(self.hf_config, "quantization_config"
-                   ) and self.hf_config.quantization_config.get(
-                       "quant_method") == QuantizationMethod.GPTQ:
-            self.quantization = "gptq"
+        if self.quantization is not None:
+            self.quantization = self.quantization.lower()
 
-        if self.quantization is None:
-            return
-        quantization = self.quantization.lower()
-        if quantization not in supported_quantization:
+        hf_quant_config = getattr(self.hf_config, "quantization_config", None)
+        if hf_quant_config is not None:
+            hf_quant_method = str(hf_quant_config.quant_method).lower()
+            if self.quantization is None:
+                self.quantization = hf_quant_method
+            elif self.quantization != hf_quant_method:
+                raise ValueError(
+                    "Quantization method specified in the model config "
+                    f"({hf_quant_method}) does not match the quantization "
+                    f"method specified in the `quantization` argument "
+                    f"({self.quantization}).")
+
+        if self.quantization not in supported_quantization:
             raise ValueError(
-                f"Unknown quantization: {self.quantization}. Must be one of "
-                f"{supported_quantization}.")
-        self.quantization = quantization
+                f"Unknown quantization method: {self.quantization}. Must be "
+                f"one of {supported_quantization}.")
 
     def verify_with_parallel_config(
         self,
