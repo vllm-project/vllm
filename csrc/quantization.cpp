@@ -1,4 +1,3 @@
-#include <cstdint>
 #include <torch/extension.h>
 
 torch::Tensor awq_gemm(
