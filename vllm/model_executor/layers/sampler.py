@@ -138,7 +138,7 @@ def _get_penalties(
 
 
 def _get_prompt_and_output_tokens(
-    input_metadata: InputMetadata
+        input_metadata: InputMetadata
 ) -> Tuple[List[List[int]], List[List[int]]]:
     prompt_tokens: List[List[int]] = []
     output_tokens: List[List[int]] = []
