@@ -18,7 +18,6 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
         group_size = self.quant_config.group_size
         if group_size == -1:
             group_size = self.input_size
-        num_groups = self.input_size // group_size
 
         self.qweight = Parameter(
             torch.empty(
@@ -31,7 +30,7 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
         )
         self.qzeros = Parameter(
             torch.empty(
-                num_groups,
+                self.input_size // group_size,
                 self.output_size_per_partition //
                 self.quant_config.pack_factor,
                 device="cuda",
@@ -41,7 +40,7 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
         )
         self.scales = Parameter(
             torch.empty(
-                num_groups,
+                self.input_size // group_size,
                 self.output_size_per_partition,
                 device="cuda",
                 dtype=dtype,
@@ -87,7 +86,6 @@ class GPTQRowParallelLinear(RowParallelLinear):
         group_size = self.quant_config.group_size
         if group_size == -1:
             group_size = self.input_size_per_partition
-        num_groups = self.input_size_per_partition // group_size
 
         self.qweight = Parameter(
             torch.empty(
@@ -100,7 +98,7 @@ class GPTQRowParallelLinear(RowParallelLinear):
         )
         self.qzeros = Parameter(
             torch.empty(
-                num_groups,
+                self.input_size_per_partition // group_size,
                 self.output_size // self.quant_config.pack_factor,
                 device="cuda",
                 dtype=torch.int32,
@@ -109,7 +107,7 @@ class GPTQRowParallelLinear(RowParallelLinear):
         )
         self.scales = Parameter(
             torch.empty(
-                num_groups,
+                self.input_size_per_partition // group_size,
                 self.output_size,
                 device="cuda",
                 dtype=dtype,
