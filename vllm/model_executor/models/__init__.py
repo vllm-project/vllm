@@ -14,12 +14,24 @@ from vllm.model_executor.models.mpt import MptForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
 from vllm.model_executor.models.chatglm import ChatGLMForCausalLM
+from vllm.model_executor.models.yi import YiForCausalLM
 
 __all__ = [
-    "AquilaForCausalLM", "BaiChuanForCausalLM", "BaichuanForCausalLM",
-    "BloomForCausalLM", "FalconForCausalLM", "GPT2LMHeadModel",
-    "GPTBigCodeForCausalLM", "GPTJForCausalLM", "GPTNeoXForCausalLM",
-    "InternLMForCausalLM", "LlamaForCausalLM", "MptForCausalLM",
-    "OPTForCausalLM", "QWenLMHeadModel", "MistralForCausalLM",
-    "ChatGLMForCausalLM"
+    "AquilaForCausalLM",
+    "BaiChuanForCausalLM",
+    "BaichuanForCausalLM",
+    "BloomForCausalLM",
+    "ChatGLMForCausalLM",
+    "FalconForCausalLM",
+    "GPT2LMHeadModel",
+    "GPTBigCodeForCausalLM",
+    "GPTJForCausalLM",
+    "GPTNeoXForCausalLM",
+    "InternLMForCausalLM",
+    "LlamaForCausalLM",
+    "MptForCausalLM",
+    "OPTForCausalLM",
+    "QWenLMHeadModel",
+    "MistralForCausalLM",
+    "YiForCausalLM",
 ]
