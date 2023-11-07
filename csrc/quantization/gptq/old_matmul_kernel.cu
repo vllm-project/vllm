@@ -1,13 +1,18 @@
 #include <torch/all.h>
 #include <torch/python.h>
 #include <c10/cuda/CUDAGuard.h>
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include "compat.cuh"
 
-const int BLOCKWIDTH  = 256;
-const int BLOCKHEIGHT =  32;
+#include "dispatch_utils.h"
+
+#define BLOCKWIDTH 256
+#define BLOCKHEIGHT 32
+
+namespace vllm {
+namespace gptq {
 
 __device__ inline unsigned int as_unsigned(int i) {
   return *reinterpret_cast<unsigned int*>(&i);
@@ -80,7 +85,10 @@ __global__ void VecQuant4MatMulKernel(
     }
 }
 
-void vecquant4matmul_cuda(
+} // namespace gptq
+} // namespace vllm
+
+void gptq_descact_matmul(
     torch::Tensor vec,
     torch::Tensor mat,
     torch::Tensor mul,
@@ -99,10 +107,10 @@ void vecquant4matmul_cuda(
         (width + BLOCKWIDTH - 1) / BLOCKWIDTH
     );
     dim3 threads(BLOCKWIDTH);
-
-    AT_DISPATCH_FLOATING_TYPES(
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    VLLM_DISPATCH_FLOATING_TYPES(
         vec.type(), "vecquant4matmul_cuda", ([&] {
-            VecQuant4MatMulKernel<<<blocks, threads>>>(
+            vllm::gptq::VecQuant4MatMulKernel<<<blocks, threads, 0, stream>>>(
                 vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
                 scales.data<scalar_t>(), zeros.data<int>(), g_idx.data<int>(),
                 batch, vec_height, height, width, zero_width
@@ -111,15 +119,5 @@ void vecquant4matmul_cuda(
     );
 }
 
-void gptq_descact_matmul(
-  torch::Tensor vec,
-  torch::Tensor mat,
-  torch::Tensor mul,
-  torch::Tensor scales,
-  torch::Tensor zeros,
-  torch::Tensor g_idx
-)
-{
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
-  vecquant4matmul_cuda(vec, mat, mul, scales, zeros, g_idx);
-}
+#undef BLOCKWIDTH
+#undef BLOCKHEIGHT
