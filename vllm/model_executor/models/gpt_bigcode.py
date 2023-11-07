@@ -32,15 +32,14 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.quantized_linear import ParallelLinear, Linear
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
-    load_padded_tensor_parallel_vocab, load_tensor_parallel_weights,
-    get_parallel_weight)
+    load_padded_tensor_parallel_vocab, load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
+from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
+                                                       ColumnParallelLinear,
+                                                       RowParallelLinear)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -48,9 +47,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 class GPTBigCodeAttention(nn.Module):
 
-    def __init__(self,
-                 config: GPTBigCodeConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
         total_num_heads = config.num_attention_heads
@@ -66,30 +63,31 @@ class GPTBigCodeAttention(nn.Module):
         if self.multi_query:
             self.num_kv_heads = 1
             self.kv_dim = self.head_dim
-            self.c_attn_q = ParallelLinear.column(self.hidden_size,
-                                                  self.hidden_size,
-                                                  bias=True,
-                                                  gather_output=False,
-                                                  quant_config=quant_config)
-            self.c_attn_kv = Linear.linear(self.hidden_size,
-                                           2 * self.kv_dim,
-                                           bias=True,
-                                           quant_config=quant_config)
+            self.c_attn_q = ColumnParallelLinear(
+                self.hidden_size,
+                self.hidden_size,
+                bias=True,
+                gather_output=False,
+            )
+            self.c_attn_kv = nn.Linear(self.hidden_size,
+                                       2 * self.kv_dim,
+                                       bias=True)
         else:
             self.num_kv_heads = self.num_heads
             self.kv_dim = self.num_kv_heads * self.head_dim
-            self.c_attn = ParallelLinear.column(self.hidden_size,
-                                                self.hidden_size +
-                                                2 * self.kv_dim,
-                                                bias=True,
-                                                gather_output=False,
-                                                quant_config=quant_config)
+            self.c_attn = ColumnParallelLinear(
+                self.hidden_size,
+                self.hidden_size + 2 * self.kv_dim,
+                bias=True,
+                gather_output=False,
+            )
 
-        self.c_proj = ParallelLinear.row(self.hidden_size,
-                                         self.hidden_size,
-                                         bias=True,
-                                         input_is_parallel=True,
-                                         quant_config=quant_config)
+        self.c_proj = RowParallelLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=True,
+            input_is_parallel=True,
+        )
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    scale=self.scale,
@@ -122,22 +120,25 @@ class GPTBigCodeAttention(nn.Module):
 
 class GPTBigMLP(nn.Module):
 
-    def __init__(self,
-                 intermediate_size: int,
-                 config: GPTBigCodeConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        intermediate_size: int,
+        config: GPTBigCodeConfig,
+    ):
         super().__init__()
         hidden_size = config.hidden_size
-        self.c_fc = ParallelLinear.column(hidden_size,
-                                          intermediate_size,
-                                          bias=True,
-                                          gather_output=False,
-                                          quant_config=quant_config)
-        self.c_proj = ParallelLinear.row(intermediate_size,
-                                         hidden_size,
-                                         bias=True,
-                                         input_is_parallel=True,
-                                         quant_config=quant_config)
+        self.c_fc = ColumnParallelLinear(
+            hidden_size,
+            intermediate_size,
+            bias=True,
+            gather_output=False,
+        )
+        self.c_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=True,
+            input_is_parallel=True,
+        )
         self.act = get_act_fn(config.activation_function)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -149,18 +150,16 @@ class GPTBigMLP(nn.Module):
 
 class GPTBigCodeBlock(nn.Module):
 
-    def __init__(self,
-                 config: GPTBigCodeConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         hidden_size = config.hidden_size
         inner_dim = (config.n_inner if config.n_inner is not None else 4 *
                      hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = GPTBigCodeAttention(config, quant_config)
+        self.attn = GPTBigCodeAttention(config)
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = GPTBigMLP(inner_dim, config, quant_config)
+        self.mlp = GPTBigMLP(inner_dim, config)
 
     def forward(
         self,
@@ -190,9 +189,7 @@ class GPTBigCodeBlock(nn.Module):
 
 class GPTBigCodeModel(nn.Module):
 
-    def __init__(self,
-                 config: GPTBigCodeConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         self.config = config
         assert not config.add_cross_attention
@@ -207,10 +204,8 @@ class GPTBigCodeModel(nn.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.wte = VocabParallelEmbedding(vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
-        self.h = nn.ModuleList([
-            GPTBigCodeBlock(config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.h = nn.ModuleList(
+            [GPTBigCodeBlock(config) for _ in range(config.num_hidden_layers)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -240,13 +235,10 @@ class GPTBigCodeModel(nn.Module):
 
 class GPTBigCodeForCausalLM(nn.Module):
 
-    def __init__(self,
-                 config: GPTBigCodeConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: GPTBigCodeConfig):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        self.transformer = GPTBigCodeModel(config, quant_config)
+        self.transformer = GPTBigCodeModel(config)
         # TODO(zhuohan): create a new weight after implementing pipeline
         #                parallelism
         self.lm_head_weight = self.transformer.wte.weight
@@ -266,20 +258,14 @@ class GPTBigCodeForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    column_parallel_layers = ["c_fc"]
-    row_parallel_layers = ["c_proj"]
+    _column_parallel_weights = ["c_fc.weight", "c_fc.bias"]
+    _row_parallel_weights = ["c_proj.weight"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        column_parallel_weights, row_parallel_weights = get_parallel_weight(
-            self)
-        column_weight_suffixes = (
-            self.quant_config.get_col_parallel_tensor_names()
-        ) if self.quant_config is not None else ["weight", "bias"]
-
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
@@ -299,47 +285,23 @@ class GPTBigCodeForCausalLM(nn.Module):
             if not name.startswith("transformer."):
                 name = "transformer." + name
 
-            packed_dim = None
-            is_transposed = False
-            if self.quant_config is not None:
-                packed_dim = self.quant_config.get_packed_dim(name)
-                is_transposed = self.quant_config.is_transposed(name)
-            if is_transposed:
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                loaded_weight = loaded_weight.T
-
             # For the fused QKV linear layer, manually shard the weights.
             if "c_attn" in name:
                 # GPT-2's fused QKV has the shape of
                 # [3 * num_heads * head_size, hidden_size].
                 # When tensor parallelism is used, we shard the weights along
                 # the head dimension.
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                if not any(
-                        name.endswith(suffix)
-                        for suffix in column_weight_suffixes):
-                    if self.config.multi_query:
-                        q_name = name.replace("c_attn", "c_attn_q")
-                        kv_name = name.replace("c_attn", "c_attn_kv")
-                        state_dict[q_name].data.copy_(loaded_weight)
-                        state_dict[kv_name].data.copy_(loaded_weight)
-                    else:
-                        state_dict[name].data.copy_(loaded_weight)
-                    continue
                 total_num_heads = self.config.num_attention_heads
                 total_num_kv_heads = (1 if self.config.multi_query else
                                       total_num_heads)
                 hidden_size = self.config.hidden_size
-                if packed_dim is not None:
-                    shard_dim = 0 if not is_transposed else 1
-                    if packed_dim == shard_dim:
-                        hidden_size //= self.quant_config.pack_factor
                 head_size = hidden_size // total_num_heads
                 total_kv_size = head_size * total_num_kv_heads
                 num_heads = total_num_heads // tensor_model_parallel_world_size
                 head_start = tensor_model_parallel_rank * num_heads
                 head_end = (tensor_model_parallel_rank + 1) * num_heads
 
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
                 wq, wk, wv = torch.split(
                     loaded_weight, [hidden_size, total_kv_size, total_kv_size],
                     dim=0)
@@ -357,29 +319,21 @@ class GPTBigCodeForCausalLM(nn.Module):
                     loaded_weight_kv = torch.cat([wk, wv], dim=0)
                     q_weight_name = name.replace("c_attn", "c_attn_q")
                     kv_weight_name = name.replace("c_attn", "c_attn_kv")
-                    q_param = state_dict[
-                        q_weight_name].T if is_transposed else state_dict[
-                            q_weight_name]
-                    kv_param = state_dict[
-                        kv_weight_name].T if is_transposed else state_dict[
-                            kv_weight_name]
-                    load_tensor_parallel_weights(q_param, loaded_weight_q,
+                    load_tensor_parallel_weights(state_dict[q_weight_name],
+                                                 loaded_weight_q,
                                                  q_weight_name,
-                                                 column_parallel_weights,
-                                                 row_parallel_weights,
+                                                 self._column_parallel_weights,
+                                                 self._row_parallel_weights,
                                                  tensor_model_parallel_rank)
-                    load_tensor_parallel_weights(kv_param, loaded_weight_kv,
+                    load_tensor_parallel_weights(state_dict[kv_weight_name],
+                                                 loaded_weight_kv,
                                                  kv_weight_name,
-                                                 column_parallel_weights,
-                                                 row_parallel_weights,
+                                                 self._column_parallel_weights,
+                                                 self._row_parallel_weights,
                                                  tensor_model_parallel_rank)
                     continue
 
-            if name not in state_dict:
-                continue
             param = state_dict[name]
-            if is_transposed:
-                param = param.T
 
             if name == "transformer.wte.weight":
                 load_padded_tensor_parallel_vocab(param, loaded_weight,
@@ -387,6 +341,6 @@ class GPTBigCodeForCausalLM(nn.Module):
                 continue
 
             load_tensor_parallel_weights(param, loaded_weight, name,
-                                         column_parallel_weights,
-                                         row_parallel_weights,
+                                         self._column_parallel_weights,
+                                         self._row_parallel_weights,
                                          tensor_model_parallel_rank)

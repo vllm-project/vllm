@@ -31,15 +31,13 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttentionWithALiBi
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.quantized_linear import ParallelLinear
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights,
-                                              convert_pyslice_to_tensor,
-                                              get_parallel_weight)
+                                              load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
+from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
+                                                       ColumnParallelLinear,
+                                                       RowParallelLinear)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -72,11 +70,7 @@ def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
 
 class BloomAttention(nn.Module):
 
-    def __init__(
-        self,
-        config: BloomConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self, config: BloomConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.total_num_heads = config.n_head
@@ -87,19 +81,17 @@ class BloomAttention(nn.Module):
         assert self.total_num_heads % tp_world_size == 0
         self.num_heads = self.total_num_heads // tp_world_size
 
-        self.query_key_value = ParallelLinear.column(
+        self.query_key_value = ColumnParallelLinear(
             self.hidden_size,
             3 * self.hidden_size,
             bias=True,
             gather_output=False,
-            quant_config=quant_config,
         )
-        self.dense = ParallelLinear.row(
+        self.dense = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
             input_is_parallel=True,
-            quant_config=quant_config,
         )
 
         # Create the alibi slopes and slice them.
@@ -133,25 +125,19 @@ class BloomAttention(nn.Module):
 
 class BloomMLP(nn.Module):
 
-    def __init__(
-        self,
-        config: BloomConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self, config: BloomConfig):
         super().__init__()
         hidden_size = config.hidden_size
-        self.dense_h_to_4h = ParallelLinear.column(
+        self.dense_h_to_4h = ColumnParallelLinear(
             hidden_size,
             4 * hidden_size,
             gather_output=False,
-            quant_config=quant_config,
         )
         self.act = get_act_fn("gelu")
-        self.dense_4h_to_h = ParallelLinear.row(
+        self.dense_4h_to_h = RowParallelLinear(
             4 * hidden_size,
             hidden_size,
             input_is_parallel=True,
-            quant_config=quant_config,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -163,18 +149,16 @@ class BloomMLP(nn.Module):
 
 class BloomBlock(nn.Module):
 
-    def __init__(self,
-                 config: BloomConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: BloomConfig):
         super().__init__()
         hidden_size = config.hidden_size
 
         self.input_layernorm = nn.LayerNorm(hidden_size,
                                             eps=config.layer_norm_epsilon)
-        self.self_attention = BloomAttention(config, quant_config)
+        self.self_attention = BloomAttention(config)
         self.post_attention_layernorm = nn.LayerNorm(
             hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = BloomMLP(config, quant_config)
+        self.mlp = BloomMLP(config)
         self.apply_residual_connection_post_layernorm = (
             config.apply_residual_connection_post_layernorm)
 
@@ -219,9 +203,7 @@ class BloomBlock(nn.Module):
 
 class BloomModel(nn.Module):
 
-    def __init__(self,
-                 config: BloomConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: BloomConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
 
@@ -234,10 +216,8 @@ class BloomModel(nn.Module):
             self.embed_dim, eps=config.layer_norm_epsilon)
 
         # Transformer blocks
-        self.h = nn.ModuleList([
-            BloomBlock(config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.h = nn.ModuleList(
+            [BloomBlock(config) for _ in range(config.num_hidden_layers)])
 
         # Final Layer Norm
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
@@ -271,13 +251,10 @@ class BloomModel(nn.Module):
 
 class BloomForCausalLM(nn.Module):
 
-    def __init__(self,
-                 config: BloomConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: BloomConfig):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        self.transformer = BloomModel(config, quant_config)
+        self.transformer = BloomModel(config)
         # TODO(zhuohan): create a new weight after implementing pipeline
         #                parallelism
         self.lm_head_weight = self.transformer.word_embeddings.weight
@@ -297,49 +274,32 @@ class BloomForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    column_parallel_layers = ["dense_h_to_4h"]
-    row_parallel_layers = ["dense", "dense_4h_to_h"]
-    parallel_vocab_layers = ["word_embeddings", "lm_head"]
+    _column_parallel_weights = [
+        "word_embeddings.weight", "dense_h_to_4h.weight", "dense_h_to_4h.bias"
+    ]
+    _row_parallel_weights = ["dense.weight", "dense_4h_to_h.weight"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        column_parallel_weights, row_parallel_weights = get_parallel_weight(
-            self)
-        column_weight_suffixes = (
-            self.quant_config.get_col_parallel_tensor_names()
-        ) if self.quant_config is not None else ["weight", "bias"]
-
-        tp_world_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
-
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            is_transposed = False
-            if self.quant_config is not None:
-                is_transposed = self.quant_config.is_transposed(name)
-            if is_transposed:
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                loaded_weight = loaded_weight.T
-
             if name == "lm_head.weight":
+                # Since hidden_states are parallelized, we need to
+                # load lm_head.weight in parallel.
+                self._column_parallel_weights.append(name)
                 # If lm_head is provided, use it instead.
                 param = self.lm_head_weight
             else:
                 if not name.startswith("transformer."):
                     name = "transformer." + name
-                if name not in state_dict:
-                    continue
                 param = state_dict[name]
-                if is_transposed:
-                    param = param.T
 
-            if "query_key_value" in name and any(
-                    name.endswith(suffix)
-                    for suffix in column_weight_suffixes):
+            if "query_key_value" in name:
                 # NOTE(woosuk): BLOOM's fused QKV has the shape of
                 # [num_heads * 3 * head_size, hidden_size], while the
                 # required shape is [3 * num_heads * head_size, hidden_size].
@@ -347,17 +307,22 @@ class BloomForCausalLM(nn.Module):
                 shard_size = param.shape[0]
                 start = shard_size * tp_rank
                 end = shard_size * (tp_rank + 1)
-
                 loaded_weight = loaded_weight[start:end]
 
-                num_heads = self.config.num_attention_heads // tp_world_size
-                weight_shape = loaded_weight.shape
-
-                loaded_weight = loaded_weight.view(num_heads, 3, -1,
-                                                   *weight_shape[1:])
-                loaded_weight = loaded_weight.transpose(0, 1)
-                loaded_weight = loaded_weight.reshape(-1, *weight_shape[1:])
-
+                num_heads = self.config.num_attention_heads
+                hidden_size = self.config.hidden_size
+                head_size = hidden_size // num_heads
+                if "query_key_value.weight" in name:
+                    loaded_weight = loaded_weight.view(-1, 3, head_size,
+                                                       hidden_size)
+                    loaded_weight = loaded_weight.transpose(0, 1)
+                    loaded_weight = loaded_weight.reshape(-1, hidden_size)
+                elif "query_key_value.bias" in name:
+                    loaded_weight = loaded_weight.view(-1, 3, head_size)
+                    loaded_weight = loaded_weight.transpose(0, 1)
+                    loaded_weight = loaded_weight.reshape(-1)
+                else:
+                    raise ValueError(f"Unexpected weight name: {name}")
             load_tensor_parallel_weights(param, loaded_weight, name,
-                                         column_parallel_weights,
-                                         row_parallel_weights, tp_rank)
+                                         self._column_parallel_weights,
+                                         self._row_parallel_weights, tp_rank)

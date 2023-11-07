@@ -30,15 +30,13 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.quantized_linear import ParallelLinear
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights,
-                                              convert_pyslice_to_tensor,
-                                              get_parallel_weight)
+                                              load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
+from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
+                                                       ColumnParallelLinear,
+                                                       RowParallelLinear)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -46,27 +44,23 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 class GPTJAttention(nn.Module):
 
-    def __init__(self,
-                 config: GPTJConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: GPTJConfig):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.total_num_heads
 
-        self.qkv_proj = ParallelLinear.column(
+        self.qkv_proj = ColumnParallelLinear(
             config.hidden_size,
             3 * config.hidden_size,
             bias=False,
             gather_output=False,
-            quant_config=quant_config,
         )
-        self.out_proj = ParallelLinear.row(
+        self.out_proj = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
             input_is_parallel=True,
-            quant_config=quant_config,
         )
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -108,23 +102,18 @@ class GPTJAttention(nn.Module):
 
 class GPTJMLP(nn.Module):
 
-    def __init__(self,
-                 intermediate_size: int,
-                 config: GPTJConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, intermediate_size: int, config: GPTJConfig):
         super().__init__()
         hidden_size = config.n_embd
-        self.fc_in = ParallelLinear.column(
+        self.fc_in = ColumnParallelLinear(
             hidden_size,
             intermediate_size,
             gather_output=False,
-            quant_config=quant_config,
         )
-        self.fc_out = ParallelLinear.row(
+        self.fc_out = RowParallelLinear(
             intermediate_size,
             hidden_size,
             input_is_parallel=True,
-            quant_config=quant_config,
         )
         self.act = get_act_fn(config.activation_function)
 
@@ -137,17 +126,15 @@ class GPTJMLP(nn.Module):
 
 class GPTJBlock(nn.Module):
 
-    def __init__(self,
-                 config: GPTJConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: GPTJConfig):
         super().__init__()
         if config.n_inner is None:
             inner_dim = 4 * config.n_embd
         else:
             inner_dim = config.n_inner
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
-        self.attn = GPTJAttention(config, quant_config)
-        self.mlp = GPTJMLP(inner_dim, config, quant_config)
+        self.attn = GPTJAttention(config)
+        self.mlp = GPTJMLP(inner_dim, config)
 
     def forward(
         self,
@@ -173,9 +160,7 @@ class GPTJBlock(nn.Module):
 
 class GPTJModel(nn.Module):
 
-    def __init__(self,
-                 config: GPTJConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: GPTJConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.n_embd
@@ -184,7 +169,7 @@ class GPTJModel(nn.Module):
             self.embed_dim,
         )
         self.h = nn.ModuleList(
-            [GPTJBlock(config, quant_config) for _ in range(config.n_layer)])
+            [GPTJBlock(config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -215,19 +200,15 @@ class GPTJModel(nn.Module):
 
 class GPTJForCausalLM(nn.Module):
 
-    def __init__(self,
-                 config: GPTJConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: GPTJConfig):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
         assert not config.tie_word_embeddings
-        self.transformer = GPTJModel(config, quant_config)
-        self.lm_head = ParallelLinear.column(
+        self.transformer = GPTJModel(config)
+        self.lm_head = ColumnParallelLinear(
             config.n_embd,
             config.vocab_size,
             gather_output=False,
-            quant_config=None,
         )
         self.sampler = Sampler(config.vocab_size)
 
@@ -245,21 +226,17 @@ class GPTJForCausalLM(nn.Module):
                                    input_metadata, self.lm_head.bias)
         return next_tokens
 
-    column_parallel_layers = ["fc_in", "lm_head"]
-    row_parallel_layers = ["out_proj", "fc_out"]
-    parallel_vocab_layers = ["wte", "lm_head"]
+    _column_parallel_weights = [
+        "wte.weight", "fc_in.weight", "fc_in.bias", "lm_head.weight",
+        "lm_head.bias"
+    ]
+    _row_parallel_weights = ["out_proj.weight", "fc_out.weight"]
 
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        column_parallel_weights, row_parallel_weights = get_parallel_weight(
-            self)
-        column_weight_suffixes = (
-            self.quant_config.get_col_parallel_tensor_names()
-        ) if self.quant_config is not None else ["weight", "bias"]
-
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
@@ -267,37 +244,17 @@ class GPTJForCausalLM(nn.Module):
             if "attn.bias" in name or "attn.masked_bias" in name:
                 continue
 
-            is_transposed = False
-            if self.quant_config is not None:
-                is_transposed = self.quant_config.is_transposed(name)
-            if is_transposed:
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                loaded_weight = loaded_weight.T
-
             is_attention_weight = False
             for stride_id, att_weight_name in enumerate(
                 ["q_proj", "k_proj", "v_proj"]):
                 if att_weight_name not in name:
                     continue
-                name = name.replace(att_weight_name, "qkv_proj")
-                if name not in state_dict:
-                    break
-                param = state_dict[name]
-                if is_transposed:
-                    param = param.T
-                if any(
-                        name.endswith(suffix)
-                        for suffix in column_weight_suffixes):
-                    shard_size = param.shape[0] // 3
-                    loaded_weight = loaded_weight[shard_size *
-                                                  tp_rank:shard_size *
-                                                  (tp_rank + 1)]
-                    param_slice = param.data[shard_size *
-                                             stride_id:shard_size *
-                                             (stride_id + 1)]
-                else:
-                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                    param_slice = param.data
+                param = state_dict[name.replace(att_weight_name, "qkv_proj")]
+                shard_size = param.shape[1]
+                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
+                                              (tp_rank + 1)]
+                param_slice = param.data[shard_size * stride_id:shard_size *
+                                         (stride_id + 1)]
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_attention_weight = True
@@ -305,11 +262,7 @@ class GPTJForCausalLM(nn.Module):
             if is_attention_weight:
                 continue
 
-            if name not in state_dict:
-                continue
             param = state_dict[name]
-            if is_transposed:
-                param = param.T
             load_tensor_parallel_weights(param, loaded_weight, name,
-                                         column_parallel_weights,
-                                         row_parallel_weights, tp_rank)
+                                         self._column_parallel_weights,
+                                         self._row_parallel_weights, tp_rank)
