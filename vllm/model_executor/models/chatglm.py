@@ -373,8 +373,8 @@ class ChatGLMForCausalLM(nn.Module):
                     q_offset = q_proj_shard_size * tp_rank
                     k_offset = (q_proj_shard_size * tp_size +
                                 kv_proj_shard_size * tp_rank)
-                    v_offset = q_proj_shard_size * tp_size + \
-                        kv_proj_shard_size * (tp_size + tp_rank)
+                    v_offset = (q_proj_shard_size * tp_size +
+                                kv_proj_shard_size * (tp_size + tp_rank))
                     wq = loaded_weight[q_offset:q_offset + q_proj_shard_size]
                     wk = loaded_weight[k_offset:k_offset + kv_proj_shard_size]
                     wv = loaded_weight[v_offset:v_offset + kv_proj_shard_size]
