@@ -365,7 +365,8 @@ class MistralForCausalLM(nn.Module):
                     # NOTE: Here we assume that the g_idx tensor is the same
                     # for the q, k, and v layers.
                     if weight_name == "q_proj":
-                        param.data.copy_(convert_pyslice_to_tensor(loaded_weight))
+                        param.data.copy_(
+                            convert_pyslice_to_tensor(loaded_weight))
                     is_attention_weight = True
                     break
 
@@ -399,7 +400,8 @@ class MistralForCausalLM(nn.Module):
                     # NOTE: Here we assume that the g_idx tensor is the same
                     # for the gate and up layers.
                     if weight_name == "gate_proj":
-                        param.data.copy_(convert_pyslice_to_tensor(loaded_weight))
+                        param.data.copy_(
+                            convert_pyslice_to_tensor(loaded_weight))
                     is_gate_up_weight = True
                     break
 
