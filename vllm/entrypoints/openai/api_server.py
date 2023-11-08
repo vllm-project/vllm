@@ -13,7 +13,8 @@ import uvicorn
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response
+from packaging import version
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -104,6 +105,12 @@ async def check_length(
         return input_ids, None
 
 
+@app.get("/health")
+async def health() -> Response:
+    """Health check."""
+    return Response(status_code=200)
+
+
 @app.get("/v1/models")
 async def show_available_models():
     """Show available models. Right now we only have one model."""
@@ -171,6 +178,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     request_id = f"cmpl-{random_uuid()}"
     created_time = int(time.monotonic())
     try:
+        spaces_between_special_tokens = request.spaces_between_special_tokens
         sampling_params = SamplingParams(
             n=request.n,
             presence_penalty=request.presence_penalty,
@@ -185,6 +193,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             ignore_eos=request.ignore_eos,
             use_beam_search=request.use_beam_search,
             skip_special_tokens=request.skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -372,6 +381,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
     created_time = int(time.monotonic())
     try:
+        spaces_between_special_tokens = request.spaces_between_special_tokens
         sampling_params = SamplingParams(
             n=request.n,
             best_of=request.best_of,
@@ -387,6 +397,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
             skip_special_tokens=request.skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
