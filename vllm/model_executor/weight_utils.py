@@ -280,7 +280,7 @@ def load_padded_tensor_parallel_vocab(
     end_idx = (tensor_model_parallel_rank + 1) * shard_size
     loaded_weight = loaded_weight[start_idx:end_idx]
     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-    param.data[:loaded_weight.shape[0]].copy_(loaded_weight)
+    param[:loaded_weight.shape[0]].copy_(loaded_weight)
 
 
 def load_tensor_parallel_weights(
