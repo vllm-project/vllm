@@ -12,6 +12,7 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
         assert self.input_size % self.quant_config.pack_factor == 0
+        assert self.input_size % self.quant_config.group_size == 0
         assert (self.output_size_per_partition %
                 self.quant_config.pack_factor == 0)
 
