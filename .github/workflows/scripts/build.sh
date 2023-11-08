@@ -11,7 +11,7 @@ LD_LIBRARY_PATH=${cuda_home}/lib64:$LD_LIBRARY_PATH
 $python_executable -m pip install wheel packaging
 $python_executable -m pip install -r requirements.txt
 
-# Limit the number of jobs to avoid OOM
+# Limit the number of parallel jobs to avoid OOM
 export MAX_JOBS=1
 
 # Build
