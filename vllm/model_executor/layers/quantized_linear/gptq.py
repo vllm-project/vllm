@@ -120,10 +120,8 @@ class GPTQRowParallelLinear(RowParallelLinear):
         start_idx = self.tp_rank * self.input_size_per_partition
         self.g_idx = Parameter(
             torch.tensor(
-                [
-                    (start_idx + i) // group_size
-                    for i in range(self.input_size_per_partition)
-                ],
+                [(start_idx + i) // group_size
+                 for i in range(self.input_size_per_partition)],
                 device="cuda",
                 dtype=torch.int32,
             ),
