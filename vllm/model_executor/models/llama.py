@@ -355,6 +355,15 @@ class LlamaForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
+            # Skip loading bias if the model does not use it and the loaded
+            # bias is all zeros.
+            # This is to avoid loading errors for some GPTQ models.
+            if name.endswith(".bias"):
+                if name not in state_dict:
+                    weight_tensor = convert_pyslice_to_tensor(loaded_weight)
+                    if torch.all(weight_tensor == 0):
+                        continue
+
             packed_dim = None
             is_transposed = False
             if self.quant_config is not None:
@@ -371,6 +380,14 @@ class LlamaForCausalLM(nn.Module):
                 param = state_dict[name.replace(weight_name, "qkv_proj")]
                 if is_transposed:
                     param = param.T
+                # FIXME(woosuk): This is a hack. Fix this.
+                if name.endswith(".g_idx"):
+                    # NOTE: Here we assume that the g_idx tensor is the same
+                    # for the q, k, and v layers.
+                    if weight_name == "q_proj":
+                        param.data.copy_(convert_pyslice_to_tensor(loaded_weight))
+                    is_attention_weight = True
+                    break
 
                 if packed_dim is not None:
                     shard_dim = 0 if not is_transposed else 1
@@ -401,6 +418,14 @@ class LlamaForCausalLM(nn.Module):
                 param = state_dict[name.replace(weight_name, "gate_up_proj")]
                 if is_transposed:
                     param = param.T
+                # FIXME(woosuk): This is a hack. Fix this.
+                if name.endswith(".g_idx"):
+                    # NOTE: Here we assume that the g_idx tensor is the same
+                    # for the gate and up layers.
+                    if weight_name == "gate_proj":
+                        param.data.copy_(convert_pyslice_to_tensor(loaded_weight))
+                    is_gate_up_weight = True
+                    break
 
                 shard_size = param.shape[0] // 2
                 loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
