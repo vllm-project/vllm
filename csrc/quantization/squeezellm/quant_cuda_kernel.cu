@@ -1,4 +1,5 @@
-#include <torch/extension.h>
+#include <torch/all.h>
+#include <torch/python.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -135,10 +136,10 @@ void squeezellm_gemm(
   dim3 threads(BLOCKWIDTH);
 
   vllm::squeezellm::NUQ4MatMulKernel<<<blocks, threads>>>(
-    (half2*) vec.data_ptr<at::Half>(),
+    (half2*) vec.data<at::Half>(),
     mat.data_ptr<int>(),
-    (half2*) mul.data_ptr<at::Half>(),
-    (__half*) lookup_table.data_ptr<at::Half>(),
+    (half2*) mul.data<at::Half>(),
+    (__half*) lookup_table.data<at::Half>(),
     height, width, batch, vec_height
   );
 }
