@@ -11,15 +11,6 @@ def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
          SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1)),
         ("To be or not to be,",
          SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
-        ("What is the meaning of life?",
-         SamplingParams(n=2,
-                        best_of=5,
-                        temperature=0.8,
-                        top_p=0.95,
-                        frequency_penalty=0.1)),
-        ("It is only with the heart that one can see rightly",
-         SamplingParams(n=3, best_of=3, use_beam_search=True,
-                        temperature=0.0)),
     ]
 
 
@@ -60,3 +51,22 @@ if __name__ == '__main__':
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     main(args)
+
+
+    # from transformers import AutoTokenizer, AutoModelForCausalLM
+    # import torch 
+    # model = AutoModelForCausalLM.from_pretrained(
+    # "facebook/opt-125m").cuda()
+    # tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
+    # prompts = ["What is your name?", "Hello"]
+    # input_ids = tokenizer(prompts, 
+    #                   return_tensors='pt',
+    #                   padding="max_length",
+    #                   max_length=30,
+    #                   truncation=True,
+    #                   ).input_ids.cuda()
+    # print(input_ids.shape)
+    # ref_generated = model.generate(
+    # input_ids=input_ids, max_new_tokens=5)[:, input_ids.shape[1]:]
+    # print(ref_generated)
+    

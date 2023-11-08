@@ -1,11 +1,17 @@
 from vllm.config import SpecDecConfig
 from vllm.model_executor import get_model
 from vllm.sequence import SequenceGroupMetadata
-from transformers import AutoModel
+from transformers import AutoModelForCausalLM
 import torch
 from typing import List
 from vllm.sequence import SamplerOutput
 from vllm.worker.worker import Worker
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+# FIXME: we should get pad_token_id from tokenizer
+PAD_TOKEN_ID = 0
 
 class SpecDecWorker(Worker):
     def __init__(self, config: SpecDecConfig) -> None:
@@ -13,30 +19,46 @@ class SpecDecWorker(Worker):
         self.draft_model_config = config.draft_model_config
         
         # self.draft_model = get_model(self.draft_model_config)
-        self.draft_model = AutoModel(self.draft_model_config.model)
+        logger.info(
+            "Initializing speculative decoding worker: "
+            f"model={self.draft_model_config.model!r}, "
+            f"tokenizer={self.draft_model_config.tokenizer!r}, "
+            f"propose_cnt={self.propose_cnt}, "
+            f"seed={self.draft_model_config.seed})")
+        self.draft_model = AutoModelForCausalLM.from_pretrained(self.draft_model_config.model).cuda()
         
         ##### values to be set
         self.draft_probs = None
         self.draft_kvs = None # if we use hf stype kvs
     
+    @staticmethod
+    def _pad_left_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
+        return [pad] * (max_len - len(x)) + x
+
     def _prepare_inputs(self, 
                         seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[torch.Tensor]:
         input_ids_list = []
         for seq_group_metadata in seq_group_metadata_list:
-            seq = seq_group_metadata.seq_data[0]
-            assert len(seq) == 1, "Speculative Decoding does nor beam search for now"
+            assert len(seq_group_metadata.seq_data) == 1, f"Speculative Decoding does nor beam search for now: {len(seq_group_metadata.seq_data)}"
+            seq_id = next(iter(seq_group_metadata.seq_data))
+            seq = seq_group_metadata.seq_data[seq_id]
             input_ids_list.append(seq.get_token_ids())
-        return input_ids_list 
+        max_len = max([len(input_ids) for input_ids in input_ids_list])
+        input_ids_list = [SpecDecWorker._pad_left_to_max(input_ids, max_len, PAD_TOKEN_ID) for input_ids in input_ids_list]
+        return torch.tensor(input_ids_list, dtype=torch.long, device='cuda')
     
     def set_draft_tokens(self,
                 seq_group_list: List[SequenceGroupMetadata]) -> torch.Tensor:
-        input_ids = self._prepare_inputs(seq_group_list)
+        input_tensor = self._prepare_inputs(seq_group_list)
         # recompute for now
-        draft_tokens = self.draft_model.generate(input_ids=input_ids,
-                                  attention_mask=(input_ids != -1),
-                                  max_new_tokens = self.propose_cnt)[:, input_ids.shape[-1]:]
+        attention_mask=(input_tensor != PAD_TOKEN_ID)
+        draft_tokens = self.draft_model.generate(input_ids=input_tensor,
+                                  attention_mask=attention_mask,
+                                  max_new_tokens=self.propose_cnt)[:, input_tensor.shape[1]:]
+        logger.info(f"Draft tokens: {draft_tokens}")
         for i, seq_group_metadata in enumerate(seq_group_list):
-            seq = seq_group_metadata.seq_data[0]
+            seq_id = next(iter(seq_group_metadata.seq_data))
+            seq = seq_group_metadata.seq_data[seq_id]
             seq.draft_token_ids = draft_tokens[i]
         
         return draft_tokens

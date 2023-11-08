@@ -103,7 +103,7 @@ class Worker:
             )
             seqs.append(seq)
 
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, input_positions, input_metadata, _ = self._prepare_inputs(
             seqs)
 
         # Execute the model.
@@ -114,6 +114,7 @@ class Worker:
             kv_caches=[(None, None)] * num_layers,
             input_metadata=input_metadata,
             cache_events=None,
+            draft_tokens=None,
         )
 
         # Calculate the number of blocks that can be allocated with the
@@ -214,7 +215,7 @@ class Worker:
         max_seq_len = max(prompt_lens) if prompt_lens else 1
         for seq_group_metadata in seq_group_metadata_list:
             
-            draft_tokens.append(seq_group_metadata.seq_data[0].draft_token_ids)
+            #  draft_tokens.append(seq_group_metadata.seq_data[0].draft_token_ids)
             
             if seq_group_metadata.is_prompt:
                 # We need to do this in this loop as we need to know max_seq_len
@@ -330,7 +331,7 @@ class Worker:
             categorized_sample_indices=categorized_sample_indices,
             sliding_window=self.sliding_window,
         )
-        return tokens_tensor, positions_tensor, input_metadata
+        return tokens_tensor, positions_tensor, input_metadata, draft_tokens
 
     @torch.inference_mode()
     def execute_model(
