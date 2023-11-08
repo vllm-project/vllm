@@ -63,22 +63,6 @@ class AWQConfig(QuantizationConfig):
         zero_point = cls.get_from_keys(config, ["zero_point"])
         return cls(weight_bits, group_size, zero_point)
 
-    @classmethod
-    def get_packed_tensors(cls) -> Dict[str, int]:
-        return {"qweight": 1, "qzeros": 1}
-
-    @classmethod
-    def get_transposed_tensor_names(cls) -> List[str]:
-        return ["qweight", "qzeros", "scales"]
-
-    @classmethod
-    def get_col_parallel_tensor_names(cls) -> List[str]:
-        return ["qweight", "qzeros", "scales"]
-
-    @classmethod
-    def get_row_parallel_tensor_names(cls) -> List[str]:
-        return ["qweight", "qzeros", "scales"]
-
     def get_linear_method(self) -> "AWQLinearMethod":
         return AWQLinearMethod(self)
 
@@ -114,13 +98,14 @@ class AWQLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        set_weight_attrs(qweight, {
-            "input_dim": 0,
-            "output_dim": 1,
-            "packed_dim": 1,
-            "pack_factor": self.quant_config.pack_factor,
-            **weight_attrs,
-        })
+        set_weight_attrs(
+            qweight, {
+                "input_dim": 0,
+                "output_dim": 1,
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor,
+                **weight_attrs,
+            })
         qzeros = Parameter(
             torch.empty(
                 input_size // self.quant_config.group_size,
@@ -130,13 +115,14 @@ class AWQLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        set_weight_attrs(qzeros, {
-            "input_dim": 0,
-            "output_dim": 1,
-            "packed_dim": 1,
-            "pack_factor": self.quant_config.pack_factor,
-            **weight_attrs,
-        })
+        set_weight_attrs(
+            qzeros, {
+                "input_dim": 0,
+                "output_dim": 1,
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor,
+                **weight_attrs,
+            })
         scales = Parameter(
             torch.empty(
                 input_size // self.quant_config.group_size,

@@ -4,7 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import quantization_ops
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               set_weight_attrs)
 from vllm.model_executor.quantization_utils.base import QuantizationConfig
 
 
@@ -76,8 +77,12 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: SqueezeLLMConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, module: torch.nn.Module, input_size: int,
-                       output_size: int, params_dtype: torch.dtype) -> None:
+    def create_weights(self,
+                       module: torch.nn.Module,
+                       input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype,
+                       weight_attrs: dict[str, Any] = None) -> None:
         if input_size % self.quant_config.pack_factor != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
@@ -92,6 +97,14 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
+        set_weight_attrs(
+            qweight, {
+                "input_dim": 0,
+                "output_dim": 1,
+                "packed_dim": 0,
+                "pack_factor": self.quant_config.pack_factor,
+                **weight_attrs,
+            })
         lookup_table = Parameter(
             torch.empty(
                 output_size,
@@ -101,6 +114,11 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
+        set_weight_attrs(lookup_table, {
+            "output_dim": 0,
+            **weight_attrs,
+        })
+
         module.register_parameter("qweight", qweight)
         module.register_parameter("lookup_table", lookup_table)
 
