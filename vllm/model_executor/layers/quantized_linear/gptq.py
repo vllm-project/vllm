@@ -48,6 +48,8 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
             ),
             requires_grad=False,
         )
+        # Initialize g_idx to be sequential.
+        # This is required because old GPTQ models may not have g_idx.
         self.g_idx = Parameter(
             torch.tensor(
                 [i // group_size for i in range(self.input_size)],
@@ -97,7 +99,7 @@ class GPTQRowParallelLinear(RowParallelLinear):
         )
         self.qzeros = Parameter(
             torch.empty(
-                self.input_size_per_partition // group_size,
+                self.input_size // group_size,
                 self.output_size // self.quant_config.pack_factor,
                 device="cuda",
                 dtype=torch.int32,
@@ -106,17 +108,20 @@ class GPTQRowParallelLinear(RowParallelLinear):
         )
         self.scales = Parameter(
             torch.empty(
-                self.input_size_per_partition // group_size,
+                self.input_size // group_size,
                 self.output_size,
                 device="cuda",
                 dtype=dtype,
             ),
             requires_grad=False,
         )
+        # Initialize g_idx to be sequential.
+        # This is required because old GPTQ models may not have g_idx.
+        start_idx = self.tp_rank * self.input_size_per_partition
         self.g_idx = Parameter(
             torch.tensor(
                 [
-                    i // group_size
+                    (start_idx + i) // group_size
                     for i in range(self.input_size_per_partition)
                 ],
                 device="cuda",

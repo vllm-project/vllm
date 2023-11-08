@@ -125,6 +125,7 @@ class ColumnParallelLinear(torch.nn.Module):
         self.gather_output = gather_output
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.skip_bias_add = skip_bias_add
         self.quant_config = quant_config
@@ -233,6 +234,7 @@ class RowParallelLinear(torch.nn.Module):
 
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.skip_bias_add = skip_bias_add
         self.quant_config = quant_config
