@@ -77,7 +77,8 @@ class SpecDecWorker(Worker):
 def _prob_accept(draft_probs: torch.Tensor, 
                 target_probs: torch.Tensor):
     p = draft_probs
-    q = target_probs[:, :-1]
+    q = target_probs[:, :-1, :]
+    # shape: [batch_size, propose_cnt, vocab_size]
     assert p.shape == q.shape
     accept_draft_prob = torch.minimum(torch.ones(()), q / p)
     rejected_locations = (
