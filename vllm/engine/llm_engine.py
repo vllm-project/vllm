@@ -12,8 +12,8 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupMetadata, SequenceOutputs,
-                           SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupOutputs,
+                           SequenceOutputs, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
@@ -356,9 +356,15 @@ class LLMEngine:
                         eos_token_id=self.tokenizer.eos_token_id))
         return current_worst_score >= highest_attainable_score
 
-    def _process_sequence_group_samples(
-            self, seq_group: SequenceGroup,
-            samples: List[SequenceOutputs]) -> None:
+    def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
+                                        outputs: SequenceGroupOutputs) -> None:
+        # Process prompt logprobs
+        prompt_logprobs = outputs.prompt_logprobs
+        if prompt_logprobs is not None:
+            seq_group.prompt_logprobs = prompt_logprobs
+
+        # Process samples
+        samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         existing_finished_seqs = seq_group.get_finished_seqs()
         parent_child_dict = {
@@ -526,8 +532,8 @@ class LLMEngine:
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-        for seq_group, samples in zip(scheduled_seq_groups, output):
-            self._process_sequence_group_samples(seq_group, samples)
+        for seq_group, outputs in zip(scheduled_seq_groups, output):
+            self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
@@ -643,8 +649,7 @@ class LLMEngine:
                     f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         self.last_logging_time = now
 
-    def _decode_sequence(self, seq: Sequence,
-                         sampling_params: SamplingParams) -> None:
+    def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
@@ -653,7 +658,8 @@ class LLMEngine:
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
-             skip_special_tokens=sampling_params.skip_special_tokens,
+             skip_special_tokens=prms.skip_special_tokens,
+             spaces_between_special_tokens=prms.spaces_between_special_tokens,
          )
         if seq.tokens is None:
             seq.tokens = new_tokens
