@@ -57,7 +57,7 @@ class GPTQConfig(QuantizationConfig):
 
     @classmethod
     def get_packed_tensors(cls) -> Dict[str, int]:
-        return {"qweight": 1, "qzeros": 1}
+        return {"qweight": 0, "qzeros": 1}
 
     @classmethod
     def get_transposed_tensor_names(cls) -> List[str]:
@@ -69,4 +69,4 @@ class GPTQConfig(QuantizationConfig):
 
     @classmethod
     def get_row_parallel_tensor_names(cls) -> List[str]:
-        return ["qweight", "qzeros", "scales", "g_idx"]
+        return ["qweight", "g_idx"]
