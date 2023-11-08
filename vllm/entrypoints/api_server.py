@@ -34,8 +34,21 @@ async def generate(request: Request) -> Response:
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
-    stream = request_dict.pop("stream", False)
-    sampling_params = SamplingParams(**request_dict)
+    stream = bool(request_dict.pop("stream", False))
+    
+    # Validation
+    if prompt is None or len(prompt) == 0:
+        return Response(status_code=400, content="Missing prompt")
+        
+    try:
+        sampling_params = SamplingParams(**request_dict)
+    except TypeError as e:
+        return Response(status_code=400,
+                        content=f"Unknown sampling parameter(s): {e}")
+    except (ValueError, KeyError) as e:
+        return Response(status_code=400,
+                        content=f"Invalid sampling parameter(s): {e}")
+
     request_id = random_uuid()
 
     results_generator = engine.generate(prompt, sampling_params, request_id)
