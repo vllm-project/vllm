@@ -64,13 +64,12 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         output = torch.zeros((reshaped_x.shape[0], self.qweight.shape[-1]),
-                             dtype=torch.float32,
+                             dtype=x.dtype,
                              device=x.device)
-        quantization_ops.gptq_descact_matmul(reshaped_x.float(),
+        quantization_ops.gptq_descact_matmul(reshaped_x,
                                              self.qweight, output,
-                                             self.scales.float(), self.qzeros,
+                                             self.scales, self.qzeros,
                                              self.g_idx)
-        output = output.half()
         if bias is not None:
             output = output + bias
         return output.reshape(out_shape)
@@ -129,13 +128,11 @@ class GPTQRowParallelLinear(RowParallelLinear):
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
-        # FIXME: Do not cast to float32.
         output = torch.zeros((reshaped_x.shape[0], self.qweight.shape[-1]),
-                             dtype=torch.float32,
+                             dtype=x.dtype,
                              device=x.device)
-        quantization_ops.gptq_descact_matmul(reshaped_x.float(),
+        quantization_ops.gptq_descact_matmul(reshaped_x,
                                              self.qweight, output,
-                                             self.scales.float(), self.qzeros,
+                                             self.scales, self.qzeros,
                                              self.g_idx)
-        output = output.half()
         return output.reshape(out_shape)
