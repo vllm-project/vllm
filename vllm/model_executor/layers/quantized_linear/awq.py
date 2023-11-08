@@ -4,7 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import quantization_ops
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               set_weight_attrs)
 from vllm.model_executor.quantization_utils.base import QuantizationConfig
 
 
@@ -87,8 +88,12 @@ class AWQLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, module: torch.nn.Module, input_size: int,
-                       output_size: int, params_dtype: torch.dtype) -> None:
+    def create_weights(self,
+                       module: torch.nn.Module,
+                       input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype,
+                       weight_attrs: dict[str, Any] = None) -> None:
         if input_size % self.quant_config.group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
@@ -109,6 +114,13 @@ class AWQLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
+        set_weight_attrs(qweight, {
+            "input_dim": 0,
+            "output_dim": 1,
+            "packed_dim": 1,
+            **weight_attrs,
+        })
+        set_weight_attrs(qweight, weight_attrs)
         qzeros = Parameter(
             torch.empty(
                 input_size // self.quant_config.group_size,
@@ -118,6 +130,12 @@ class AWQLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
+        set_weight_attrs(qzeros, {
+            "input_dim": 0,
+            "output_dim": 1,
+            "packed_dim": 1,
+            **weight_attrs,
+        })
         scales = Parameter(
             torch.empty(
                 input_size // self.quant_config.group_size,
@@ -127,6 +145,11 @@ class AWQLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
+        set_weight_attrs(qzeros, {
+            "input_dim": 0,
+            "output_dim": 1,
+            **weight_attrs,
+        })
         module.register_parameter("qweight", qweight)
         module.register_parameter("qzeros", qzeros)
         module.register_parameter("scales", scales)

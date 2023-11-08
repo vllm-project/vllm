@@ -13,6 +13,8 @@ import torch
 from tqdm.auto import tqdm
 
 from vllm.logger import init_logger
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.quantization_utils import get_quant_class
 from vllm.model_executor.quantization_utils.base import QuantizationConfig
 
@@ -263,46 +265,55 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
 
 
 def load_padded_tensor_parallel_vocab(
-    param: torch.Tensor,
-    loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
-    tensor_model_parallel_rank: int,
+        param: torch.Tensor,
+        loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
 ) -> None:
+    tp_rank = get_tensor_model_parallel_rank()
     shard_size = param.shape[0]
-    start_idx = tensor_model_parallel_rank * shard_size
-    end_idx = (tensor_model_parallel_rank + 1) * shard_size
+    start_idx = tp_rank * shard_size
+    end_idx = (tp_rank + 1) * shard_size
     loaded_weight = loaded_weight[start_idx:end_idx]
     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-    param[:loaded_weight.shape[0]].copy_(loaded_weight)
+    param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
 
 
 def load_tensor_parallel_weights(
     param: torch.Tensor,
     loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
-    param_name: str,
-    column_parallel_weight_names: List[str],
-    row_parallel_weight_names: List[str],
-    tensor_model_parallel_rank: int,
+    output_slice_offset: Optional[int] = None,
+    output_slice_size: Optional[int] = None,
 ) -> None:
-    for p in column_parallel_weight_names:
-        if p in param_name:
-            shard_size = param.shape[0]
-            start_idx = tensor_model_parallel_rank * shard_size
-            end_idx = (tensor_model_parallel_rank + 1) * shard_size
-            loaded_weight = loaded_weight[start_idx:end_idx]
-            break
-    for p in row_parallel_weight_names:
-        if p in param_name:
-            shard_size = param.shape[1]
-            start_idx = tensor_model_parallel_rank * shard_size
-            end_idx = (tensor_model_parallel_rank + 1) * shard_size
-            loaded_weight = loaded_weight[:, start_idx:end_idx]
-            break
+    tp_rank = get_tensor_model_parallel_rank()
+    tp_size = get_tensor_model_parallel_world_size()
+    param_data = param.data
+    if output_slice_offset is not None and output_slice_size is not None:
+        output_dim = getattr(param, "output_dim", None)
+        assert output_dim is not None
+        output_slice_offset = output_slice_offset // tp_size
+        output_slice_size = output_slice_size // tp_size
+        param_data = param_data.narrow(output_dim, output_slice_offset,
+                                       output_slice_size)
 
     loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-    assert param.shape == loaded_weight.shape, (
-        f"{param_name} shape mismatch between model and checkpoint: "
-        f"{param.shape} != {loaded_weight.shape}")
-    param.data.copy_(loaded_weight)
+    if getattr(param, "output_dim_parallel", False):
+        output_dim = getattr(param, "output_dim", None)
+        if output_dim is not None:
+            shard_size = param_data.shape[output_dim]
+            start_idx = tp_rank * shard_size
+            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                                                 shard_size)
+    if getattr(param, "input_dim_parallel", False):
+        input_dim = getattr(param, "input_dim", None)
+        if input_dim is not None:
+            shard_size = param_data.shape[input_dim]
+            start_idx = tp_rank * shard_size
+            loaded_weight = loaded_weight.narrow(input_dim, start_idx,
+                                                 shard_size)
+
+    assert param_data.shape == loaded_weight.shape, (
+        f"shape mismatch between model and checkpoint: "
+        f"{param_data.shape} != {loaded_weight.shape}")
+    param_data.copy_(loaded_weight)
 
 
 def initialize_dummy_weights(

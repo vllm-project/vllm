@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -18,11 +18,25 @@ from vllm.model_executor.parallel_utils.utils import (
 )
 
 
+def set_weight_attrs(weight: torch.Tensor, weight_attrs: Optional[dict[str,
+                                                                       Any]]):
+    if weight_attrs is None:
+        return
+    for key, value in weight_attrs.items():
+        assert not hasattr(
+            weight, key), (f"Overwriting existing tensor attribute: {key}")
+        setattr(weight, key, value)
+
+
 class LinearMethodBase(ABC):
 
     @abstractmethod
-    def create_weights(self, module: torch.nn.Module, input_size: int,
-                       output_size: int, params_dtype: torch.dtype) -> None:
+    def create_weights(self,
+                       module: torch.nn.Module,
+                       input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype,
+                       weight_attrs: dict[str, Any] = None) -> None:
         del module
         raise NotImplementedError
 
@@ -40,14 +54,24 @@ class FullPrecisionLinearMethod(LinearMethodBase):
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add
 
-    def create_weights(self, module: torch.nn.Module, input_size: int,
-                       output_size: int, params_dtype: torch.dtype) -> None:
+    def create_weights(self,
+                       module: torch.nn.Module,
+                       input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype,
+                       weight_attrs: dict[str, Any] = None) -> None:
         weight = Parameter(torch.empty(output_size,
                                        input_size,
                                        device=torch.cuda.current_device(),
                                        dtype=params_dtype),
                            requires_grad=False)
+        set_weight_attrs(weight, {
+            "input_dim": 1,
+            "output_dim": 0,
+            **weight_attrs
+        })
         module.register_parameter("weight", weight)
+        #print("dir(module.weight):", dir(module.weight))
 
     def apply_weights(self,
                       module: torch.nn.Module,
@@ -90,6 +114,7 @@ class ReplicatedLinear(torch.nn.Module):
                 torch.empty(self.output_size,
                             device=torch.cuda.current_device(),
                             dtype=self.params_dtype))
+            set_weight_attrs(self.bias, {"output_dim": 0})
         else:
             self.register_parameter('bias', None)
 
@@ -150,12 +175,17 @@ class ColumnParallelLinear(torch.nn.Module):
         self.linear_method = linear_method
         self.linear_method.create_weights(self, self.input_size,
                                           self.output_size_per_partition,
-                                          self.params_dtype)
+                                          self.params_dtype,
+                                          {"output_dim_parallel": True})
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
                             device=torch.cuda.current_device(),
                             dtype=params_dtype))
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "output_dim_parallel": True
+            })
         else:
             self.register_parameter('bias', None)
 
@@ -239,7 +269,8 @@ class RowParallelLinear(torch.nn.Module):
             linear_method = FullPrecisionLinearMethod()
         self.linear_method = linear_method
         self.linear_method.create_weights(self, self.input_size_per_partition,
-                                          self.output_size, self.params_dtype)
+                                          self.output_size, self.params_dtype,
+                                          {"input_dim_parallel": True})
 
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError('When not reduce the results, adding bias to the '
@@ -250,6 +281,10 @@ class RowParallelLinear(torch.nn.Module):
                 torch.empty(self.output_size,
                             device=torch.cuda.current_device(),
                             dtype=params_dtype))
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "input_dim_parallel": True
+            })
         else:
             self.register_parameter('bias', None)
 

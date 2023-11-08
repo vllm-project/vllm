@@ -312,123 +312,58 @@ class LlamaForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_layers = []
-    _row_parallel_layers = ["o_proj", "down_proj"]
-
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        if self.quant_config is None:
-            col_weight_suffixes = ["weight"]
-            row_weight_suffixes = ["weight"]
-        else:
-            col_weight_suffixes = (
-                self.quant_config.get_col_parallel_tensor_names())
-            row_weight_suffixes = (
-                self.quant_config.get_row_parallel_tensor_names())
-
-        column_parallel_weights: List[str] = []
-        for layer in self._column_parallel_layers:
-            for suffix in col_weight_suffixes:
-                column_parallel_weights.append(f"{layer}.{suffix}")
-        row_parallel_weights: List[str] = []
-        for layer in self._row_parallel_layers:
-            for suffix in row_weight_suffixes:
-                row_parallel_weights.append(f"{layer}.{suffix}")
-
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-        q_proj_shard_size = (self.config.hidden_size // tp_size)
         num_kv_heads_replicas = max(1,
                                     tp_size // self.config.num_key_value_heads)
         num_kv_heads_per_gpu = max(1,
                                    self.config.num_key_value_heads // tp_size)
-        kv_proj_shard_size = (self.config.hidden_size //
-                              self.config.num_attention_heads *
-                              num_kv_heads_per_gpu)
-        attention_weight_specs = [
-            # (weight_name, shard_size, offset)
-            ("q_proj", q_proj_shard_size, 0),
-            ("k_proj", kv_proj_shard_size, q_proj_shard_size),
-            ("v_proj", kv_proj_shard_size,
-             q_proj_shard_size + kv_proj_shard_size),
+
+        q_proj_size = self.config.hidden_size
+        kv_proj_size = (self.config.hidden_size //
+                        self.config.num_attention_heads *
+                        self.config.num_key_value_heads)
+        ffn_intermediate_size = self.config.intermediate_size
+        stacked_params_mapping = [
+            # (param_name, shard_name, slice_size, offset)
+            ("qkv_proj", "q_proj", q_proj_size, 0),
+            ("qkv_proj", "k_proj", kv_proj_size, q_proj_size),
+            ("qkv_proj", "v_proj", kv_proj_size, q_proj_size + kv_proj_size),
+            ("gate_up_proj", "gate_proj", ffn_intermediate_size, 0),
+            ("gate_up_proj", "up_proj", ffn_intermediate_size,
+             ffn_intermediate_size),
         ]
-        state_dict = self.state_dict()
+
+        state_dict = dict(self.named_parameters())
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            packed_dim = None
-            is_transposed = False
-            if self.quant_config is not None:
-                packed_dim = self.quant_config.get_packed_dim(name)
-                is_transposed = self.quant_config.is_transposed(name)
-            if is_transposed:
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                loaded_weight = loaded_weight.T
-
-            is_attention_weight = False
-            for weight_name, shard_size, offset in attention_weight_specs:
+            loaded = False
+            for (param_name, weight_name, slice_size,
+                 slice_offset) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "qkv_proj")]
-                if is_transposed:
-                    param = param.T
-
-                if packed_dim is not None:
-                    shard_dim = 0 if not is_transposed else 1
-                    if packed_dim == shard_dim:
-                        shard_size //= self.quant_config.pack_factor
-                        offset //= self.quant_config.pack_factor
-
-                if weight_name in ["k_proj", "v_proj"]:
-                    shard_id = tp_rank // num_kv_heads_replicas
-                else:
-                    shard_id = tp_rank
-                loaded_weight = loaded_weight[shard_size *
-                                              shard_id:shard_size *
-                                              (shard_id + 1)]
-                param_slice = param.data[offset:offset + shard_size]
-                assert param_slice.shape == loaded_weight.shape
-
-                param_slice.copy_(loaded_weight)
-                is_attention_weight = True
+                param = state_dict[name.replace(weight_name, param_name)]
+                # TODO: fix the case when num kv heads < tp size
+                load_tensor_parallel_weights(param,
+                                             loaded_weight,
+                                             output_slice_offset=slice_offset,
+                                             output_slice_size=slice_size)
+                loaded = True
                 break
-            if is_attention_weight:
-                continue
-
-            is_gate_up_weight = False
-            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
-                if weight_name not in name:
-                    continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
-                if is_transposed:
-                    param = param.T
-
-                shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
-                                              (tp_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_gate_up_weight = True
-                break
-            if is_gate_up_weight:
+            if loaded:
                 continue
 
             param = state_dict[name]
-            if is_transposed:
-                param = param.T
-
             if "embed_tokens" in name or "lm_head" in name:
-                load_padded_tensor_parallel_vocab(param, loaded_weight,
-                                                  tp_rank)
+                load_padded_tensor_parallel_vocab(param, loaded_weight)
                 continue
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         column_parallel_weights,
-                                         row_parallel_weights, tp_rank)
+            load_tensor_parallel_weights(param, loaded_weight)
