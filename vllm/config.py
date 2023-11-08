@@ -120,10 +120,11 @@ class ModelConfig:
                     f"method specified in the `quantization` argument "
                     f"({self.quantization}).")
 
-        if self.quantization not in supported_quantization:
-            raise ValueError(
-                f"Unknown quantization method: {self.quantization}. Must be "
-                f"one of {supported_quantization}.")
+        if self.quantization is not None:
+            if self.quantization not in supported_quantization:
+                raise ValueError(
+                    f"Unknown quantization method: {self.quantization}. Must "
+                    f"be one of {supported_quantization}.")
 
     def verify_with_parallel_config(
         self,
