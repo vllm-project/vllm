@@ -67,8 +67,7 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
         output = torch.zeros((reshaped_x.shape[0], self.qweight.shape[-1]),
                              dtype=x.dtype,
                              device=x.device)
-        quantization_ops.gptq_descact_matmul(reshaped_x,
-                                             self.qweight, output,
+        quantization_ops.gptq_descact_matmul(reshaped_x, self.qweight, output,
                                              self.scales, self.qzeros,
                                              self.g_idx)
         if bias is not None:
@@ -132,8 +131,7 @@ class GPTQRowParallelLinear(RowParallelLinear):
         output = torch.zeros((reshaped_x.shape[0], self.qweight.shape[-1]),
                              dtype=x.dtype,
                              device=x.device)
-        quantization_ops.gptq_descact_matmul(reshaped_x,
-                                             self.qweight, output,
+        quantization_ops.gptq_descact_matmul(reshaped_x, self.qweight, output,
                                              self.scales, self.qzeros,
                                              self.g_idx)
         return output.reshape(out_shape)
