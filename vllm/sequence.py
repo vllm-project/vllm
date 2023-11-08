@@ -57,6 +57,9 @@ class SequenceData:
     Attributes:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
+        draft_token_ids: The token IDs proposed by the draft model, 
+                    it will be added by the SpecDecWorker when proposing draft tokens
+                    it will be cleared by the SpecDecWorker after accepting tokens
         cumulative_logprob: The cumulative log probability of the output.
     """
 
@@ -66,6 +69,7 @@ class SequenceData:
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
+        self.draft_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:

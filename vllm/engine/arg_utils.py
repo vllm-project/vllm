@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, SpecDecConfig)
 
 
 @dataclass
@@ -32,6 +32,9 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+    
+    draft_model: Optional[str] = None
+    propose_cnt: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -171,6 +174,17 @@ class EngineArgs:
                             choices=['awq', 'squeezellm', None],
                             default=None,
                             help='Method used to quantize the weights')
+        
+        # speculative decoding setting
+        parser.add_argument('--draft-model',
+                            type=str,
+                            default=None,
+                            help='name or path of the huggingface model to use as the draft model')
+        parser.add_argument('--propose-cnt',
+                            type=int,
+                            default=None,
+                            help='for speculative decoding, number of tokens to propose each step')
+        
         return parser
 
     @classmethod
@@ -183,7 +197,7 @@ class EngineArgs:
 
     def create_engine_configs(
         self,
-    ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
+    ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig, ]:
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
@@ -200,7 +214,17 @@ class EngineArgs:
                                            self.max_num_seqs,
                                            model_config.max_model_len,
                                            self.max_paddings)
-        return model_config, cache_config, parallel_config, scheduler_config
+ 
+        spec_decoding_config = None
+        if self.draft_model:
+            # assume the draft model and target model share the same tokenizer
+            # for now, share the same seed as the target
+            draft_model_config = ModelConfig(self.draft_model, self.tokenizer,
+                                             self.tokenizer_mode, self.trust_remote_code,
+                                             self.download_dir, self.load_format,
+                                             'auto', self.seed)
+            spec_decoding_config = SpecDecConfig(draft_model_config, self.propose_cnt)
+        return model_config, cache_config, parallel_config, scheduler_config, spec_decoding_config
 
 
 @dataclass

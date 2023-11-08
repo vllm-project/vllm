@@ -305,12 +305,12 @@ class SchedulerConfig:
                 f"({self.max_num_seqs}).")
 
 
-class SpecDecodingConfig:
+class SpecDecConfig:
     def __init__(self,
                  draft_model_config: ModelConfig,
-                 draft_cnt: int) -> None:
+                 propose_cnt: int) -> None:
         self.draft_model_config = draft_model_config
-        self.draft_cnt = draft_cnt
+        self.propose_cnt = propose_cnt
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

@@ -153,6 +153,7 @@ class Worker:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
+        draft_tokens: List[List[int]] = []
         slot_mapping: List[List[int]] = []
         selected_token_indices: List[int] = []
         selected_token_start_idx = 0
@@ -212,6 +213,9 @@ class Worker:
         generation_block_tables: List[List[int]] = []
         max_seq_len = max(prompt_lens) if prompt_lens else 1
         for seq_group_metadata in seq_group_metadata_list:
+            
+            draft_tokens.append(seq_group_metadata.seq_data[0].draft_token_ids)
+            
             if seq_group_metadata.is_prompt:
                 # We need to do this in this loop as we need to know max_seq_len
                 assert len(
@@ -334,8 +338,7 @@ class Worker:
         seq_group_metadata_list: List[SequenceGroupMetadata],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-        draft_tokens: Optional[torch.Tensor]
+        blocks_to_copy: Dict[int, List[int]]
     ) -> SamplerOutput:
         # Issue cache operations.
         issued_cache_op = False
@@ -362,7 +365,7 @@ class Worker:
             return {}
 
         # Prepare input tensors.
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, input_positions, input_metadata, draft_tokens = self._prepare_inputs(
             seq_group_metadata_list)
 
         # Execute the model.

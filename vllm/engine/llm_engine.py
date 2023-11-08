@@ -4,7 +4,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpecDecodingConfig)
+                         SchedulerConfig, SpecDecConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
@@ -17,7 +17,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
-from vllm.engine.spec_decoding import SpeculativeHandler
+from vllm.engine.spec_dec import SpecDecWorker
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -66,9 +66,9 @@ class LLMEngine:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        spec_decoding_config: Optional[SpecDecConfig],
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
-        spec_decoding_config: Optional[SpecDecodingConfig],
         log_stats: bool,
     ) -> None:
         logger.info(
@@ -124,9 +124,9 @@ class LLMEngine:
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
         
-        self.spec_handler = None
-        if spec_decoding_config is not None:
-            self.spec_handler = SpeculativeHandler(spec_decoding_config)
+        self.spec_worker = None
+        if spec_decoding_config:
+            self.spec_worker = SpecDecWorker(spec_decoding_config)
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -564,10 +564,9 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
 
-        draft_tokens = None
-        if self.spec_handler:
-            draft_tokens = self.spec_handler.propose()
-        
+        if self.spec_worker:
+            self.spec_worker.set_draft_tokens(seq_group_metadata_list)
+
         # Execute the model.
         output = self._run_workers(
             "execute_model",
@@ -575,13 +574,12 @@ class LLMEngine:
             blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
-            draft_tokens=draft_tokens
         )
         
-        if self.spec_handler:
-            self.spec_handler.accept(output)
-            self.spec_handler.invalidate_draft_kv()
-            self.spec_handler.invalidate_target_kv()
+        if self.spec_worker:
+            self.spec_worker.accept(output)
+            self.spec_worker.invalidate_draft_kv()
+            self.spec_worker.invalidate_target_kv()
         
 
         return self._process_model_outputs(output, scheduler_outputs) + ignored

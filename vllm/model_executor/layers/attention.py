@@ -124,6 +124,9 @@ class PagedAttention(nn.Module):
         """
         return None
 
+    def multi_query_cached_kv_attention():
+        pass
+    
     def single_query_cached_kv_attention(
         self,
         output: torch.Tensor,
