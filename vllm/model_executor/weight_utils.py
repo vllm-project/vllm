@@ -287,10 +287,17 @@ def load_tensor_parallel_weights(
     tp_size = get_tensor_model_parallel_world_size()
     param_data = param.data
     if output_slice_offset is not None and output_slice_size is not None:
-        output_dim = getattr(param, "output_dim", None)
-        assert output_dim is not None
-        output_slice_offset = output_slice_offset // tp_size
-        output_slice_size = output_slice_size // tp_size
+        output_dim = param.output_dim
+        # Adjust the offset and size to account for tensor parallelism.
+        output_slice_offset //= tp_size
+        output_slice_size //= tp_size
+        # If quantized, we need to adjust the offset and size to account for
+        # the packing.
+        packed_dim = getattr(param, "packed_dim", None)
+        if packed_dim == output_dim:
+            pack_factor = param.pack_factor
+            output_slice_offset //= pack_factor
+            output_slice_size //= pack_factor
         param_data = param_data.narrow(output_dim, output_slice_offset,
                                        output_slice_size)
 

@@ -118,9 +118,9 @@ class AWQLinearMethod(LinearMethodBase):
             "input_dim": 0,
             "output_dim": 1,
             "packed_dim": 1,
+            "pack_factor": self.quant_config.pack_factor,
             **weight_attrs,
         })
-        set_weight_attrs(qweight, weight_attrs)
         qzeros = Parameter(
             torch.empty(
                 input_size // self.quant_config.group_size,
@@ -134,6 +134,7 @@ class AWQLinearMethod(LinearMethodBase):
             "input_dim": 0,
             "output_dim": 1,
             "packed_dim": 1,
+            "pack_factor": self.quant_config.pack_factor,
             **weight_attrs,
         })
         scales = Parameter(
@@ -145,7 +146,7 @@ class AWQLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        set_weight_attrs(qzeros, {
+        set_weight_attrs(scales, {
             "input_dim": 0,
             "output_dim": 1,
             **weight_attrs,
