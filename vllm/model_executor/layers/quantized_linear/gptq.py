@@ -8,6 +8,35 @@ from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
                                                        RowParallelLinear)
 
 
+# TODO(woosuk): Optimize.
+def _gptq_matmul(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    g_idx: torch.Tensor,
+    shifter: torch.Tensor,
+) -> torch.Tensor:
+    """Matrix multiplication with GPTQ weights."""
+    # qw: [input_size, output_size]
+    qw = (qweight.unsqueeze(1) >> shifter.view(1, -1, 1)) & 0xf
+    qw = qw.flatten(start_dim=0, end_dim=1)
+
+    # qz: [input_size, output_size]
+    qz = (qzeros[g_idx].unsqueeze(2) >> shifter.view(1, 1, -1)) & 0xf
+    qz = qz + 1
+    qz = qz.flatten(start_dim=1, end_dim=2)
+
+    # qs: [input_size, output_size]
+    qs = scales[g_idx]
+    # w: [input_size, output_size]
+    w = qs * (qw - qz).to(qs.dtype)
+
+    # out: [batch_size, output_size]
+    out = torch.matmul(x, w)
+    return out
+
+
 class GPTQColumnParallelLinear(ColumnParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
@@ -58,6 +87,11 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
             ),
             requires_grad=False,
         )
+        self.shifter = torch.tensor(
+            [0, 4, 8, 12, 16, 20, 24, 28],
+            device="cuda",
+            dtype=torch.int32,
+        )
 
     def apply_weights(
         self,
@@ -66,12 +100,15 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
     ) -> torch.Tensor:
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
-        output = torch.zeros((reshaped_x.shape[0], self.qweight.shape[-1]),
-                             dtype=x.dtype,
-                             device=x.device)
-        quantization_ops.gptq_descact_matmul(reshaped_x, self.qweight, output,
-                                             self.scales, self.qzeros,
-                                             self.g_idx)
+        num_tokens = x.shape[:-1].numel()
+        if num_tokens <= 32:
+            output = torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+            quantization_ops.gptq_descact_matmul(reshaped_x, self.qweight,
+                                                 output, self.scales,
+                                                 self.qzeros, self.g_idx)
+        else:
+            output = _gptq_matmul(reshaped_x, self.qweight, self.qzeros,
+                                  self.scales, self.g_idx, self.shifter)
         if bias is not None:
             output = output + bias
         return output.reshape(out_shape)
@@ -127,14 +164,22 @@ class GPTQRowParallelLinear(RowParallelLinear):
             ),
             requires_grad=False,
         )
+        self.shifter = torch.tensor(
+            [0, 4, 8, 12, 16, 20, 24, 28],
+            device="cuda",
+            dtype=torch.int32,
+        )
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
-        output = torch.zeros((reshaped_x.shape[0], self.qweight.shape[-1]),
-                             dtype=x.dtype,
-                             device=x.device)
-        quantization_ops.gptq_descact_matmul(reshaped_x, self.qweight, output,
-                                             self.scales, self.qzeros,
-                                             self.g_idx)
+        num_tokens = x.shape[:-1].numel()
+        if num_tokens <= 32:
+            output = torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+            quantization_ops.gptq_descact_matmul(reshaped_x, self.qweight,
+                                                 output, self.scales,
+                                                 self.qzeros, self.g_idx)
+        else:
+            output = _gptq_matmul(reshaped_x, self.qweight, self.qzeros,
+                                  self.scales, self.g_idx, self.shifter)
         return output.reshape(out_shape)
