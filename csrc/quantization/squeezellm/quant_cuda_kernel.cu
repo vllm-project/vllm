@@ -136,10 +136,10 @@ void squeezellm_gemm(
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vllm::squeezellm::NUQ4MatMulKernel<<<blocks, threads, 0, stream>>>(
-    (half2*) vec.data<at::Half>(),
+    (half2*) vec.data_ptr<at::Half>(),
     mat.data_ptr<int>(),
-    (half2*) mul.data<at::Half>(),
-    (__half*) lookup_table.data<at::Half>(),
+    (half2*) mul.data_ptr<at::Half>(),
+    (__half*) lookup_table.data_ptr<at::Half>(),
     height, width, batch, vec_height
   );
 }

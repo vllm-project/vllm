@@ -112,8 +112,8 @@ void gptq_descact_matmul(
     VLLM_DISPATCH_FLOATING_TYPES(
         vec.type(), "vecquant4matmul_cuda", ([&] {
             vllm::gptq::VecQuant4MatMulKernel<<<blocks, threads, 0, stream>>>(
-                vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
-                scales.data<scalar_t>(), zeros.data<int>(), g_idx.data<int>(),
+                vec.data_ptr<scalar_t>(), mat.data_ptr<int>(), mul.data_ptr<scalar_t>(),
+                scales.data_ptr<scalar_t>(), zeros.data_ptr<int>(), g_idx.data_ptr<int>(),
                 batch, vec_height, height, width, zero_width
             );
         })
