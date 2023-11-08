@@ -16,8 +16,8 @@ class ModelConfig:
     """Configuration for the model.
 
     Args:
-        model: Name or path of the huggingface model to use.
-        tokenizer: Name or path of the huggingface tokenizer to use.
+        model: Name or path of the huggingface/modelscope model to use.
+        tokenizer: Name or path of the huggingface/modelscope tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
@@ -48,6 +48,7 @@ class ModelConfig:
             output). If None, will be derived from the model.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
+        modelscope: Download models from modelscope.
     """
 
     def __init__(
@@ -64,6 +65,7 @@ class ModelConfig:
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        modelscope: Optional[bool] = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -75,8 +77,18 @@ class ModelConfig:
         self.revision = revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
-
-        self.hf_config = get_config(model, trust_remote_code, revision)
+        self.modelscope = modelscope
+        if modelscope:
+            # download model from modelscope.
+            from modelscope.hub.snapshot_download import snapshot_download
+            model_path = snapshot_download(model_id=model,
+                                            cache_dir=download_dir,
+                                            revision=revision)
+            self.model = model_path
+            self.download_dir = model_path
+            self.tokenizer = model_path
+        
+        self.hf_config = get_config(self.model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_config,
                                                      max_model_len)
