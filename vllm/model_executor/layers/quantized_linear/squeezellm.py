@@ -52,22 +52,6 @@ class SqueezeLLMConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["wbits"])
         return cls(weight_bits)
 
-    @classmethod
-    def get_packed_tensors(cls) -> Dict[str, int]:
-        return {"qweight": 0}
-
-    @classmethod
-    def get_transposed_tensor_names(cls) -> List[str]:
-        return ["qweight"]
-
-    @classmethod
-    def get_col_parallel_tensor_names(cls) -> List[str]:
-        return ["qweight", "lookup_table"]
-
-    @classmethod
-    def get_row_parallel_tensor_names(cls) -> List[str]:
-        return ["qweight"]
-
     def get_linear_method(self) -> "SqueezeLLMLinearMethod":
         return SqueezeLLMLinearMethod(self)
 
