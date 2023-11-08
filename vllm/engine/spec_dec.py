@@ -30,10 +30,6 @@ class SpecDecWorker(Worker):
         ##### values to be set
         self.draft_probs = None
         self.draft_kvs = None # if we use hf stype kvs
-    
-    @staticmethod
-    def _pad_left_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
-        return [pad] * (max_len - len(x)) + x
 
     def _prepare_inputs(self, 
                         seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[torch.Tensor]:
@@ -44,7 +40,7 @@ class SpecDecWorker(Worker):
             seq = seq_group_metadata.seq_data[seq_id]
             input_ids_list.append(seq.get_token_ids())
         max_len = max([len(input_ids) for input_ids in input_ids_list])
-        input_ids_list = [SpecDecWorker._pad_left_to_max(input_ids, max_len, PAD_TOKEN_ID) for input_ids in input_ids_list]
+        input_ids_list = [_pad_left_to_max(input_ids, max_len, PAD_TOKEN_ID) for input_ids in input_ids_list]
         return torch.tensor(input_ids_list, dtype=torch.long, device='cuda')
     
     def set_draft_tokens(self,
@@ -66,14 +62,10 @@ class SpecDecWorker(Worker):
     def accept(self,
                target_output: List[SamplerOutput]):
         def extract_probs(output: List[SamplerOutput]):
-            pass
-        
-        def sample_accept(draft_probs: torch.Tensor, 
-                          target_probs: torch.Tensor):
-            pass
+            pass    
         
         target_probs = extract_probs(target_output)
-        sample_accept(self.draft_probs, target_probs)
+        _prob_accept(self.draft_probs, target_probs)
         
     
     def invalidate_draft_kv(self):
@@ -82,4 +74,15 @@ class SpecDecWorker(Worker):
     def invalidate_target_kv(self):
         pass
     
+def _prob_accept(draft_probs: torch.Tensor, 
+                target_probs: torch.Tensor):
+    p = draft_probs
+    q = target_probs[:, :-1]
+    assert p.shape == q.shape
+    accept_draft_prob = torch.minimum(torch.ones(()), q / p)
+    rejected_locations = (
+        torch.rand_like(accept_draft_prob) > accept_draft_prob
+    ).nonzero()
     
+def _pad_left_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
+    return [pad] * (max_len - len(x)) + x

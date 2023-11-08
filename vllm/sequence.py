@@ -70,6 +70,7 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.draft_token_ids: List[int] = []
+        self.draft_token_logprobs: List[torch.Tensor]= []
         self.cumulative_logprob = 0.0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
@@ -87,6 +88,9 @@ class SequenceData:
 
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
+
+    def get_token_ids_with_draft(self) -> List[int]:
+        return self.prompt_token_ids + self.output_token_ids + self.draft_token_ids
 
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:

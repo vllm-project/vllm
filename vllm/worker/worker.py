@@ -103,7 +103,7 @@ class Worker:
             )
             seqs.append(seq)
 
-        input_tokens, input_positions, input_metadata, _ = self._prepare_inputs(
+        input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seqs)
 
         # Execute the model.
@@ -114,7 +114,6 @@ class Worker:
             kv_caches=[(None, None)] * num_layers,
             input_metadata=input_metadata,
             cache_events=None,
-            draft_tokens=None,
         )
 
         # Calculate the number of blocks that can be allocated with the
@@ -154,7 +153,6 @@ class Worker:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
-        draft_tokens: List[List[int]] = []
         slot_mapping: List[List[int]] = []
         selected_token_indices: List[int] = []
         selected_token_start_idx = 0
@@ -175,7 +173,9 @@ class Worker:
             seq_id = seq_ids[0]
 
             seq_data = seq_group_metadata.seq_data[seq_id]
-            prompt_tokens = seq_data.get_token_ids()
+            
+            # prompt_tokens = seq_data.get_token_ids()
+            prompt_tokens = seq_data.get_token_ids_with_draft()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
@@ -214,9 +214,6 @@ class Worker:
         generation_block_tables: List[List[int]] = []
         max_seq_len = max(prompt_lens) if prompt_lens else 1
         for seq_group_metadata in seq_group_metadata_list:
-            
-            #  draft_tokens.append(seq_group_metadata.seq_data[0].draft_token_ids)
-            
             if seq_group_metadata.is_prompt:
                 # We need to do this in this loop as we need to know max_seq_len
                 assert len(
@@ -247,9 +244,13 @@ class Worker:
             categorized_sample_indices_start_idx += num_seqs
 
             for seq_id in seq_ids:
-                seq_data = seq_group_metadata.seq_data[seq_id]
-                generation_token = seq_data.get_last_token_id()
-                input_tokens.append([generation_token])
+                seq_data: SequenceData = seq_group_metadata.seq_data[seq_id]
+                
+                if len(seq_data.draft_token_ids):
+                    input_tokens.append(seq_data.draft_token_ids)
+                else:   
+                    generation_token = seq_data.get_last_token_id()
+                    input_tokens.append([generation_token])
 
                 context_len = seq_data.get_len()
                 position = context_len - 1
@@ -331,7 +332,7 @@ class Worker:
             categorized_sample_indices=categorized_sample_indices,
             sliding_window=self.sliding_window,
         )
-        return tokens_tensor, positions_tensor, input_metadata, draft_tokens
+        return tokens_tensor, positions_tensor, input_metadata
 
     @torch.inference_mode()
     def execute_model(
@@ -366,7 +367,7 @@ class Worker:
             return {}
 
         # Prepare input tensors.
-        input_tokens, input_positions, input_metadata, draft_tokens = self._prepare_inputs(
+        input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
 
         # Execute the model.
@@ -376,7 +377,6 @@ class Worker:
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
             cache_events=cache_events,
-            draft_tokens=draft_tokens,
         )
         return output
 
