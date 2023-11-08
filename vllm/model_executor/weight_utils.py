@@ -291,6 +291,7 @@ def load_tensor_parallel_weights(
     row_parallel_weight_names: List[str],
     tensor_model_parallel_rank: int,
 ) -> None:
+    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
     for p in column_parallel_weight_names:
         if p in param_name:
             shard_size = param.shape[0]
@@ -303,15 +304,10 @@ def load_tensor_parallel_weights(
             shard_size = param.shape[-1]
             start_idx = tensor_model_parallel_rank * shard_size
             end_idx = (tensor_model_parallel_rank + 1) * shard_size
-            if isinstance(loaded_weight, torch.Tensor):
-                loaded_weight = loaded_weight[..., start_idx:end_idx]
-            else:
-                index = [slice(None)] * (len(loaded_weight.get_shape()) -
-                                         1) + [slice(start_idx, end_idx)]
-                loaded_weight = loaded_weight[index]
+            # load_weight can be 1D or 2D.
+            loaded_weight = loaded_weight[..., start_idx:end_idx]
             break
 
-    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
     assert param.shape == loaded_weight.shape, (
         f"{param_name} shape mismatch between model and checkpoint: "
         f"{param.shape} != {loaded_weight.shape}")
