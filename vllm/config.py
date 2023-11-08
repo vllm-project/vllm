@@ -125,6 +125,9 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
+        logger.warning(f"{self.quantization} quantization is not fully "
+                       "optimized yet. The speed can be slower than "
+                       "non-quantized models.")
 
     def verify_with_parallel_config(
         self,
