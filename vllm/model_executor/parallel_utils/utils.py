@@ -47,5 +47,6 @@ def split_tensor_along_last_dim(
 
     return tensor_list
 
+
 class VocabUtility:
     pass
