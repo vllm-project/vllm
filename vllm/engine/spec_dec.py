@@ -4,7 +4,7 @@ from vllm.sequence import SequenceGroupMetadata
 from transformers import AutoModelForCausalLM
 import torch
 from typing import List, Dict
-from vllm.sequence import SamplerOutput, SequenceGroupOutputs
+from vllm.sequence import SamplerOutput, SequenceGroupOutputs, SequenceOutputs
 from vllm.worker.worker import Worker
 from vllm.logger import init_logger
 
@@ -78,7 +78,7 @@ class SpecDecWorker(Worker):
             seq = seq_group_metadata.seq_data[seq_id]
             for j in range(self.propose_cnt):
                 draft_token = draft_tokens[j][i].item()
-                seq.draft_token_probs[draft_token] = draft_distributions[j][i]
+                seq.draft_token_probs.append({draft_token:draft_distributions[j][i]})
                 seq.draft_token_ids.append(draft_token)
             logger.info(f"Seq draft tokens: {seq.draft_token_ids}")
             logger.info(f"Seq draft prob: {seq.draft_token_probs}")
@@ -105,25 +105,39 @@ class SpecDecWorker(Worker):
             logprob = all_logprobs[token_id]
             return torch.exp(logprob)
         
-        # Rejecting Sampling
+        def extract_draft_prob_dis(sample: SequenceOutputs,
+                                   token_id: int,
+                                   index: int):
+            token_prob = sample.sd_draft_probs[index]
+            assert token_id in token_prob
+            return token_prob[token_id]
+        
+        def extract_target_prob_dis(seq_grou_output: SequenceGroupOutputs,
+                                    token_id: int):
+            pass
+        
+        # Rejection Sampling
         for seq_group_output in target_outputs:
             assert len(seq_group_output.samples) == 1
             sample = seq_group_output.samples[0]
             print(sample.sd_draft_probs)
             
             accept_token_ids = []
-            for token_id in sample.sd_draft_ids:
-                p = sample.sd_draft_probs[token_id][token_id].item()
-                q = extract_target_prob(seq_group_output, token_id)
+            for i, token_id in enumerate(sample.sd_draft_ids):
+                draft_prob_dis = extract_draft_prob_dis(sample, token_id, i)
+                target_prob_dis = extract_target_prob_dis(seq_group_output, token_id)
+                p, q = draft_prob_dis[token_id].item(), target_prob_dis[token_id].item()
                 r = torch.rand()
                 if r <= p/q: # accept
                     accept_token_ids.append(token_id)
                 else: # reject and resample
-                    break
+                    new_dis = torch.clamp(draft_prob_dis - target_prob_dis, min=0)
+                    next_token = torch.multinomial(new_dis, num_samples=1)
+                    accept_token_ids.append(next_token.item())
             
             # all proposed tokens are accepted
             if len(accept_token_ids) == sample.sd_draft_ids:
-                accept_token_ids.append(sample.output_token)
+                accept_token_ids.append(sample.output_token.item())
         
         self.invalidate_draft_kv()
         self.invalidate_target_kv()    
