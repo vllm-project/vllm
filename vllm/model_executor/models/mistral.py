@@ -228,9 +228,8 @@ class MistralModel(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.embed_tokens = VocabParallelEmbedding(
-            vocab_size,
+            config.vocab_size,
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
