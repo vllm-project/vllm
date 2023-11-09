@@ -45,25 +45,33 @@ class SpecDecWorker(Worker):
     
     def set_draft_tokens(self,
                 seq_group_list: List[SequenceGroupMetadata]) -> torch.Tensor:
+        logger.info(f"# of input request: {len(seq_group_list)}")
         input_tensor = self._prepare_inputs(seq_group_list)
         # recompute for now
         attention_mask=(input_tensor != PAD_TOKEN_ID)
         draft_tokens = self.draft_model.generate(input_ids=input_tensor,
                                   attention_mask=attention_mask,
                                   max_new_tokens=self.propose_cnt)[:, input_tensor.shape[1]:]
+        logger.info(f"Input tokens: {input_tensor}")
         logger.info(f"Draft tokens: {draft_tokens}")
         for i, seq_group_metadata in enumerate(seq_group_list):
             seq_id = next(iter(seq_group_metadata.seq_data))
             seq = seq_group_metadata.seq_data[seq_id]
-            seq.draft_token_ids = draft_tokens[i]
+            seq.draft_token_ids = draft_tokens[i].tolist()
         
         return draft_tokens
     
     def accept(self,
                target_output: List[SamplerOutput]):
         def extract_probs(output: List[SamplerOutput]):
-            pass    
-        
+            logprobs = []
+            logger.info(f"# of output: {len(output)}")
+            for seq_group_output in output:
+                assert len(seq_group_output.samples) == 1
+                print(seq_group_output.prompt_logprobs)
+                sample = seq_group_output.samples[0]
+                print(sample.logprobs)  
+                exit(0)
         target_probs = extract_probs(target_output)
         _prob_accept(self.draft_probs, target_probs)
         

@@ -380,10 +380,6 @@ class SequenceOutputs:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
-        
-        # only for speculative decoding
-        self.sd_output_tokens = None
-        self.sd_logprobs_list = None
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
