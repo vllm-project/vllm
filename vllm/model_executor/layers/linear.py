@@ -7,28 +7,15 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather)
 from vllm.model_executor.parallel_utils.utils import (
-    divide,
-    split_tensor_along_last_dim,
-)
+    divide, split_tensor_along_last_dim)
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-
-def set_weight_attrs(weight: torch.Tensor, weight_attrs: Optional[dict[str,
-                                                                       Any]]):
-    if weight_attrs is None:
-        return
-    for key, value in weight_attrs.items():
-        assert not hasattr(
-            weight, key), (f"Overwriting existing tensor attribute: {key}")
-        setattr(weight, key, value)
 
 
 class LinearMethodBase(ABC):

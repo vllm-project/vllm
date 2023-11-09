@@ -42,7 +42,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.quantization_utils import QuantizationConfig
@@ -289,13 +289,7 @@ class LlamaForCausalLM(nn.Module):
         else:
             linear_method = None
         self.model = LlamaModel(config, linear_method)
-        vocab_size = ((config.vocab_size + 63) // 64) * 64
-        # NOTE: The LM head is not quantized.
-        self.lm_head = ColumnParallelLinear(config.hidden_size,
-                                            vocab_size,
-                                            bias=False,
-                                            gather_output=False,
-                                            linear_method=None)
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -346,7 +340,11 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             param = params_dict[name]
-            if "embed_tokens" in name or "lm_head" in name:
-                load_padded_tensor_parallel_vocab(param, loaded_weight)
-                continue
-            load_tensor_parallel_weights(param, loaded_weight)
+            weight_loader = getattr(param, "weight_loader", None)
+            if weight_loader is not None:
+                weight_loader(param, loaded_weight)
+            else:
+                assert param.shape == loaded_weight.shape, (
+                    f"shape mismatch between model and checkpoint: "
+                    f"{param.shape} != {loaded_weight.shape}")
+                param.data.copy_(loaded_weight)
