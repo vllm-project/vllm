@@ -36,14 +36,10 @@ async def generate(request: Request) -> Response:
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
             prompt = request_output.prompt
-            if args.echo:
-                text_outputs = [
-                    prompt + output.text for output in request_output.outputs
-                ]
-            else:
-                text_outputs = [
-                    output.text for output in request_output.outputs
-                ]
+            text_outputs = [
+                (prompt + output.text if args.echo else output.text)
+                for output in request_output.outputs
+            ]
             ret = {"text": text_outputs}
             yield (json.dumps(ret) + "\0").encode("utf-8")
 
