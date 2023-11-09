@@ -69,7 +69,8 @@ class VocabParallelEmbedding(torch.nn.Module):
                         self.embedding_dim,
                         device=torch.cuda.current_device(),
                         dtype=params_dtype))
-        set_weight_attrs(self.weight, {"parallel_dim": 0})
+        set_weight_attrs(self.weight, {"parallel_dim": 0,
+                                       "weight_loader": self.weight_loader})
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         assert loaded_weight.shape[0] == self.num_embeddings
