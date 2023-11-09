@@ -98,10 +98,12 @@ class PagedAttention(nn.Module):
         """
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
-            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
-            value = torch.repeat_interleave(value,
-                                            self.num_queries_per_kv,
-                                            dim=1)
+            key = key[:, :, None, :].repeat(
+                1, 1, self.num_queries_per_kv, 1).view(
+                    key.shape[0], self.num_heads, key.shape[-1])
+            value = value[:, :, None, :].repeat(
+                1, 1, self.num_queries_per_kv, 1).view(
+                    value.shape[0], self.num_heads, value.shape[-1])
 
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(
@@ -445,10 +447,12 @@ class PagedAttentionWithALiBi(PagedAttention):
         """
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
-            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
-            value = torch.repeat_interleave(value,
-                                            self.num_queries_per_kv,
-                                            dim=1)
+            key = key[:, :, None, :].repeat(
+                1, 1, self.num_queries_per_kv, 1).view(
+                    key.shape[0], self.num_heads, key.shape[-1])
+            value = value[:, :, None, :].repeat(
+                1, 1, self.num_queries_per_kv, 1).view(
+                    value.shape[0], self.num_heads, value.shape[-1])
         batch_size = input_metadata.num_prompts
         seq_len = input_metadata.max_prompt_len
 
