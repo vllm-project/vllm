@@ -78,9 +78,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--echo",
                         type=bool,
-                        action='store_true',
+                        action="store_true",
                         default=True,
-                        help='Whether to add prompt into outputs')
+                        help="Whether to add prompt into outputs")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
