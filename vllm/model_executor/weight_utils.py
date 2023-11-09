@@ -239,7 +239,7 @@ def hf_model_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():
                     param = f.get_slice(name)
-                    yield name, param
+                    yield name, convert_pyslice_to_tensor(param)
     else:
         for bin_file in hf_weights_files:
             state = torch.load(bin_file, map_location="cpu")
@@ -278,44 +278,15 @@ def load_padded_tensor_parallel_vocab(
 
 
 def load_tensor_parallel_weights(
-    param: torch.Tensor,
-    loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
-    output_slice_offset: Optional[int] = None,
-    output_slice_size: Optional[int] = None,
+        param: torch.Tensor,
+        loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
 ) -> None:
-    tp_rank = get_tensor_model_parallel_rank()
-    tp_size = get_tensor_model_parallel_world_size()
     param_data = param.data
-    if output_slice_offset is not None and output_slice_size is not None:
-        output_dim = param.output_dim
-        # Adjust the offset and size to account for tensor parallelism.
-        output_slice_offset //= tp_size
-        output_slice_size //= tp_size
-        # If quantized, we need to adjust the offset and size to account for
-        # the packing.
-        packed_dim = getattr(param, "packed_dim", None)
-        if packed_dim == output_dim:
-            pack_factor = param.pack_factor
-            output_slice_offset //= pack_factor
-            output_slice_size //= pack_factor
-        param_data = param_data.narrow(output_dim, output_slice_offset,
-                                       output_slice_size)
 
-    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-    if getattr(param, "output_dim_parallel", False):
-        output_dim = getattr(param, "output_dim", None)
-        if output_dim is not None:
-            shard_size = param_data.shape[output_dim]
-            start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                 shard_size)
-    if getattr(param, "input_dim_parallel", False):
-        input_dim = getattr(param, "input_dim", None)
-        if input_dim is not None:
-            shard_size = param_data.shape[input_dim]
-            start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(input_dim, start_idx,
-                                                 shard_size)
+    weight_loader = getattr(param, "weight_loader", None)
+    if weight_loader is not None:
+        weight_loader(param_data, loaded_weight)
+        return
 
     assert param_data.shape == loaded_weight.shape, (
         f"shape mismatch between model and checkpoint: "

@@ -36,6 +36,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
+                                               QKVParallelLinear,
+                                               PackedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
@@ -62,11 +64,11 @@ class LlamaMLP(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                 2 * intermediate_size,
-                                                 bias=False,
-                                                 gather_output=False,
-                                                 linear_method=linear_method)
+        self.gate_up_proj = PackedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2,
+            bias=False,
+            gather_output=False,
+            linear_method=linear_method)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
@@ -112,7 +114,6 @@ class LlamaAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        num_kv_heads_replicas = max(1, tp_size // self.total_num_kv_heads)
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -120,13 +121,12 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = ColumnParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
             hidden_size,
-            (self.total_num_heads +
-             2 * self.total_num_kv_heads * num_kv_heads_replicas) *
             self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
             bias=False,
-            gather_output=False,
             linear_method=linear_method,
         )
         self.o_proj = RowParallelLinear(
@@ -317,29 +317,16 @@ class LlamaForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        num_kv_heads_replicas = max(1,
-                                    tp_size // self.config.num_key_value_heads)
-        num_kv_heads_per_gpu = max(1,
-                                   self.config.num_key_value_heads // tp_size)
-
-        q_proj_size = self.config.hidden_size
-        kv_proj_size = (self.config.hidden_size //
-                        self.config.num_attention_heads *
-                        self.config.num_key_value_heads)
-        ffn_intermediate_size = self.config.intermediate_size
         stacked_params_mapping = [
-            # (param_name, shard_name, slice_size, offset)
-            ("qkv_proj", "q_proj", q_proj_size, 0),
-            ("qkv_proj", "k_proj", kv_proj_size, q_proj_size),
-            ("qkv_proj", "v_proj", kv_proj_size, q_proj_size + kv_proj_size),
-            ("gate_up_proj", "gate_proj", ffn_intermediate_size, 0),
-            ("gate_up_proj", "up_proj", ffn_intermediate_size,
-             ffn_intermediate_size),
+            # (param_name, shard_name, shard_idx)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
 
-        state_dict = dict(self.named_parameters())
+        params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
@@ -347,22 +334,18 @@ class LlamaForCausalLM(nn.Module):
                 continue
 
             loaded = False
-            for (param_name, weight_name, slice_size,
-                 slice_offset) in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, param_name)]
-                # TODO: fix the case when num kv heads < tp size
-                load_tensor_parallel_weights(param,
-                                             loaded_weight,
-                                             output_slice_offset=slice_offset,
-                                             output_slice_size=slice_size)
+                param = params_dict[name.replace(weight_name, param_name)]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
                 loaded = True
                 break
             if loaded:
                 continue
 
-            param = state_dict[name]
+            param = params_dict[name]
             if "embed_tokens" in name or "lm_head" in name:
                 load_padded_tensor_parallel_vocab(param, loaded_weight)
                 continue
