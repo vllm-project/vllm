@@ -61,12 +61,8 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: SqueezeLLMConfig):
         self.quant_config = quant_config
 
-    def create_weights(self,
-                       module: torch.nn.Module,
-                       input_size: int,
-                       output_size: int,
-                       params_dtype: torch.dtype,
-                       weight_attrs: dict[str, Any] = None) -> None:
+    def create_weights(self, input_size: int, output_size: int,
+                       params_dtype: torch.dtype) -> Dict[str, torch.Tensor]:
         if input_size % self.quant_config.pack_factor != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
@@ -87,7 +83,6 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
                 "output_dim": 1,
                 "packed_dim": 0,
                 "pack_factor": self.quant_config.pack_factor,
-                **weight_attrs,
             })
         lookup_table = Parameter(
             torch.empty(
@@ -100,22 +95,24 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
         )
         set_weight_attrs(lookup_table, {
             "output_dim": 0,
-            **weight_attrs,
         })
-
-        module.register_parameter("qweight", qweight)
-        module.register_parameter("lookup_table", lookup_table)
+        return {
+            "qweight": qweight,
+            "lookup_table": lookup_table,
+        }
 
     def apply_weights(self,
-                      module: torch.nn.Module,
+                      weights: Dict[str, torch.Tensor],
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        out_shape = x.shape[:-1] + (module.qweight.shape[-1], )
+        qweight = weights["qweight"]
+        lookup_table = weights["lookup_table"]
+        out_shape = x.shape[:-1] + (qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         # NOTE: The output tensor should be zero-initialized.
         out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
-        quantization_ops.squeezellm_gemm(reshaped_x, module.qweight, out,
-                                         module.lookup_table)
+        quantization_ops.squeezellm_gemm(reshaped_x, qweight, out,
+                                         lookup_table)
 
         if bias is not None:
             out = out + bias
