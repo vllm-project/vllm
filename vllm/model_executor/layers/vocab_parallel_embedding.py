@@ -79,7 +79,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         assert loaded_weight.shape[1] == self.embedding_dim
         loaded_weight = loaded_weight[self.vocab_start_index:self.
                                       vocab_end_index]
-        param[:self.num_embeddings].data.copy_(loaded_weight)
+        param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
 
     def forward(self, input_):
         if self.tp_size > 1:
