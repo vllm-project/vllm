@@ -43,24 +43,48 @@ class SpecDecWorker(Worker):
         input_ids_list = [_pad_left_to_max(input_ids, max_len, PAD_TOKEN_ID) for input_ids in input_ids_list]
         return torch.tensor(input_ids_list, dtype=torch.long, device='cuda')
     
+    # TODO: we need to align draft and target model's sampler
+    def _sample_method(self):
+        return None
+    
     def set_draft_tokens(self,
-                seq_group_list: List[SequenceGroupMetadata]) -> torch.Tensor:
+                seq_group_list: List[SequenceGroupMetadata]) -> None:
         logger.info(f"# of input request: {len(seq_group_list)}")
         input_tensor = self._prepare_inputs(seq_group_list)
+        draft_logits, draft_distributions, draft_tokens = []
         # recompute for now
         attention_mask=(input_tensor != PAD_TOKEN_ID)
-        draft_tokens = self.draft_model.generate(input_ids=input_tensor,
-                                  attention_mask=attention_mask,
-                                  max_new_tokens=self.propose_cnt)[:, input_tensor.shape[1]:]
+        past_key_values = None
+        for i in range(self.propose_cnt):
+            outputs = self.model(input_tensor,
+                                 past_key_values=past_key_values,
+                                 attention_mask=attention_mask,
+                                 use_cache=True)
+            
+            past_key_values = outputs.past_key_values
+            next_token_logits = outputs.logits[:, -1, :]
+            distribution = self._sample_method(next_token_logits)
+            input_ids = torch.multinomial(distribution, num_samples=1)
+            attention_mask = torch.cat([attention_mask, torch.ones(input_ids.shape[0], 1)])
+            
+            draft_logits.append(next_token_logits)
+            draft_distributions.append(distribution)
+            draft_tokens.append(input_ids)
+            
+        # draft_tokens = self.draft_model.generate(input_ids=input_tensor,
+        #                           attention_mask=attention_mask,
+        #                           max_new_tokens=self.propose_cnt)[:, input_tensor.shape[1]:]
         logger.info(f"Input tokens: {input_tensor}")
         logger.info(f"Draft tokens: {draft_tokens}")
         for i, seq_group_metadata in enumerate(seq_group_list):
             seq_id = next(iter(seq_group_metadata.seq_data))
             seq = seq_group_metadata.seq_data[seq_id]
-            seq.draft_token_ids = draft_tokens[i].tolist()
+            for j in self.propose_cnt:
+                draft_token = draft_tokens[j][i]
+                draft_prob = draft_distributions[j][i]
+                seq.draft_token_ids.append(draft_token)
+        logger.info(f"Draft prob: {draft_distributions}")
         
-        return draft_tokens
-    
     def accept(self,
                target_output: List[SamplerOutput]):
         def extract_probs(output: List[SamplerOutput]):
