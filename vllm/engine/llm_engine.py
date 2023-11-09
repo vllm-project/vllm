@@ -578,9 +578,6 @@ class LLMEngine:
         
         if self.spec_worker:
             self.spec_worker.accept(output)
-            self.spec_worker.invalidate_draft_kv()
-            self.spec_worker.invalidate_target_kv()
-        
 
         return self._process_model_outputs(output, scheduler_outputs) + ignored
 

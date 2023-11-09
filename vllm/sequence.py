@@ -2,6 +2,7 @@
 import copy
 import enum
 from typing import Dict, List, Optional, Union
+import torch
 
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
@@ -70,7 +71,8 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.draft_token_ids: List[int] = []
-        self.draft_token_logprobs: List[torch.Tensor]= []
+        # TODO: we need to remove draft_token_ids eventually
+        self.draft_token_probs: Dict[int, torch.Tensor] = {}
         self.cumulative_logprob = 0.0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
@@ -376,10 +378,15 @@ class SequenceOutputs:
         parent_seq_id: int,
         output_token: int,
         logprobs: Dict[int, float],
+        sd_draft_ids: Optional[List[int]],
+        sd_draft_probs: Optional[Dict[int, float]]
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
+        
+        self.sd_draft_ids = sd_draft_ids
+        self.sd_draft_probs = sd_draft_probs
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "

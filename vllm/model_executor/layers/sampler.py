@@ -509,7 +509,6 @@ def _get_logprobs(
         batched_logprobs_query_seq_indices,
         batched_logprobs_query_token_indices
     ]].cpu()
-    print(batched_logprobs_query_result)
 
     # Batched query for logprobs of topk tokens
     if largest_num_logprobs > 0:
@@ -599,7 +598,9 @@ def _build_sampler_output(
                                                       next_token_ids,
                                                       group_sample_logprobs):
             seq_outputs.append(
-                SequenceOutputs(seq_ids[parent_id], next_token_id, logprobs))
+                SequenceOutputs(seq_ids[parent_id], next_token_id, logprobs,
+                                input_metadata.seq_data[seq_ids[0]].draft_token_ids,
+                                input_metadata.seq_data[seq_ids[0]].draft_token_probs))
         sampler_output.append(
             SequenceGroupOutputs(seq_outputs, group_prompt_logprobs))
     return sampler_output
