@@ -72,12 +72,8 @@ class AWQLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
 
-    def create_weights(self,
-                       module: torch.nn.Module,
-                       input_size: int,
-                       output_size: int,
-                       params_dtype: torch.dtype,
-                       weight_attrs: dict[str, Any] = None) -> None:
+    def create_weights(self, input_size: int, output_size: int,
+                       params_dtype: torch.dtype) -> Dict[str, torch.Tensor]:
         if input_size % self.quant_config.group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
@@ -104,7 +100,6 @@ class AWQLinearMethod(LinearMethodBase):
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                **weight_attrs,
             })
         qzeros = Parameter(
             torch.empty(
@@ -121,7 +116,6 @@ class AWQLinearMethod(LinearMethodBase):
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                **weight_attrs,
             })
         scales = Parameter(
             torch.empty(
@@ -135,21 +129,24 @@ class AWQLinearMethod(LinearMethodBase):
         set_weight_attrs(scales, {
             "input_dim": 0,
             "output_dim": 1,
-            **weight_attrs,
         })
-        module.register_parameter("qweight", qweight)
-        module.register_parameter("qzeros", qzeros)
-        module.register_parameter("scales", scales)
+        return {
+            "qweight": qweight,
+            "qzeros": qzeros,
+            "scales": scales,
+        }
 
     def apply_weights(self,
-                      module: torch.nn.Module,
+                      weights: Dict[str, torch.Tensor],
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        qweight = weights["qweight"]
+        qzeros = weights["qzeros"]
+        scales = weights["scales"]
         pack_factor = self.quant_config.pack_factor
-        out_shape = (x.shape[:-1] + (module.qweight.shape[-1] * pack_factor, ))
+        out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
-        out = quantization_ops.awq_gemm(reshaped_x, module.qweight,
-                                        module.scales, module.qzeros,
+        out = quantization_ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
                                         pack_factor)
         if bias is not None:
             out = out + bias
