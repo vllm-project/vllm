@@ -264,34 +264,25 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     return x
 
 
+def default_weight_loader(param: torch.Tensor,
+                          loaded_weight: torch.Tensor) -> None:
+    """Default weight loader."""
+    assert param.size() == loaded_weight.size()
+    param.data.copy_(loaded_weight)
+
+
 def load_padded_tensor_parallel_vocab(
         param: torch.Tensor,
         loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
 ) -> None:
-    tp_rank = get_tensor_model_parallel_rank()
-    shard_size = param.shape[0]
-    start_idx = tp_rank * shard_size
-    end_idx = (tp_rank + 1) * shard_size
-    loaded_weight = loaded_weight[start_idx:end_idx]
-    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-    param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
+    raise NotImplementedError()
 
 
 def load_tensor_parallel_weights(
         param: torch.Tensor,
         loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
 ) -> None:
-    param_data = param.data
-
-    weight_loader = getattr(param, "weight_loader", None)
-    if weight_loader is not None:
-        weight_loader(param_data, loaded_weight)
-        return
-
-    assert param_data.shape == loaded_weight.shape, (
-        f"shape mismatch between model and checkpoint: "
-        f"{param_data.shape} != {loaded_weight.shape}")
-    param_data.copy_(loaded_weight)
+    raise NotImplementedError()
 
 
 def initialize_dummy_weights(
