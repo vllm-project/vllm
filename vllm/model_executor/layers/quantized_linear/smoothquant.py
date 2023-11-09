@@ -12,14 +12,11 @@ class SQColumnParallelLinear(ColumnParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
         assert self.input_size % self.quant_config.weight_bits == 0
-        assert dtype in [torch.half, torch.float16, torch.float]
-        self.register_buffer(
-            'weight',
-            torch.randint(-127,
-                          127,
-                          (self.output_size_per_partition, self.input_size),
-                          dtype=torch.int8,
-                          requires_grad=False))
+        self.register_buffer('weight', 
+                            torch.empty(self.output_size_per_partition,
+                                           self.input_size, 
+                                           dtype=torch.int8, 
+                                           requires_grad=False))
 
     def apply_weights(
         self,
@@ -43,14 +40,12 @@ class SQRowParallelLinear(RowParallelLinear):
     def create_weights(self, dtype: torch.dtype) -> None:
         assert (self.input_size_per_partition %
                 self.quant_config.weight_bits == 0)
-        assert dtype in [torch.half, torch.float16, torch.float]
-        self.register_buffer(
-            'weight',
-            torch.randint(-127,
-                          127,
-                          (self.output_size, self.input_size_per_partition),
-                          dtype=torch.int8,
-                          requires_grad=False))
+        self.register_buffer('weight', 
+                            torch.empty(self.output_size,
+                                           self.input_size_per_partition, 
+                                           dtype=torch.int8, 
+                                           requires_grad=False))
+
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         x_shape = x.shape
