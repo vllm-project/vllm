@@ -3,6 +3,8 @@ from typing import List, Tuple
 
 from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
+# pylint: disable=redefined-outer-name
+
 
 def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
@@ -54,9 +56,12 @@ def main(args: argparse.Namespace):
     process_requests(engine, test_prompts)
 
 
-if __name__ == '__main__':
+# test model from modelscope: python examples/llm_engine_example.py \
+# --model="damo/nlp_gpt2_text-generation_english-base" \
+# --revision="v1.0.0" --from_modelscope
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Demo on using the LLMEngine class directly')
+        description="Demo on using the LLMEngine class directly")
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     main(args)

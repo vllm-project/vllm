@@ -71,5 +71,13 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
         llm = LLM(model=...)  # Name or path of your model
         output = llm.generate("Hello, my name is")
         print(output)
+    
+    To use model from www.modelscope.cn 
+    .. code-block:: python
+        from vllm import LLM
+
+        llm = LLM(model=..., revision=..., from_modelscope=True)  # Name or path of your model
+        output = llm.generate("Hello, my name is")
+        print(output)      
 
     If vLLM successfully generates text, it indicates that your model is supported.
