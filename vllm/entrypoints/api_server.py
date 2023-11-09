@@ -36,9 +36,14 @@ async def generate(request: Request) -> Response:
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
             prompt = request_output.prompt
-            text_outputs = [
-                prompt + output.text for output in request_output.outputs
-            ]
+            if args.echo:
+                text_outputs = [
+                    prompt + output.text for output in request_output.outputs
+                ]
+            else:
+                text_outputs = [
+                    output.text for output in request_output.outputs
+                ]
             ret = {"text": text_outputs}
             yield (json.dumps(ret) + "\0").encode("utf-8")
 
@@ -71,6 +76,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--echo",
+                        type=bool,
+                        action='store_true',
+                        default=True,
+                        help='Whether to add prompt into outputs')
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
