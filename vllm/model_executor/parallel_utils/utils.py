@@ -46,3 +46,6 @@ def split_tensor_along_last_dim(
         return tuple(chunk.contiguous() for chunk in tensor_list)
 
     return tensor_list
+
+class VocabUtility:
+    pass
