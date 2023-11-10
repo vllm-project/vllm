@@ -147,6 +147,7 @@ class BaiChuanAttention(nn.Module):
             hidden_size,
             bias=False,
             input_is_parallel=True,
+            linear_method=linear_method,
         )
         # Create the alibi slopes and slice them.
         if self.postion_embedding == "ALIBI":
