@@ -50,7 +50,7 @@ HEURISTICS = {
     prune_configs_by={
         'early_config_prune': _prune_configs,
         'perf_model': estimate_matmul_time,
-        'top_k': 1,
+        'top_k': 10,
     },
 )
 @triton.heuristics(HEURISTICS)
@@ -95,9 +95,10 @@ def _awq_kernel(
 
     AWQ_BIT_WIDTH = 32 // AWQ_PACK_FACTOR
     AWQ_MASK = (1 << AWQ_BIT_WIDTH) - 1
-    weight_shifter = tl.load(shifter_ptr + tl.arange(0, AWQ_PACK_FACTOR))
-    zero_shifter = tl.arange(0, AWQ_PACK_FACTOR) * AWQ_BIT_WIDTH
+    shifter = tl.load(shifter_ptr + tl.arange(0, AWQ_PACK_FACTOR))
 
+    s = tl.zeros([BLOCK_N], dtype=A.dtype.element_ty)
+    z = tl.zeros([BLOCK_N], dtype=tl.int32)
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=dot_out_dtype)
     for k in range(0, tl.cdiv(K, BLOCK_K * SPLIT_K)):
         if EVEN_K:
@@ -109,34 +110,26 @@ def _awq_kernel(
             a = tl.load(A, mask=rk[None, :] < k_remaining, other=_0)
             b = tl.load(B, mask=rk[:, None] < k_remaining, other=_0)
 
-        k_idx = pid_z * BLOCK_K + k * BLOCK_K * SPLIT_K
-        awq_g_idx = k_idx // AWQ_GROUP_SIZE
+        # BUG
+        if (k * BLOCK_K * SPLIT_K) % AWQ_GROUP_SIZE == 0:
+            k_idx = pid_z * BLOCK_K + k * BLOCK_K * SPLIT_K
+            awq_g_idx = k_idx // AWQ_GROUP_SIZE
+            # FIXME(woosuk): Currently, there's a bug in unpacking z.
+            # As a temporary workaround, we unpack z before launching the kernel.
+            z = tl.load(Z + awq_g_idx * stride_zk + rn * stride_zn).to(tl.int32)
+            s = tl.load(S + awq_g_idx * stride_sk + rn * stride_sn)
 
-        # 1. unpack b from [BLOCK_K, PACKED_BLOCK_N] to [BLOCK_K, BLOCK_N]
-        b = (b[:, None, :] >> weight_shifter[None, :, None]) & AWQ_MASK
+        # Unpack b from [BLOCK_K, PACKED_BLOCK_N] to [BLOCK_K, BLOCK_N]
+        b = (b[:, None, :] >> shifter[None, :, None]) & AWQ_MASK
         b = tl.view(b, (BLOCK_K, BLOCK_N))
 
-        # FIXME(woosuk): Currently, there's a bug in unpacking z.
-        # As a temporary workaround, we unpack z before launching the kernel.
-
-        # 2. load z: [PACKED_BLOCK_N]
-        # z = tl.load(Z + awq_g_idx * stride_zk + rbn * stride_zn)
-        # unpack z from [PACKED_BLOCK_N] to [BLOCK_N]
-        # z = (z[:, None] * zero_shifter[None, :) & AWQ_MASK
-        # z = tl.view(z, (1, BLOCK_N))
-        z = tl.load(Z + awq_g_idx * stride_zk + rn * stride_zn)
-        z = z.to(tl.int32)
-
-        # 3. compute b - z
+        # Compute b - z
         b = (b - z).to(A.dtype.element_ty)
 
-        # 4. load s: [BLOCK_N]
-        s = tl.load(S + awq_g_idx * stride_sk + rn * stride_sn)
-
-        # 5. compute b * s
+        # Compute b * s
         b = b * s[None, :]
 
-        # 6. compute a @ b
+        # Compute a @ b
         acc += tl.dot(a, b, out_dtype=dot_out_dtype)
 
         # 7. update pointers
@@ -263,8 +256,8 @@ if __name__ == "__main__":
     GROUP_SIZE = 128
     PACK_FACTOR = 8
     M = 12
-    K = 256
-    N = 128
+    K = 768
+    N = 768
 
     a = torch.randn((M, K), dtype=torch.float16, device="cuda")
     b = torch.randint(0, 0x0fffffff, (K, N // PACK_FACTOR), dtype=torch.int32, device="cuda")
