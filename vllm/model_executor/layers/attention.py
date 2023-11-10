@@ -98,12 +98,18 @@ class PagedAttention(nn.Module):
         """
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
-            key = key[:, :, None, :].repeat(
-                1, 1, self.num_queries_per_kv, 1).view(
-                    key.shape[0], self.num_heads, key.shape[-1])
-            value = value[:, :, None, :].repeat(
-                1, 1, self.num_queries_per_kv, 1).view(
-                    value.shape[0], self.num_heads, value.shape[-1])
+            query = query.view(query.shape[0],
+                               self.num_kv_heads,
+                               self.num_queries_per_kv,
+                               query.shape[-1])
+            key = key[:, :, None, :].expand(key.shape[0],
+                                            self.num_kv_heads,
+                                            self.num_queries_per_kv,
+                                            key.shape[-1])
+            value = value[:, :, None, :].expand(value.shape[0],
+                                                self.num_kv_heads,
+                                                self.num_queries_per_kv,
+                                                value.shape[-1])
 
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(
@@ -115,7 +121,7 @@ class PagedAttention(nn.Module):
             scale=self.scale,
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
-        output.copy_(out.squeeze(0))
+        output.copy_(out.view_as(output))
         return output
 
     def get_alibi_slopes(self) -> Optional[torch.Tensor]:
@@ -447,12 +453,18 @@ class PagedAttentionWithALiBi(PagedAttention):
         """
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
-            key = key[:, :, None, :].repeat(
-                1, 1, self.num_queries_per_kv, 1).view(
-                    key.shape[0], self.num_heads, key.shape[-1])
-            value = value[:, :, None, :].repeat(
-                1, 1, self.num_queries_per_kv, 1).view(
-                    value.shape[0], self.num_heads, value.shape[-1])
+            query = query.view(query.shape[0],
+                               self.num_kv_heads,
+                               self.num_queries_per_kv,
+                               query.shape[-1])
+            key = key[:, :, None, :].expand(key.shape[0],
+                                            self.num_kv_heads,
+                                            self.num_queries_per_kv,
+                                            key.shape[-1])
+            value = value[:, :, None, :].expand(value.shape[0],
+                                                self.num_kv_heads,
+                                                self.num_queries_per_kv,
+                                                value.shape[-1])
         batch_size = input_metadata.num_prompts
         seq_len = input_metadata.max_prompt_len
 
@@ -465,7 +477,7 @@ class PagedAttentionWithALiBi(PagedAttention):
             scale=self.scale,
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
-        output.copy_(out.view(-1, self.num_heads, self.head_size))
+        output.copy_(out.view_as(output))
         return output
 
     def get_alibi_slopes(self) -> Optional[torch.Tensor]:
