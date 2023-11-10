@@ -30,8 +30,8 @@ from transformers import OPTConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               ColumnParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
