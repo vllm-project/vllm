@@ -75,7 +75,7 @@ class SequenceData:
         # we can generate the same token multiple times in different locations
         # for each entry in the list, it's a map of
         # token_id -> probability distribution 
-        self.draft_token_probs: List[Dict[int, torch.Tensor]] = {}
+        self.draft_token_probs: List[Dict[int, torch.Tensor]] = []
         self.cumulative_logprob = 0.0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
