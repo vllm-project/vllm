@@ -31,6 +31,7 @@ def main(args: argparse.Namespace) -> None:
 
     if args.version == "triton":
         unpacked_qzeros = unpack_int32(qzeros, pack_factor)
+        shifter = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device="cuda") * 4
 
     def run_benchmark(num_iters: int, profile: bool = False) -> float:
         torch.cuda.synchronize()
@@ -42,7 +43,7 @@ def main(args: argparse.Namespace) -> None:
             if args.version == "orig":
                 quantization_ops.awq_gemm(x, w, scales, qzeros, pack_factor)
             elif args.version == "triton":
-                awq_matmul(x, w, unpacked_qzeros, scales, pack_factor, args.group_size, is_qzero_packed=False)
+                awq_matmul(x, w, unpacked_qzeros, scales, pack_factor, args.group_size, shifter, is_qzero_packed=False)
             else:
                 raise ValueError(f"Invalid version: {args.version}")
         torch.cuda.synchronize()
