@@ -4,6 +4,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import quantization_ops
+from vllm.model_executor.layers.quantized_ops.awq import awq_matmul, unpack_int32
 from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
                                                        RowParallelLinear)
 
@@ -46,16 +47,24 @@ class AWQColumnParallelLinear(ColumnParallelLinear):
             requires_grad=False,
         )
 
+        self.shifter = torch.tensor(
+            [0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device="cuda") * 4
+        self.unpacked_qzeros = None
+
     def apply_weights(
         self,
         x: torch.Tensor,
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
         pack_factor = self.quant_config.pack_factor
+        group_size = self.quant_config.group_size
+        if self.unpacked_qzeros is None:
+            self.unpacked_qzeros = unpack_int32(self.qzeros, pack_factor, self.shifter) 
+
         out_shape = (x.shape[:-1] + (self.qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
-        out = quantization_ops.awq_gemm(reshaped_x, self.qweight, self.scales,
-                                        self.qzeros, pack_factor)
+        out = awq_matmul(reshaped_x, self.qweight, self.unpacked_qzeros, self.scales,
+                         pack_factor, group_size, self.shifter, is_qzero_packed=False)
         if bias is not None:
             out = out + bias
         return out.reshape(out_shape)
@@ -96,11 +105,19 @@ class AWQRowParallelLinear(RowParallelLinear):
             ),
             requires_grad=False,
         )
+        self.shifter = torch.tensor(
+            [0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device="cuda")
+        self.shifter *= 4
+        self.unpacked_qzeros = None
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         pack_factor = self.quant_config.pack_factor
+        group_size = self.quant_config.group_size
+        if self.unpacked_qzeros is None:
+            self.unpacked_qzeros = unpack_int32(self.qzeros, pack_factor, self.shifter) 
+
         out_shape = (x.shape[:-1] + (self.qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
-        out = quantization_ops.awq_gemm(reshaped_x, self.qweight, self.scales,
-                                        self.qzeros, pack_factor)
+        out = awq_matmul(reshaped_x, self.qweight, self.unpacked_qzeros, self.scales,
+                         pack_factor, group_size, self.shifter, is_qzero_packed=False)
         return out.reshape(out_shape)
