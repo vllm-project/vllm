@@ -293,7 +293,7 @@ def _greedy_sample(
     selected_seq_groups: List[Tuple[List[int], SamplingParams]],
     logprobs: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
-    samples = torch.argmax(logprobs, dim=-1).cpu()
+    samples = torch.argmax(logprobs, dim=-1).tolist()
     sample_idx = 0
     results = []
     for seq_group in selected_seq_groups:
@@ -302,7 +302,7 @@ def _greedy_sample(
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples[sample_idx].item()]
+        next_token_ids = [samples[sample_idx]]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     assert sample_idx == logprobs.size(0)
@@ -483,7 +483,7 @@ def _get_logprobs(
     batched_logprobs_query_result = logprobs[[
         batched_logprobs_query_seq_indices,
         batched_logprobs_query_token_indices
-    ]].cpu()
+    ]].tolist()
 
     # Batched query for logprobs of topk tokens
     if largest_num_logprobs > 0:
@@ -516,7 +516,7 @@ def _get_logprobs(
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
                     token_id:
-                    batched_logprobs_query_result[query_result_idx].item()
+                    batched_logprobs_query_result[query_result_idx]
                 }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
@@ -537,7 +537,7 @@ def _get_logprobs(
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
                 next_token_id:
-                batched_logprobs_query_result[query_result_idx].item()
+                batched_logprobs_query_result[query_result_idx]
             }
             query_result_idx += 1
             if num_logprobs > 0:
