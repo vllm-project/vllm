@@ -75,8 +75,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         })
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        assert loaded_weight.shape[0] == self.num_embeddings
-        assert loaded_weight.shape[1] == self.embedding_dim
+        parallel_dim = param.parallel_dim
+        assert loaded_weight.shape[parallel_dim] == self.num_embeddings
         loaded_weight = loaded_weight[self.vocab_start_index:self.
                                       vocab_end_index]
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
@@ -102,7 +102,25 @@ class VocabParallelEmbedding(torch.nn.Module):
 
 
 class ParallelLMHead(VocabParallelEmbedding):
-    # TODO: Add docstring
+
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_dim: int,
+                 bias: bool = False,
+                 params_dtype: Optional[torch.dtype] = None):
+        super().__init__(num_embeddings, embedding_dim, params_dtype)
+        if bias:
+            self.bias = Parameter(
+                torch.empty(self.num_embeddings_per_partition,
+                            device=torch.cuda.current_device(),
+                            dtype=params_dtype))
+            set_weight_attrs(self.bias, {
+                "parallel_dim": 0,
+                "weight_loader": self.weight_loader
+            })
+        else:
+            self.register_parameter('bias', None)
+
     def forward(self, input_):
         del input_
-        raise RuntimeError("LMHead's weight should be used in the sampler.")
+        raise RuntimeError("LMHead's weights should be used in the sampler.")
