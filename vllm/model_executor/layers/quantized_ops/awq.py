@@ -125,6 +125,7 @@ def _awq_kernel(
         # z = (z[:, None] * zero_shifter[None, :) & AWQ_MASK
         # z = tl.view(z, (1, BLOCK_N))
         z = tl.load(Z + awq_g_idx * stride_zk + rn * stride_zn)
+        z = z.to(tl.int32)
 
         # 3. compute b - z
         b = (b - z).to(A.dtype.element_ty)
@@ -194,7 +195,10 @@ def awq_matmul(
     # Check dtypes.
     assert a.dtype in (torch.float16, torch.bfloat16)
     assert b.dtype == torch.int32
-    assert qzeros.dtype == torch.int32
+    if is_qzero_packed:
+        assert qzeros.dtype == torch.int32
+    else:
+        assert qzeros.dtype == torch.int8
     assert scales.dtype == a.dtype
 
     # Check shapes.
@@ -247,6 +251,7 @@ def unpack_int32(
     bit_width = 32 // pack_factor
     bit_mask = (1 << bit_width) - 1
     packed_tensor = (packed_tensor[:, :, None] >> shifter[None, None, :]) & bit_mask
+    packed_tensor = packed_tensor.to(torch.int8)
     return packed_tensor.view(packed_tensor.shape[0], -1)
 
 
