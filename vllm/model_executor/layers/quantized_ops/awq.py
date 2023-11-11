@@ -5,8 +5,8 @@ import triton
 import triton.language as tl
 # FIXME(woosuk): The performance model is not designed for quantized matmul.
 # For the best performance, we need to implement a new performance model.
-from triton.ops.matmul_perf_model import (
-    early_config_prune, estimate_matmul_time)
+from triton.ops.matmul_perf_model import (early_config_prune,
+                                          estimate_matmul_time)
 
 from vllm import quantization_ops
 from vllm.model_executor.layers.quantized_ops.matmul_utils import (
@@ -39,9 +39,11 @@ def _prune_configs(configs, named_args):
 
 CONFIGS = get_configs_compute_bound() + get_configs_io_bound()
 HEURISTICS = {
-    'EVEN_K': lambda args: args['K'] % (args['BLOCK_K'] * args['SPLIT_K']) == 0,
+    'EVEN_K': lambda args: args['K'] %
+    (args['BLOCK_K'] * args['SPLIT_K']) == 0,
     'PACKED_BLOCK_N': lambda args: args['BLOCK_N'] // args['AWQ_PACK_FACTOR'],
 }
+
 
 # Grid: ((M // BLOCK_M) * (N // BLOCK_N), SPLIT_K)
 @triton.autotune(
@@ -67,8 +69,12 @@ def _awq_kernel(
     AWQ_GROUP_SIZE: tl.constexpr,
     PACKED_BLOCK_N: tl.constexpr,
     dot_out_dtype: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr, SPLIT_K: tl.constexpr, EVEN_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
 ):
     # matrix multiplication
     pid = tl.program_id(0)
@@ -86,7 +92,8 @@ def _awq_kernel(
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     packed_rn = pid_n * PACKED_BLOCK_N + tl.arange(0, PACKED_BLOCK_N)
     ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
-    rbn = tl.max_contiguous(tl.multiple_of(packed_rn % N, PACKED_BLOCK_N), PACKED_BLOCK_N)
+    rbn = tl.max_contiguous(tl.multiple_of(packed_rn % N, PACKED_BLOCK_N),
+                            PACKED_BLOCK_N)
     # rbn = packed_rn
     rk = pid_z * BLOCK_K + tl.arange(0, BLOCK_K)
     # pointers
@@ -116,7 +123,8 @@ def _awq_kernel(
             awq_g_idx = k_idx // AWQ_GROUP_SIZE
             # FIXME(woosuk): Currently, there's a bug in unpacking z.
             # As a temporary workaround, we unpack z before launching the kernel.
-            z = tl.load(Z + awq_g_idx * stride_zk + rn * stride_zn).to(tl.int32)
+            z = tl.load(Z + awq_g_idx * stride_zk + rn * stride_zn).to(
+                tl.int32)
             s = tl.load(S + awq_g_idx * stride_sk + rn * stride_sn)
 
         # Unpack b from [BLOCK_K, PACKED_BLOCK_N] to [BLOCK_K, BLOCK_N]
@@ -175,8 +183,9 @@ def awq_matmul(
     if group_size != 128:
         raise NotImplementedError("AWQ group size must be 128.")
     if shifter is None:
-        shifter = torch.tensor(
-            [0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device=a.device)
+        shifter = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
+                               dtype=torch.int32,
+                               device=a.device)
         shifter *= 4
 
     # Check if the tensors are contiguous.
@@ -216,17 +225,31 @@ def awq_matmul(
 
     # Launch kernel.
     dot_out_dtype = tl.float32
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']), META['SPLIT_K'])
-    _awq_kernel[grid](a, b, c, M, N, K,
-                    qzeros, scales, shifter,
-                    a.stride(0), a.stride(1),
-                    b.stride(0), b.stride(1),
-                    c.stride(0), c.stride(1),
-                    qzeros.stride(0), qzeros.stride(1),
-                    scales.stride(0), scales.stride(1),
-                    P, G,
-                    dot_out_dtype=dot_out_dtype,
-                    GROUP_M=8)
+    grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(
+        N, META['BLOCK_N']), META['SPLIT_K'])
+    _awq_kernel[grid](a,
+                      b,
+                      c,
+                      M,
+                      N,
+                      K,
+                      qzeros,
+                      scales,
+                      shifter,
+                      a.stride(0),
+                      a.stride(1),
+                      b.stride(0),
+                      b.stride(1),
+                      c.stride(0),
+                      c.stride(1),
+                      qzeros.stride(0),
+                      qzeros.stride(1),
+                      scales.stride(0),
+                      scales.stride(1),
+                      P,
+                      G,
+                      dot_out_dtype=dot_out_dtype,
+                      GROUP_M=8)
     return c
 
 
@@ -237,15 +260,17 @@ def unpack_int32(
 ) -> torch.Tensor:
     assert packed_tensor.dtype == torch.int32
     if shifter is None:
-        shifter = torch.tensor(
-            [0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device=packed_tensor.device)
+        shifter = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
+                               dtype=torch.int32,
+                               device=packed_tensor.device)
         shifter *= 4
 
     bit_width = 32 // pack_factor
     bit_mask = (1 << bit_width) - 1
-    packed_tensor = (packed_tensor[:, :, None] >> shifter[None, None, :]) & bit_mask
-    packed_tensor = packed_tensor.to(torch.int8)
-    return packed_tensor.view(packed_tensor.shape[0], -1)
+    unpacked = packed_tensor[:, :, None] >> shifter[None, None, :]
+    unpacked = unpacked & bit_mask
+    unpacked = unpacked.to(torch.int8)
+    return unpacked.view(unpacked.shape[0], -1)
 
 
 if __name__ == "__main__":
@@ -253,6 +278,8 @@ if __name__ == "__main__":
     torch.cuda.manual_seed(0)
     torch.cuda.manual_seed_all(0)
 
+    MAX_INT32 = 0x0fffffff
+    MIN_INT32 = -MAX_INT32 - 1
     GROUP_SIZE = 128
     PACK_FACTOR = 8
     M = 12
@@ -260,9 +287,16 @@ if __name__ == "__main__":
     N = 768
 
     a = torch.randn((M, K), dtype=torch.float16, device="cuda")
-    b = torch.randint(0, 0x0fffffff, (K, N // PACK_FACTOR), dtype=torch.int32, device="cuda")
-    qzeros = torch.randint(0, 0x0fffffff, (K // GROUP_SIZE, N // PACK_FACTOR), dtype=torch.int32, device="cuda")
-    scales = torch.randn((K // GROUP_SIZE, N), dtype=torch.float16, device="cuda")
+    b = torch.randint(MIN_INT32,
+                      MAX_INT32, (K, N // PACK_FACTOR),
+                      dtype=torch.int32,
+                      device="cuda")
+    qzeros = torch.randint(MIN_INT32, MAX_INT32, (K // GROUP_SIZE, N // PACK_FACTOR),
+                           dtype=torch.int32,
+                           device="cuda")
+    scales = torch.randn((K // GROUP_SIZE, N),
+                         dtype=torch.float16,
+                         device="cuda")
 
     c = awq_matmul(a, b, qzeros, scales, PACK_FACTOR, GROUP_SIZE)
     ans = quantization_ops.awq_gemm(a, b, scales, qzeros, PACK_FACTOR)
