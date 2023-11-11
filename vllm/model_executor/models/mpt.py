@@ -242,16 +242,12 @@ class MptForCausalLM(nn.Module):
     def __init__(
         self,
         config: MptConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
         assert config.tie_word_embeddings
-        self.quant_config = quant_config
-        if quant_config is not None:
-            linear_method = quant_config.get_linear_method()
-        else:
-            linear_method = None
+        self.linear_method = linear_method
 
         self.transformer = MptModel(config, linear_method)
         self.lm_head_weight = self.transformer.wte.weight

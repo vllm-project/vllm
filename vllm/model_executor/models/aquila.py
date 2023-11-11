@@ -287,14 +287,11 @@ class AquilaForCausalLM(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
-        if quant_config is not None:
-            linear_method = quant_config.get_linear_method()
-        else:
-            linear_method = None
+        self.linear_method = linear_method
         self.model = AquilaModel(config, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)

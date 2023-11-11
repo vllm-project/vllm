@@ -236,15 +236,11 @@ class QWenLMHeadModel(nn.Module):
     def __init__(
         self,
         config: QWenConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        if quant_config is not None:
-            linear_method = quant_config.get_linear_method()
-        else:
-            linear_method = None
+        self.linear_method = linear_method
         self.transformer = QWenModel(config, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)

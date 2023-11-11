@@ -302,14 +302,10 @@ class BaiChuanBaseForCausalLM(nn.Module):
     def __init__(self,
                  config,
                  position_embedding: str,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        if quant_config is not None:
-            linear_method = quant_config.get_linear_method()
-        else:
-            linear_method = None
+        self.linear_method = linear_method
         self.model = BaiChuanModel(config, position_embedding, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)
@@ -361,13 +357,13 @@ class BaichuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 13b
 
     def __init__(self,
                  config,
-                 quant_config: Optional[QuantizationConfig] = None):
-        super().__init__(config, "ALIBI", quant_config)
+                 linear_method: Optional[LinearMethodBase] = None):
+        super().__init__(config, "ALIBI", linear_method)
 
 
 class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 7b
 
     def __init__(self,
                  config,
-                 quant_config: Optional[QuantizationConfig] = None):
-        super().__init__(config, "ROPE", quant_config)
+                 linear_method: Optional[LinearMethodBase] = None):
+        super().__init__(config, "ROPE", linear_method)

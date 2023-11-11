@@ -239,15 +239,11 @@ class GPTNeoXForCausalLM(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        if quant_config is not None:
-            linear_method = quant_config.get_linear_method()
-        else:
-            linear_method = None
+        self.linear_method = linear_method
         self.gpt_neox = GPTNeoXModel(config, linear_method)
         self.embed_out = ParallelLMHead(
             config.vocab_size,
