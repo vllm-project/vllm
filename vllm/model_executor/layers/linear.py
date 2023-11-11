@@ -18,10 +18,11 @@ logger = init_logger(__name__)
 
 
 class LinearMethodBase(ABC):
-
+    """Base class for different quantized linear methods."""
     @abstractmethod
     def create_weights(self, input_size: int, output_size: int,
                        params_dtype: torch.dtype) -> Dict[str, torch.Tensor]:
+        """Create weights for a linear layer."""
         raise NotImplementedError
 
     @abstractmethod
@@ -29,11 +30,17 @@ class LinearMethodBase(ABC):
                       weights: Dict[str, torch.Tensor],
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Apply the weights to the input tensor."""
         raise NotImplementedError
 
 
 class FullPrecisionLinearMethod(LinearMethodBase):
+    """Full precision linear method without quantization.
 
+    Args:
+        separate_bias_add: If true, add bias separately after matrix
+                           multiplication.
+    """
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add
 
@@ -60,7 +67,16 @@ class FullPrecisionLinearMethod(LinearMethodBase):
 
 
 class ReplicatedLinear(torch.nn.Module):
+    """Replicated linear layer.
 
+    Args:
+        input_size: input dimension of the linear layer.
+        output_size: output dimension of the linear layer.
+        bias: If true, add bias.
+        skip_bias_add: If true, skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        linear_method: (Maybe quantized) linear method.
+    """
     def __init__(
         self,
         input_size: int,
@@ -108,12 +124,10 @@ class ColumnParallelLinear(torch.nn.Module):
     The linear layer is defined as Y = XA + b. A is parallelized along
     its second dimension as A = [A_1, ..., A_p].
 
-    Arguments:
+    Args:
         input_size: first dimension of matrix A.
         output_size: second dimension of matrix A.
-
-    Keyword Arguments
-        bias: If true, add bias
+        bias: If true, add bias.
         gather_output: If true, call all-gather on output and make Y available
                        to all GPUs, otherwise, every GPU will have its output
                        which is Y_i = XA_i
@@ -121,7 +135,7 @@ class ColumnParallelLinear(torch.nn.Module):
                        bias can be fused with other element-wise operations. we
                        skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
-        quant_config: Quantization configuration.
+        linear_method: (Maybe quantized) linear method.
     """
 
     def __init__(
@@ -180,15 +194,6 @@ class ColumnParallelLinear(torch.nn.Module):
         param_data.copy_(loaded_weight)
 
     def forward(self, input_):
-        """Forward of ColumnParallelLinear
-
-        Args:
-            input_: Tensor whose last dimension is `input_size`.
-
-        Returns:
-            - output
-            - bias
-        """
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -204,7 +209,25 @@ class ColumnParallelLinear(torch.nn.Module):
 
 
 class PackedColumnParallelLinear(ColumnParallelLinear):
+    """Packed linear layers with column parallelism.
 
+    Similar to ColumnParallelLinear, but the weight matrix is concatenated
+    along the output dimension. When the weight matrix is loaded, the
+    different partitions are sharded separately.
+
+    Args:
+        input_size: input dimension of the linear layer.
+        output_sizes: list of output dimensions of the linear layer.
+        bias: If true, add bias.
+        gather_output: If true, call all-gather on output and make the output
+                       available to all GPUs, otherwise, every GPU will have
+                       its own output.
+        skip_bias_add: This was added to enable performance optimizations where
+                       bias can be fused with other element-wise operations. we
+                       skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        linear_method: (Maybe quantized) linear method.
+    """
     def __init__(
         self,
         input_size: int,
@@ -277,7 +300,28 @@ class PackedColumnParallelLinear(ColumnParallelLinear):
 
 
 class QKVParallelLinear(ColumnParallelLinear):
+    """Linear layers for the attention's QKV transformation.
 
+    Linear layers for the linear transformation of the query, key, and value
+    vectors in the attention layer. The weight matrix is concatenated along
+    the output dimension. The layer is parallelized along the head dimension.
+    When the number of key/value heads is smaller than the number of query
+    heads (e.g., multi-query/grouped-query attention), the key/value head may
+    be replicated while the query heads are partitioned.
+
+    Args:
+        hidden_size: input hidden state size of the transformer.
+        head_size: size of each attention head.
+        total_num_heads: total number of attention query heads.
+        total_num_kv_heads: total number of attention key/value heads. If
+                            None, assume total_num_kv_heads = total_num_heads.
+        bias: If true, add bias.
+        skip_bias_add: This was added to enable performance optimizations where
+                       bias can be fused with other element-wise operations. we
+                       skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        linear_method: (Maybe quantized) linear method.
+    """
     def __init__(
         self,
         hidden_size: int,
@@ -392,8 +436,6 @@ class RowParallelLinear(torch.nn.Module):
     Arguments:
         input_size: first dimension of matrix A.
         output_size: second dimension of matrix A.
-
-    Keyword Arguments:
         bias: If true, add bias. Note that bias is not parallelized.
         input_is_parallel: If true, we assume that the input is already
                            split across the GPUs and we do not split
@@ -402,7 +444,7 @@ class RowParallelLinear(torch.nn.Module):
                        bias can be fused with other element-wise operations.
                        We skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
-        quant_config: Quantization configuration.
+        linear_method: (Maybe quantized) linear method.
     """
 
     def __init__(
@@ -468,17 +510,6 @@ class RowParallelLinear(torch.nn.Module):
         param_data.copy_(loaded_weight)
 
     def forward(self, input_):
-        """Forward of RowParallelLinear
-
-        Args:
-            input_: tensor whose last dimension is `input_size`. If
-                    `input_is_parallel` is set, then the last dimension
-                    is `input_size // tp_size`.
-
-        Returns:
-            - output
-            - bias
-        """
         # Set up backprop all-reduce.
         if self.input_is_parallel:
             input_parallel = input_
