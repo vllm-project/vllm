@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.8.0-devel-ubuntu22.04 AS dev
+FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
     && apt-get install -y python3-pip
@@ -9,7 +9,7 @@ WORKDIR /workspace
 COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
-    
+
 # install development dependencies
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -26,7 +26,7 @@ COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
 
 # max jobs used by Ninja to build extensions
-ENV MAX_JOBS=$max_jobs 
+ENV MAX_JOBS=$max_jobs
 RUN python3 setup.py build_ext --inplace
 
 # image to run unit testing suite
@@ -41,7 +41,7 @@ COPY vllm vllm
 ENTRYPOINT ["python3", "-m", "pytest", "tests"]
 
 # use CUDA base as CUDA runtime dependencies are already installed via pip
-FROM nvidia/cuda:11.8.0-base-ubuntu22.04 AS vllm-base
+FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
 
 # libnccl required for ray
 RUN apt-get update -y \
