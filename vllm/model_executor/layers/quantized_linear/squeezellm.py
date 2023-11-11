@@ -6,7 +6,7 @@ from torch.nn.parameter import Parameter
 from vllm import quantization_ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
-from vllm.model_executor.quantization_utils.base import QuantizationConfig
+from vllm.model_executor.layers.quantized_linear.base_config import QuantizationConfig
 
 
 class SqueezeLLMConfig(QuantizationConfig):
@@ -62,7 +62,6 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
     Args:
         quant_config: The SqueezeLLM quantization config.
     """
-
 
     def __init__(self, quant_config: SqueezeLLMConfig):
         self.quant_config = quant_config

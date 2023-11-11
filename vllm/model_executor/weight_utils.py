@@ -13,8 +13,8 @@ import torch
 from tqdm.auto import tqdm
 
 from vllm.logger import init_logger
-from vllm.model_executor.quantization_utils import get_quant_class
-from vllm.model_executor.quantization_utils.base import QuantizationConfig
+from vllm.model_executor.layers.quantized_linear import (
+    get_quantization_config, QuantizationConfig)
 
 logger = init_logger(__name__)
 
@@ -98,7 +98,7 @@ def get_quant_config(
         hf_folder = model_name_or_path
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
-    quant_cls = get_quant_class(quantization)
+    quant_cls = get_quantization_config(quantization)
     quant_config_files = [
         f for f in config_files if any(
             f.endswith(x) for x in quant_cls.get_config_filenames())

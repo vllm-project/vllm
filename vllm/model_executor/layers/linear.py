@@ -19,6 +19,7 @@ logger = init_logger(__name__)
 
 class LinearMethodBase(ABC):
     """Base class for different quantized linear methods."""
+
     @abstractmethod
     def create_weights(self, input_size: int, output_size: int,
                        params_dtype: torch.dtype) -> Dict[str, torch.Tensor]:
@@ -41,6 +42,7 @@ class FullPrecisionLinearMethod(LinearMethodBase):
         separate_bias_add: If true, add bias separately after matrix
                            multiplication.
     """
+
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add
 
@@ -77,6 +79,7 @@ class ReplicatedLinear(torch.nn.Module):
         params_dtype: Data type for the parameters.
         linear_method: (Maybe quantized) linear method.
     """
+
     def __init__(
         self,
         input_size: int,
@@ -228,6 +231,7 @@ class PackedColumnParallelLinear(ColumnParallelLinear):
         params_dtype: Data type for the parameters.
         linear_method: (Maybe quantized) linear method.
     """
+
     def __init__(
         self,
         input_size: int,
@@ -322,6 +326,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         params_dtype: Data type for the parameters.
         linear_method: (Maybe quantized) linear method.
     """
+
     def __init__(
         self,
         hidden_size: int,

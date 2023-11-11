@@ -115,6 +115,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         bias: whether to use bias.
         params_dtype: type of the parameters.
     """
+
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
