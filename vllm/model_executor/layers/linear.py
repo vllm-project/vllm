@@ -222,13 +222,38 @@ class PackedColumnParallelLinear(ColumnParallelLinear):
         super().__init__(input_size, sum(output_sizes), bias, gather_output,
                          skip_bias_add, params_dtype, linear_method)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor,
-                      loaded_shard_id: int):
+    def weight_loader(self,
+                      param: Parameter,
+                      loaded_weight: torch.Tensor,
+                      loaded_shard_id: Optional[int] = None):
+        param_data = param.data
+        output_dim = getattr(param, "output_dim", None)
+        if loaded_shard_id is None:
+            # Loaded weight is already packed.
+            if output_dim is None:
+                assert param_data.shape == loaded_weight.shape
+                param_data.copy_(loaded_weight)
+                return
+            current_shard_offset = 0
+            shard_offsets = []
+            for i, output_size in enumerate(self.output_sizes):
+                shard_offsets.append((i, current_shard_offset, output_size))
+                current_shard_offset += output_size
+            packed_dim = getattr(param, "packed_dim", None)
+            for shard_id, shard_offset, shard_size in shard_offsets:
+                # If quantized, we need to adjust the offset and size to account
+                # for the packing.
+                if packed_dim == output_dim:
+                    shard_size = shard_size // param.pack_factor
+                    shard_offset = shard_offset // param.pack_factor
+                loaded_weight_shard = loaded_weight.narrow(
+                    output_dim, shard_offset, shard_size)
+                self.weight_loader(param, loaded_weight_shard, shard_id)
+            return
+
         assert loaded_shard_id < len(self.output_sizes)
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
-        param_data = param.data
-        output_dim = getattr(param, "output_dim", None)
         if output_dim is not None:
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
