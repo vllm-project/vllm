@@ -6,6 +6,7 @@ from vllm.model_executor.layers.linear import LinearMethodBase
 
 
 class QuantizationConfig:
+    """Base class for quantization configs."""
 
     @classmethod
     def get_name(cls) -> str:
@@ -47,4 +48,5 @@ class QuantizationConfig:
                          "quantization config.")
 
     def get_linear_method(self) -> LinearMethodBase:
+        """Get the linear method to use for the quantized linear layer."""
         raise NotImplementedError
