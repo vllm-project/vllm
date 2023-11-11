@@ -129,9 +129,9 @@ def _awq_kernel(
             a = tl.load(A, mask=rk[None, :] < k_remaining, other=_0)
             b = tl.load(B, mask=rk[:, None] < k_remaining, other=_0)
 
-        # BUG
         if (k * BLOCK_K * SPLIT_K) % AWQ_GROUP_SIZE == 0:
             k_idx = pid_z * BLOCK_K + k * BLOCK_K * SPLIT_K
+            k_idx = tl.where(k_idx < K, k_idx, 0)
             awq_g_idx = k_idx // AWQ_GROUP_SIZE
             # FIXME(woosuk): Currently, there's a bug in unpacking z.
             # As a temporary workaround, we unpack z before launching the kernel.
