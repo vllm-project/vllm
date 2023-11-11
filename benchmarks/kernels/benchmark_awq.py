@@ -25,13 +25,24 @@ def main(args: argparse.Namespace) -> None:
     pack_factor = 32 // args.bits
 
     x = torch.randn(args.m, args.k, dtype=dtype, device="cuda")
-    w = torch.randint(MIN_INT32, MAX_INT32, (args.k, args.n // pack_factor), dtype=torch.int32, device="cuda")
-    qzeros = torch.randint(MIN_INT32, MAX_INT32, (args.k // args.group_size, args.n // pack_factor), dtype=torch.int32, device="cuda")
-    scales = torch.randn(args.k // args.group_size, args.n, dtype=dtype, device="cuda")
+    w = torch.randint(MIN_INT32,
+                      MAX_INT32, (args.k, args.n // pack_factor),
+                      dtype=torch.int32,
+                      device="cuda")
+    qzeros = torch.randint(MIN_INT32,
+                           MAX_INT32,
+                           (args.k // args.group_size, args.n // pack_factor),
+                           dtype=torch.int32,
+                           device="cuda")
+    scales = torch.randn(args.k // args.group_size,
+                         args.n,
+                         dtype=dtype,
+                         device="cuda")
 
     if args.version == "triton":
         unpacked_qzeros = unpack_int32(qzeros, pack_factor)
-        shifter = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device="cuda") * 4
+        shifter = torch.tensor(
+            [0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device="cuda") * 4
 
     def run_benchmark(num_iters: int, profile: bool = False) -> float:
         torch.cuda.synchronize()
@@ -43,7 +54,14 @@ def main(args: argparse.Namespace) -> None:
             if args.version == "orig":
                 quantization_ops.awq_gemm(x, w, scales, qzeros, pack_factor)
             elif args.version == "triton":
-                awq_matmul(x, w, unpacked_qzeros, scales, pack_factor, args.group_size, shifter, is_qzero_packed=False)
+                awq_matmul(x,
+                           w,
+                           unpacked_qzeros,
+                           scales,
+                           pack_factor,
+                           args.group_size,
+                           shifter,
+                           is_qzero_packed=False)
             else:
                 raise ValueError(f"Invalid version: {args.version}")
         torch.cuda.synchronize()
