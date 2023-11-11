@@ -19,7 +19,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -71,7 +70,6 @@ class MptAttention(nn.Module):
             self.d_model,
             self.d_model,
             bias=not config.no_bias,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
 
@@ -130,7 +128,6 @@ class MptMLP(nn.Module):
             hidden_size,
             intermediate_size,
             bias=not config.no_bias,
-            gather_output=False,
             linear_method=linear_method,
         )
         self.act = get_act_fn("gelu")
@@ -138,7 +135,6 @@ class MptMLP(nn.Module):
             intermediate_size,
             hidden_size,
             bias=not config.no_bias,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
 

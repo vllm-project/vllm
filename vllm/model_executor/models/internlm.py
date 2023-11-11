@@ -18,7 +18,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -39,12 +38,10 @@ class InternLMMLP(nn.Module):
         self.gate_up_proj = PackedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             bias=False,
-            gather_output=False,
             linear_method=linear_method)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
-                                           input_is_parallel=True,
                                            linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -93,7 +90,6 @@ class InternLMAttention(nn.Module):
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=bias,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
         self.attn = PagedAttentionWithRoPE(

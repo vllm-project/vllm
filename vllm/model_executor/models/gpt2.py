@@ -39,7 +39,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -75,7 +74,6 @@ class GPT2Attention(nn.Module):
             self.hidden_size,
             self.hidden_size,
             bias=True,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
         self.attn = PagedAttention(self.num_heads,
@@ -112,14 +110,12 @@ class GPT2MLP(nn.Module):
             hidden_size,
             intermediate_size,
             bias=True,
-            gather_output=False,
             linear_method=linear_method,
         )
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=True,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
         self.act = get_act_fn(config.activation_function)

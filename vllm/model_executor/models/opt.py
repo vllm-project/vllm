@@ -40,7 +40,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -91,7 +90,6 @@ class OPTAttention(nn.Module):
             embed_dim,
             embed_dim,
             bias=bias,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
         self.attn = PagedAttention(self.num_heads,
@@ -140,14 +138,12 @@ class OPTDecoderLayer(nn.Module):
             self.embed_dim,
             config.ffn_dim,
             bias=config.enable_bias,
-            gather_output=False,
             linear_method=linear_method,
         )
         self.fc2 = RowParallelLinear(
             config.ffn_dim,
             self.embed_dim,
             bias=config.enable_bias,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
         self.final_layer_norm = nn.LayerNorm(

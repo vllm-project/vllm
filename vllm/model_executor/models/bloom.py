@@ -39,7 +39,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -100,7 +99,6 @@ class BloomAttention(nn.Module):
             self.hidden_size,
             self.hidden_size,
             bias=True,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
 
@@ -145,14 +143,12 @@ class BloomMLP(nn.Module):
         self.dense_h_to_4h = ColumnParallelLinear(
             hidden_size,
             4 * hidden_size,
-            gather_output=False,
             linear_method=linear_method,
         )
         self.act = get_act_fn("gelu")
         self.dense_4h_to_h = RowParallelLinear(
             4 * hidden_size,
             hidden_size,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
 

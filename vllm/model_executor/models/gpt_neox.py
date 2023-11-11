@@ -38,7 +38,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -73,7 +72,6 @@ class GPTNeoXAttention(nn.Module):
         self.dense = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
 
@@ -119,13 +117,11 @@ class GPTNeoXMLP(nn.Module):
         self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
-            gather_output=False,
             linear_method=linear_method,
         )
         self.dense_4h_to_h = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
-            input_is_parallel=True,
             linear_method=linear_method,
         )
         self.act = get_act_fn(config.hidden_act)

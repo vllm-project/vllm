@@ -41,7 +41,6 @@ from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -131,7 +130,6 @@ class FalconAttention(nn.Module):
             self.hidden_size,
             self.hidden_size,
             bias=config.bias,
-            input_is_parallel=True,
             skip_bias_add=True,
             reduce_results=self.reduce_row_parallel_results)
 
@@ -206,7 +204,6 @@ class FalconMLP(nn.Module):
         self.dense_h_to_4h = ColumnParallelLinear(hidden_size,
                                                   4 * hidden_size,
                                                   bias=config.bias,
-                                                  gather_output=False,
                                                   skip_bias_add=True,
                                                   linear_method=linear_method)
         self.act = nn.GELU()
@@ -216,7 +213,6 @@ class FalconMLP(nn.Module):
             4 * hidden_size,
             hidden_size,
             bias=config.bias,
-            input_is_parallel=True,
             skip_bias_add=True,
             reduce_results=self.reduce_row_parallel_results,
             linear_method=linear_method)
