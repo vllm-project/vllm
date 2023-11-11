@@ -42,13 +42,14 @@ HEURISTICS = {
     'EVEN_K': lambda args: args['K'] %
     (args['BLOCK_K'] * args['SPLIT_K']) == 0,
     'PACKED_BLOCK_N': lambda args: args['BLOCK_N'] // args['AWQ_PACK_FACTOR'],
+    'PADDED_M': lambda args: triton.next_power_of_2(args['M']),
 }
 
 
 # Grid: ((M // BLOCK_M) * (N // BLOCK_N), SPLIT_K)
 @triton.autotune(
     configs=CONFIGS,
-    key=['M', 'N', 'K'],
+    key=['PADDED_M', 'N', 'K'],
     prune_configs_by={
         'early_config_prune': _prune_configs,
         'perf_model': estimate_matmul_time,
@@ -80,6 +81,7 @@ def _awq_kernel(
     AWQ_PACK_FACTOR: tl.constexpr,
     AWQ_GROUP_SIZE: tl.constexpr,
     PACKED_BLOCK_N: tl.constexpr,
+    PADDED_M: tl.constexpr,
     dot_out_dtype: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
