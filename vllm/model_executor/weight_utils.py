@@ -13,8 +13,6 @@ import torch
 from tqdm.auto import tqdm
 
 from vllm.logger import init_logger
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.quantization_utils import get_quant_class
 from vllm.model_executor.quantization_utils.base import QuantizationConfig
 
@@ -269,20 +267,6 @@ def default_weight_loader(param: torch.Tensor,
     """Default weight loader."""
     assert param.size() == loaded_weight.size()
     param.data.copy_(loaded_weight)
-
-
-def load_padded_tensor_parallel_vocab(
-        param: torch.Tensor,
-        loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
-) -> None:
-    raise NotImplementedError()
-
-
-def load_tensor_parallel_weights(
-        param: torch.Tensor,
-        loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
-) -> None:
-    raise NotImplementedError()
 
 
 def initialize_dummy_weights(

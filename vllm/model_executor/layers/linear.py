@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -94,7 +93,7 @@ class ReplicatedLinear(torch.nn.Module):
                             dtype=self.params_dtype))
             set_weight_attrs(self.bias, {"output_dim": 0})
         else:
-            self.register_parameter('bias', None)
+            self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = self.bias if not self.skip_bias_add else None
@@ -166,7 +165,7 @@ class ColumnParallelLinear(torch.nn.Module):
                 "weight_loader": self.weight_loader,
             })
         else:
-            self.register_parameter('bias', None)
+            self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
@@ -441,8 +440,8 @@ class RowParallelLinear(torch.nn.Module):
             set_weight_attrs(weight, {"weight_loader": self.weight_loader})
 
         if not reduce_results and (bias and not skip_bias_add):
-            raise ValueError('When not reduce the results, adding bias to the '
-                             'results can lead to incorrect results')
+            raise ValueError("When not reduce the results, adding bias to the "
+                             "results can lead to incorrect results")
 
         if bias:
             self.bias = Parameter(
@@ -454,7 +453,7 @@ class RowParallelLinear(torch.nn.Module):
                 "weight_loader": self.weight_loader,
             })
         else:
-            self.register_parameter('bias', None)
+            self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()

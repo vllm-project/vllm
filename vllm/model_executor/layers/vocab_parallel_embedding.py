@@ -119,7 +119,7 @@ class ParallelLMHead(VocabParallelEmbedding):
                 "weight_loader": self.weight_loader
             })
         else:
-            self.register_parameter('bias', None)
+            self.register_parameter("bias", None)
 
     def forward(self, input_):
         del input_

@@ -2,7 +2,7 @@
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-from typing import List, Sequence
+from typing import Sequence
 
 import torch
 
@@ -24,7 +24,7 @@ def split_tensor_along_last_dim(
     tensor: torch.Tensor,
     num_partitions: int,
     contiguous_split_chunks: bool = False,
-) -> List[torch.Tensor]:
+) -> Sequence[torch.Tensor]:
     """ Split a tensor along its last dimension.
 
         Arguments:
@@ -46,7 +46,3 @@ def split_tensor_along_last_dim(
         return tuple(chunk.contiguous() for chunk in tensor_list)
 
     return tensor_list
-
-
-class VocabUtility:
-    pass
