@@ -36,9 +36,10 @@ def vocab_range_from_global_vocab_size(global_vocab_size: int, rank: int,
 class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
 
-    This is mainly adapted from torch.nn.Embedding and all the default
-    values are kept.
-    Arguments:
+    Adapted from torch.nn.Embedding, note that we pad the vocabulary size to
+    make sure it is divisible by the number of model parallel GPUs.
+
+    Args:
         num_embeddings: vocabulary size.
         embedding_dim: size of hidden state.
         params_dtype: type of the parameters.
@@ -102,7 +103,18 @@ class VocabParallelEmbedding(torch.nn.Module):
 
 
 class ParallelLMHead(VocabParallelEmbedding):
+    """Parallelized LM head.
 
+    Output logits weight matrices used in the Sampler. The weight and bias
+    tensors are padded to make sure they are divisible by the number of
+    model parallel GPUs.
+
+    Args:
+        num_embeddings: vocabulary size.
+        embedding_dim: size of hidden state.
+        bias: whether to use bias.
+        params_dtype: type of the parameters.
+    """
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,

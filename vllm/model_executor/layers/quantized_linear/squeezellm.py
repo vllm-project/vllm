@@ -57,6 +57,12 @@ class SqueezeLLMConfig(QuantizationConfig):
 
 
 class SqueezeLLMLinearMethod(LinearMethodBase):
+    """Linear method for SqueezeLLM.
+
+    Args:
+        quant_config: The SqueezeLLM quantization config.
+    """
+
 
     def __init__(self, quant_config: SqueezeLLMConfig):
         self.quant_config = quant_config

@@ -68,6 +68,11 @@ class AWQConfig(QuantizationConfig):
 
 
 class AWQLinearMethod(LinearMethodBase):
+    """Linear method for AWQ.
+
+    Args:
+        quant_config: The AWQ quantization config.
+    """
 
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
