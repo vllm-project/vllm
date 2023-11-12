@@ -292,7 +292,7 @@ if __name__ == "__main__":
     torch.cuda.manual_seed(0)
     torch.cuda.manual_seed_all(0)
 
-    MAX_INT32 = 0x0fffffff
+    MAX_INT32 = 0x7fffffff
     MIN_INT32 = -MAX_INT32 - 1
     GROUP_SIZE = 128
     PACK_FACTOR = 8

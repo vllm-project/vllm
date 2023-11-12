@@ -7,7 +7,7 @@ import torch
 from vllm import quantization_ops
 from vllm.model_executor.layers.quantized_ops.awq import awq_matmul, unpack_int32
 
-MAX_INT32 = 0x0fffffff
+MAX_INT32 = 0x7fffffff
 MIN_INT32 = -MAX_INT32 - 1
 
 
