@@ -53,7 +53,7 @@ HEURISTICS = {
     prune_configs_by={
         'early_config_prune': _prune_configs,
         'perf_model': estimate_matmul_time,
-        'top_k': 10,
+        'top_k': 50,
     },
 )
 @triton.heuristics(HEURISTICS)
