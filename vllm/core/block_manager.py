@@ -159,6 +159,10 @@ class BlockSpaceManager:
             self.gpu_allocator.free(last_block)
             return last_block.block_number, new_block.block_number
 
+
+    def delete_slot(self, seq: Sequence) -> None:
+        pass
+    
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
         # Thus, it is always safe from OOM.

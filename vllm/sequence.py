@@ -380,16 +380,11 @@ class SequenceOutputs:
         self,
         parent_seq_id: int,
         output_token: int,
-        logprobs: Dict[int, float],
-        sd_draft_ids: Optional[List[int]],
-        sd_draft_probs: Optional[Dict[int, float]]
+        logprobs: Dict[int, float]
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
-        
-        self.sd_draft_ids = sd_draft_ids
-        self.sd_draft_probs = sd_draft_probs
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "

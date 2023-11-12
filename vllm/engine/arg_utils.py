@@ -215,7 +215,7 @@ class EngineArgs:
                                            model_config.max_model_len,
                                            self.max_paddings)
  
-        spec_decoding_config = None
+        spec_dec_config = None
         if self.draft_model:
             # assume the draft model and target model share the same tokenizer
             # for now, share the same seed as the target
@@ -223,8 +223,8 @@ class EngineArgs:
                                              self.tokenizer_mode, self.trust_remote_code,
                                              self.download_dir, self.load_format,
                                              'auto', self.seed)
-            spec_decoding_config = SpecDecConfig(draft_model_config, self.propose_cnt)
-        return model_config, cache_config, parallel_config, scheduler_config, spec_decoding_config
+            spec_dec_config = SpecDecConfig(draft_model_config, self.propose_cnt)
+        return model_config, cache_config, parallel_config, scheduler_config, spec_dec_config
 
 
 @dataclass

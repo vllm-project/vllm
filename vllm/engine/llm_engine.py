@@ -66,7 +66,7 @@ class LLMEngine:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        spec_decoding_config: Optional[SpecDecConfig],
+        spec_dec_config: Optional[SpecDecConfig],
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
@@ -125,8 +125,8 @@ class LLMEngine:
         self.num_generation_tokens: List[Tuple[float, int]] = []
         
         self.spec_worker = None
-        if spec_decoding_config:
-            self.spec_worker = SpecDecWorker(spec_decoding_config)
+        if spec_dec_config:
+            self.spec_worker = SpecDecWorker(spec_dec_config)
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -577,7 +577,9 @@ class LLMEngine:
         )
         
         if self.spec_worker:
-            self.spec_worker.accept(output)
+            # accept will read draft_token_ids and draft_token_probs from scheduler_outputs
+            # and set accepted_token_ids and accepted_token_probs in output
+            self.spec_worker.accept(output, scheduler_outputs)
 
         return self._process_model_outputs(output, scheduler_outputs) + ignored
 
