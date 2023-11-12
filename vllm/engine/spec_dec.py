@@ -111,7 +111,7 @@ class SpecDecWorker(Worker):
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
         for seq_group, seq_group_output in zip(scheduled_seq_groups, target_outputs):
             assert seq_group.num_seqs() == 1
-            sample = seq_group_output.samples[0]
+            sample: SequenceOutputs = seq_group_output.samples[0]
             seq_id = list(seq_group.seqs_dict.keys())[0]
             cur_seq = seq_group.seqs_dict[seq_id]
             assert seq_id == sample.parent_seq_id, \
@@ -141,16 +141,7 @@ class SpecDecWorker(Worker):
             if len(accepted_token_ids) == len(cur_seq.data.draft_token_ids):
                 accepted_token_ids.append(sample.output_token)
             logger.info(f"accept tokens: {accepted_token_ids}")
-
-        self.invalidate_draft_kv()
-        self.invalidate_target_kv()
-        exit(0)
-
-    def invalidate_draft_kv(self):
-        pass
-
-    def invalidate_target_kv(self):
-        pass
+            sample.accepted_tokens_ids = accepted_token_ids
 
 
 def _pad_left_to_max(x: List[int], max_len: int, pad: int) -> List[int]:

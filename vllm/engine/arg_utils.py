@@ -215,7 +215,7 @@ class EngineArgs:
                                            model_config.max_model_len,
                                            self.max_paddings)
  
-        spec_dec_config = None
+        spec_dec_config: SpecDecConfig = None
         if self.draft_model:
             # assume the draft model and target model share the same tokenizer
             # for now, share the same seed as the target

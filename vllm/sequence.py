@@ -392,6 +392,8 @@ class SequenceOutputs:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
+        
+        self.accepted_tokens_ids = None
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "

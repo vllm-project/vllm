@@ -124,7 +124,7 @@ class LLMEngine:
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
         
-        self.spec_worker = None
+        self.spec_worker: SpecDecWorker = None
         if spec_dec_config:
             self.spec_worker = SpecDecWorker(spec_dec_config)
 
