@@ -91,8 +91,8 @@ if __name__ == '__main__':
                         choices=["orig", "triton"],
                         default="triton")
     parser.add_argument("--m", "-m", type=int, default=8)
-    parser.add_argument("--n", "-n", type=int, default=5120)
-    parser.add_argument("--k", "-k", type=int, default=20480)
+    parser.add_argument("--n", "-n", type=int, default=20480)
+    parser.add_argument("--k", "-k", type=int, default=5120)
     parser.add_argument("--bits", type=int, choices=[4], default=4)
     parser.add_argument("--group-size", type=int, default=128)
     parser.add_argument("--dtype",
