@@ -92,14 +92,6 @@ class SpecDecWorker(Worker):
             # logger.info(f"Seq draft prob: {seq.draft_token_probs}")
 
     @staticmethod
-    def _extract_draft_prob_dis(sample: SequenceOutputs,
-                                token_id: int,
-                                index: int):
-        token_prob = sample.sd_draft_probs[index]
-        assert token_id in token_prob
-        return token_prob[token_id]
-
-    @staticmethod
     def _extract_target_prob_dis(seq_grou_output: SequenceGroupOutputs,
                                  token_id: int):
         # TODO: implement this
@@ -111,20 +103,25 @@ class SpecDecWorker(Worker):
     # r = rand(0, 1)
     # accpet if r <= p/q
     # reject and sample from a new distribution if r > p/q
-    # The function reads draft tokens/probs from scheduler_output and set accepted token_ids
+    # The function reads draft tokens/probs from scheduler_outputs and set accepted token_ids
     # in traget_outputs
     def accept(self,
                target_outputs: List[SamplerOutput],
-               scheduler_output: SchedulerOutputs):
-        for seq_group_output in target_outputs:
-            assert len(seq_group_output.samples) == 1
+               scheduler_outputs: SchedulerOutputs):
+        scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
+        for seq_group, seq_group_output in zip(scheduled_seq_groups, target_outputs):
+            assert seq_group.num_seqs() == 1
             sample = seq_group_output.samples[0]
-
+            seq_id = list(seq_group.seqs_dict.keys())[0]
+            cur_seq = seq_group.seqs_dict[seq_id]
+            assert seq_id == sample.parent_seq_id, \
+                    (f"seq_group: {seq_id} and",
+                     f"seq_group_output: {sample.parent_seq_id} are not aligned")
+            
             accepted_token_ids = []
-            for i, token_id in enumerate(sample.sd_draft_ids):
-                draft_prob_dis = SpecDecWorker.extract_draft_prob_dis(
-                    sample, token_id, i)
-                target_prob_dis = SpecDecWorker.extract_target_prob_dis(
+            for i, token_id in enumerate(cur_seq.data.draft_token_ids):
+                draft_prob_dis = cur_seq.get_draft_probdis(token_id, i)
+                target_prob_dis = SpecDecWorker._extract_target_prob_dis(
                     seq_group_output, token_id)
                 p, q = draft_prob_dis[token_id].item(
                 ), target_prob_dis[token_id].item()
@@ -141,7 +138,7 @@ class SpecDecWorker(Worker):
                     accepted_token_ids.append(next_token.item())
 
             # all proposed tokens are accepted
-            if len(accepted_token_ids) == len(sample.sd_draft_ids):
+            if len(accepted_token_ids) == len(cur_seq.data.draft_token_ids):
                 accepted_token_ids.append(sample.output_token)
             logger.info(f"accept tokens: {accepted_token_ids}")
 

@@ -233,6 +233,13 @@ class Sequence:
                 f"num_blocks={len(self.logical_token_blocks)})")
 
 
+    def get_draft_probdis(self,
+                      token_id: int,
+                      pos: int) -> torch.Tensor:
+        token_probdis = self.data.draft_token_probs[pos]
+        assert token_id in token_probdis
+        return token_probdis[token_id]
+    
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
