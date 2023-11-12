@@ -8,7 +8,8 @@ from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
                                                        RowParallelLinear)
 
 
-# TODO(woosuk): Optimize.
+# FIXME(woosuk): Replace this and the CUDA kernel with a more optimized
+# implementation.
 def _gptq_matmul(
     x: torch.Tensor,
     qweight: torch.Tensor,
@@ -101,6 +102,9 @@ class GPTQColumnParallelLinear(ColumnParallelLinear):
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         num_tokens = x.shape[:-1].numel()
+        # FIXME(woosuk): The current GPTQ kernel performs poorly when the batch
+        # size is large. As a temporary workaround, we use the PyTorch-based
+        # GPTQ matmul implementation when the batch size is larger than 32.
         if num_tokens <= 32:
             output = torch.zeros(out_shape, dtype=x.dtype, device=x.device)
             quantization_ops.gptq_descact_matmul(reshaped_x, self.qweight,
@@ -174,6 +178,9 @@ class GPTQRowParallelLinear(RowParallelLinear):
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         num_tokens = x.shape[:-1].numel()
+        # FIXME(woosuk): The current GPTQ kernel performs poorly when the batch
+        # size is large. As a temporary workaround, we use the PyTorch-based
+        # GPTQ matmul implementation when the batch size is larger than 32.
         if num_tokens <= 32:
             output = torch.zeros(out_shape, dtype=x.dtype, device=x.device)
             quantization_ops.gptq_descact_matmul(reshaped_x, self.qweight,
