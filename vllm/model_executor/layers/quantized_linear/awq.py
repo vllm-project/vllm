@@ -3,7 +3,6 @@ from typing import Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm import quantization_ops
 from vllm.model_executor.layers.quantized_ops.awq import (awq_matmul,
                                                           get_shifter,
                                                           unpack_int32)
