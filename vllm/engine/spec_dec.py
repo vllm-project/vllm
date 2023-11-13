@@ -10,6 +10,7 @@ from vllm.worker.worker import Worker
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+import math
 
 # FIXME: we should get pad_token_id from tokenizer
 PAD_TOKEN_ID = 0
@@ -97,8 +98,9 @@ class SpecDecWorker(Worker):
                 # we call append_token_id of Sequence
                 # instead of SequenceData
                 # we can get seq from scheduler_outputs here
-                seqs[seq_id].append_token_id(draft_token)
-            logger.info(f"Seq draft tokens: {[p.keys() for p in seq_data.draft_token_probs]}")
+                seqs[seq_id].append_token_id(draft_token, 
+                                             {draft_token: math.log(draft_distributions[j][i][draft_token].item())})
+            logger.info(f"Seq draft tokens: {seq_data.get_draft_token_ids()}")
             # logger.info(f"Seq draft prob: {seq.draft_token_probs}")
 
     @staticmethod

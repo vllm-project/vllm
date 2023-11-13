@@ -305,6 +305,8 @@ class Scheduler:
         seq.delete_tailing_tokens(invalid_token_cnt)
         # delete from physical table
         self.block_manager.free_tailing_blocks(seq)
+        # clear draft tokens
+        seq.data.draft_token_probs = []
     
     def free_finished_seq_groups(self) -> None:
         self.running = [

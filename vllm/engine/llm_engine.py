@@ -400,8 +400,6 @@ class LLMEngine:
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
             if last_child_sample.accepted_tokens:
-                for token_id in last_child_sample.accepted_tokens:
-                    parent.append_token_id(token_id, None)
                 # invlidate kv cache for non-accepted tokens
                 self.scheduler.free_invalid_kv(parent, last_child_sample)
             else:

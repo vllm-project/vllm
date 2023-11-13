@@ -96,7 +96,7 @@ class SequenceData:
         return self.output_token_ids[-1]
     
     def get_draft_token_ids(self) -> List[int]:
-        draft_tokens = [tp.keys()[0] for tp in self.draft_token_probs]
+        draft_tokens = [list(tp.keys())[0] for tp in self.draft_token_probs]
         return draft_tokens
     
     def __repr__(self) -> str:

@@ -487,8 +487,10 @@ def _get_logprobs(
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
             prompt_len = input_metadata.prompt_lens[i]
+            # FIXME: we should not access output_token_ids directly here
             prompt_tokens = input_metadata.seq_data[
-                seq_ids[0]].prompt_token_ids
+                seq_ids[0]].prompt_token_ids + input_metadata.seq_data[
+                seq_ids[0]].output_token_ids
             batched_logprobs_query_seq_indices.extend(
                 sample_idx + j for j in range(prompt_len - 1))
             batched_logprobs_query_token_indices.extend(
