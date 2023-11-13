@@ -174,8 +174,7 @@ class Worker:
 
             seq_data = seq_group_metadata.seq_data[seq_id]
             
-            # prompt_tokens = seq_data.get_token_ids()
-            prompt_tokens = seq_data.get_token_ids_with_draft()
+            prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
@@ -235,9 +234,15 @@ class Worker:
             seq_groups.append((seq_ids, sampling_params))
 
             num_seqs = len(seq_ids)
+            seq = seq_group_metadata.seq_data[seq_ids[0]]
+            if len(seq.draft_token_probs) > 0:
+                assert num_seqs == 1
+                selected_token_end_idx = selected_token_start_idx + 1 + len(seq.draft_token_probs)
+            else:
+                selected_token_end_idx = selected_token_start_idx + num_seqs
             selected_token_indices.extend(
                 range(selected_token_start_idx,
-                      selected_token_start_idx + num_seqs))
+                      selected_token_end_idx))
             selected_token_start_idx += num_seqs
 
             categorized_sample_indices[sampling_params.sampling_type].extend(
@@ -248,9 +253,11 @@ class Worker:
             for seq_id in seq_ids:
                 seq_data: SequenceData = seq_group_metadata.seq_data[seq_id]
                 
-                if len(seq_data.draft_token_ids):
-                    input_tokens.append(seq_data.draft_token_ids)
-                else:   
+                if len(seq_data.draft_token_probs) > 0:
+                    input_tokens.append(seq_data.get_draft_token_ids())
+                else:
+                    # If there is no draft token, we just use the last token
+                    # as the generation token.
                     generation_token = seq_data.get_last_token_id()
                     input_tokens.append([generation_token])
 

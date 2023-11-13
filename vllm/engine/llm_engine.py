@@ -399,8 +399,14 @@ class LLMEngine:
             # We reuse the parent sequence here to reduce redundant memory
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
-            parent.append_token_id(last_child_sample.output_token,
-                                   last_child_sample.logprobs)
+            if last_child_sample.accepted_tokens:
+                for token_id in last_child_sample.accepted_tokens:
+                    parent.append_token_id(token_id, None)
+                # invlidate kv cache for non-accepted tokens
+                self.scheduler.free_invalid_kv(parent, last_child_sample)
+            else:
+                parent.append_token_id(last_child_sample.output_token,
+                                    last_child_sample.logprobs)
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
@@ -565,7 +571,8 @@ class LLMEngine:
             return ignored
 
         if self.spec_worker:
-            self.spec_worker.set_draft_tokens(seq_group_metadata_list)
+            self.spec_worker.set_draft_tokens(seq_group_metadata_list,
+                                              scheduler_outputs)
 
         # Execute the model.
         output = self._run_workers(
@@ -577,8 +584,7 @@ class LLMEngine:
         )
         
         if self.spec_worker:
-            # accept will read draft_token_ids and draft_token_probs from scheduler_outputs
-            # and set accepted_token_ids and accepted_token_probs in output
+            # accept will set accepted_token_ids and accepted_token_probs in output
             self.spec_worker.accept(output, scheduler_outputs)
 
         return self._process_model_outputs(output, scheduler_outputs) + ignored

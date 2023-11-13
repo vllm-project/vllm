@@ -58,9 +58,6 @@ class SequenceData:
     Attributes:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
-        draft_token_ids: The token IDs proposed by the draft model, 
-                    it will be added by the SpecDecWorker when proposing draft tokens
-                    it will be cleared by the SpecDecWorker after accepting tokens
         cumulative_logprob: The cumulative log probability of the output.
     """
 
@@ -70,7 +67,6 @@ class SequenceData:
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
-        self.draft_token_ids: List[int] = []
         # we use a list here because
         # we can generate the same token multiple times in different locations
         # for each entry in the list, it's a map of
@@ -94,14 +90,15 @@ class SequenceData:
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
 
-    def get_token_ids_with_draft(self) -> List[int]:
-        return self.prompt_token_ids + self.output_token_ids + self.draft_token_ids
-
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
-
+    
+    def get_draft_token_ids(self) -> List[int]:
+        draft_tokens = [tp.keys()[0] for tp in self.draft_token_probs]
+        return draft_tokens
+    
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
@@ -381,6 +378,7 @@ class SequenceOutputs:
         output_token: The output token ID.
         logprobs: The logprobs of the output token.
             (Token id -> logP(x_i+1 | x_0, ..., x_i))
+        accepted_tokens: The tokens that are accepted by the speculative decoding.
     """
 
     def __init__(
@@ -393,7 +391,7 @@ class SequenceOutputs:
         self.output_token = output_token
         self.logprobs = logprobs
         
-        self.accepted_tokens_ids = None
+        self.accepted_tokens = None
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "

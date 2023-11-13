@@ -55,7 +55,8 @@ class SpecDecWorker(Worker):
     # propose draft tokens
     # the function will run the draft model and set draft_tokens and draft_token_probs of each seq
     def set_draft_tokens(self,
-                         seq_group_list: List[SequenceGroupMetadata]) -> None:
+                         seq_group_list: List[SequenceGroupMetadata],
+                         scheduler_outputs: SchedulerOutputs) -> None:
         logger.info(f"# of input request: {len(seq_group_list)}")
         input_tensor = self._prepare_inputs(seq_group_list)
         draft_logits, draft_distributions, draft_tokens = [], [], []
@@ -87,8 +88,11 @@ class SpecDecWorker(Worker):
                 draft_token = draft_tokens[j][i].item()
                 seq.draft_token_probs.append(
                     {draft_token: draft_distributions[j][i]})
-                seq.draft_token_ids.append(draft_token)
-            logger.info(f"Seq draft tokens: {seq.draft_token_ids}")
+                # FIXME: we should call append_token_id of Sequence
+                # instead of SequenceData
+                # we can get seq from scheduler_outputs here
+                seq.append_token_id(draft_token)
+            logger.info(f"Seq draft tokens: {[p.keys() for p in seq.draft_token_probs]}")
             # logger.info(f"Seq draft prob: {seq.draft_token_probs}")
 
     @staticmethod
@@ -119,7 +123,8 @@ class SpecDecWorker(Worker):
                      f"seq_group_output: {sample.parent_seq_id} are not aligned")
             
             accepted_token_ids = []
-            for i, token_id in enumerate(cur_seq.data.draft_token_ids):
+            for i, token_prob in enumerate(cur_seq.data.draft_token_probs):
+                token_id = list(token_prob.keys())[0]
                 draft_prob_dis = cur_seq.get_draft_probdis(token_id, i)
                 target_prob_dis = SpecDecWorker._extract_target_prob_dis(
                     seq_group_output, token_id)
@@ -138,10 +143,10 @@ class SpecDecWorker(Worker):
                     accepted_token_ids.append(next_token.item())
 
             # all proposed tokens are accepted
-            if len(accepted_token_ids) == len(cur_seq.data.draft_token_ids):
+            if len(accepted_token_ids) == len(cur_seq.data.draft_token_probs):
                 accepted_token_ids.append(sample.output_token)
             logger.info(f"accept tokens: {accepted_token_ids}")
-            sample.accepted_tokens_ids = accepted_token_ids
+            sample.accepted_tokens = accepted_token_ids
 
 
 def _pad_left_to_max(x: List[int], max_len: int, pad: int) -> List[int]:

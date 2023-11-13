@@ -7,7 +7,8 @@ from vllm.core.block_manager import BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceStatus)
+                           SequenceGroupMetadata, SequenceStatus,
+                           SequenceOutputs)
 
 logger = init_logger(__name__)
 
@@ -298,6 +299,10 @@ class Scheduler:
     def free_seq(self, seq: Sequence) -> None:
         self.block_manager.free(seq)
 
+    def free_invalid_kv(self, seq: Sequence, seq_out: SequenceOutputs):
+        for invlid_token_id in get_invalid_token_ids(seq, seq_out):
+            self.block_manager.delete_slot(seq, invlid_token_id)
+    
     def free_finished_seq_groups(self) -> None:
         self.running = [
             seq_group for seq_group in self.running

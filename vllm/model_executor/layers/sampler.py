@@ -488,8 +488,7 @@ def _get_logprobs(
                                        sampling_params.prompt_logprobs)
             prompt_len = input_metadata.prompt_lens[i]
             prompt_tokens = input_metadata.seq_data[
-                seq_ids[0]].prompt_token_ids + input_metadata.seq_data[
-                seq_ids[0]].draft_token_ids
+                seq_ids[0]].prompt_token_ids
             batched_logprobs_query_seq_indices.extend(
                 sample_idx + j for j in range(prompt_len - 1))
             batched_logprobs_query_token_indices.extend(
@@ -536,8 +535,7 @@ def _get_logprobs(
             num_logprobs = sampling_params.prompt_logprobs
             prompt_len = input_metadata.prompt_lens[i]
             prompt_tokens = input_metadata.seq_data[
-                seq_ids[0]].prompt_token_ids + input_metadata.seq_data[
-                seq_ids[0]].draft_token_ids
+                seq_ids[0]].prompt_token_ids
             group_prompt_logprobs: PromptLogprobs = [None]
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
