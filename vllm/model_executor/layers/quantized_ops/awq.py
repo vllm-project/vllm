@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
 import triton
@@ -172,10 +172,7 @@ def awq_matmul(
     if group_size != 128:
         raise NotImplementedError("AWQ group size must be 128.")
     if shifter is None:
-        shifter = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
-                               dtype=torch.int32,
-                               device=a.device)
-        shifter *= 4
+        shifter = get_shifter(pack_factor, a.device)
 
     # Check if the tensors are contiguous.
     assert a.is_contiguous()
@@ -249,10 +246,7 @@ def unpack_int32(
 ) -> torch.Tensor:
     assert packed_tensor.dtype == torch.int32
     if shifter is None:
-        shifter = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
-                               dtype=torch.int32,
-                               device=packed_tensor.device)
-        shifter *= 4
+        shifter = get_shifter(pack_factor, packed_tensor.device)
 
     bit_width = 32 // pack_factor
     bit_mask = (1 << bit_width) - 1
@@ -260,6 +254,18 @@ def unpack_int32(
     unpacked = unpacked & bit_mask
     unpacked = unpacked.to(torch.int8)
     return unpacked.view(unpacked.shape[0], -1)
+
+
+def get_shifter(
+    pack_factor: int,
+    device: Union[str, torch.device] = "cuda",
+) -> torch.Tensor:
+    assert pack_factor == 8
+    shifter = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
+                           dtype=torch.int32,
+                           device=device)
+    shifter *= 4
+    return shifter
 
 
 if __name__ == "__main__":

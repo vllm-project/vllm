@@ -4,7 +4,9 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import quantization_ops
-from vllm.model_executor.layers.quantized_ops.awq import awq_matmul, unpack_int32
+from vllm.model_executor.layers.quantized_ops.awq import (awq_matmul,
+                                                          get_shifter,
+                                                          unpack_int32)
 from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
                                                        RowParallelLinear)
 
@@ -47,8 +49,8 @@ class AWQColumnParallelLinear(ColumnParallelLinear):
             requires_grad=False,
         )
 
-        self.shifter = torch.tensor(
-            [0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device="cuda") * 4
+        self.shifter = get_shifter(self.quant_config.pack_factor,
+                                   device="cuda")
         self.unpacked_qzeros = None
 
     def apply_weights(
@@ -112,10 +114,9 @@ class AWQRowParallelLinear(RowParallelLinear):
             ),
             requires_grad=False,
         )
-        self.shifter = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
-                                    dtype=torch.int32,
-                                    device="cuda")
-        self.shifter *= 4
+
+        self.shifter = get_shifter(self.quant_config.pack_factor,
+                                   device="cuda")
         self.unpacked_qzeros = None
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
