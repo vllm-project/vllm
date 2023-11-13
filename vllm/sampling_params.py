@@ -52,7 +52,7 @@ class SamplingParams:
             to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
         top_k: Integer that controls the number of top tokens to consider. Set
             to -1 to consider all tokens.
-        min_p: Float that represents the minimum probability for a token to be 
+        min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
         use_beam_search: Whether to use beam search instead of sampling.
