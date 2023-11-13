@@ -44,12 +44,7 @@ def main(args: argparse.Namespace) -> None:
         shifter = torch.tensor(
             [0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device="cuda") * 4
 
-    def run_benchmark(num_iters: int, profile: bool = False) -> float:
-        torch.cuda.synchronize()
-        if profile:
-            torch.cuda.cudart().cudaProfilerStart()
-        start_time = time.perf_counter()
-
+    def run(num_iters: int) -> None:
         for _ in range(num_iters):
             if args.version == "orig":
                 quantization_ops.awq_gemm(x, w, scales, qzeros, pack_factor)
@@ -66,6 +61,23 @@ def main(args: argparse.Namespace) -> None:
                 raise ValueError(f"Invalid version: {args.version}")
         torch.cuda.synchronize()
 
+    def run_benchmark(num_iters: int,
+                      profile: bool = False,
+                      gpu_time: bool = False) -> float:
+        torch.cuda.synchronize()
+        if profile:
+            torch.cuda.cudart().cudaProfilerStart()
+        start_time = time.perf_counter()
+
+        if gpu_time:
+            with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CUDA]) as p:
+                run(num_iters)
+            return p.key_averages().total_average(
+            ).self_cuda_time_total / num_iters
+        else:
+            run(num_iters)
+
         end_time = time.perf_counter()
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
@@ -73,14 +85,16 @@ def main(args: argparse.Namespace) -> None:
 
     # Warmup.
     print("Warming up...")
-    run_benchmark(num_iters=3, profile=False)
-
+    run_benchmark(num_iters=3, profile=False) * 1000000
     # Benchmark.
-    if args.profile:
+    if args.gpu_time:
+        assert not args.profile
+        latency = run_benchmark(num_iters=100, gpu_time=True)
+    elif args.profile:
         latency = run_benchmark(num_iters=1, profile=True)
     else:
         latency = run_benchmark(num_iters=100, profile=False)
-    print(f"Kernel running time: {latency * 1000000:.3f} us")
+    print(f"Elapsed time: {latency:.3f} us")
 
 
 if __name__ == '__main__':
@@ -101,6 +115,7 @@ if __name__ == '__main__':
                         default="half")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--gpu-time", action="store_true")
     args = parser.parse_args()
     print(args)
     main(args)
