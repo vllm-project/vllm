@@ -9,6 +9,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_cluster, ray
 from vllm.logger import init_logger
+from vllm.model_executor import set_random_seed
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 
@@ -418,7 +419,7 @@ class AsyncLLMEngine:
         # Preprocess the request.
         # This should not be used for logging, as it is monotonic time.
         arrival_time = time.monotonic()
-
+        set_random_seed(sampling_params.seed)
         try:
             stream = await self.add_request(request_id,
                                             prompt,

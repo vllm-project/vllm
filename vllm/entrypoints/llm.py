@@ -5,6 +5,7 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.model_executor import set_random_seed
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
@@ -142,6 +143,7 @@ class LLM:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
+        set_random_seed(sampling_params.seed)
         # Add requests to the engine.
         if prompts is not None:
             num_requests = len(prompts)
