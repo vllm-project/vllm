@@ -62,6 +62,7 @@ class SamplingParams:
             unlikely to find better candidates; `"never"`, where the beam search
             procedure only stops when there cannot be better candidates
             (canonical beam search algorithm).
+        seed: Random seed for sampling. An integer or null.
         stop: List of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
         stop_token_ids: List of tokens that stop the generation when they are
@@ -97,6 +98,7 @@ class SamplingParams:
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
+        seed: int = 0,
         stop: Optional[Union[str, List[str]]] = None,
         stop_token_ids: Optional[List[int]] = None,
         ignore_eos: bool = False,
@@ -118,6 +120,7 @@ class SamplingParams:
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
+        self.seed = seed
         if stop is None:
             self.stop = []
         elif isinstance(stop, str):
@@ -231,6 +234,7 @@ class SamplingParams:
                 f"use_beam_search={self.use_beam_search}, "
                 f"length_penalty={self.length_penalty}, "
                 f"early_stopping={self.early_stopping}, "
+                f"seed={self.seed}, "
                 f"stop={self.stop}, "
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
