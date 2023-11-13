@@ -126,7 +126,7 @@ class LLMEngine:
         
         self.spec_worker: SpecDecWorker = None
         if spec_dec_config:
-            self.spec_worker = SpecDecWorker(spec_dec_config)
+            self.spec_worker = SpecDecWorker(spec_dec_config, self.scheduler)
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers

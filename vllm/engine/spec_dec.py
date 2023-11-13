@@ -5,7 +5,7 @@ from transformers import AutoModelForCausalLM
 import torch
 from typing import List, Dict
 from vllm.sequence import SamplerOutput, SequenceGroupOutputs, SequenceOutputs
-from vllm.core.scheduler import SchedulerOutputs
+from vllm.core.scheduler import SchedulerOutputs, Scheduler
 from vllm.worker.worker import Worker
 from vllm.logger import init_logger
 
@@ -17,9 +17,12 @@ PAD_TOKEN_ID = 0
 
 
 class SpecDecWorker(Worker):
-    def __init__(self, config: SpecDecConfig) -> None:
+    def __init__(self, 
+                 config: SpecDecConfig,
+                 scheduler: Scheduler) -> None:
         self.propose_cnt = config.propose_cnt
         self.draft_model_config = config.draft_model_config
+        self.scheduler = scheduler
 
         # self.draft_model = get_model(self.draft_model_config)
         logger.info(
@@ -93,13 +96,19 @@ class SpecDecWorker(Worker):
             seq_data = seq_group_metadata.seq_data[seq_id]
             for j in range(self.propose_cnt):
                 draft_token = draft_tokens[j][i].item()
+                seq_data
                 seq_data.draft_token_probs.append(
                     {draft_token: draft_distributions[j][i]})
-                # we call append_token_id of Sequence
-                # instead of SequenceData
-                # we can get seq from scheduler_outputs here
+                # need to update seqs and seq_metadata
+                # update seqs to allocate logical block
+                # update seq_metadata to align with seqs, seq_metadata will be used in the next step to prepare inputs
                 seqs[seq_id].append_token_id(draft_token, 
                                              {draft_token: math.log(draft_distributions[j][i][draft_token].item())})
+                seq_group_metadata.seq_data[seq_id] = seqs[seq_id].data
+                # allocate physical block
+                self.scheduler.block_manager.append_slot(seqs[seq_id])
+                seq_group_metadata.block_tables[seq_id] = self.scheduler.block_manager.get_block_table(seqs[seq_id])
+                
             logger.info(f"Seq draft tokens: {seq_data.get_draft_token_ids()}")
             # logger.info(f"Seq draft prob: {seq.draft_token_probs}")
 
