@@ -12,6 +12,17 @@ from vllm import quantization_ops
 from vllm.model_executor.layers.quantized_ops.matmul_utils import (
     get_configs_compute_bound, get_configs_io_bound)
 
+# NOTE(woosuk): These variables should be defined outside of the @triton
+# decorator to avoid the following parsing error:
+# https://github.com/openai/triton/issues/1589
+CONFIGS = get_configs_compute_bound() + get_configs_io_bound()
+HEURISTICS = {
+    'EVEN_K': lambda args: args['K'] %
+    (args['BLOCK_K'] * args['SPLIT_K']) == 0,
+    'PACKED_BLOCK_N': lambda args: args['BLOCK_N'] // args['AWQ_PACK_FACTOR'],
+    'PADDED_M': lambda args: triton.next_power_of_2(args['M']),
+}
+
 
 def _prune_invalid_configs(
     configs: List[triton.Config],
@@ -37,15 +48,6 @@ def _prune_configs(configs, named_args):
     return _prune_invalid_configs(pruned, pack_factor, group_size)
 
 
-CONFIGS = get_configs_compute_bound() + get_configs_io_bound()
-HEURISTICS = {
-    'EVEN_K': lambda args: args['K'] %
-    (args['BLOCK_K'] * args['SPLIT_K']) == 0,
-    'PACKED_BLOCK_N': lambda args: args['BLOCK_N'] // args['AWQ_PACK_FACTOR'],
-    'PADDED_M': lambda args: triton.next_power_of_2(args['M']),
-}
-
-
 # Grid: ((M // BLOCK_M) * (N // BLOCK_N), SPLIT_K)
 @triton.autotune(
     configs=CONFIGS,
@@ -58,38 +60,14 @@ HEURISTICS = {
 )
 @triton.heuristics(HEURISTICS)
 @triton.jit
-def _awq_kernel(
-    A,
-    B,
-    C,
-    M,
-    N,
-    K,
-    Z,
-    S,
-    shifter_ptr,
-    stride_am,
-    stride_ak,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    stride_zk,
-    stride_zn,
-    stride_sk,
-    stride_sn,
-    AWQ_PACK_FACTOR: tl.constexpr,
-    AWQ_GROUP_SIZE: tl.constexpr,
-    PACKED_BLOCK_N: tl.constexpr,
-    PADDED_M: tl.constexpr,
-    dot_out_dtype: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr,
-    SPLIT_K: tl.constexpr,
-    EVEN_K: tl.constexpr,
-):
+def _awq_kernel(A, B, C, M, N, K, Z, S, shifter_ptr, stride_am, stride_ak,
+                stride_bk, stride_bn, stride_cm, stride_cn, stride_zk,
+                stride_zn, stride_sk, stride_sn, AWQ_PACK_FACTOR: tl.constexpr,
+                AWQ_GROUP_SIZE: tl.constexpr, PACKED_BLOCK_N: tl.constexpr,
+                PADDED_M: tl.constexpr, dot_out_dtype: tl.constexpr,
+                BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+                BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+                SPLIT_K: tl.constexpr, EVEN_K: tl.constexpr):
     # matrix multiplication
     pid = tl.program_id(0)
     pid_z = tl.program_id(1)
