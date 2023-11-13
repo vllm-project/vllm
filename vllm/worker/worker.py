@@ -146,6 +146,12 @@ class Worker:
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
 
+    def _get_slot(self, block_table: List[int], position: int) -> int:
+        block_number = block_table[position // self.block_size]
+        block_offset = position % self.block_size
+        slot = block_number * self.block_size + block_offset
+        return slot
+    
     def _prepare_inputs(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -201,9 +207,7 @@ class Worker:
             slot_mapping.append([])
             block_table = seq_group_metadata.block_tables[seq_id]
             for i in range(prompt_len):
-                block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
-                slot = block_number * self.block_size + block_offset
+                slot = self._get_slot(block_table, i)
                 slot_mapping[-1].append(slot)
 
         # Add generation tokens.
@@ -253,36 +257,44 @@ class Worker:
             for seq_id in seq_ids:
                 seq_data: SequenceData = seq_group_metadata.seq_data[seq_id]
                 
+                block_table = seq_group_metadata.block_tables[seq_id]
+                context_len = seq_data.get_len()
+                max_context_len = max(max_context_len, context_len)
+                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
+                                                len(block_table))
+                context_lens.append(context_len)    
                 if len(seq_data.draft_token_probs) > 0:
                     input_tokens.append(seq_data.get_draft_token_ids())
+                    assert not self.sliding_window, "Speculative Decoding does not support sliding window for now"
+                    draft_len = len(seq_data.get_draft_token_ids())
+                    # FIXME: we should set max_seq_len in a single place
+                    max_seq_len = max(max_seq_len, draft_len)
+                    positions = list(range(context_len - draft_len, context_len))
+                    input_positions.append(positions)
+                    
+                    slots = []
+                    block_table = seq_group_metadata.block_tables[seq_id]
+                    for position in positions:
+                        slots.append(self._get_slot(block_table, position))
+                    slot_mapping.append(slots)
                 else:
                     # If there is no draft token, we just use the last token
                     # as the generation token.
                     generation_token = seq_data.get_last_token_id()
                     input_tokens.append([generation_token])
 
-                context_len = seq_data.get_len()
-                position = context_len - 1
-                if self.sliding_window is not None:
-                    context_len = min(context_len, self.sliding_window)
-                input_positions.append([position])
+                    position = context_len - 1
+                    if self.sliding_window is not None:
+                        context_len = min(context_len, self.sliding_window)
+                    input_positions.append([position])
+                    
+                    slot = self._get_slot(block_table, position)
+                    slot_mapping.append([slot])
 
-                block_table = seq_group_metadata.block_tables[seq_id]
-
-                max_context_len = max(max_context_len, context_len)
-                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
-                                             len(block_table))
-                context_lens.append(context_len)
-
-                block_number = block_table[position // self.block_size]
-                block_offset = position % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append([slot])
-
-                if self.sliding_window is not None:
-                    sliding_window_blocks = (self.sliding_window //
-                                             self.block_size)
-                    block_table = block_table[-sliding_window_blocks:]
+                    if self.sliding_window is not None:
+                        sliding_window_blocks = (self.sliding_window //
+                                                self.block_size)
+                        block_table = block_table[-sliding_window_blocks:]
                 generation_block_tables.append(block_table)
 
         padded_input_tokens = [
