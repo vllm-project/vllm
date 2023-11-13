@@ -164,8 +164,8 @@ class ModelConfig:
                     parallel_config.tensor_parallel_size)
         # For LLaMA-2:
         if getattr(self.hf_config, "num_key_value_heads", None) is not None:
-            return (self.hf_config.num_key_value_heads //
-                    parallel_config.tensor_parallel_size)
+            return max(1, self.hf_config.num_key_value_heads //
+                       parallel_config.tensor_parallel_size)
         # For ChatGLM-2:
         if getattr(self.hf_config, "multi_query_group_num", None) is not None:
             return (self.hf_config.multi_query_group_num //
