@@ -294,7 +294,7 @@ if __name__ == "__main__":
         if args.dtype != "auto":
             raise ValueError("dtype must be auto for MII backend.")
         if args.n != 1:
-            raise ValueError("n must be 1 for Mii backend.")
+            raise ValueError("n must be 1 for MII backend.")
         if args.use_beam_search:
             raise ValueError("Beam search is not supported for MII backend.")
         if args.quantization is not None:
