@@ -114,7 +114,7 @@ def _awq_kernel(A, B, C, M, N, K, Z, S, shifter_ptr, stride_am, stride_ak,
             k_idx = tl.where(k_idx < K, k_idx, 0)
             awq_g_idx = k_idx // AWQ_GROUP_SIZE
             # FIXME(woosuk): Currently, there's a bug in unpacking z.
-            # As a temporary workaround, we unpack z before launching the kernel.
+            # As a temporary workaround, we unpack z before the kernel.
             z = tl.load(Z + awq_g_idx * stride_zk + rn * stride_zn)
             z = z.to(tl.int32)
             s = tl.load(S + awq_g_idx * stride_sk + rn * stride_sn)
