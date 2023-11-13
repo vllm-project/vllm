@@ -194,8 +194,8 @@ def main(args: argparse.Namespace):
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
         prompt = "hi" * (args.input_len - 1)
-        requests = [(prompt, args.input_len,
-                     args.output_len) for _ in range(args.num_prompts)]
+        requests = [(prompt, args.input_len, args.output_len)
+                    for _ in range(args.num_prompts)]
     else:
         requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
                                    args.output_len)
