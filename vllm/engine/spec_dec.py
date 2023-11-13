@@ -81,18 +81,24 @@ class SpecDecWorker(Worker):
             draft_distributions.append(distribution)
             draft_tokens.append(input_tensor)
 
+        # seq_id -> Sequence
+        seqs = {} 
+        for seq_group in scheduler_outputs.scheduled_seq_groups:
+            for id in seq_group.seqs_dict:
+                assert id not in seqs
+                seqs[id] = seq_group.seqs_dict[id]
         for i, seq_group_metadata in enumerate(seq_group_list):
             seq_id = next(iter(seq_group_metadata.seq_data))
-            seq = seq_group_metadata.seq_data[seq_id]
+            seq_data = seq_group_metadata.seq_data[seq_id]
             for j in range(self.propose_cnt):
                 draft_token = draft_tokens[j][i].item()
-                seq.draft_token_probs.append(
+                seq_data.draft_token_probs.append(
                     {draft_token: draft_distributions[j][i]})
-                # FIXME: we should call append_token_id of Sequence
+                # we call append_token_id of Sequence
                 # instead of SequenceData
                 # we can get seq from scheduler_outputs here
-                seq.append_token_id(draft_token)
-            logger.info(f"Seq draft tokens: {[p.keys() for p in seq.draft_token_probs]}")
+                seqs[seq_id].append_token_id(draft_token)
+            logger.info(f"Seq draft tokens: {[p.keys() for p in seq_data.draft_token_probs]}")
             # logger.info(f"Seq draft prob: {seq.draft_token_probs}")
 
     @staticmethod

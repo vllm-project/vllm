@@ -149,6 +149,9 @@ class Sequence:
             block_size=self.block_size,
         )
         self.logical_token_blocks.append(block)
+        
+    def _delete_logical_block(self, block: LogicalTokenBlock) -> None:
+        self.logical_token_blocks.remove(block)
 
     def _append_tokens_to_blocks(self, token_ids: List[int]) -> None:
         cursor = 0
@@ -175,6 +178,17 @@ class Sequence:
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id])
+
+    # delete n tokens from the end of the sequence
+    def delete_tailing_tokens(self, n: int) -> None:
+        while n > 0:
+            assert len(self.logical_token_blocks) > 0
+            last_block = self.logical_token_blocks[-1]
+            if last_block.get_num_tokens() <= n:
+                n -= last_block.get_num_tokens()
+                self._delete_logical_block(last_block)
+            else:
+                last_block.delete_last_tokens(n)
 
     def get_len(self) -> int:
         return self.data.get_len()
