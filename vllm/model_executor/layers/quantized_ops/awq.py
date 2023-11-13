@@ -137,19 +137,16 @@ def _awq_kernel(
             awq_g_idx = k_idx // AWQ_GROUP_SIZE
             # FIXME(woosuk): Currently, there's a bug in unpacking z.
             # As a temporary workaround, we unpack z before launching the kernel.
-            z = tl.load(Z + awq_g_idx * stride_zk + rn * stride_zn).to(
-                tl.int32)
+            z = tl.load(Z + awq_g_idx * stride_zk + rn * stride_zn)
+            z = z.to(tl.int32)
             s = tl.load(S + awq_g_idx * stride_sk + rn * stride_sn)
 
         # Unpack b from [BLOCK_K, PACKED_BLOCK_N] to [BLOCK_K, BLOCK_N]
         b = (b[:, None, :] >> shifter[None, :, None]) & AWQ_MASK
         b = tl.view(b, (BLOCK_K, BLOCK_N))
 
-        # Compute b - z
-        b = (b - z).to(A.dtype.element_ty)
-
-        # Compute b * s
-        b = b * s[None, :]
+        # Compute s * (b - z)
+        b = s * (b - z).to(A.dtype.element_ty)
 
         # Compute a @ b
         acc += tl.dot(a, b, out_dtype=dot_out_dtype)
