@@ -368,6 +368,8 @@ def _get_and_verify_max_len(
         "n_positions",
         # MPT
         "max_seq_len",
+        # ChatGLM2
+        "seq_length",
         # Others
         "max_sequence_length",
         "max_seq_length",
