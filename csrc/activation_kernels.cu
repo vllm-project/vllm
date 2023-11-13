@@ -18,8 +18,8 @@ __global__ void silu_and_mul_kernel(
   const int d) {
   const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t x = __ldg(&input[token_idx * 2 * d + idx]);
-    const scalar_t y = __ldg(&input[token_idx * 2 * d + d + idx]);
+    const scalar_t x = __ldg(&input[(int64_t) token_idx * 2 * d + idx]);
+    const scalar_t y = __ldg(&input[(int64_t) token_idx * 2 * d + d + idx]);
     out[token_idx * d + idx] = silu(x) * y;
   }
 }
@@ -57,7 +57,7 @@ __global__ void activation_kernel(
   const int d) {
   const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t x = __ldg(&input[token_idx * d + idx]);
+    const scalar_t x = __ldg(&input[(int64_t) token_idx * d + idx]);
     out[token_idx * d + idx] = ACT_FN(x);
   }
 }
