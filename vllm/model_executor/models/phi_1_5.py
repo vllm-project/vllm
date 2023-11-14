@@ -243,6 +243,15 @@ class PhiForCausalLM(nn.Module):
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
+                t = torch.arange(self.config.n_positions, dtype=torch.float32)
+
+                freqs = torch.einsum("i,j -> ij", t, loaded_weight)
+                cos = freqs.cos()
+                sin = freqs.sin()
+                cache = torch.cat((cos, sin), dim=-1)
+
+                for i in range(len(self.phi.layers)):
+                    self.phi.layers[i].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
                 continue
             _, layer_idx, *tail = name.split(".")
             tail = ".".join(tail)
