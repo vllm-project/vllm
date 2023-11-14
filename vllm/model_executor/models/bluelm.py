@@ -240,8 +240,11 @@ class BlueLMModel(nn.Module):
             vocab_size,
             config.hidden_size,
         )
-        self.embed_layer_norm = nn.LayerNorm(config.hidden_size,
-                                             eps=config.rms_norm_eps)
+        if config.use_stable_embedding:
+            self.embed_layer_norm = nn.LayerNorm(config.hidden_size,
+                                                    eps=config.rms_norm_eps)
+        else:
+            self.embed_layer_norm = None
         self.layers = nn.ModuleList([
             BlueLMDecoderLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)
@@ -257,7 +260,8 @@ class BlueLMModel(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
-        hidden_states = self.embed_layer_norm(hidden_states)
+        if self.embed_layer_norm is not None:
+            hidden_states = self.embed_layer_norm(hidden_states)
         for i in range(len(self.layers)):
             if cache_events is None:
                 cache_event = None
