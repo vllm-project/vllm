@@ -251,7 +251,8 @@ class PhiForCausalLM(nn.Module):
                 cache = torch.cat((cos, sin), dim=-1)
 
                 for i in range(len(self.phi.layers)):
-                    self.phi.layers[i].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
+                    self.phi.layers[
+                        i].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
                 continue
             _, layer_idx, *tail = name.split(".")
             tail = ".".join(tail)
