@@ -172,6 +172,10 @@ class ModelConfig:
         if getattr(self.hf_config, "num_key_value_heads", None) is not None:
             return (self.hf_config.num_key_value_heads //
                     parallel_config.tensor_parallel_size)
+        # For ChatGLM-2:
+        if getattr(self.hf_config, "multi_query_group_num", None) is not None:
+            return (self.hf_config.multi_query_group_num //
+                    parallel_config.tensor_parallel_size)
         total_num_attention_heads = self.hf_config.num_attention_heads
         return total_num_attention_heads // parallel_config.tensor_parallel_size
 
@@ -370,6 +374,8 @@ def _get_and_verify_max_len(
         "n_positions",
         # MPT
         "max_seq_len",
+        # ChatGLM2
+        "seq_length",
         # Others
         "max_sequence_length",
         "max_seq_length",
@@ -396,6 +402,9 @@ def _get_and_verify_max_len(
     if rope_scaling is not None:
         assert "factor" in rope_scaling
         scaling_factor = rope_scaling["factor"]
+        if rope_scaling["type"] == "yarn":
+            derived_max_model_len = rope_scaling[
+                "original_max_position_embeddings"]
         derived_max_model_len *= scaling_factor
 
     if max_model_len is None:

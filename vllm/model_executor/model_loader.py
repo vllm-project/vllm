@@ -19,6 +19,7 @@ _MODEL_REGISTRY = {
     "BaiChuanForCausalLM": BaiChuanForCausalLM,  # baichuan-7b
     "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
     "BloomForCausalLM": BloomForCausalLM,
+    "ChatGLMModel": ChatGLMForCausalLM,
     "FalconForCausalLM": FalconForCausalLM,
     "GPT2LMHeadModel": GPT2LMHeadModel,
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
@@ -28,22 +29,26 @@ _MODEL_REGISTRY = {
     "LlamaForCausalLM": LlamaForCausalLM,
     "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
     "MistralForCausalLM": MistralForCausalLM,
-    "MPTForCausalLM": MPTForCausalLM,
+    # transformers's mpt class has lower case
+    "MptForCausalLM": MptForCausalLM,
+    "MPTForCausalLM": MptForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
     "RWForCausalLM": FalconForCausalLM,
+    "YiForCausalLM": YiForCausalLM,
 }
 
 # FIXME(woosuk): Remove this once all models support quantization.
 _MODEL_CLASSES_SUPPORT_QUANTIZATION = {
-    "awq": [LlamaForCausalLM, MistralForCausalLM],
-    "squeezellm": [LlamaForCausalLM, MistralForCausalLM],
+    "awq": [LlamaForCausalLM, MistralForCausalLM, YiForCausalLM],
+    "squeezellm": [LlamaForCausalLM, MistralForCausalLM, YiForCausalLM],
     "gptq": [
         LlamaForCausalLM,
         QWenLMHeadModel,
         BaiChuanForCausalLM,
         BaichuanForCausalLM,
         BloomForCausalLM,
+        ChatGLMForCausalLM,
         GPT2LMHeadModel,
         GPTJForCausalLM,
         GPTNeoXForCausalLM,
@@ -52,8 +57,9 @@ _MODEL_CLASSES_SUPPORT_QUANTIZATION = {
         FalconForCausalLM,
         AquilaForCausalLM,
         OPTForCausalLM,
-        MPTForCausalLM,
+        MptForCausalLM,
         MistralForCausalLM,
+        YiForCausalLM,
     ],
 }
 

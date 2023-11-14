@@ -1,16 +1,18 @@
 from typing import Optional
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig, MptConfig, PretrainedConfig
 
 from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
 
 _CONFIG_REGISTRY = {
-    "mpt": MPTConfig,
-    "baichuan": BaiChuanConfig,
     "aquila": AquilaConfig,
+    "baichuan": BaiChuanConfig,
+    "chatglm": ChatGLMConfig,
+    "mpt": MptConfig,
     "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
+    "yi": YiConfig,
 }
 
 
