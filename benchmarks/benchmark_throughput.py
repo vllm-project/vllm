@@ -15,10 +15,10 @@ def sample_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
-    uniform_output_len: Optional[int],
+    fixed_output_len: Optional[int],
 ) -> List[Tuple[str, int, int]]:
-    if uniform_output_len is not None:
-        if uniform_output_len < 4:
+    if fixed_output_len is not None:
+        if fixed_output_len < 4:
             raise ValueError("output_len too small")
 
     # Load the dataset.
@@ -38,8 +38,8 @@ def sample_requests(
     tokenized_dataset = []
     for i in range(len(dataset)):
         output_len = len(completion_token_ids[i])
-        if uniform_output_len is not None:
-            output_len = uniform_output_len
+        if fixed_output_len is not None:
+            output_len = fixed_output_len
         tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
 
     # Filter out too long sequences.
