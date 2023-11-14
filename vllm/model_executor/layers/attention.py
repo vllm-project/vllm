@@ -203,6 +203,35 @@ class PagedAttention(nn.Module):
                 alibi_slopes,
             )
 
+            
+    def multi_query_cached_kv_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        input_metadata: InputMetadata,
+        cache_event: Optional[torch.cuda.Event],
+    ) -> torch.Tensor:
+        """ PagedAttention forward pass for multiple query vectors.
+
+        Args:
+            query: shape = [batch_size, seq_len, num_query, num_heads * head_size]
+            key: shape = [batch_size, seq_len, num_query, num_kv_heads * head_size]
+            value: shape = [batch_size, seq_len, num_query, num_kv_heads * head_size]
+            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
+                block_size, x]
+            value_cache: shape = [num_blocks, num_kv_heads, head_size,
+                block_size]
+            input_metadata: metadata for paged attention.
+            cache_event: event to wait for the cache operations to finish.
+
+        Returns:
+            shape = [batch_size, seq_len, num_query, num_heads * head_size]
+        """
+        return torch.zeros(query.shape)
+
     def forward(
         self,
         query: torch.Tensor,
