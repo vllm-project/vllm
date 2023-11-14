@@ -56,12 +56,12 @@ class PhiAttention(nn.Module):
         self.num_heads = (self.total_num_heads //
                           tensor_model_parallel_world_size)
 
-        self.query_key_value = ColumnParallelLinear(
+        self.Wqkv = ColumnParallelLinear(
             config.n_embd,
             3 * config.n_embd,
             gather_output=False,
         )
-        self.dense = RowParallelLinear(
+        self.out_proj = RowParallelLinear(
             config.n_embd,
             config.n_embd,
             input_is_parallel=True,
@@ -90,12 +90,12 @@ class PhiAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        qkv, _ = self.query_key_value(hidden_states)
+        qkv, _ = self.Wqkv(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(position_ids, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
-        output, _ = self.dense(attn_output)
+        output, _ = self.out_proj(attn_output)
         return output
 
 
@@ -145,9 +145,9 @@ class PhiLayer(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln(hidden_states)
-        attn_output = self.mixer(
+        attn_outputs = self.mixer(
             position_ids=position_ids,
-            hidden_states=attn_input,
+            hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             cache_event=cache_event,
@@ -169,7 +169,6 @@ class PhiModel(nn.Module):
             config.n_embd,
         )
         self.layers = nn.ModuleList([PhiLayer(config) for _ in range(config.n_layer)])
-        self.ln = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -193,7 +192,6 @@ class PhiModel(nn.Module):
                 input_metadata,
                 cache_event,
             )
-        hidden_states = self.ln(hidden_states)
         return hidden_states
 
 
@@ -203,6 +201,7 @@ class PhiForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.phi = PhiModel(config)
+        self.ln = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.embed_out = ColumnParallelLinear(
             config.n_embd,
             config.vocab_size,
@@ -220,14 +219,15 @@ class PhiForCausalLM(nn.Module):
     ) -> SamplerOutput:
         hidden_states = self.phi(input_ids, positions, kv_caches,
                                       input_metadata, cache_events)
+        hidden_states = self.ln(hidden_states)
         next_tokens = self.sampler(self.embed_out.weight, hidden_states,
-                                   input_metadata)
+                                   input_metadata, self.embed_out.bias)
         return next_tokens
 
     _column_parallel_weights = [
-        "embed_in.weight", "embed_out.weight", "fc1.weight", "fc1.bias"
+        "embed_in.weight", "embed_out.weight", "embed_out.bias", "fc1.weight", "fc1.bias"
     ]
-    _row_parallel_weights = ["dense.weight", "fc2.weight"]
+    _row_parallel_weights = ["out_proj.weight", "fc2.weight"]
 
     def load_weights(self,
                      model_name_or_path: str,
@@ -242,7 +242,7 @@ class PhiForCausalLM(nn.Module):
                     or "rotary_emb.inv_freq" in name):
                 continue
             param = state_dict[name]
-            if "query_key_value" in name:
+            if "Wqkv" in name:
                 # NOTE(woosuk): GPT-NeoX's fused QKV has the shape of
                 # [num_heads * 3 * head_size, hidden_size], while the
                 # required shape is [3 * num_heads * head_size, hidden_size].
@@ -255,12 +255,12 @@ class PhiForCausalLM(nn.Module):
                 num_heads = self.config.n_head
                 hidden_size = self.config.n_embd
                 head_size = hidden_size // num_heads
-                if "query_key_value.weight" in name:
+                if "Wqkv.weight" in name:
                     loaded_weight = loaded_weight.view(-1, 3, head_size,
                                                        hidden_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1, hidden_size)
-                elif "query_key_value.bias" in name:
+                elif "Wqkv.bias" in name:
                     loaded_weight = loaded_weight.view(-1, 3, head_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1)
