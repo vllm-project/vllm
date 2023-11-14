@@ -240,7 +240,8 @@ class BlueLMModel(nn.Module):
             vocab_size,
             config.hidden_size,
         )
-        self.embed_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.embed_layer_norm = nn.LayerNorm(config.hidden_size,
+                                             eps=config.rms_norm_eps)
         self.layers = nn.ModuleList([
             BlueLMDecoderLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)
