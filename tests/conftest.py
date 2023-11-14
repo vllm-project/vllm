@@ -8,15 +8,14 @@ from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 _TEST_PROMPTS = [
-    # pylint: disable=line-too-long
-    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
-    "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
-    "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
-    "Describe the basic components of a neural network and how it can be trained.",
-    "Write a short story about a robot that dreams for the first time.",
-    "Analyze the impact of the COVID-19 pandemic on global economic structures and future business models.",
-    "Explain the cultural significance of the Mona Lisa painting, and how its perception might vary in Western versus Eastern societies.",
-    "Translate the following English sentence into Japanese, French, and Swahili: 'The early bird catches the worm.'",
+    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.", # noqa: E501
+    "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.", # noqa: E501
+    "Compare and contrast artificial intelligence with human intelligence in terms of processing information.", # noqa: E501
+    "Describe the basic components of a neural network and how it can be trained.", # noqa: E501
+    "Write a short story about a robot that dreams for the first time.", # noqa: E501
+    "Analyze the impact of the COVID-19 pandemic on global economic structures and future business models.", # noqa: E501
+    "Explain the cultural significance of the Mona Lisa painting, and how its perception might vary in Western versus Eastern societies.", # noqa: E501
+    "Translate the following English sentence into Japanese, French, and Swahili: 'The early bird catches the worm.'", # noqa: E501
 ]
 
 

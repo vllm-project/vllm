@@ -49,11 +49,10 @@ def test_api_server(api_server):
         prompts = ["Hello world"] * 1
         result = None
         while not result:
-            # pylint: disable=bare-except
             try:
-                for result in pool.map(_query_server, prompts):
+                for _ in pool.map(_query_server, prompts):
                     break
-            except:
+            except Exception:
                 time.sleep(1)
 
         # Actual tests start here

@@ -330,11 +330,8 @@ def _get_and_verify_dtype(
 
     dtype = dtype.lower()
     if dtype == "auto":
-        if config_dtype == torch.float32:
-            # Following the common practice, we use float16 for float32 models.
-            torch_dtype = torch.float16
-        else:
-            torch_dtype = config_dtype
+        # Following the common practice, we use float16 for float32 models.
+        torch_dtype = torch.float16 if config_dtype == torch.float32 else config_dtype
     else:
         if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
             raise ValueError(f"Unknown dtype: {dtype}")

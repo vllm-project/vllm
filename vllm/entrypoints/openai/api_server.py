@@ -124,10 +124,7 @@ async def check_length(
     assert (not (prompt is None and prompt_ids is None)
             and not (prompt is not None and prompt_ids is not None)
             ), "Either prompt or prompt_ids should be provided."
-    if prompt_ids is not None:
-        input_ids = prompt_ids
-    else:
-        input_ids = tokenizer(prompt).input_ids
+    input_ids = prompt_ids if prompt_ids is not None else tokenizer(prompt).input_ids
     token_num = len(input_ids)
 
     if request.max_tokens is None:
