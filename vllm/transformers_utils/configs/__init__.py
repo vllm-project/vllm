@@ -8,6 +8,7 @@ from vllm.transformers_utils.configs.qwen import QWenConfig
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.yi import YiConfig
+from vllm.transformers_utils.configs.bluelm import BlueLMConfig
 
 __all__ = [
     "AquilaConfig",
@@ -17,4 +18,5 @@ __all__ = [
     "QWenConfig",
     "RWConfig",
     "YiConfig",
+    "BlueLMConfig",
 ]

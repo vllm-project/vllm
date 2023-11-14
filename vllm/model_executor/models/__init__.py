@@ -16,12 +16,14 @@ from vllm.model_executor.models.phi_1_5 import PhiForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
 from vllm.model_executor.models.chatglm import ChatGLMForCausalLM
 from vllm.model_executor.models.yi import YiForCausalLM
+from vllm.model_executor.models.bluelm import BlueLMForCausalLM
 
 __all__ = [
     "AquilaForCausalLM",
     "BaiChuanForCausalLM",
     "BaichuanForCausalLM",
     "BloomForCausalLM",
+    "BlueLMForCausalLM",
     "ChatGLMForCausalLM",
     "FalconForCausalLM",
     "GPT2LMHeadModel",
