@@ -179,7 +179,7 @@ class PhiModel(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        hidden_states = self.embed_in(input_ids)
+        hidden_states = self.wte(input_ids)
         for i in range(len(self.layers)):
             if cache_events is None:
                 cache_event = None
@@ -221,8 +221,8 @@ class PhiForCausalLM(nn.Module):
         hidden_states = self.phi(input_ids, positions, kv_caches,
                                       input_metadata, cache_events)
         hidden_states = self.ln(hidden_states)
-        next_tokens = self.sampler(self.embed_out.weight, hidden_states,
-                                   input_metadata, self.embed_out.bias)
+        next_tokens = self.sampler(self.linear.weight, hidden_states,
+                                   input_metadata, self.linear.bias)
         return next_tokens
 
     _column_parallel_weights = [
@@ -246,36 +246,14 @@ class PhiForCausalLM(nn.Module):
             layer_idx = int(layer_idx)
             
             # First or last layers are Embeddings and CausalLMHead respectively
-            if layer_idx in [0, self.config.n_layer + 1]:
+            if layer_idx == 0:
                 key = f"phi.{tail}"
+            elif layer_idx == self.config.n_layer + 1:
+                key = tail
             else:
                 key = f"phi.layers.{layer_idx - 1}.{tail}"
 
             param = state_dict[key]
-            if "Wqkv" in key:
-                # NOTE(woosuk): GPT-NeoX's fused QKV has the shape of
-                # [num_heads * 3 * head_size, hidden_size], while the
-                # required shape is [3 * num_heads * head_size, hidden_size].
-                # Thus, we need weight conversion.
-                shard_size = param.shape[0]
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-
-                num_heads = self.config.n_head
-                hidden_size = self.config.n_embd
-                head_size = hidden_size // num_heads
-                if "Wqkv.weight" in name:
-                    loaded_weight = loaded_weight.view(-1, 3, head_size,
-                                                       hidden_size)
-                    loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1, hidden_size)
-                elif "Wqkv.bias" in name:
-                    loaded_weight = loaded_weight.view(-1, 3, head_size)
-                    loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1)
-                else:
-                    raise ValueError(f"Unexpected weight name: {name}")
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
