@@ -182,9 +182,10 @@ class MptModel(nn.Module):
         self.norm_f = nn.LayerNorm(config.d_model)
         if config.no_bias:
             for module in self.modules():
-                if hasattr(module, "bias") and isinstance(module.bias, nn.Parameter):
-                        # Remove the bias term in Linear and LayerNorm.
-                        module.register_parameter("bias", None)
+                if hasattr(module, "bias") and isinstance(
+                        module.bias, nn.Parameter):
+                    # Remove the bias term in Linear and LayerNorm.
+                    module.register_parameter("bias", None)
 
     def forward(
         self,
