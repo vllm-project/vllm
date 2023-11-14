@@ -37,7 +37,24 @@ class LLM:
             the `torch_dtype` attribute specified in the model config file.
             However, if the `torch_dtype` in the config is `float32`, we will
             use `float16` instead.
+        quantization: The method used to quantize the model weights. Currently,
+            we support "awq". If None, we assume the model weights are not
+            quantized and use `dtype` to determine the data type of the weights.
+        revision: The specific model version to use. It can be a branch name,
+            a tag name, or a commit id.
+        tokenizer_revision: The specific tokenizer version to use. It can be a
+            branch name, a tag name, or a commit id.
         seed: The seed to initialize the random number generator for sampling.
+        gpu_memory_utilization: The ratio (between 0 and 1) of GPU memory to
+            reserve for the model weights, activations, and KV cache. Higher
+            values will increase the KV cache size and thus improve the model's
+            throughput. However, if the value is too high, it may cause out-of-
+            memory (OOM) errors.
+        swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
+            This can be used for temporarily storing the states of the requests
+            when their `best_of` sampling parameters are larger than 1. If all
+            requests will have `best_of=1`, you can safely set this to 0.
+            Otherwise, too small values may cause out-of-memory (OOM) errors.
     """
 
     def __init__(
@@ -48,7 +65,12 @@ class LLM:
         trust_remote_code: bool = False,
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
+        quantization: Optional[str] = None,
+        revision: Optional[str] = None,
+        tokenizer_revision: Optional[str] = None,
         seed: int = 0,
+        gpu_memory_utilization: float = 0.9,
+        swap_space: int = 4,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -60,7 +82,12 @@ class LLM:
             trust_remote_code=trust_remote_code,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
+            quantization=quantization,
+            revision=revision,
+            tokenizer_revision=tokenizer_revision,
             seed=seed,
+            gpu_memory_utilization=gpu_memory_utilization,
+            swap_space=swap_space,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)

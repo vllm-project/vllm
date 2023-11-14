@@ -20,7 +20,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -34,9 +34,10 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.sequence import SequenceOutputs
+from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
+                                                       ColumnParallelLinear,
+                                                       RowParallelLinear)
+from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -59,17 +60,26 @@ class GPTNeoXAttention(nn.Module):
             config.hidden_size,
             3 * config.hidden_size,
             gather_output=False,
-            perform_initialization=False)
-        self.dense = RowParallelLinear(config.hidden_size,
-                                       config.hidden_size,
-                                       input_is_parallel=True,
-                                       perform_initialization=False)
+        )
+        self.dense = RowParallelLinear(
+            config.hidden_size,
+            config.hidden_size,
+            input_is_parallel=True,
+        )
 
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0
-        self.attn = PagedAttentionWithRoPE(self.num_heads, self.head_size,
-                                           scaling, rotary_dim)
+        rope_theta = getattr(config, "rope_theta", 10000)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_size,
+            scaling,
+            rotary_dim,
+            base=rope_theta,
+            max_position=max_position_embeddings)
 
     def forward(
         self,
@@ -92,14 +102,16 @@ class GPTNeoXMLP(nn.Module):
 
     def __init__(self, config: GPTNeoXConfig):
         super().__init__()
-        self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
-                                                  config.intermediate_size,
-                                                  gather_output=False,
-                                                  perform_initialization=False)
-        self.dense_4h_to_h = RowParallelLinear(config.intermediate_size,
-                                               config.hidden_size,
-                                               input_is_parallel=True,
-                                               perform_initialization=False)
+        self.dense_h_to_4h = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            gather_output=False,
+        )
+        self.dense_4h_to_h = RowParallelLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            input_is_parallel=True,
+        )
         self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states):
@@ -161,9 +173,10 @@ class GPTNeoXModel(nn.Module):
         super().__init__()
         self.config = config
 
-        self.embed_in = VocabParallelEmbedding(config.vocab_size,
-                                               config.hidden_size,
-                                               perform_initialization=False)
+        self.embed_in = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+        )
         self.layers = nn.ModuleList(
             [GPTNeoXLayer(config) for _ in range(config.num_hidden_layers)])
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,
@@ -201,11 +214,12 @@ class GPTNeoXForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.gpt_neox = GPTNeoXModel(config)
-        self.embed_out = ColumnParallelLinear(config.hidden_size,
-                                              config.vocab_size,
-                                              bias=False,
-                                              gather_output=False,
-                                              perform_initialization=False)
+        self.embed_out = ColumnParallelLinear(
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
+            gather_output=False,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -215,7 +229,7 @@ class GPTNeoXForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.gpt_neox(input_ids, positions, kv_caches,
                                       input_metadata, cache_events)
         next_tokens = self.sampler(self.embed_out.weight, hidden_states,
@@ -231,11 +245,12 @@ class GPTNeoXForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     use_np_cache: bool = False):
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache):
+                model_name_or_path, cache_dir, load_format, revision):
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
                 continue

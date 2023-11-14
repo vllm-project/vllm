@@ -173,3 +173,7 @@ cython_debug/
 
 # Sphinx documentation
 _build/
+
+# vim swap files
+*.swo
+*.swp

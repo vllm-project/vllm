@@ -44,7 +44,6 @@ YAPF_FLAGS=(
 
 YAPF_EXCLUDES=(
     '--exclude' 'build/**'
-    '--exclude' 'vllm/model_executor/parallel_utils/**'
 )
 
 # Format specified files
@@ -72,7 +71,7 @@ format_changed() {
 
 # Format all files
 format_all() {
-    yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" vllm
+    yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" vllm tests
 }
 
 ## This flag formats individual files. --files *must* be the first command line
@@ -94,9 +93,43 @@ echo 'vLLM yapf: Done'
 # echo 'vLLM mypy:'
 # mypy
 
+# Lint specified files
+lint() {
+    pylint "$@"
+}
+
+# Lint files that differ from main branch. Ignores dirs that are not slated
+# for autolint yet.
+lint_changed() {
+    # The `if` guard ensures that the list of filenames is not empty, which
+    # could cause pylint to receive 0 positional arguments, making it hang
+    # waiting for STDIN.
+    #
+    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
+    # exist on both branches.
+    MERGEBASE="$(git merge-base origin/main HEAD)"
+
+    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
+        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
+             pylint
+    fi
+
+}
+
 # Run Pylint
 echo 'vLLM Pylint:'
-pylint vllm
+## This flag lints individual files. --files *must* be the first command line
+## arg to use this option.
+if [[ "$1" == '--files' ]]; then
+   lint "${@:2}"
+   # If `--all` is passed, then any further arguments are ignored and the
+   # entire python directory is linted.
+elif [[ "$1" == '--all' ]]; then
+   lint vllm tests
+else
+   # Format only the files that changed in last commit.
+   lint_changed
+fi
 
 if ! git diff --quiet &>/dev/null; then
     echo 'Reformatted files. Please review and stage the changes.'

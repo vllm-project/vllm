@@ -21,7 +21,7 @@ The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -35,9 +35,10 @@ from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.sequence import SequenceOutputs
+from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
+                                                       ColumnParallelLinear,
+                                                       RowParallelLinear)
+from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -85,14 +86,12 @@ class BloomAttention(nn.Module):
             3 * self.hidden_size,
             bias=True,
             gather_output=False,
-            perform_initialization=False,
         )
         self.dense = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
             input_is_parallel=True,
-            perform_initialization=False,
         )
 
         # Create the alibi slopes and slice them.
@@ -129,15 +128,17 @@ class BloomMLP(nn.Module):
     def __init__(self, config: BloomConfig):
         super().__init__()
         hidden_size = config.hidden_size
-        self.dense_h_to_4h = ColumnParallelLinear(hidden_size,
-                                                  4 * hidden_size,
-                                                  gather_output=False,
-                                                  perform_initialization=False)
+        self.dense_h_to_4h = ColumnParallelLinear(
+            hidden_size,
+            4 * hidden_size,
+            gather_output=False,
+        )
         self.act = get_act_fn("gelu")
-        self.dense_4h_to_h = RowParallelLinear(4 * hidden_size,
-                                               hidden_size,
-                                               input_is_parallel=True,
-                                               perform_initialization=False)
+        self.dense_4h_to_h = RowParallelLinear(
+            4 * hidden_size,
+            hidden_size,
+            input_is_parallel=True,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.dense_h_to_4h(x)
@@ -208,7 +209,9 @@ class BloomModel(nn.Module):
 
         # Embedding + LN Embedding
         self.word_embeddings = VocabParallelEmbedding(
-            config.vocab_size, self.embed_dim, perform_initialization=False)
+            config.vocab_size,
+            self.embed_dim,
+        )
         self.word_embeddings_layernorm = nn.LayerNorm(
             self.embed_dim, eps=config.layer_norm_epsilon)
 
@@ -264,7 +267,7 @@ class BloomForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> Dict[int, SequenceOutputs]:
+    ) -> SamplerOutput:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
@@ -279,11 +282,12 @@ class BloomForCausalLM(nn.Module):
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     use_np_cache: bool = False):
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache):
+                model_name_or_path, cache_dir, load_format, revision):
             if name == "lm_head.weight":
                 # Since hidden_states are parallelized, we need to
                 # load lm_head.weight in parallel.

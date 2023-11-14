@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
+#include "dispatch_utils.h"
 #include "reduction_utils.cuh"
 
 namespace vllm {
@@ -8,8 +9,8 @@ namespace vllm {
 // TODO(woosuk): Further optimize this kernel.
 template<typename scalar_t>
 __global__ void rms_norm_kernel(
-  scalar_t* __restrict__ out,             // [num_tokens, hidden_size]
-  const scalar_t* __restrict__ input,     // [num_tokens, hidden_size]
+  scalar_t* __restrict__ out,             // [..., hidden_size]
+  const scalar_t* __restrict__ input,     // [..., hidden_size]
   const scalar_t* __restrict__ weight,    // [hidden_size]
   const float epsilon,
   const int num_tokens,
@@ -36,19 +37,17 @@ __global__ void rms_norm_kernel(
 } // namespace vllm
 
 void rms_norm(
-  torch::Tensor& out,      // [num_tokens, hidden_size]
-  torch::Tensor& input,    // [num_tokens, hidden_size]
+  torch::Tensor& out,      // [..., hidden_size]
+  torch::Tensor& input,    // [..., hidden_size]
   torch::Tensor& weight,   // [hidden_size]
   float epsilon) {
-  int num_tokens = input.size(0);
-  int hidden_size = input.size(1);
+  int hidden_size = input.size(-1);
+  int num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-    at::ScalarType::Half,
-    at::ScalarType::BFloat16,
+  VLLM_DISPATCH_FLOATING_TYPES(
     input.scalar_type(),
     "rms_norm_kernel",
     [&] {

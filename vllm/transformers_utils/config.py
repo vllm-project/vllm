@@ -1,20 +1,27 @@
-from transformers import AutoConfig, PretrainedConfig
+from typing import Optional
+
+from transformers import AutoConfig, MptConfig, PretrainedConfig
 
 from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
 
 _CONFIG_REGISTRY = {
-    "mpt": MPTConfig,
+    "aquila": AquilaConfig,
     "baichuan": BaiChuanConfig,
+    "chatglm": ChatGLMConfig,
+    "mpt": MptConfig,
     "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
+    "yi": YiConfig,
 }
 
 
-def get_config(model: str, trust_remote_code: bool) -> PretrainedConfig:
+def get_config(model: str,
+               trust_remote_code: bool,
+               revision: Optional[str] = None) -> PretrainedConfig:
     try:
         config = AutoConfig.from_pretrained(
-            model, trust_remote_code=trust_remote_code)
+            model, trust_remote_code=trust_remote_code, revision=revision)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
@@ -28,5 +35,5 @@ def get_config(model: str, trust_remote_code: bool) -> PretrainedConfig:
             raise e
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
-        config = config_class.from_pretrained(model)
+        config = config_class.from_pretrained(model, revision=revision)
     return config
