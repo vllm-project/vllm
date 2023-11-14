@@ -130,7 +130,6 @@ class PhiLayer(nn.Module):
 
     def __init__(self, config: PretrainedConfig):
         super().__init__()
-        self.use_parallel_residual = config.use_parallel_residual
         self.ln = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.mixer = PhiAttention(config)
         self.mlp = PhiMLP(config)
@@ -164,11 +163,13 @@ class PhiModel(nn.Module):
         super().__init__()
         self.config = config
 
-        self.embed_in = VocabParallelEmbedding(
+        self.wte = VocabParallelEmbedding(
             config.vocab_size,
             config.n_embd,
         )
-        self.layers = nn.ModuleList([PhiLayer(config) for _ in range(config.n_layer)])
+        self.layers = nn.ModuleList([
+            PhiLayer(config) for _ in range(config.n_layer)
+        ])
 
     def forward(
         self,
@@ -202,7 +203,7 @@ class PhiForCausalLM(nn.Module):
         self.config = config
         self.phi = PhiModel(config)
         self.ln = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
-        self.embed_out = ColumnParallelLinear(
+        self.linear = ColumnParallelLinear(
             config.n_embd,
             config.vocab_size,
             gather_output=False,
@@ -238,11 +239,20 @@ class PhiForCausalLM(nn.Module):
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if ("attention.bias" in name or "attention.masked_bias" in name
-                    or "rotary_emb.inv_freq" in name):
+            if ("rotary_emb.inv_freq" in name):
                 continue
-            param = state_dict[name]
-            if "Wqkv" in name:
+            _, layer_idx, *tail = name.split(".")
+            tail = ".".join(tail)
+            layer_idx = int(layer_idx)
+            
+            # First or last layers are Embeddings and CausalLMHead respectively
+            if layer_idx in [0, self.config.n_layer + 1]:
+                key = f"phi.{tail}"
+            else:
+                key = f"phi.layers.{layer_idx - 1}.{tail}"
+
+            param = state_dict[key]
+            if "Wqkv" in key:
                 # NOTE(woosuk): GPT-NeoX's fused QKV has the shape of
                 # [num_heads * 3 * head_size, hidden_size], while the
                 # required shape is [3 * num_heads * head_size, hidden_size].
