@@ -73,6 +73,8 @@ class ChatCompletionRequest(BaseModel):
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
+    add_generation_prompt: Optional[bool] = True
+    return_full_response: Optional[bool] = False
 
 
 class CompletionRequest(BaseModel):

@@ -14,7 +14,6 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response
-from packaging import version
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -64,12 +63,16 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 async def get_gen_prompt(request) -> str:
     if chat_template is not None:
-        return tokenizer.apply_chat_template(conversation=request.messages,
-                                             chat_template=chat_template,
-                                             tokenize=False)
+        return tokenizer.apply_chat_template(
+            conversation=request.messages,
+            chat_template=chat_template,
+            tokenize=False,
+            add_generation_prompt=request.add_generation_prompt)
     elif tokenizer.chat_template is not None:
-        return tokenizer.apply_chat_template(conversation=request.messages,
-                                             tokenize=False)
+        return tokenizer.apply_chat_template(
+            conversation=request.messages,
+            tokenize=False,
+            add_generation_prompt=request.add_generation_prompt)
     else:
         raise ValueError("No chat template defined. Please use a tokenizer "
                          "that includes a chat template, or pass in "
@@ -201,14 +204,20 @@ async def create_chat_completion(request: ChatCompletionRequest,
     result_generator = engine.generate(prompt, sampling_params, request_id,
                                        token_ids)
 
+    def get_role() -> str:
+        if request.add_generation_prompt:
+            return "assistant"
+        else:
+            return request.messages[-1]["role"]
+
     def create_stream_response_json(
-        index: int,
-        text: str,
-        finish_reason: Optional[str] = None,
-    ) -> str:
+            index: int,
+            text: str,
+            role: str,
+            finish_reason: Optional[str] = None) -> str:
         choice_data = ChatCompletionResponseStreamChoice(
             index=index,
-            delta=DeltaMessage(content=text),
+            delta=DeltaMessage(role=role, content=text),
             finish_reason=finish_reason,
         )
         response = ChatCompletionStreamResponse(
@@ -223,10 +232,11 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
     async def completion_stream_generator() -> AsyncGenerator[str, None]:
         # First chunk with role
+        role = get_role()
         for i in range(request.n):
             choice_data = ChatCompletionResponseStreamChoice(
                 index=i,
-                delta=DeltaMessage(role="assistant"),
+                delta=DeltaMessage(role=role),
                 finish_reason=None,
             )
             chunk = ChatCompletionStreamResponse(id=request_id,
@@ -246,12 +256,14 @@ async def create_chat_completion(request: ChatCompletionRequest,
                 previous_num_tokens[i] = len(output.token_ids)
                 response_json = create_stream_response_json(
                     index=i,
+                    role=role,
                     text=delta_text,
                 )
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
                     response_json = create_stream_response_json(
                         index=i,
+                        role=role,
                         text="",
                         finish_reason=output.finish_reason,
                     )
@@ -274,13 +286,24 @@ async def create_chat_completion(request: ChatCompletionRequest,
         final_res = res
     assert final_res is not None
     choices = []
+    role = get_role()
     for output in final_res.outputs:
         choice_data = ChatCompletionResponseChoice(
             index=output.index,
-            message=ChatMessage(role="assistant", content=output.text),
+            message=ChatMessage(role=role, content=output.text),
             finish_reason=output.finish_reason,
         )
         choices.append(choice_data)
+
+    if request.return_full_response:
+        last_msg_content = ""
+        if request.messages and isinstance(
+                request.messages, list) and request.messages[-1].get(
+                    "content") and request.messages[-1].get("role") == role:
+            last_msg_content = request.messages[-1]["content"]
+
+        for choice in choices:
+            choice.message.content = last_msg_content + choice.message.content
 
     num_prompt_tokens = len(final_res.prompt_token_ids)
     num_generated_tokens = sum(
