@@ -13,7 +13,7 @@ def test_duplicated_ignored_sequence_group():
     sampling_params = SamplingParams(temperature=0.01,
                                      top_p=0.1,
                                      max_tokens=256)
-    llm = LLM(model="meta-llama/Llama-2-7b-hf",
+    llm = LLM(model="facebook/opt-125m",
               max_num_batched_tokens=4096,
               tensor_parallel_size=1)
     prompts = ["This is a short prompt", "This is a very long prompt " * 1000]
