@@ -242,7 +242,7 @@ class BlueLMModel(nn.Module):
         )
         if config.use_stable_embedding:
             self.embed_layer_norm = nn.LayerNorm(config.hidden_size,
-                                                    eps=config.rms_norm_eps)
+                                                 eps=config.rms_norm_eps)
         else:
             self.embed_layer_norm = None
         self.layers = nn.ModuleList([
