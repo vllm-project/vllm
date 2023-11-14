@@ -24,7 +24,6 @@ def _query_server(prompt: str) -> dict:
 def api_server():
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
-    # pylint: disable=consider-using-with
     uvicorn_process = subprocess.Popen([
         sys.executable, "-u",
         str(script_path), "--model", "facebook/opt-125m"
@@ -33,7 +32,6 @@ def api_server():
     uvicorn_process.terminate()
 
 
-# pylint: disable=redefined-outer-name, unused-argument
 def test_api_server(api_server):
     """
     Run the API server and test it.

@@ -130,7 +130,6 @@ class BaiChuanAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        # pylint: disable=invalid-name
         self.W_pack = ColumnParallelLinear(
             hidden_size,
             3 * hidden_size,

@@ -1,4 +1,3 @@
-# pylint: disable=protected-access
 import random
 from typing import Tuple
 from unittest.mock import patch

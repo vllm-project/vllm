@@ -55,7 +55,7 @@ def create_error_response(status_code: HTTPStatus,
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request, exc):  # pylint: disable=unused-argument
+async def validation_exception_handler(_, exc):
     return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
 

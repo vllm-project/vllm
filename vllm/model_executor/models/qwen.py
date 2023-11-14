@@ -90,7 +90,6 @@ class QWenAttention(nn.Module):
                           tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
 
-        # pylint: disable=invalid-name
         self.c_attn = ColumnParallelLinear(
             hidden_size,
             3 * hidden_size,
