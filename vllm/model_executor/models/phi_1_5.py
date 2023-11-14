@@ -56,6 +56,7 @@ class PhiAttention(nn.Module):
         self.num_heads = (self.total_num_heads //
                           tensor_model_parallel_world_size)
 
+        # pylint: disable=C0103
         self.Wqkv = ColumnParallelLinear(
             config.n_embd,
             3 * config.n_embd,
@@ -71,7 +72,8 @@ class PhiAttention(nn.Module):
         rotary_dim = config.rotary_dim
         assert rotary_dim % 2 == 0
 
-        # See https://huggingface.co/microsoft/phi-1_5/blob/92557d03bb12543040c8bb5f0475cbdd9968f05f/modeling_mixformer_sequential.py#L222 
+        # pylint: disable=C0301
+        # See https://huggingface.co/microsoft/phi-1_5/blob/92557d03bb12543040c8bb5f0475cbdd9968f05f/modeling_mixformer_sequential.py#L222
         rope_theta = 10000
         max_position_embeddings = getattr(config, "n_positions", 2048)
         self.attn = PagedAttentionWithRoPE(
@@ -151,6 +153,7 @@ class PhiLayer(nn.Module):
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
+        # pylint: disable=C0301
         # Dropout 0.0 https://huggingface.co/microsoft/phi-1_5/blob/92557d03bb12543040c8bb5f0475cbdd9968f05f/modeling_mixformer_sequential.py#L696
         feed_forward_hidden_states = self.mlp(hidden_states)
         hidden_states = attn_outputs + feed_forward_hidden_states + residual
@@ -167,9 +170,8 @@ class PhiModel(nn.Module):
             config.vocab_size,
             config.n_embd,
         )
-        self.layers = nn.ModuleList([
-            PhiLayer(config) for _ in range(config.n_layer)
-        ])
+        self.layers = nn.ModuleList(
+            [PhiLayer(config) for _ in range(config.n_layer)])
 
     def forward(
         self,
@@ -219,14 +221,15 @@ class PhiForCausalLM(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
         hidden_states = self.phi(input_ids, positions, kv_caches,
-                                      input_metadata, cache_events)
+                                 input_metadata, cache_events)
         hidden_states = self.ln(hidden_states)
         next_tokens = self.sampler(self.linear.weight, hidden_states,
                                    input_metadata, self.linear.bias)
         return next_tokens
 
     _column_parallel_weights = [
-        "embed_in.weight", "embed_out.weight", "embed_out.bias", "fc1.weight", "fc1.bias"
+        "embed_in.weight", "embed_out.weight", "embed_out.bias", "fc1.weight",
+        "fc1.bias"
     ]
     _row_parallel_weights = ["out_proj.weight", "fc2.weight"]
 
@@ -239,12 +242,12 @@ class PhiForCausalLM(nn.Module):
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if ("rotary_emb.inv_freq" in name):
+            if "rotary_emb.inv_freq" in name:
                 continue
             _, layer_idx, *tail = name.split(".")
             tail = ".".join(tail)
             layer_idx = int(layer_idx)
-            
+
             # First or last layers are Embeddings and CausalLMHead respectively
             if layer_idx == 0:
                 key = f"phi.{tail}"
@@ -253,6 +256,7 @@ class PhiForCausalLM(nn.Module):
             else:
                 key = f"phi.layers.{layer_idx - 1}.{tail}"
 
+            # pylint: disable=E1136
             param = state_dict[key]
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
