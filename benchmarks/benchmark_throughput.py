@@ -172,10 +172,8 @@ def run_mii(
     tensor_parallel_size: int,
     output_len: int,
 ) -> float:
-    assert tensor_parallel_size == 1
-
     from mii import pipeline
-    llm = pipeline(model)
+    llm = pipeline(model, tensor_parallel=tensor_parallel_size)
     prompts = [prompt for prompt, _, _ in requests]
 
     start = time.perf_counter()
