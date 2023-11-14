@@ -368,6 +368,7 @@ class ChatGLMForCausalLM(nn.Module):
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
+            packed_dim = None
             is_transposed = False
             if self.quant_config is not None:
                 packed_dim = self.quant_config.get_packed_dim(name)
