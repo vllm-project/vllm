@@ -206,18 +206,17 @@ class _AsyncLLMEngine(LLMEngine):
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
-        all_outputs = []
+        coros = []
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
-                executor = partial(worker.execute_method.remote, method)
+                coros.append(
+                    worker.execute_method.remote(method, *args, **kwargs))
             else:
                 executor = getattr(worker, method)
+                coros.append(asyncio.get_event_loop().run_in_executor(
+                    None, partial(executor, *args, **kwargs)))
 
-            output = executor(*args, **kwargs)
-            all_outputs.append(output)
-
-        if self.parallel_config.worker_use_ray:
-            all_outputs = await asyncio.gather(*all_outputs)
+        all_outputs = await asyncio.gather(*coros)
 
         if get_all_outputs:
             return all_outputs
