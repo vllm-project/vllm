@@ -6,24 +6,24 @@
 # Licensed under the MIT license.
 #
 # BSD 3-Clause License
-# 
+#
 # Copyright (c) 2022, Tri Dao, trid@cs.stanford.edu.
 # All rights reserved.
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
-# 
+#
 # * Redistributions of source code must retain the above copyright notice, this
 #   list of conditions and the following disclaimer.
-# 
+#
 # * Redistributions in binary form must reproduce the above copyright notice,
 #   this list of conditions and the following disclaimer in the documentation
 #   and/or other materials provided with the distribution.
-# 
+#
 # * Neither the name of the copyright holder nor the names of its
 #   contributors may be used to endorse or promote products derived from
 #   this software without specific prior written permission.
-# 
+#
 # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 # AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
 # IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -59,6 +59,20 @@ from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
+
+
+class PhiEmbedding(nn.Module):
+
+    def __init__(self, config: PretrainedConfig):
+        super().__init__()
+
+        self.wte = VocabParallelEmbedding(
+            config.vocab_size,
+            config.n_embd,
+        )
+
+    def forward(self, input_ids: torch.LongTensor):
+        return self.wte(input_ids)
 
 
 class PhiAttention(nn.Module):
@@ -177,50 +191,10 @@ class PhiLayer(nn.Module):
         return hidden_states
 
 
-class PhiModel(nn.Module):
+class PhiCausalLMHead(nn.Module):
 
     def __init__(self, config: PretrainedConfig):
         super().__init__()
-        self.config = config
-
-        self.wte = VocabParallelEmbedding(
-            config.vocab_size,
-            config.n_embd,
-        )
-        self.layers = nn.ModuleList(
-            [PhiLayer(config) for _ in range(config.n_layer)])
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-    ) -> torch.Tensor:
-        hidden_states = self.wte(input_ids)
-        for i in range(len(self.layers)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
-            layer = self.layers[i]
-            hidden_states = layer(
-                position_ids,
-                hidden_states,
-                kv_caches[i],
-                input_metadata,
-                cache_event,
-            )
-        return hidden_states
-
-
-class PhiForCausalLM(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.phi = PhiModel(config)
         self.ln = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.linear = ColumnParallelLinear(
             config.n_embd,
@@ -231,18 +205,49 @@ class PhiForCausalLM(nn.Module):
 
     def forward(
         self,
+        hidden_states: torch.Tensor,
+        input_metadata: InputMetadata,
+    ):
+        hidden_states = self.ln(hidden_states)
+        next_tokens = self.sampler(self.linear.weight, hidden_states,
+                                   input_metadata, self.linear.bias)
+        return next_tokens
+
+
+class PhiForCausalLM(nn.Module):
+
+    def __init__(self, config: PretrainedConfig):
+        super().__init__()
+        self.config = config
+        modules = [PhiEmbedding(config)]
+        modules += [PhiLayer(config) for _ in range(config.n_layer)]
+        modules.append(PhiCausalLMHead(config))
+        self.layers = nn.Sequential(*modules)
+
+    def forward(
+        self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.phi(input_ids, positions, kv_caches,
-                                 input_metadata, cache_events)
-        hidden_states = self.ln(hidden_states)
-        next_tokens = self.sampler(self.linear.weight, hidden_states,
-                                   input_metadata, self.linear.bias)
-        return next_tokens
+        hidden_states = self.layers[0](input_ids)
+        for i in range(len(1, self.layers + 1)):
+            if cache_events is None:
+                cache_event = None
+            else:
+                cache_event = cache_events[i]
+            layer = self.layers[i]
+            hidden_states = layer(
+                positions,
+                hidden_states,
+                kv_caches[i],
+                input_metadata,
+                cache_event,
+            )
+        lm_logits = self.layers[-1](hidden_states)
+        return lm_logits
 
     _column_parallel_weights = [
         "embed_in.weight", "embed_out.weight", "embed_out.bias", "fc1.weight",
@@ -260,6 +265,7 @@ class PhiForCausalLM(nn.Module):
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
+                # pylint: disable=C0301
                 # FIXME: This is a hack. Handle the following by post-initializing RoPE.
                 t = torch.arange(self.config.n_positions, dtype=torch.float32)
 
@@ -269,22 +275,12 @@ class PhiForCausalLM(nn.Module):
                 cache = torch.cat((cos, sin), dim=-1)
 
                 layer_idx = int(name.split(".")[1]) - 1
-                self.phi.layers[layer_idx].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
+                self.phi.layers[
+                    layer_idx].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
                 continue
-            _, layer_idx, *tail = name.split(".")
-            tail = ".".join(tail)
-            layer_idx = int(layer_idx)
-
-            # First or last layers are Embeddings and CausalLMHead respectively
-            if layer_idx == 0:
-                key = f"phi.{tail}"
-            elif layer_idx == self.config.n_layer + 1:
-                key = tail
-            else:
-                key = f"phi.layers.{layer_idx - 1}.{tail}"
 
             # pylint: disable=E1136
-            param = state_dict[key]
+            param = state_dict[name]
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights,
