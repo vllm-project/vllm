@@ -43,11 +43,11 @@ class MPTAttention(nn.Module):
         super().__init__()
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
-        self.clip_qkv = config.attn_config['clip_qkv']
-        self.qk_ln = config.attn_config['qk_ln']
-        self.alibi_bias_max = config.attn_config['alibi_bias_max']
-        assert not config.attn_config['prefix_lm']
-        assert config.attn_config['alibi']
+        self.clip_qkv = config.attn_config["clip_qkv"]
+        self.qk_ln = config.attn_config["qk_ln"]
+        self.alibi_bias_max = config.attn_config["alibi_bias_max"]
+        assert not config.attn_config["prefix_lm"]
+        assert config.attn_config["alibi"]
 
         self.qkv_proj = ColumnParallelLinear(
             self.d_model,

@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copied from https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py
+# Copied from https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py # pylint: disable=line-too-long
 """A HuggingFace-style model configuration."""
 import warnings
 from typing import Any, Dict, Optional, Union
@@ -33,12 +33,12 @@ init_config_defaults: Dict = {
 class MPTConfig(PretrainedConfig):
     model_type = 'mpt'
     attribute_map = {
-        "num_attention_heads": "n_heads",
-        "hidden_size": "d_model",
-        "num_hidden_layers": "n_layers",
+        'num_attention_heads': 'n_heads',
+        'hidden_size': 'd_model',
+        'num_hidden_layers': 'n_layers',
     }
 
-    def __init__(self,
+    def __init__(self, #pylint: disable-dangerous-default-value
                  d_model: int = 2048,
                  n_heads: int = 16,
                  n_layers: int = 24,
@@ -60,6 +60,7 @@ class MPTConfig(PretrainedConfig):
                  fc_type: str = 'torch',
                  verbose: Optional[int] = None,
                  **kwargs: Any):
+        # pylint: disable=line-too-long
         """The MPT configuration class.
         Args:
             d_model (int): The size of the embedding dimension of the model.
@@ -147,7 +148,7 @@ class MPTConfig(PretrainedConfig):
         if self.attn_config.get('alibi', False):
             self.learned_pos_emb = False
             warnings.warn(
-                f'alibi is turned on, setting `learned_pos_emb` to `False.`')
+                f'alibi is turned on, setting `learned_pos_emb` to {self.learned_pos_emb}`')
         super().__init__(**kwargs)
         self._validate_config()
 
@@ -173,7 +174,7 @@ class MPTConfig(PretrainedConfig):
             [self.attn_config['attn_pdrop'], self.resid_pdrop, self.emb_pdrop]
         )):
             raise ValueError(
-                "self.attn_config['attn_pdrop'], resid_pdrop, emb_pdrop are probabilities and must be between 0 and 1"
+                "self.attn_config['attn_pdrop'], resid_pdrop, emb_pdrop are probabilities and must be between 0 and 1" # pylint: disable=line-too-long
             )
         if self.attn_config['attn_impl'] not in ['torch', 'flash', 'triton']:
             raise ValueError(
@@ -190,7 +191,7 @@ class MPTConfig(PretrainedConfig):
         if self.attn_config['attn_uses_sequence_id'] and self.attn_config[
                 'attn_impl'] not in ['torch', 'triton']:
             raise NotImplementedError(
-                'attn_uses_sequence_id only implemented with torch and triton attention.'
+                'attn_uses_sequence_id only implemented with torch and triton attention.' # pylint: disable=line-too-long
             )
         if self.embedding_fraction > 1 or self.embedding_fraction <= 0:
             raise ValueError(
@@ -199,7 +200,7 @@ class MPTConfig(PretrainedConfig):
         if isinstance(self.logit_scale,
                       str) and self.logit_scale != 'inv_sqrt_d_model':
             raise ValueError(
-                f"self.logit_scale={self.logit_scale!r} is not recognized as an option; use numeric value or 'inv_sqrt_d_model'."
+                f"self.logit_scale={self.logit_scale!r} is not recognized as an option; use numeric value or 'inv_sqrt_d_model'." # pylint: disable=line-too-long
             )
         if self.init_config.get('name', None) is None:
             raise ValueError(
@@ -207,14 +208,16 @@ class MPTConfig(PretrainedConfig):
             )
         if not self.learned_pos_emb and (not self.attn_config['alibi']):
             warnings.warn(
-                f'Positional information not being provided to the model using either learned_pos_emb or alibi.'
+                f'Positional information not being provided to the model.'
             )
         if self.fc_type == 'te' or self.ffn_config['ffn_type'] == 'te_ln_mlp':
             try:
+                #pylint : disable-import-outside-toplevel
                 import transformer_engine.pytorch as te
                 del te
             except:
                 raise ImportError(
+                    # pylint: disable=line-too-long
                     'TransformerEngine import fail. `fc_type: te` requires TransformerEngine be installed. '
                     +
                     'The required version of transformer_engine also requires FlashAttention v1.0.6 is installed:\n'
