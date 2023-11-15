@@ -58,13 +58,13 @@ class PhiAttention(nn.Module):
 
         # pylint: disable=C0103
         self.Wqkv = ColumnParallelLinear(
-            config.n_embd,
-            3 * config.n_embd,
+            self.hidden_size,
+            3 * self.hidden_size,
             gather_output=False,
         )
         self.out_proj = RowParallelLinear(
-            config.n_embd,
-            config.n_embd,
+            self.hidden_size,
+            self.hidden_size,
             input_is_parallel=True,
         )
 
