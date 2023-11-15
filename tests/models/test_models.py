@@ -9,7 +9,7 @@ MODELS = [
     "mistralai/Mistral-7B-v0.1", "tiiuae/falcon-7b", "gpt2",
     "bigcode/tiny_starcoder_py", "EleutherAI/gpt-j-6b",
     "EleutherAI/pythia-70m", "bigscience/bloom-560m", "mosaicml/mpt-7b",
-    "microsoft/phi-1_5"
+    "microsoft/phi-1_5",
 ]
 
 
