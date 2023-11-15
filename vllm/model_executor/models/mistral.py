@@ -38,19 +38,24 @@ from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.quantized_linear import ParallelLinear
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
-    convert_pyslice_to_tensor, hf_model_weights_iterator,
-    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab)
+    convert_pyslice_to_tensor,
+    hf_model_weights_iterator,
+    load_tensor_parallel_weights,
+    load_padded_tensor_parallel_vocab,
+)
 from vllm.sequence import SamplerOutput
+import time
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class MistralMLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -59,19 +64,25 @@ class MistralMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = ParallelLinear.column(hidden_size,
-                                                  2 * intermediate_size,
-                                                  bias=False,
-                                                  gather_output=False,
-                                                  quant_config=quant_config)
-        self.down_proj = ParallelLinear.row(intermediate_size,
-                                            hidden_size,
-                                            bias=False,
-                                            input_is_parallel=True,
-                                            quant_config=quant_config)
+        self.gate_up_proj = ParallelLinear.column(
+            hidden_size,
+            2 * intermediate_size,
+            bias=False,
+            gather_output=False,
+            quant_config=quant_config,
+        )
+        self.down_proj = ParallelLinear.row(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+            quant_config=quant_config,
+        )
         if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. "
+                "Only silu is supported for now."
+            )
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -82,15 +93,16 @@ class MistralMLP(nn.Module):
 
 
 class MistralAttention(nn.Module):
-
-    def __init__(self,
-                 hidden_size: int,
-                 num_heads: int,
-                 num_kv_heads: int,
-                 max_position: int = 4096 * 32,
-                 rope_theta: float = 10000,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 sliding_window: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position: int = 4096 * 32,
+        rope_theta: float = 10000,
+        quant_config: Optional[QuantizationConfig] = None,
+        sliding_window: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -109,8 +121,7 @@ class MistralAttention(nn.Module):
 
         self.qkv_proj = ParallelLinear.column(
             hidden_size,
-            (self.total_num_heads + 2 * self.total_num_kv_heads) *
-            self.head_dim,
+            (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_dim,
             bias=False,
             gather_output=False,
             quant_config=quant_config,
@@ -122,14 +133,16 @@ class MistralAttention(nn.Module):
             input_is_parallel=True,
             quant_config=quant_config,
         )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           base=self.rope_theta,
-                                           max_position=max_position,
-                                           rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads,
-                                           sliding_window=self.sliding_window)
+        self.attn = PagedAttentionWithRoPE(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            base=self.rope_theta,
+            max_position=max_position,
+            rotary_dim=self.head_dim,
+            num_kv_heads=self.num_kv_heads,
+            sliding_window=self.sliding_window,
+        )
 
     def forward(
         self,
@@ -142,14 +155,14 @@ class MistralAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(
+            positions, q, k, v, k_cache, v_cache, input_metadata, cache_event
+        )
         output, _ = self.o_proj(attn_output)
         return output
 
 
 class MistralDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: MistralConfig,
@@ -166,17 +179,18 @@ class MistralDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             quant_config=quant_config,
-            sliding_window=config.sliding_window)
+            sliding_window=config.sliding_window,
+        )
         self.mlp = MistralMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -207,7 +221,6 @@ class MistralDecoderLayer(nn.Module):
 
 
 class MistralModel(nn.Module):
-
     def __init__(
         self,
         config: MistralConfig,
@@ -223,10 +236,12 @@ class MistralModel(nn.Module):
             vocab_size,
             config.hidden_size,
         )
-        self.layers = nn.ModuleList([
-            MistralDecoderLayer(config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                MistralDecoderLayer(config, quant_config)
+                for _ in range(config.num_hidden_layers)
+            ]
+        )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -256,7 +271,6 @@ class MistralModel(nn.Module):
 
 
 class MistralForCausalLM(nn.Module):
-
     def __init__(
         self,
         config: MistralConfig,
@@ -268,11 +282,13 @@ class MistralForCausalLM(nn.Module):
         self.model = MistralModel(config, quant_config)
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         # NOTE: The LM head is not quantized.
-        self.lm_head = ParallelLinear.column(config.hidden_size,
-                                             vocab_size,
-                                             bias=False,
-                                             gather_output=False,
-                                             quant_config=None)
+        self.lm_head = ParallelLinear.column(
+            config.hidden_size,
+            vocab_size,
+            bias=False,
+            gather_output=False,
+            quant_config=None,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -283,28 +299,37 @@ class MistralForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata, cache_events)
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata)
+        model_start = time.time()
+        hidden_states = self.model(
+            input_ids, positions, kv_caches, input_metadata, cache_events
+        )
+        model_end = time.time()
+        next_tokens = self.sampler(self.lm_head.weight, hidden_states, input_metadata)
+        sampler_end = time.time()
+
+        # print with  number padding so they're all same width
+        print(
+            f"model time: {model_end - model_start:.4f}s | sampler time: {sampler_end - model_end:.4f}s | total time: {sampler_end - model_start:.4f}s | relative sampler time: {(sampler_end - model_end) / (sampler_end - model_start):.4f}"
+        )
+
         return next_tokens
 
     _column_parallel_layers = []
     _row_parallel_layers = ["o_proj", "down_proj"]
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         if self.quant_config is None:
             col_weight_suffixes = ["weight"]
             row_weight_suffixes = ["weight"]
         else:
-            col_weight_suffixes = (
-                self.quant_config.get_col_parallel_tensor_names())
-            row_weight_suffixes = (
-                self.quant_config.get_row_parallel_tensor_names())
+            col_weight_suffixes = self.quant_config.get_col_parallel_tensor_names()
+            row_weight_suffixes = self.quant_config.get_row_parallel_tensor_names()
 
         column_parallel_weights: List[str] = []
         for layer in self._column_parallel_layers:
@@ -317,21 +342,24 @@ class MistralForCausalLM(nn.Module):
 
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        q_proj_shard_size = (self.config.hidden_size // tp_size)
-        kv_proj_shard_size = (self.config.hidden_size //
-                              self.config.num_attention_heads *
-                              self.config.num_key_value_heads // tp_size)
+        q_proj_shard_size = self.config.hidden_size // tp_size
+        kv_proj_shard_size = (
+            self.config.hidden_size
+            // self.config.num_attention_heads
+            * self.config.num_key_value_heads
+            // tp_size
+        )
         attention_weight_specs = [
             # (weight_name, shard_size, offset)
             ("q_proj", q_proj_shard_size, 0),
             ("k_proj", kv_proj_shard_size, q_proj_shard_size),
-            ("v_proj", kv_proj_shard_size,
-             q_proj_shard_size + kv_proj_shard_size),
+            ("v_proj", kv_proj_shard_size, q_proj_shard_size + kv_proj_shard_size),
         ]
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+            model_name_or_path, cache_dir, load_format, revision
+        ):
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -359,9 +387,11 @@ class MistralForCausalLM(nn.Module):
                         offset //= self.quant_config.pack_factor
 
                 loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[offset:offset + shard_size]
+                    shard_size
+                    * tensor_model_parallel_rank : shard_size
+                    * (tensor_model_parallel_rank + 1)
+                ]
+                param_slice = param.data[offset : offset + shard_size]
                 assert param_slice.shape == loaded_weight.shape
 
                 param_slice.copy_(loaded_weight)
@@ -380,10 +410,13 @@ class MistralForCausalLM(nn.Module):
 
                 shard_size = param.shape[0] // 2
                 loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
+                    shard_size
+                    * tensor_model_parallel_rank : shard_size
+                    * (tensor_model_parallel_rank + 1)
+                ]
+                param_slice = param.data[
+                    shard_size * stride_id : shard_size * (stride_id + 1)
+                ]
                 assert param_slice.shape == loaded_weight.shape
                 param_slice.copy_(loaded_weight)
                 is_gate_up_weight = True
@@ -396,11 +429,16 @@ class MistralForCausalLM(nn.Module):
                 param = param.T
 
             if "embed_tokens" in name or "lm_head" in name:
-                load_padded_tensor_parallel_vocab(param, loaded_weight,
-                                                  tensor_model_parallel_rank)
+                load_padded_tensor_parallel_vocab(
+                    param, loaded_weight, tensor_model_parallel_rank
+                )
                 continue
 
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         column_parallel_weights,
-                                         row_parallel_weights,
-                                         tensor_model_parallel_rank)
+            load_tensor_parallel_weights(
+                param,
+                loaded_weight,
+                name,
+                column_parallel_weights,
+                row_parallel_weights,
+                tensor_model_parallel_rank,
+            )
