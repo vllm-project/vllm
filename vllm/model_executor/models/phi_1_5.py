@@ -46,7 +46,7 @@ class PhiAttention(nn.Module):
 
     def __init__(self, config: PretrainedConfig):
         super().__init__()
-        self.total_num_heads = config.n_head
+        self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.n_embd
         self.head_size = self.hidden_size // self.total_num_heads
 
