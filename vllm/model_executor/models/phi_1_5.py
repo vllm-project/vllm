@@ -243,6 +243,7 @@ class PhiForCausalLM(nn.Module):
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
+                # FIXME: This is a hack. Handle the following by post-initializing RoPE.
                 t = torch.arange(self.config.n_positions, dtype=torch.float32)
 
                 freqs = torch.einsum("i,j -> ij", t, loaded_weight)
