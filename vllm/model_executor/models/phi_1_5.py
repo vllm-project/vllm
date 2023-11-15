@@ -233,12 +233,12 @@ class PhiForCausalLM(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
         hidden_states = self.layers[0](input_ids)
-        for i in range(len(1, self.layers + 1)):
+        for i in range(self.config.n_layer):
             if cache_events is None:
                 cache_event = None
             else:
                 cache_event = cache_events[i]
-            layer = self.layers[i]
+            layer = self.layers[i + 1]
             hidden_states = layer(
                 positions,
                 hidden_states,
@@ -246,7 +246,7 @@ class PhiForCausalLM(nn.Module):
                 input_metadata,
                 cache_event,
             )
-        lm_logits = self.layers[-1](hidden_states)
+        lm_logits = self.layers[-1](hidden_states, input_metadata)
         return lm_logits
 
     _column_parallel_weights = [
@@ -274,9 +274,8 @@ class PhiForCausalLM(nn.Module):
                 sin = freqs.sin()
                 cache = torch.cat((cos, sin), dim=-1)
 
-                layer_idx = int(name.split(".")[1]) - 1
-                self.phi.layers[
-                    layer_idx].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
+                layer_idx = int(name.split(".")[1])
+                self.layers[layer_idx].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
                 continue
 
             # pylint: disable=E1136
