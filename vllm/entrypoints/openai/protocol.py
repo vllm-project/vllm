@@ -74,7 +74,7 @@ class ChatCompletionRequest(BaseModel):
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
     add_generation_prompt: Optional[bool] = True
-    return_full_response: Optional[bool] = False
+    echo: Optional[bool] = False
 
 
 class CompletionRequest(BaseModel):

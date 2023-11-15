@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import codecs
 import json
 import time
 from http import HTTPStatus
@@ -62,21 +63,13 @@ async def check_model(request) -> Optional[JSONResponse]:
 
 
 async def get_gen_prompt(request) -> str:
-    if chat_template is not None:
-        return tokenizer.apply_chat_template(
-            conversation=request.messages,
-            chat_template=chat_template,
-            tokenize=False,
-            add_generation_prompt=request.add_generation_prompt)
-    elif tokenizer.chat_template is not None:
+    try:
         return tokenizer.apply_chat_template(
             conversation=request.messages,
             tokenize=False,
             add_generation_prompt=request.add_generation_prompt)
-    else:
-        raise ValueError("No chat template defined. Please use a tokenizer "
-                         "that includes a chat template, or pass in "
-                         "a jinja template using the --chat-template flag.")
+    except Exception as e:
+        raise RuntimeError(f"Error generating prompt: {str(e)}") from e
 
 
 async def check_length(
@@ -172,7 +165,12 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return create_error_response(HTTPStatus.BAD_REQUEST,
                                      "logit_bias is not currently supported")
 
-    prompt = await get_gen_prompt(request)
+    try:
+        prompt = await get_gen_prompt(request)
+    except RuntimeError as e:
+        logger.error(f"Error in generating prompt from request: {str(e)}")
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+
     token_ids, error_check_ret = await check_length(request, prompt=prompt)
     if error_check_ret is not None:
         return error_check_ret
@@ -180,6 +178,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     model_name = request.model
     request_id = f"cmpl-{random_uuid()}"
     created_time = int(time.monotonic())
+    obj_str = "chat.completion.chunk"
     try:
         spaces_between_special_tokens = request.spaces_between_special_tokens
         sampling_params = SamplingParams(
@@ -210,64 +209,77 @@ async def create_chat_completion(request: ChatCompletionRequest,
         else:
             return request.messages[-1]["role"]
 
-    def create_stream_response_json(
-            index: int,
-            text: str,
-            role: str,
-            finish_reason: Optional[str] = None) -> str:
-        choice_data = ChatCompletionResponseStreamChoice(
-            index=index,
-            delta=DeltaMessage(role=role, content=text),
-            finish_reason=finish_reason,
-        )
-        response = ChatCompletionStreamResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
-            choices=[choice_data],
-        )
-        response_json = response.json(ensure_ascii=False)
-
-        return response_json
-
     async def completion_stream_generator() -> AsyncGenerator[str, None]:
-        # First chunk with role
         role = get_role()
         for i in range(request.n):
             choice_data = ChatCompletionResponseStreamChoice(
-                index=i,
-                delta=DeltaMessage(role=role),
-                finish_reason=None,
-            )
+                index=i, delta=DeltaMessage(role=role), finish_reason=None)
             chunk = ChatCompletionStreamResponse(id=request_id,
+                                                 object=obj_str,
+                                                 created=created_time,
                                                  choices=[choice_data],
                                                  model=model_name)
             data = chunk.json(exclude_unset=True, ensure_ascii=False)
             yield f"data: {data}\n\n"
 
+        # Handle echoing of the first input
+        if request.echo:
+            last_msg_content = ""
+            if request.messages and isinstance(
+                    request.messages, list) and request.messages[-1].get(
+                        "content") and request.messages[-1].get(
+                            "role") == role:
+                last_msg_content = request.messages[-1]["content"]
+            if last_msg_content:
+                for i in range(request.n):
+                    choice_data = ChatCompletionResponseStreamChoice(
+                        index=i,
+                        delta=DeltaMessage(content=last_msg_content),
+                        finish_reason=None)
+                    chunk = ChatCompletionStreamResponse(id=request_id,
+                                                         object=obj_str,
+                                                         created=created_time,
+                                                         choices=[choice_data],
+                                                         model=model_name)
+                    data = chunk.json(exclude_unset=True, ensure_ascii=False)
+                    yield f"data: {data}\n\n"
+
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
+        finish_reason_sent = [False] * request.n
         async for res in result_generator:
             res: RequestOutput
             for output in res.outputs:
                 i = output.index
-                delta_text = output.text[len(previous_texts[i]):]
-                previous_texts[i] = output.text
-                previous_num_tokens[i] = len(output.token_ids)
-                response_json = create_stream_response_json(
-                    index=i,
-                    role=role,
-                    text=delta_text,
-                )
-                yield f"data: {response_json}\n\n"
-                if output.finish_reason is not None:
-                    response_json = create_stream_response_json(
+                if output.finish_reason is None and not finish_reason_sent[i]:
+                    delta_text = output.text[len(previous_texts[i]):]
+                    previous_texts[i] = output.text
+                    previous_num_tokens[i] = len(output.token_ids)
+                    choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
-                        role=role,
-                        text="",
-                        finish_reason=output.finish_reason,
-                    )
-                    yield f"data: {response_json}\n\n"
+                        delta=DeltaMessage(content=delta_text),
+                        finish_reason=None)
+                    chunk = ChatCompletionStreamResponse(id=request_id,
+                                                         object=obj_str,
+                                                         created=created_time,
+                                                         choices=[choice_data],
+                                                         model=model_name)
+                    data = chunk.json(exclude_unset=True, ensure_ascii=False)
+                    yield f"data: {data}\n\n"
+                if output.finish_reason is not None and not finish_reason_sent[
+                        i]:
+                    choice_data = ChatCompletionResponseStreamChoice(
+                        index=i, delta=[], finish_reason=output.finish_reason)
+                    chunk = ChatCompletionStreamResponse(id=request_id,
+                                                         object=obj_str,
+                                                         created=created_time,
+                                                         choices=[choice_data],
+                                                         model=model_name)
+                    data = chunk.json(exclude_unset=True,
+                                      exclude_none=True,
+                                      ensure_ascii=False)
+                    yield f"data: {data}\n\n"
+                    finish_reason_sent[i] = True
         yield "data: [DONE]\n\n"
 
     # Streaming response
@@ -295,7 +307,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         )
         choices.append(choice_data)
 
-    if request.return_full_response:
+    if request.echo:
         last_msg_content = ""
         if request.messages and isinstance(
                 request.messages, list) and request.messages[-1].get(
@@ -586,8 +598,9 @@ if __name__ == "__main__":
     parser.add_argument("--chat-template",
                         type=str,
                         default=None,
-                        help="The path to the chat template to use "
-                        "with the specified model.")
+                        help="The file path to the chat template, "
+                        "or the template in single-line form "
+                        "for the specified model")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -608,18 +621,26 @@ if __name__ == "__main__":
         served_model = args.model
 
     if args.chat_template is not None:
-        with open(args.chat_template, "r") as f:
-            content = f.read()
-            try:
-                # Try to parse as JSON and if chat_template exists, use value
-                json_data = json.loads(content)
-                if "chat_template" in json_data:
-                    chat_template = json_data["chat_template"]
-                else:
+        try:
+            with open(args.chat_template, "r") as f:
+                content = f.read()
+                try:
+                    json_data = json.loads(content)
+                    if "chat_template" in json_data:
+                        chat_template = json_data["chat_template"]
+                    else:
+                        chat_template = content
+                except json.JSONDecodeError:
+                    # If JSON fails, use the file content as raw text
                     chat_template = content
+        except OSError as e:
+            try:
+                # If opening a file fails, set chat template to be args to
+                # ensure we decode so our escape are interpreted correctly
+                chat_template = codecs.decode(args.chat_template,
+                                              "unicode_escape")
             except json.JSONDecodeError:
-                # If parsing as JSON fails, use the file content as raw text
-                chat_template = content
+                logger.error("Unable to set template.")
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
@@ -631,12 +652,15 @@ if __name__ == "__main__":
                               tokenizer_mode=engine_args.tokenizer_mode,
                               trust_remote_code=engine_args.trust_remote_code)
 
-    if chat_template or tokenizer.chat_template:
-        logger.info(
-            f"Chat template:\n{chat_template or tokenizer.chat_template}")
+    if chat_template is not None:
+        tokenizer.chat_template = chat_template
+
+    tmp_template = tokenizer.chat_template or tokenizer.default_chat_template
+    if tmp_template:
+        logger.info(f"Chat template:\n{tmp_template}")
     else:
         logger.warning(
-            "No chat template loaded, the chat endpoint will be disabled.")
+            "No chat template loaded, the chat endpoint will be not work.")
 
     uvicorn.run(app,
                 host=args.host,
