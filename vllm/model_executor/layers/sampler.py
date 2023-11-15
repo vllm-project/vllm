@@ -52,36 +52,32 @@ class Sampler(nn.Module):
         # Apply presence and frequency penalties.
         output_tokens = _get_output_tokens(input_metadata)
         
-        if len(output_tokens) == logits.shape[0]:
-            assert len(output_tokens) == logits.shape[0]
-            presence_penalties, frequency_penalties, repetition_penalties = (
-                _get_penalties(input_metadata))
-            assert len(presence_penalties) == logits.shape[0]
-            assert len(frequency_penalties) == logits.shape[0]
-            assert len(repetition_penalties) == logits.shape[0]
-            logits = _apply_penalties(logits, output_tokens, presence_penalties,
-                                    frequency_penalties, repetition_penalties)
+        assert len(output_tokens) == logits.shape[0]
+        presence_penalties, frequency_penalties, repetition_penalties = (
+            _get_penalties(input_metadata))
+        assert len(presence_penalties) == logits.shape[0]
+        assert len(frequency_penalties) == logits.shape[0]
+        assert len(repetition_penalties) == logits.shape[0]
+        logits = _apply_penalties(logits, output_tokens, presence_penalties,
+                                frequency_penalties, repetition_penalties)
 
-            # Apply temperature scaling.
-            temperatures = _get_temperatures(input_metadata)
-            assert len(temperatures) == logits.shape[0]
-            if any(t != 1.0 for t in temperatures):
-                t = torch.tensor(temperatures,
-                                dtype=logits.dtype,
-                                device=logits.device)
-                # Use in-place division to avoid creating a new tensor.
-                logits.div_(t.unsqueeze(dim=1))
+        # Apply temperature scaling.
+        temperatures = _get_temperatures(input_metadata)
+        assert len(temperatures) == logits.shape[0]
+        if any(t != 1.0 for t in temperatures):
+            t = torch.tensor(temperatures,
+                            dtype=logits.dtype,
+                            device=logits.device)
+            # Use in-place division to avoid creating a new tensor.
+            logits.div_(t.unsqueeze(dim=1))
 
-            # Apply top-p and top-k truncation.
-            top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
-            assert len(top_ps) == len(top_ks) == logits.shape[0]
-            do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
-            do_top_k = any(k != self.vocab_size for k in top_ks)
-            if do_top_p or do_top_k:
-                logits = _apply_top_p_top_k(logits, top_ps, top_ks)
-        else:
-            # speculative decoding
-            pass
+        # Apply top-p and top-k truncation.
+        top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
+        assert len(top_ps) == len(top_ks) == logits.shape[0]
+        do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
+        do_top_k = any(k != self.vocab_size for k in top_ks)
+        if do_top_p or do_top_k:
+            logits = _apply_top_p_top_k(logits, top_ps, top_ks)
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
@@ -99,6 +95,53 @@ class Sampler(nn.Module):
                                      prompt_logprobs, sample_logprobs)
 
 
+class SpecSampler(nn.Module):
+    def __init__(self, vocab_size: int) -> None:
+        super().__init__(vocab_size)
+    
+    def forward(self,
+        embedding: torch.Tensor,
+        hidden_states: torch.Tensor,
+        input_metadata: InputMetadata,
+        embedding_bias: Optional[torch.Tensor] = None,
+    ) -> SamplerOutput:
+        # Get the hidden states that we use for sampling.
+        hidden_states = _prune_hidden_states(hidden_states, input_metadata)
+
+        # Get the logits for the next tokens.
+        logits = _get_logits(hidden_states, embedding, embedding_bias,
+                             self.vocab_size)
+        
+        # Apply presence and frequency penalties.
+        output_tokens = _get_output_tokens(input_metadata)
+        
+        # Apply temperature scaling.
+        temperatures = _get_temperatures(input_metadata)
+        assert len(temperatures) == logits.shape[0]
+        if any(t != 1.0 for t in temperatures):
+            t = torch.tensor(temperatures,
+                            dtype=logits.dtype,
+                            device=logits.device)
+            # Use in-place division to avoid creating a new tensor.
+            logits.div_(t.unsqueeze(dim=1))
+        
+        # We use float32 for probabilities and log probabilities.
+        # Compute the probabilities.
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+        # Compute the log probabilities.
+        # Use log_softmax to ensure numerical stability.
+        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+
+
+        # Sample the next tokens.
+        sample_results = _sample(probs, logprobs, input_metadata)
+        # Get the logprobs query results.
+        prompt_logprobs, sample_logprobs = _get_logprobs(
+            logprobs, input_metadata, sample_results)
+        return _build_sampler_output(sample_results, input_metadata,
+                                     prompt_logprobs, sample_logprobs)
+        
+  
 def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
                 embedding_bias: Optional[torch.Tensor],
                 vocab_size: int) -> torch.Tensor:
