@@ -37,29 +37,31 @@ class MPTConfig(PretrainedConfig):
         'hidden_size': 'd_model',
         'num_hidden_layers': 'n_layers',
     }
-
-    def __init__(self, #pylint: disable-dangerous-default-value
-                 d_model: int = 2048,
-                 n_heads: int = 16,
-                 n_layers: int = 24,
-                 expansion_ratio: int = 4,
-                 max_seq_len: int = 2048,
-                 vocab_size: int = 50368,
-                 resid_pdrop: float = 0.0,
-                 emb_pdrop: float = 0.0,
-                 learned_pos_emb: bool = True,
-                 attn_config: Dict = attn_config_defaults,
-                 ffn_config: Dict = ffn_config_defaults,
-                 init_device: str = 'cpu',
-                 logit_scale: Optional[Union[float, str]] = None,
-                 no_bias: bool = False,
-                 embedding_fraction: float = 1.0,
-                 norm_type: str = 'low_precision_layernorm',
-                 use_cache: bool = False,
-                 init_config: Dict = init_config_defaults,
-                 fc_type: str = 'torch',
-                 verbose: Optional[int] = None,
-                 **kwargs: Any):
+    
+    # pylint: disable=dangerous-default-value
+    def __init__(
+            self,
+            d_model: int = 2048,
+            n_heads: int = 16,
+            n_layers: int = 24,
+            expansion_ratio: int = 4,
+            max_seq_len: int = 2048,
+            vocab_size: int = 50368,
+            resid_pdrop: float = 0.0,
+            emb_pdrop: float = 0.0,
+            learned_pos_emb: bool = True,
+            attn_config: Dict = attn_config_defaults,
+            ffn_config: Dict = ffn_config_defaults,
+            init_device: str = 'cpu',
+            logit_scale: Optional[Union[float, str]] = None,
+            no_bias: bool = False,
+            embedding_fraction: float = 1.0,
+            norm_type: str = 'low_precision_layernorm',
+            use_cache: bool = False,
+            init_config: Dict = init_config_defaults,
+            fc_type: str = 'torch',
+            verbose: Optional[int] = None,
+            **kwargs: Any):
         # pylint: disable=line-too-long
         """The MPT configuration class.
         Args:
@@ -148,7 +150,8 @@ class MPTConfig(PretrainedConfig):
         if self.attn_config.get('alibi', False):
             self.learned_pos_emb = False
             warnings.warn(
-                f'alibi is turned on, setting `learned_pos_emb` to {self.learned_pos_emb}`')
+                f'alibi is turned on, setting `learned_pos_emb` to {self.learned_pos_emb}`'
+            )
         super().__init__(**kwargs)
         self._validate_config()
 
@@ -174,7 +177,7 @@ class MPTConfig(PretrainedConfig):
             [self.attn_config['attn_pdrop'], self.resid_pdrop, self.emb_pdrop]
         )):
             raise ValueError(
-                "self.attn_config['attn_pdrop'], resid_pdrop, emb_pdrop are probabilities and must be between 0 and 1" # pylint: disable=line-too-long
+                "self.attn_config['attn_pdrop'], resid_pdrop, emb_pdrop are probabilities and must be between 0 and 1"  # pylint: disable=line-too-long
             )
         if self.attn_config['attn_impl'] not in ['torch', 'flash', 'triton']:
             raise ValueError(
@@ -191,7 +194,7 @@ class MPTConfig(PretrainedConfig):
         if self.attn_config['attn_uses_sequence_id'] and self.attn_config[
                 'attn_impl'] not in ['torch', 'triton']:
             raise NotImplementedError(
-                'attn_uses_sequence_id only implemented with torch and triton attention.' # pylint: disable=line-too-long
+                'attn_uses_sequence_id only implemented with torch and triton attention.'  # pylint: disable=line-too-long
             )
         if self.embedding_fraction > 1 or self.embedding_fraction <= 0:
             raise ValueError(
@@ -200,7 +203,7 @@ class MPTConfig(PretrainedConfig):
         if isinstance(self.logit_scale,
                       str) and self.logit_scale != 'inv_sqrt_d_model':
             raise ValueError(
-                f"self.logit_scale={self.logit_scale!r} is not recognized as an option; use numeric value or 'inv_sqrt_d_model'." # pylint: disable=line-too-long
+                f"self.logit_scale={self.logit_scale!r} is not recognized as an option; use numeric value or 'inv_sqrt_d_model'."  # pylint: disable=line-too-long
             )
         if self.init_config.get('name', None) is None:
             raise ValueError(
@@ -208,14 +211,13 @@ class MPTConfig(PretrainedConfig):
             )
         if not self.learned_pos_emb and (not self.attn_config['alibi']):
             warnings.warn(
-                f'Positional information not being provided to the model.'
-            )
+                'Positional information not being provided to the model.')
         if self.fc_type == 'te' or self.ffn_config['ffn_type'] == 'te_ln_mlp':
             try:
-                #pylint : disable-import-outside-toplevel
+                # pylint: disable=import-outside-toplevel
                 import transformer_engine.pytorch as te
                 del te
-            except:
+            except Exception as exc:
                 raise ImportError(
                     # pylint: disable=line-too-long
                     'TransformerEngine import fail. `fc_type: te` requires TransformerEngine be installed. '
@@ -223,7 +225,7 @@ class MPTConfig(PretrainedConfig):
                     'The required version of transformer_engine also requires FlashAttention v1.0.6 is installed:\n'
                     + 'pip install flash-attn==1.0.6 --no-build-isolation \n' +
                     'pip install git+https://github.com/NVIDIA/TransformerEngine.git@144e4888b2cdd60bd52e706d5b7a79cb9c1a7156'
-                )
+                ) from exc
         if self.ffn_config['ffn_type'] == 'mptmlp':
             self.ffn_config['fc_type'] = self.fc_type
         elif self.ffn_config['ffn_type'] == 'te_ln_mlp':
