@@ -8,6 +8,7 @@ from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
+from vllm.prefix import Prefix, PrefixPool
 
 logger = init_logger(__name__)
 
@@ -74,6 +75,8 @@ class Scheduler:
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window)
+        
+        self.prefix_pool = PrefixPool(self.cache_config.block_size)
 
         # TODO(zhuohan): Use deque instead of list for better performance.
         # Sequence groups in the WAITING state.
@@ -177,10 +180,21 @@ class Scheduler:
                 seq_lens = new_seq_lens
 
                 seq_group = self.waiting.pop(0)
+                # swap in the prefix if it is on CPU
+                if seq_group.prefix is not None and seq_group.prefix.on_cpu:
+                    # prefix.on_gpu will be set inside this function
+                    self._swap_in_prefix(seq_group.prefix, blocks_to_swap_in)
+                # if the prefix hasn't been compuated, allocate blocks for it and set prefix.swap_to_gpu to True
                 self._allocate(seq_group)
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
                 scheduled.append(seq_group)
+
+            # set the prefix state
+            for seq_group in scheduled:
+                if seq_group.prefix is not None:
+                    seq_group.prefix.on_gpu = True
+                    seq_group.prefix.swap_to_gpu = False
 
             if scheduled or ignored_seq_groups:
                 scheduler_outputs = SchedulerOutputs(
@@ -288,6 +302,7 @@ class Scheduler:
                 seq_data=seq_data,
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
+                prefix=seq_group.prefix,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
@@ -398,3 +413,28 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+    
+    def _swap_in_prefix(
+        self,
+        prefix: Prefix,
+        blocks_to_swap_in: Dict[int, int],
+    ) -> None:
+        mapping = self.block_manager.swap_in_prefix(prefix)
+        blocks_to_swap_in.update(mapping)
+        prefix.on_gpu = True
+
+    def _swap_out_prefix(
+        self,
+        prefix: Prefix,
+        blocks_to_swap_out: Dict[int, int],
+    ) -> None:
+        if not self.block_manager.can_swap_out_prefix(prefix):
+            # FIXME(woosuk): Abort the sequence group instead of aborting the
+            # entire engine.
+            raise RuntimeError(
+                "Aborted due to the lack of CPU swap space. Please increase "
+                "the swap space to avoid this error.")
+        mapping = self.block_manager.swap_out_prefix(prefix)
+        blocks_to_swap_out.update(mapping)
+        prefix.on_cpu = True
+        prefix.on_gpu = False
