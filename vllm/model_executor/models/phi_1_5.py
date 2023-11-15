@@ -250,7 +250,8 @@ class PhiForCausalLM(nn.Module):
         return lm_logits
 
     _column_parallel_weights = [
-        "wte.weight", "linear.weight", "linear.bias", "fc1.weight", "fc1.bias"
+        "wte.weight", "Wqkv.weight", "Wqkv.bias", "linear.weight",
+        "linear.bias", "fc1.weight", "fc1.bias"
     ]
     _row_parallel_weights = ["out_proj.weight", "fc2.weight"]
 
