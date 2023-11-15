@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import MptConfig
+from vllm.transformers_utils.configs.mpt import MPTConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
@@ -37,17 +37,17 @@ def _get_alibi_slopes(
     return slopes
 
 
-class MptAttention(nn.Module):
+class MPTAttention(nn.Module):
 
-    def __init__(self, config: MptConfig):
+    def __init__(self, config: MPTConfig):
         super().__init__()
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
-        self.clip_qkv = config.attn_config.clip_qkv
-        self.qk_ln = config.attn_config.qk_ln
-        self.alibi_bias_max = config.attn_config.alibi_bias_max
-        assert not config.attn_config.prefix_lm
-        assert config.attn_config.alibi
+        self.clip_qkv = config.attn_config['clip_qkv']
+        self.qk_ln = config.attn_config['qk_ln']
+        self.alibi_bias_max = config.attn_config['alibi_bias_max']
+        assert not config.attn_config['prefix_lm']
+        assert config.attn_config['alibi']
 
         self.qkv_proj = ColumnParallelLinear(
             self.d_model,
@@ -105,9 +105,9 @@ class MptAttention(nn.Module):
         return output
 
 
-class MptMLP(nn.Module):
+class MPTMLP(nn.Module):
 
-    def __init__(self, config: MptConfig):
+    def __init__(self, config: MPTConfig):
         super().__init__()
         hidden_size = config.d_model
         expansion_ratio = config.expansion_ratio
@@ -133,15 +133,15 @@ class MptMLP(nn.Module):
         return x
 
 
-class MptBlock(nn.Module):
+class MPTBlock(nn.Module):
 
-    def __init__(self, config: MptConfig):
+    def __init__(self, config: MPTConfig):
         super().__init__()
         hidden_size = config.d_model
         self.norm_1 = nn.LayerNorm(hidden_size)
-        self.attn = MptAttention(config)
+        self.attn = MPTAttention(config)
         self.norm_2 = nn.LayerNorm(hidden_size)
-        self.ffn = MptMLP(config)
+        self.ffn = MPTMLP(config)
 
     def forward(
         self,
@@ -166,9 +166,9 @@ class MptBlock(nn.Module):
         return hidden_states
 
 
-class MptModel(nn.Module):
+class MPTModel(nn.Module):
 
-    def __init__(self, config: MptConfig):
+    def __init__(self, config: MPTConfig):
         super().__init__()
         assert config.embedding_fraction == 1.0
         assert config.norm_type == "low_precision_layernorm"
@@ -178,7 +178,7 @@ class MptModel(nn.Module):
             config.d_model,
         )
         self.blocks = nn.ModuleList(
-            [MptBlock(config) for _ in range(config.n_layers)])
+            [MPTBlock(config) for _ in range(config.n_layers)])
         self.norm_f = nn.LayerNorm(config.d_model)
         if config.no_bias:
             for module in self.modules():
@@ -213,14 +213,14 @@ class MptModel(nn.Module):
         return hidden_states
 
 
-class MptForCausalLM(nn.Module):
+class MPTForCausalLM(nn.Module):
 
-    def __init__(self, config: MptConfig):
+    def __init__(self, config: MPTConfig):
         super().__init__()
         self.config = config
         assert config.tie_word_embeddings
 
-        self.transformer = MptModel(config)
+        self.transformer = MPTModel(config)
         # TODO(zhuohan): create a new weight after implementing pipeline
         #                parallelism
         self.lm_head_weight = self.transformer.wte.weight
