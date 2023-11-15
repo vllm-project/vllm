@@ -161,6 +161,9 @@ class Worker:
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
+        context_lens: List[int] = []
+        subquery_lens: List[int] = []
+        prefix_block_tables: List[List[int]] = []
         for seq_group_metadata in seq_group_metadata_list:
             if not seq_group_metadata.is_prompt:
                 continue
@@ -176,6 +179,15 @@ class Worker:
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
+            prefix_len = 0
+            if seq_group_metadata.prefix is not None and seq_group_metadata.prefix.on_gpu:
+                prefix_len = seq_group_metadata.prefix.get_length()
+                assert prefix_len % self.block_size == 0
+                prompt_tokens = prompt_tokens[prefix_len:]
+                prefix_block_tables.append(seq_group_metadata.prefix.get_block_table_num())
+            # actual prompt lens
+            context_lens.append(prefix_len)
+            subquery_lens.append(prompt_len-prefix_len)
 
             if sampling_params.prompt_logprobs is not None:
                 # NOTE: prompt token positions do not need sample, skip
@@ -188,7 +200,7 @@ class Worker:
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.append(list(range(prompt_len)))
+            input_positions.extend(range(prefix_len,prefix_len+len(prompt_tokens)))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -199,7 +211,7 @@ class Worker:
             # Compute the slot mapping.
             slot_mapping.append([])
             block_table = seq_group_metadata.block_tables[seq_id]
-            for i in range(prompt_len):
+            for i in range(prefix_len, prompt_len):
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
@@ -208,9 +220,8 @@ class Worker:
         # Add generation tokens.
         max_context_len = 0
         max_num_blocks_per_seq = 0
-        context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
-        max_seq_len = max(prompt_lens) if prompt_lens else 1
+        max_seq_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             if seq_group_metadata.is_prompt:
                 # We need to do this in this loop as we need to know max_seq_len
@@ -283,9 +294,10 @@ class Worker:
             _pad_to_max(mapping, max_seq_len, pad=-1)
             for mapping in slot_mapping
         ]
+        block_tables = generation_block_tables if prefix_block_tables == [] else prefix_block_tables
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq, pad=0)
-            for block_table in generation_block_tables
+            for block_table in block_tables
         ]
 
         # Convert to tensors.
@@ -315,12 +327,16 @@ class Worker:
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)
+    
+        start_loc_tensor = torch.arange(0, len(prompt_lens)*max_seq_len, max_seq_len, dtype=torch.long, device='cuda')
 
         input_metadata = InputMetadata(
             seq_groups=seq_groups,
             seq_data=seq_data,
             prompt_lens=prompt_lens,
+            max_seq_len=max_seq_len,
             slot_mapping=slot_mapping_tensor,
+            start_loc=start_loc_tensor,
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,

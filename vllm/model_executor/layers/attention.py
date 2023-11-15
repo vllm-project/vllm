@@ -11,6 +11,7 @@ from vllm import attention_ops
 from vllm import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.triton_kernel.prefix_prefill import context_attention_fwd
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -112,6 +113,48 @@ class PagedAttention(nn.Module):
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
         output.copy_(out.squeeze(0))
+        return output
+
+    def multi_query_cached_kv_attention(
+        self,
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        input_metadata: InputMetadata,
+    ) -> torch.Tensor:
+        """Normal attention for the prompt tokens.
+
+        Args:
+            output: shape = [num_prompt_tokens, num_heads, head_size]
+            query: shape = [num_prompt_tokens, num_heads, head_size]
+            key: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            value: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            input_metadata: metadata for prefix-enabled prefill attention.
+        """
+
+        if self.num_kv_heads != self.num_heads:
+            # Project the key and value tensors to the desired number of heads.
+            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
+            value = torch.repeat_interleave(value, self.num_queries_per_kv,dim=1)
+        
+        context_attention_fwd(
+                query,
+                key,
+                value,
+                output,
+                key_cache,
+                value_cache,
+                input_metadata.block_tables, # [BS, max_block_per_request]
+                input_metadata.start_loc,
+                input_metadata.prompt_lens_tensor,
+                input_metadata.context_lens,
+                input_metadata.max_seq_len
+            )
+
+        
         return output
 
     def get_alibi_slopes(self) -> Optional[torch.Tensor]:
@@ -241,23 +284,33 @@ class PagedAttention(nn.Module):
         # Pre-allocate the output tensor.
         output = torch.empty_like(query)
 
+        # Wait until the cache op is done.
+        if cache_event is not None:
+            cache_event.wait()
+
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
             # Prompt run.
             assert input_metadata.num_generation_tokens == 0
-            self.set_attn_bias(input_metadata, dtype=query.dtype)
-            self.multi_query_kv_attention(
-                output,
-                query,
-                key,
-                value,
+            # self.set_attn_bias(input_metadata, dtype=query.dtype)
+            # self.multi_query_kv_attention(
+            #     output,
+            #     query,
+            #     key,
+            #     value,
+            #     input_metadata,
+            # )
+            self.multi_query_cached_kv_attention(
+                output[:num_prompt_tokens],
+                query[:num_prompt_tokens],
+                key[:num_prompt_tokens],
+                value[:num_prompt_tokens],
+                key_cache,
+                value_cache,
                 input_metadata,
             )
-
-        # Wait until the cache op is done.
-        if cache_event is not None:
-            cache_event.wait()
+        # TODO(shiyi): perform multi_query_cached_kv_attention after the cache op for better kernel performance
 
         # Reshape the keys and values and store them in the cache.
         # When key_cache and value_cache are not provided, the new key
