@@ -55,7 +55,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
     "paged_attention_v2",
     &paged_attention_v2,
-    "PagedAttention V2.")
+    "PagedAttention V2.");
   m.def(
     "single_query_cached_kv_quantized_attention",
     &single_query_cached_kv_quantized_attention,

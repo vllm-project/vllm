@@ -83,9 +83,9 @@ class LLMEngine:
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"quantization={model_config.quantization}, "
-            f"seed={model_config.seed})"
-            f"kv_cache_type={model_config.kv_cache_dtype}"
-            f"use kv cache quantization: {model_config.quant_kv_cache}")
+            f"seed={model_config.seed}, "
+            f"kv_cache_type={model_config.kv_cache_dtype}, "
+            f"use kv cache quantization: {model_config.quant_kv_cache} )")
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config

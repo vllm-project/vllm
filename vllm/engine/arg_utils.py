@@ -198,8 +198,9 @@ class EngineArgs:
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
             self.trust_remote_code, self.download_dir, self.load_format,
-            self.dtype, self.seed, self.tokenizer_revision, self.max_model_len,
-            self.quantization, self.kv_cache_dtype, self.kv_quant_params_path)
+            self.dtype, self.seed, self.revision, self.tokenizer_revision, 
+            self.max_model_len, self.quantization, 
+            self.kv_cache_dtype, self.kv_quant_params_path)
         cache_config = CacheConfig(
             self.block_size, self.gpu_memory_utilization, self.swap_space,
             getattr(model_config.hf_config, 'sliding_window', None))
