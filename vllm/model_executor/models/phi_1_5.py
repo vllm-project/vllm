@@ -251,9 +251,8 @@ class PhiForCausalLM(nn.Module):
                 sin = freqs.sin()
                 cache = torch.cat((cos, sin), dim=-1)
 
-                for i in range(len(self.phi.layers)):
-                    self.phi.layers[
-                        i].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
+                layer_idx = int(name.split(".")[1]) - 1
+                self.phi.layers[layer_idx].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
                 continue
             _, layer_idx, *tail = name.split(".")
             tail = ".".join(tail)
