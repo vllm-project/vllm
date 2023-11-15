@@ -25,18 +25,26 @@ class InputMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]],
         seq_data: Dict[int, SequenceData],
         prompt_lens: List[int],
+        max_seq_len: int,
         slot_mapping: torch.Tensor,
+        start_loc:torch.Tensor,
         context_lens: torch.Tensor,
         max_context_len: int,
         block_tables: torch.Tensor,
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Dict[SamplingType, torch.Tensor],
         sliding_window: Optional[int] = None,
+        kv_mqa: bool = False,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens
+        self.prompt_lens_tensor = torch.tensor(prompt_lens,
+                                               dtype=torch.int,
+                                               device=slot_mapping.device)
+        self.max_seq_len = max_seq_len
         self.slot_mapping = slot_mapping
+        self.start_loc = start_loc
         self.context_lens = context_lens
         self.max_context_len = max_context_len
         self.block_tables = block_tables
@@ -73,6 +81,7 @@ class InputMetadata:
 
         # Set during the execution of the first attention op.
         self.attn_bias: Optional[AttentionBias] = None
+        self.kv_mqa = kv_mqa
 
     def __repr__(self) -> str:
         # Print only useful metadata.

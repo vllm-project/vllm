@@ -13,6 +13,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.rotary_embedding import (
     DynamicNTKScalingRotaryEmbedding, LinearScalingRotaryEmbedding,
     RotaryEmbedding, YaRNScalingRotaryEmbedding)
+from vllm.model_executor.layers.kv_mqa import context_attention_fwd
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -124,8 +125,46 @@ class PagedAttention(nn.Module):
         """
         return None
 
-    def multi_query_cached_kv_attention():
-        pass
+    def multi_query_cached_kv_attention(
+        self,
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        input_metadata: InputMetadata,
+    ) -> torch.Tensor:
+        """Normal attention for the prompt tokens.
+        Args:
+            output: shape = [num_prompt_tokens, num_heads, head_size]
+            query: shape = [num_prompt_tokens, num_heads, head_size]
+            key: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            value: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            input_metadata: metadata for prefix-enabled prefill attention.
+        """
+
+        if self.num_kv_heads != self.num_heads:
+            # Project the key and value tensors to the desired number of heads.
+            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
+            value = torch.repeat_interleave(value, self.num_queries_per_kv,dim=1)
+
+        context_attention_fwd(
+                query,
+                key,
+                value,
+                output,
+                key_cache,
+                value_cache,
+                input_metadata.block_tables, # [BS, max_block_per_request]
+                input_metadata.start_loc,
+                input_metadata.prompt_lens_tensor,
+                input_metadata.context_lens,
+                input_metadata.max_seq_len
+            )
+
+
+        return output
     
     def single_query_cached_kv_attention(
         self,
@@ -245,6 +284,10 @@ class PagedAttention(nn.Module):
 
         # Pre-allocate the output tensor.
         output = torch.empty_like(query)
+        
+        # Wait until the cache op is done.
+        if cache_event is not None:
+            cache_event.wait()
 
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
@@ -284,7 +327,11 @@ class PagedAttention(nn.Module):
                 slot_mapping,
             )
 
-        if input_metadata.num_generation_tokens > 0:
+        if input_metadata.kv_mqa:
+            self.multi_query_cached_kv_attention(output, query, 
+                                                 key, value, key_cache, 
+                                                 value_cache, input_metadata)
+        elif input_metadata.num_generation_tokens > 0:
             # Decoding run.
             assert input_metadata.num_prompt_tokens == 0
             assert key_cache is not None and value_cache is not None, (

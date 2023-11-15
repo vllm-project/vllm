@@ -51,32 +51,37 @@ class Sampler(nn.Module):
         logits = _apply_logits_processors(logits, input_metadata)
         # Apply presence and frequency penalties.
         output_tokens = _get_output_tokens(input_metadata)
-        assert len(output_tokens) == logits.shape[0]
-        presence_penalties, frequency_penalties, repetition_penalties = (
-            _get_penalties(input_metadata))
-        assert len(presence_penalties) == logits.shape[0]
-        assert len(frequency_penalties) == logits.shape[0]
-        assert len(repetition_penalties) == logits.shape[0]
-        logits = _apply_penalties(logits, output_tokens, presence_penalties,
-                                  frequency_penalties, repetition_penalties)
+        
+        if len(output_tokens) == logits.shape[0]:
+            assert len(output_tokens) == logits.shape[0]
+            presence_penalties, frequency_penalties, repetition_penalties = (
+                _get_penalties(input_metadata))
+            assert len(presence_penalties) == logits.shape[0]
+            assert len(frequency_penalties) == logits.shape[0]
+            assert len(repetition_penalties) == logits.shape[0]
+            logits = _apply_penalties(logits, output_tokens, presence_penalties,
+                                    frequency_penalties, repetition_penalties)
 
-        # Apply temperature scaling.
-        temperatures = _get_temperatures(input_metadata)
-        assert len(temperatures) == logits.shape[0]
-        if any(t != 1.0 for t in temperatures):
-            t = torch.tensor(temperatures,
-                             dtype=logits.dtype,
-                             device=logits.device)
-            # Use in-place division to avoid creating a new tensor.
-            logits.div_(t.unsqueeze(dim=1))
+            # Apply temperature scaling.
+            temperatures = _get_temperatures(input_metadata)
+            assert len(temperatures) == logits.shape[0]
+            if any(t != 1.0 for t in temperatures):
+                t = torch.tensor(temperatures,
+                                dtype=logits.dtype,
+                                device=logits.device)
+                # Use in-place division to avoid creating a new tensor.
+                logits.div_(t.unsqueeze(dim=1))
 
-        # Apply top-p and top-k truncation.
-        top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
-        assert len(top_ps) == len(top_ks) == logits.shape[0]
-        do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
-        do_top_k = any(k != self.vocab_size for k in top_ks)
-        if do_top_p or do_top_k:
-            logits = _apply_top_p_top_k(logits, top_ps, top_ks)
+            # Apply top-p and top-k truncation.
+            top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
+            assert len(top_ps) == len(top_ks) == logits.shape[0]
+            do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
+            do_top_k = any(k != self.vocab_size for k in top_ks)
+            if do_top_p or do_top_k:
+                logits = _apply_top_p_top_k(logits, top_ps, top_ks)
+        else:
+            # speculative decoding
+            pass
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.

@@ -216,6 +216,7 @@ class Worker:
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
         max_seq_len = max(prompt_lens) if prompt_lens else 1
+        kv_mqa = False
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             if seq_group_metadata.is_prompt:
                 # We need to do this in this loop as we need to know max_seq_len
@@ -264,6 +265,7 @@ class Worker:
                                                 len(block_table))
                 context_lens.append(context_len)    
                 if len(seq_data.draft_token_probs) > 0:
+                    kv_mqa = True
                     input_tokens.append(seq_data.get_draft_token_ids())
                     assert not self.sliding_window, "Speculative Decoding does not support sliding window for now"
                     draft_len = len(seq_data.get_draft_token_ids())
@@ -341,17 +343,21 @@ class Worker:
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)
 
+        start_loc_tensor = torch.arange(0, len(prompt_lens)*max_seq_len, max_seq_len, dtype=torch.long, device='cuda')
         input_metadata = InputMetadata(
             seq_groups=seq_groups,
             seq_data=seq_data,
             prompt_lens=prompt_lens,
+            max_seq_len=max_seq_len,
             slot_mapping=slot_mapping_tensor,
+            start_loc=start_loc_tensor,
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
             sliding_window=self.sliding_window,
+            kv_mqa=kv_mqa
         )
         return tokens_tensor, positions_tensor, input_metadata
 
