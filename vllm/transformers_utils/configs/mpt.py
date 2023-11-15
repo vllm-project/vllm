@@ -37,31 +37,30 @@ class MPTConfig(PretrainedConfig):
         'hidden_size': 'd_model',
         'num_hidden_layers': 'n_layers',
     }
-    
+
     # pylint: disable=dangerous-default-value
-    def __init__(
-            self,
-            d_model: int = 2048,
-            n_heads: int = 16,
-            n_layers: int = 24,
-            expansion_ratio: int = 4,
-            max_seq_len: int = 2048,
-            vocab_size: int = 50368,
-            resid_pdrop: float = 0.0,
-            emb_pdrop: float = 0.0,
-            learned_pos_emb: bool = True,
-            attn_config: Dict = attn_config_defaults,
-            ffn_config: Dict = ffn_config_defaults,
-            init_device: str = 'cpu',
-            logit_scale: Optional[Union[float, str]] = None,
-            no_bias: bool = False,
-            embedding_fraction: float = 1.0,
-            norm_type: str = 'low_precision_layernorm',
-            use_cache: bool = False,
-            init_config: Dict = init_config_defaults,
-            fc_type: str = 'torch',
-            verbose: Optional[int] = None,
-            **kwargs: Any):
+    def __init__(self,
+                 d_model: int = 2048,
+                 n_heads: int = 16,
+                 n_layers: int = 24,
+                 expansion_ratio: int = 4,
+                 max_seq_len: int = 2048,
+                 vocab_size: int = 50368,
+                 resid_pdrop: float = 0.0,
+                 emb_pdrop: float = 0.0,
+                 learned_pos_emb: bool = True,
+                 attn_config: Dict = attn_config_defaults,
+                 ffn_config: Dict = ffn_config_defaults,
+                 init_device: str = 'cpu',
+                 logit_scale: Optional[Union[float, str]] = None,
+                 no_bias: bool = False,
+                 embedding_fraction: float = 1.0,
+                 norm_type: str = 'low_precision_layernorm',
+                 use_cache: bool = False,
+                 init_config: Dict = init_config_defaults,
+                 fc_type: str = 'torch',
+                 verbose: Optional[int] = None,
+                 **kwargs: Any):
         # pylint: disable=line-too-long
         """The MPT configuration class.
         Args:
