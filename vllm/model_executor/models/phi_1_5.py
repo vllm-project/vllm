@@ -153,8 +153,6 @@ class PhiLayer(nn.Module):
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
-        # pylint: disable=C0301
-        # Dropout 0.0 https://huggingface.co/microsoft/phi-1_5/blob/92557d03bb12543040c8bb5f0475cbdd9968f05f/modeling_mixformer_sequential.py#L696
         feed_forward_hidden_states = self.mlp(hidden_states)
         hidden_states = attn_outputs + feed_forward_hidden_states + residual
         return hidden_states
