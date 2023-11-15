@@ -274,7 +274,8 @@ class PhiForCausalLM(nn.Module):
                 cache = torch.cat((cos, sin), dim=-1)
 
                 layer_idx = int(name.split(".")[1])
-                self.layers[layer_idx].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
+                self.layers[
+                    layer_idx].mixer.attn.rotary_emb.cos_sin_cache.copy_(cache)
                 continue
 
             # pylint: disable=E1136
