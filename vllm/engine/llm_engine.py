@@ -241,6 +241,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        prefix_pos: Optional[int] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -269,9 +270,22 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
 
+        # check prefix
+        if prefix_pos is not None:
+            # a temp workaround
+            prefix_pos = prefix_pos // block_size
+            truncated_prefix_token_ids = prompt_token_ids[:prefix_pos]
+            prefix = self.scheduler.prefix_pool.fixed_search(hash(truncated_prefix_token_ids))
+            if prefix is not None:
+                seq.prefix = prefix
+                # prefix.update_freq(1.0)
+            else:
+                # create a new prefix
+                seq.prefix = self.scheduler.prefix_pool.add_prefix(truncated_prefix_token_ids)
+
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time)
+                                  arrival_time, seq.prefix)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)

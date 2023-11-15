@@ -4,6 +4,7 @@ import enum
 from typing import Dict, List, Optional, Union
 
 from vllm.block import LogicalTokenBlock
+from vllm.prefix import Prefix
 from vllm.sampling_params import SamplingParams
 
 PromptLogprobs = List[Optional[Dict[int, float]]]
@@ -113,9 +114,11 @@ class Sequence:
         prompt: str,
         prompt_token_ids: List[int],
         block_size: int,
+        prefix: Optional[Prefix] = None,
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
+        self.prefix = prefix
         self.block_size = block_size
 
         self.data = SequenceData(prompt_token_ids)
@@ -236,12 +239,14 @@ class SequenceGroup:
         seqs: List[Sequence],
         sampling_params: SamplingParams,
         arrival_time: float,
+        prefix: Optional[Prefix] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
         self.prompt_logprobs: Optional[PromptLogprobs] = None
+        self.prefix = prefix
 
     @property
     def prompt(self) -> str:
@@ -335,6 +340,7 @@ class SequenceGroupMetadata:
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
+        prefix: The prefix of the prompt of the sequence group.
     """
 
     def __init__(
@@ -344,12 +350,14 @@ class SequenceGroupMetadata:
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
+        prefix: Optional[Prefix] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
         self.seq_data = seq_data
         self.sampling_params = sampling_params
         self.block_tables = block_tables
+        self.prefix = prefix
 
 
 class SequenceOutputs:
