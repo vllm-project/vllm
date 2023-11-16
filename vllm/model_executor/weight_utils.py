@@ -258,7 +258,10 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     tensor first.
     """
     if not isinstance(x, torch.Tensor):
-        x = x[:]
+        try:
+            x = x[:]
+        except IndexError:
+            return torch.Tensor()
     return x
 
 
