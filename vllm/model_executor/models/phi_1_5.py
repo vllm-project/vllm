@@ -215,11 +215,9 @@ class PhiCausalLMHead(nn.Module):
         super().__init__()
         self.ln = nn.LayerNorm(config.hidden_size,
                                eps=config.layer_norm_epsilon)
-        self.linear = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            bias=True
-        )
+        self.linear = ParallelLMHead(config.vocab_size,
+                                     config.hidden_size,
+                                     bias=True)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
