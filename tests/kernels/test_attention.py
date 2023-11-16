@@ -363,7 +363,6 @@ def test_multi_query_cached_kv_attention(
             abs_position = context_lens[i] + j
             logical_block_idx = abs_position // block_size
             logical_block_offset = abs_position % block_size
-            #__import__('pdb').set_trace()
             phys_block_idx = block_tables_tensor[i][logical_block_idx]
             slot_mapping[i][j] = phys_block_idx * block_size + logical_block_offset
     slot_mapping_tensor = torch.tensor(slot_mapping,
@@ -390,7 +389,6 @@ def test_multi_query_cached_kv_attention(
         draft_lens=query_lens)
 
     attn = PagedAttention(num_heads, head_size, scale)
-    __import__('pdb').set_trace()
     output = attn.forward(query, key, value, key_cache, value_cache,
                           input_metadata, None)
     assert output.shape == query.shape
@@ -409,7 +407,6 @@ def test_multi_query_cached_kv_attention(
         scale,
     )
 
-    __import__('pdb').set_trace()
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
