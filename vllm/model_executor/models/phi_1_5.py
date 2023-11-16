@@ -231,7 +231,7 @@ class PhiCausalLMHead(nn.Module):
         return next_tokens
 
 
-class PhiForCausalLM(nn.Module):
+class PhiModel(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -239,13 +239,11 @@ class PhiForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        modules = [PhiEmbedding(config)]
-        modules += [
+        self.embd = PhiEmbedding(config)
+        self.h = nn.ModuleList([
             PhiLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
-        ]
-        modules.append(PhiCausalLMHead(config))
-        self.layers = nn.Sequential(*modules)
+        ])
 
     def forward(
         self,
@@ -255,13 +253,13 @@ class PhiForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.layers[0](input_ids)
+        hidden_states = self.embd(input_ids)
         for i in range(self.config.num_hidden_layers):
             if cache_events is None:
                 cache_event = None
             else:
                 cache_event = cache_events[i]
-            layer = self.layers[i + 1]
+            layer = self.h[i]
             hidden_states = layer(
                 positions,
                 hidden_states,
@@ -269,7 +267,32 @@ class PhiForCausalLM(nn.Module):
                 input_metadata,
                 cache_event,
             )
-        lm_logits = self.layers[-1](hidden_states, input_metadata)
+        return hidden_states
+
+
+class PhiForCausalLM(nn.Module):
+
+    def __init__(self,
+                 config: PretrainedConfig,
+                 linear_method: Optional[LinearMethodBase] = None):
+        super().__init__()
+        self.config = config
+        self.linear_method = linear_method
+
+        self.transformer = PhiModel(config, linear_method)
+        self.lm_head = PhiCausalLMHead(config)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
+        cache_events: Optional[List[torch.cuda.Event]],
+    ) -> SamplerOutput:
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         input_metadata, cache_events)
+        lm_logits = self.lm_head(hidden_states, input_metadata)
         return lm_logits
 
     def load_weights(self,
