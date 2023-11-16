@@ -5,7 +5,6 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from vllm.transformers_utils.configs.mpt import MPTConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
@@ -22,6 +21,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.transformers_utils.configs.mpt import MPTConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
