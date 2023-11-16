@@ -61,7 +61,6 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
-
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
@@ -81,7 +80,9 @@ class PhiEmbedding(nn.Module):
 
 class PhiAttention(nn.Module):
 
-    def __init__(self, config: PretrainedConfig, linear_method: Optional[LinearMethodBase] = None):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
@@ -141,7 +142,9 @@ class PhiAttention(nn.Module):
 
 class PhiMLP(nn.Module):
 
-    def __init__(self, config: PretrainedConfig, linear_method: Optional[LinearMethodBase] = None):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
 
         n_inner = getattr(config, "n_inner", None)
@@ -168,9 +171,12 @@ class PhiMLP(nn.Module):
 
 class PhiLayer(nn.Module):
 
-    def __init__(self, config: PretrainedConfig, linear_method: Optional[LinearMethodBase] = None):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
-        self.ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.ln = nn.LayerNorm(config.hidden_size,
+                               eps=config.layer_norm_epsilon)
         self.mixer = PhiAttention(config, linear_method)
         self.mlp = PhiMLP(config, linear_method)
 
@@ -200,7 +206,8 @@ class PhiCausalLMHead(nn.Module):
 
     def __init__(self, config: PretrainedConfig):
         super().__init__()
-        self.ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.ln = nn.LayerNorm(config.hidden_size,
+                               eps=config.layer_norm_epsilon)
         self.linear = ParallelLMHead(
             config.hidden_size,
             config.vocab_size,
@@ -220,13 +227,18 @@ class PhiCausalLMHead(nn.Module):
 
 class PhiForCausalLM(nn.Module):
 
-    def __init__(self, config: PretrainedConfig, linear_method: Optional[LinearMethodBase] = None):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
         modules = [PhiEmbedding(config)]
-        modules += [PhiLayer(config, linear_method) for _ in range(config.num_hidden_layers)]
-        modules.append(PhiCausalLMHead(config, linear_method))
+        modules += [
+            PhiLayer(config, linear_method)
+            for _ in range(config.num_hidden_layers)
+        ]
+        modules.append(PhiCausalLMHead(config))
         self.layers = nn.Sequential(*modules)
 
     def forward(
