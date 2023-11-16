@@ -101,6 +101,13 @@ class PhiAttention(nn.Module):
             self.total_num_heads,
             linear_method=linear_method,
         )
+        self.qkv_proj = QKVParallelLinear(
+            config.hidden_size,
+            self.head_size,
+            self.total_num_heads,
+            bias=False,
+            linear_method=linear_method,
+        )
         self.out_proj = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
@@ -272,7 +279,7 @@ class PhiForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        state_dict = self.state_dict()
+        params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
@@ -291,7 +298,7 @@ class PhiForCausalLM(nn.Module):
                 continue
 
             # pylint: disable=E1136
-            param = state_dict[name]
+            param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
