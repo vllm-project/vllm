@@ -1,6 +1,6 @@
 """Utils for model executor."""
 import random
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -16,7 +16,7 @@ def set_random_seed(seed: int) -> None:
 
 def set_weight_attrs(
     weight: torch.Tensor,
-    weight_attrs: Optional[dict[str, Any]],
+    weight_attrs: Optional[Dict[str, Any]],
 ):
     """Set attributes on a weight tensor.
 

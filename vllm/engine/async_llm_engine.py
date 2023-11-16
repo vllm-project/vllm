@@ -142,10 +142,10 @@ class RequestTracker:
 
         self._request_streams[request_id].finish()
 
-    def get_new_and_finished_requests(self) -> Tuple[List[dict], Set[str]]:
+    def get_new_and_finished_requests(self) -> Tuple[List[Dict], Set[str]]:
         """Get the new requests and finished requests to be
         sent to the engine."""
-        new_requests: List[dict] = []
+        new_requests: List[Dict] = []
         finished_requests: Set[str] = set()
 
         while not self._finished_requests.empty():

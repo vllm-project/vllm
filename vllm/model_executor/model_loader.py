@@ -37,14 +37,6 @@ _MODEL_REGISTRY = {
     "YiForCausalLM": YiForCausalLM,
 }
 
-# FIXME(woosuk): Remove this once all models support quantization.
-_MODEL_CLASSES_SUPPORT_QUANTIZATION = [
-    LlamaForCausalLM,
-    MistralForCausalLM,
-    YiForCausalLM,
-]
-
-
 @contextlib.contextmanager
 def _set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
@@ -70,9 +62,6 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     # Get the (maybe quantized) linear method.
     linear_method = None
     if model_config.quantization is not None:
-        if model_class not in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
-            raise ValueError(
-                f"Quantization is not supported for {model_class}.")
         quant_config = get_quant_config(model_config.quantization,
                                         model_config.model,
                                         model_config.download_dir)
@@ -95,10 +84,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
-            model = model_class(model_config.hf_config, linear_method)
-        else:
-            model = model_class(model_config.hf_config)
+        model = model_class(model_config.hf_config, linear_method)
         if model_config.load_format == "dummy":
             model = model.cuda()
             # NOTE(woosuk): For accurate performance evaluation, we assign
