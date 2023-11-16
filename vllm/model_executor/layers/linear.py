@@ -18,7 +18,7 @@ logger = init_logger(__name__)
 
 
 class LinearMethodBase(ABC):
-    """Base class for different quantized linear methods."""
+    """Base class for different (maybe quantized) linear methods."""
 
     @abstractmethod
     def create_weights(self, input_size: int, output_size: int,
