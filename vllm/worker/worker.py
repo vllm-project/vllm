@@ -200,7 +200,7 @@ class Worker:
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(range(prefix_len,prefix_len+len(prompt_tokens)))
+            input_positions.append(list(range(prefix_len,prefix_len+len(prompt_tokens))))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized

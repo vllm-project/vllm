@@ -7,7 +7,7 @@ import math
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-from benchmark_utils import bench, gc_torch
+from .benchmark_utils import bench, gc_torch
 
 if triton.__version__ >= "2.1.0":
     @triton.jit
@@ -463,4 +463,4 @@ def bench_contexted_kv_attention(
         print(" | ".join(outputs))
     
 
-test_contexted_kv_attention(12, 128, torch.float16)
+# test_contexted_kv_attention(12, 128, torch.float16)

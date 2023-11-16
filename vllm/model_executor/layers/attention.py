@@ -293,23 +293,26 @@ class PagedAttention(nn.Module):
         if num_prompt_tokens > 0:
             # Prompt run.
             assert input_metadata.num_generation_tokens == 0
-            # self.set_attn_bias(input_metadata, dtype=query.dtype)
-            # self.multi_query_kv_attention(
-            #     output,
-            #     query,
-            #     key,
-            #     value,
-            #     input_metadata,
-            # )
-            self.multi_query_cached_kv_attention(
-                output[:num_prompt_tokens],
-                query[:num_prompt_tokens],
-                key[:num_prompt_tokens],
-                value[:num_prompt_tokens],
-                key_cache,
-                value_cache,
-                input_metadata,
-            )
+            if key_cache is None or value_cache is None:
+                # No cache provided. Perform normal attention.
+                self.set_attn_bias(input_metadata, dtype=query.dtype)
+                self.multi_query_kv_attention(
+                    output,
+                    query,
+                    key,
+                    value,
+                    input_metadata,
+                )
+            else:
+                self.multi_query_cached_kv_attention(
+                    output[:num_prompt_tokens],
+                    query[:num_prompt_tokens],
+                    key[:num_prompt_tokens],
+                    value[:num_prompt_tokens],
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                )
         # TODO(shiyi): perform multi_query_cached_kv_attention after the cache op for better kernel performance
 
         # Reshape the keys and values and store them in the cache.
