@@ -99,6 +99,13 @@ class SequenceData:
         draft_tokens = [list(tp.keys())[0] for tp in self.draft_token_probs]
         return draft_tokens
     
+    def get_verify_token_ids(self) -> List[int]:
+        draft_token_ids = self.get_draft_token_ids()
+        assert self.output_token_ids[-len(draft_token_ids):] == draft_token_ids
+        if len(draft_token_ids) == len(self.output_token_ids):
+            return self.prompt_token_ids[-1] + draft_token_ids
+        return self.output_token_ids[-len(draft_token_ids) - 1:]
+    
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
@@ -398,8 +405,8 @@ class SequenceOutputs:
     def __init__(
         self,
         parent_seq_id: int,
-        output_token: int,
-        logprobs: Dict[int, float]
+        output_token: Union[int, List[int]],
+        logprobs: Union[Dict[int, float], List[Dict[int, float]]],
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token

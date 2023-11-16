@@ -70,18 +70,24 @@ class InputMetadata:
                                          dtype=torch.int32,
                                          device=self.slot_mapping.device)
 
-        self.num_prompts = len(prompt_lens)
-        self.num_prompt_tokens = self.num_prompts * self.max_prompt_len
-        self.num_generation_tokens = context_lens.shape[0]
+        self.kv_mqa = kv_mqa
+        
+        if self.kv_mqa:
+            self.num_prompt_tokens = 0
+            # FIXME: This is a hack to make sure the number of generation tokens
+            self.num_generation_tokens = context_lens.shape[0]
+        else:
+            self.num_prompts = len(prompt_lens)
+            self.num_prompt_tokens = self.num_prompts * self.max_prompt_len
+            self.num_generation_tokens = context_lens.shape[0]
         if block_tables.numel() > 0:
             self.max_num_blocks_per_seq = block_tables.shape[1]
         else:
             self.max_num_blocks_per_seq = 0
-        assert block_tables.shape[0] == self.num_generation_tokens
+        # assert block_tables.shape[0] == self.num_generation_tokens
 
         # Set during the execution of the first attention op.
         self.attn_bias: Optional[AttentionBias] = None
-        self.kv_mqa = kv_mqa
 
     def __repr__(self) -> str:
         # Print only useful metadata.

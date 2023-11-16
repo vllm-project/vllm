@@ -40,6 +40,17 @@ class Sampler(nn.Module):
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
+        if input_metadata.kv_mqa:
+            return self.spec_forward(embedding, hidden_states, input_metadata, embedding_bias)
+        else:
+            return self.org_forward(embedding, hidden_states, input_metadata, embedding_bias)
+
+    def org_forward(self,
+        embedding: torch.Tensor,
+        hidden_states: torch.Tensor,
+        input_metadata: InputMetadata,
+        embedding_bias: Optional[torch.Tensor] = None,
+    ) -> SamplerOutput:
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
 
@@ -94,36 +105,28 @@ class Sampler(nn.Module):
         return _build_sampler_output(sample_results, input_metadata,
                                      prompt_logprobs, sample_logprobs)
 
-
-class SpecSampler(nn.Module):
-    def __init__(self, vocab_size: int) -> None:
-        super().__init__(vocab_size)
-    
-    def forward(self,
+    def spec_forward(self,
         embedding: torch.Tensor,
         hidden_states: torch.Tensor,
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
         # Get the hidden states that we use for sampling.
+        batch_size = hidden_states.shape[0]
         hidden_states = _prune_hidden_states(hidden_states, input_metadata)
-
         # Get the logits for the next tokens.
         logits = _get_logits(hidden_states, embedding, embedding_bias,
                              self.vocab_size)
         
-        # Apply presence and frequency penalties.
-        output_tokens = _get_output_tokens(input_metadata)
-        
-        # Apply temperature scaling.
-        temperatures = _get_temperatures(input_metadata)
-        assert len(temperatures) == logits.shape[0]
-        if any(t != 1.0 for t in temperatures):
-            t = torch.tensor(temperatures,
-                            dtype=logits.dtype,
-                            device=logits.device)
-            # Use in-place division to avoid creating a new tensor.
-            logits.div_(t.unsqueeze(dim=1))
+        # # Apply temperature scaling.
+        # temperatures = _get_temperatures(input_metadata)
+
+        # if any(t != 1.0 for t in temperatures):
+        #     t = torch.tensor(temperatures,
+        #                     dtype=logits.dtype,
+        #                     device=logits.device)
+        #     # Use in-place division to avoid creating a new tensor.
+        #     logits.div_(t.unsqueeze(dim=1))
         
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
@@ -132,16 +135,27 @@ class SpecSampler(nn.Module):
         # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
+        samples = torch.argmax(logprobs, dim=-1).cpu().reshape(batch_size, -1)
+        return _build_spec_sampler_output(samples, input_metadata, logprobs)
 
-        # Sample the next tokens.
-        sample_results = _sample(probs, logprobs, input_metadata)
-        # Get the logprobs query results.
-        prompt_logprobs, sample_logprobs = _get_logprobs(
-            logprobs, input_metadata, sample_results)
-        return _build_sampler_output(sample_results, input_metadata,
-                                     prompt_logprobs, sample_logprobs)
-        
-  
+def _build_spec_sampler_output(samples: torch.Tensor, 
+                               input_metadata: InputMetadata, 
+                               logprobs: torch.Tensor) -> SamplerOutput:
+    sampler_output = []
+    batch_size = samples.shape[0]
+    assert len(input_metadata.seq_groups) == batch_size
+    logprobs = logprobs.reshape(batch_size, -1)
+    for (seq_group, sample_result, logprob) in zip(input_metadata.seq_groups, samples, logprobs):
+        seq_ids, _ = seq_group
+        token_probs = []
+        for j, token_id in enumerate(sample_result):
+            token_probs.append({token_id: logprob[j]})
+        print(sample_result, token_probs)
+        seq_outputs =[SequenceOutputs(seq_ids[0], sample_result, token_probs)]
+        sampler_output.append(
+            SequenceGroupOutputs(seq_outputs, None))
+    return sampler_output
+       
 def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
                 embedding_bias: Optional[torch.Tensor],
                 vocab_size: int) -> torch.Tensor:

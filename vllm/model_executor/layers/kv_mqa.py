@@ -6,8 +6,40 @@ import triton.language as tl
 import math
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import numpy as np
 
-from benchmark_utils import bench, gc_torch
+def bench(func, iterations=10):
+    """
+    Benchmarks a function by running it a number of times and returning the average and standard deviation of execution time.
+
+    :param func: The function to be benchmarked.
+    :param iterations: Number of times the function will be executed. Default is 10.
+    :return: An object with 'avg' and 'std' methods to get the average and standard deviation of execution times.
+    """
+    times = []
+
+    for _ in range(iterations):
+        start_time = time.time()
+        func()
+        torch.cuda.synchronize()
+        end_time = time.time()
+        times.append(end_time - start_time)
+
+    times = np.array(times)
+    avg_time = np.mean(times)
+    std_dev_time = np.std(times)
+
+    class Result:
+        def avg(self):
+            return avg_time
+
+        def std(self):
+            return std_dev_time
+
+    return Result()
+
+def gc_torch():
+    pass
 
 if triton.__version__ >= "2.1.0":
     @triton.jit
@@ -463,4 +495,5 @@ def bench_contexted_kv_attention(
         print(" | ".join(outputs))
     
 
-test_contexted_kv_attention(12, 128, torch.float16)
+# test_contexted_kv_attention(12, 128, torch.float16)
+# bench_contexted_kv_attention(12, 128, torch.float16)

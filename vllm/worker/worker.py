@@ -242,13 +242,13 @@ class Worker:
             seq = seq_group_metadata.seq_data[seq_ids[0]]
             if len(seq.draft_token_probs) > 0:
                 assert num_seqs == 1
-                selected_token_end_idx = selected_token_start_idx + 1 + len(seq.draft_token_probs)
+                selected_token_end_idx = selected_token_start_idx + len(seq.draft_token_probs)
             else:
                 selected_token_end_idx = selected_token_start_idx + num_seqs
             selected_token_indices.extend(
                 range(selected_token_start_idx,
                       selected_token_end_idx))
-            selected_token_start_idx += num_seqs
+            selected_token_start_idx = selected_token_end_idx
 
             categorized_sample_indices[sampling_params.sampling_type].extend(
                 range(categorized_sample_indices_start_idx,
@@ -259,19 +259,23 @@ class Worker:
                 seq_data: SequenceData = seq_group_metadata.seq_data[seq_id]
                 
                 block_table = seq_group_metadata.block_tables[seq_id]
-                context_len = seq_data.get_len()
+                draft_len = len(seq_data.get_draft_token_ids())
+                prompt_len = seq_data.get_len()
+                context_len = prompt_len - draft_len
                 max_context_len = max(max_context_len, context_len)
                 max_num_blocks_per_seq = max(max_num_blocks_per_seq,
                                                 len(block_table))
-                context_lens.append(context_len)    
-                if len(seq_data.draft_token_probs) > 0:
+                context_lens.append(context_len)
+                if draft_len > 0:
                     kv_mqa = True
-                    input_tokens.append(seq_data.get_draft_token_ids())
+                    prompt_lens.append(prompt_len)
+                    verify_tokens = seq_data.get_verify_token_ids()
+                    verify_len = len(verify_tokens)
+                    input_tokens.append(verify_tokens)
                     assert not self.sliding_window, "Speculative Decoding does not support sliding window for now"
-                    draft_len = len(seq_data.get_draft_token_ids())
                     # FIXME: we should set max_seq_len in a single place
-                    max_seq_len = max(max_seq_len, draft_len)
-                    positions = list(range(context_len - draft_len, context_len))
+                    max_seq_len = max(max_seq_len, verify_len)
+                    positions = list(range(prompt_len - verify_len, prompt_len))
                     input_positions.append(positions)
                     
                     slots = []
@@ -343,6 +347,7 @@ class Worker:
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)
 
+        print("------------", max_seq_len, len(prompt_lens))
         start_loc_tensor = torch.arange(0, len(prompt_lens)*max_seq_len, max_seq_len, dtype=torch.long, device='cuda')
         input_metadata = InputMetadata(
             seq_groups=seq_groups,

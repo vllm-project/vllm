@@ -163,7 +163,6 @@ class PagedAttention(nn.Module):
                 input_metadata.max_seq_len
             )
 
-
         return output
     
     def single_query_cached_kv_attention(
