@@ -250,8 +250,7 @@ def ref_multi_query_cached_kv_attention(
     num_query: torch.Tensor,
     scale: float,
 ) -> None:
-    num_query_heads = query.shape[2]
-    num_kv_heads = value_cache.shape[1]
+    num_heads = value_cache.shape[1]
     head_size = value_cache.shape[2]
     block_size = value_cache.shape[3]
     num_seqs = query.shape[0]
@@ -273,25 +272,25 @@ def ref_multi_query_cached_kv_attention(
                 block_offset = j % block_size
 
                 k = key_cache[block_number, :, :, block_offset, :]
-                k = k.reshape(num_kv_heads, head_size)
+                k = k.reshape(num_heads, head_size)
                 keys.append(k)
 
                 v = value_cache[block_number, :, :, block_offset]
                 values.append(v)
             for j in range(query_num):
                 k = key[i, j]
-                k = k.reshape(num_kv_heads, head_size)
+                k = k.reshape(num_heads, head_size)
                 keys.append(k)
 
                 v = value[i, j]
-                v = v.reshape(num_kv_heads, head_size)
+                v = v.reshape(num_heads, head_size)
                 values.append(v)
 
             keys = torch.stack(keys, dim=0)
             values = torch.stack(values, dim=0)
 
             out = ref_masked_attention(q, keys, values, scale)
-            out = out.view(num_query_heads, head_size)
+            out = out.view(num_heads, head_size)
             output[i, query_num].copy_(out, non_blocking=True)
 
 
@@ -321,35 +320,49 @@ def test_multi_query_cached_kv_attention(
 
     scale = float(1.0 / (head_size**0.5))
 
-    qkv = torch.empty((3, num_seqs, max_num_query, num_heads, head_size),
+    qkv = torch.empty((num_seqs, max_num_query, 3 * num_heads * head_size),
                       dtype=dtype,
                       device="cuda")
     qkv.uniform_(-scale, scale)
-    query = qkv[0]
-    key = qkv[1]
-    value = qkv[2]
 
-    context_lens_l = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
-    context_lens_l[-1] = MAX_SEQ_LEN
-    max_context_len = max(context_lens_l)
-    context_lens = torch.tensor(context_lens_l, dtype=torch.int, device="cuda")
+    # maximum number of draft tokens are included despite not necessarily needing.
+    # Additionally, kernel expects the tensor sliced in this odd way.
+    query = qkv[:, :, :num_heads*head_size]
+    key = qkv[:, :, num_heads*head_size:2*num_heads*head_size]
+    value = qkv[:, :, 2*num_heads*head_size:]
+
+    context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    context_lens[-1] = MAX_SEQ_LEN
+    max_context_len = max(context_lens)
+    context_lens_tensor = torch.tensor(context_lens, dtype=torch.int, device="cuda")
 
     query_lens = [random.randint(1, max_num_query) for _ in range(num_seqs)]
     query_lens[-1] = max_num_query
-    query_lens = torch.tensor(query_lens, dtype=torch.int, device="cuda")
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
-    block_tables = []
+    block_tables_tensor = []
     for _ in range(num_seqs):
         block_table = [
             random.randint(0, NUM_BLOCKS - 1)
             for _ in range(max_num_blocks_per_seq)
         ]
-        block_tables.append(block_table)
-    block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
+        block_tables_tensor.append(block_table)
+    block_tables_tensor = torch.tensor(block_tables_tensor, dtype=torch.int, device="cuda")
 
-    # Create the KV caches.
+    # create slot mapping
+    slot_mapping = []
+    for i in range(num_seqs):
+        # mappings < 0 are ignored by reshape_and_cache
+        slot_mapping.append([-1] * max_num_query)
+        for j in range(query_lens[i]):
+            abs_position = context_lens[i] + j
+            logical_block_idx = abs_position // block_size
+            logical_block_offset = abs_position % block_size
+            phys_block_idx = block_tables_tensor[i][logical_block_idx]
+            slot_mapping[i][j] = phys_block_idx * block_size + logical_block_offset
+    slot_mapping_tensor = torch.tensor(slot_mapping, dtype=torch.int, device="cuda")
+
     key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
                                                 num_heads, head_size, dtype,
                                                 seed)
@@ -357,27 +370,25 @@ def test_multi_query_cached_kv_attention(
 
     num_seqs, _, num_heads, head_size = query.shape
 
-    # need for block tables
+    # need for block_tables, slot_mapping
     input_metadata = InputMetadata(
-        seq_groups=[(range(num_seqs), SamplingParams())],
+        seq_groups=[([i], SamplingParams()) for i in range(num_seqs)],
         seq_data={k: SequenceData([])
                   for k in range(num_seqs)},
-        prompt_lens=context_lens_l,
-        slot_mapping=block_tables[:, 0],
-        context_lens=context_lens,
+        prompt_lens=[],
+        slot_mapping=slot_mapping_tensor,
+        context_lens=context_lens_tensor,
         max_context_len=max_context_len,
-        block_tables=block_tables,
+        block_tables=block_tables_tensor,
         selected_token_indices=None,
-        categorized_sample_indices=None)
-
-    # Call the paged attention kernel.
-    output = torch.zeros_like(query)
+        categorized_sample_indices=None,
+        draft_lens=query_lens)
 
     attn = PagedAttention(num_heads, head_size, scale)
-    attn.multi_query_cached_kv_attention(output, query, key, value, key_cache,
-                                         value_cache, input_metadata, None)
+    output = attn.forward(output, query, key, value, key_cache,
+                            value_cache, input_metadata, None)
+    assert output.shape == query.shape
 
-    # Run the reference implementation.
     ref_output = torch.zeros_like(query)
     ref_multi_query_cached_kv_attention(
         ref_output,
@@ -386,8 +397,8 @@ def test_multi_query_cached_kv_attention(
         value,
         key_cache,
         value_cache,
-        block_tables,
-        context_lens,
+        block_tables_tensor,
+        context_lens_tensor,
         query_lens,
         scale,
     )

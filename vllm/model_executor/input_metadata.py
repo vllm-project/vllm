@@ -12,6 +12,7 @@ class InputMetadata:
         max_context_len: The maximum context length.
         context_lens: the length of attention context for each sequence.
         block_tables: The block tables. (Seq id -> list of physical block)
+        draft_len: length of the draft to verify. Shape = [num_generation_tokens]
     """
 
     def __init__(
@@ -21,6 +22,7 @@ class InputMetadata:
         max_context_len: Optional[int],
         context_lens: Optional[torch.Tensor],
         block_tables: Optional[torch.Tensor],
+        draft_lens: Optional[List[int]] = None,
     ) -> None:
         self.prompt_lens = prompt_lens
         self.max_context_len = max_context_len
