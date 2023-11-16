@@ -1,6 +1,6 @@
 # coding=utf-8
 # Adapted from
-# https://huggingface.co/microsoft/phi-1_5/blob/main/modeling_mixformer_sequential.py
+# https://huggingface.co/microsoft/phi-1_5/blob/main/modeling_phi.py
 # Copyright 2023 The vLLM team.
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
