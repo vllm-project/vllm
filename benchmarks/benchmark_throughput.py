@@ -17,9 +17,8 @@ def sample_requests(
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int],
 ) -> List[Tuple[str, int, int]]:
-    if fixed_output_len is not None:
-        if fixed_output_len < 4:
-            raise ValueError("output_len too small")
+    if fixed_output_len is not None and fixed_output_len < 4:
+        raise ValueError("output_len too small")
 
     # Load the dataset.
     with open(dataset_path) as f:

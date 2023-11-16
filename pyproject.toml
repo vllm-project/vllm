@@ -28,4 +28,6 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
+    # line too long, handled by black formatting
+    "E501",
 ]
