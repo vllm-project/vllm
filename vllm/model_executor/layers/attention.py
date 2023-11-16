@@ -327,20 +327,20 @@ def _multi_query_paged_attention(
                                            max_num_query,
                                            dim=0)
 
-    # interpolate context lens
+    # interpolate context lens from context_len to context_len + draft_len
     context_lens = torch.repeat_interleave(input_metadata.context_lens,
                                            max_num_query,
                                            dim=0)
-    context_lens += torch.arange(0, max_num_query).cuda().repeat(num_seqs)
-
-    # TODO vectorize
+    # TODO(stephen) vectorize
     for i in range(context_lens.shape[0]):
         if input_metadata.draft_lens[i // max_num_query] <= i % max_num_query:
             context_lens[i] = -1
+        else:
+            context_lens[i] += i % max_num_query
 
-    # TODO add grid stride over sequences to kernel to increase cache locality,
+    # TODO(stephen) add grid stride over sequences to kernel to increase cache locality,
     # in effect enabling pseudo matrix blocking
-    # TODO exit from kernel early if seq_len is -1
+    # TODO(stephen) exit from block early if seq_len is -1
     ops.paged_attention_v1(
         output,
         query,

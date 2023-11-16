@@ -326,22 +326,24 @@ def test_multi_query_cached_kv_attention(
     qkv.uniform_(-scale, scale)
 
     # maximum number of draft tokens are included despite not necessarily needing.
-    # Additionally, kernel expects the tensor sliced in this odd way.
+    # Slice in last dimension as this is expected format of output of KQV projection.
     query = qkv[:, :, :num_heads * head_size]
     key = qkv[:, :, num_heads * head_size:2 * num_heads * head_size]
     value = qkv[:, :, 2 * num_heads * head_size:]
 
+    # generate random context lens
     context_lens = [random.randint(1, 100) for _ in range(num_seqs)]
     context_lens[-1] = 100
     max_context_len = max(context_lens)
     context_lens_tensor = torch.tensor(context_lens,
                                        dtype=torch.int,
                                        device="cuda")
-
+    
+    # generate random query lens
     query_lens = [random.randint(1, max_num_query) for _ in range(num_seqs)]
     query_lens[-1] = max_num_query
 
-    # Create the block tables.
+    # Create the block tables, following single_query_attention test
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables_tensor = []
     for _ in range(num_seqs):
@@ -357,7 +359,7 @@ def test_multi_query_cached_kv_attention(
     # create slot mapping
     slot_mapping = []
     for i in range(num_seqs):
-        # mappings < 0 are ignored by reshape_and_cache
+        # mappings < 0 are ignored by the reshape_and_cache kernel
         slot_mapping.append([-1] * max_num_query)
         for j in range(query_lens[i]):
             abs_position = context_lens[i] + j
@@ -374,7 +376,7 @@ def test_multi_query_cached_kv_attention(
                                                 seed)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
-    # need for block_tables, slot_mapping
+    # need input_metadata to pass in block_tables, slot_mapping
     input_metadata = InputMetadata(
         seq_groups=[([i], SamplingParams()) for i in range(num_seqs)],
         seq_data={k: SequenceData([])
