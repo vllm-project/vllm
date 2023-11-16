@@ -13,8 +13,8 @@ __all__ = [
     "AquilaConfig",
     "BaiChuanConfig",
     "ChatGLMConfig",
-    "QWenConfig",
     "MPTConfig",
+    "QWenConfig",
     "RWConfig",
     "YiConfig",
 ]
