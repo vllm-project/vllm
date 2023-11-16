@@ -9,17 +9,22 @@ import torch.nn as nn
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttentionWithALiBi
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearMethodBase,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
@@ -30,7 +35,7 @@ def _get_alibi_slopes(
     total_num_heads: int,
     alibi_bias_max: int,
 ) -> torch.Tensor:
-    next_power_of_2 = 2**math.ceil(math.log2(total_num_heads))
+    next_power_of_2 = 2 ** math.ceil(math.log2(total_num_heads))
     m = torch.arange(1, next_power_of_2 + 1, dtype=torch.float32)
     m = m.mul(alibi_bias_max / next_power_of_2)
     slopes = 1.0 / torch.pow(2, m)
@@ -40,7 +45,6 @@ def _get_alibi_slopes(
 
 
 class MPTAttention(nn.Module):
-
     def __init__(
         self,
         config: MPTConfig,
@@ -81,14 +85,14 @@ class MPTAttention(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         head_start = tp_rank * self.num_heads
         head_end = (tp_rank + 1) * self.num_heads
-        alibi_slopes = _get_alibi_slopes(self.total_num_heads,
-                                         self.alibi_bias_max)
+        alibi_slopes = _get_alibi_slopes(self.total_num_heads, self.alibi_bias_max)
         alibi_slopes = alibi_slopes[head_start:head_end].tolist()
 
         self.head_dim = self.d_model // self.total_num_heads
         scaling = self.head_dim**-0.5
-        self.attn = PagedAttentionWithALiBi(self.num_heads, self.head_dim,
-                                            scaling, alibi_slopes)
+        self.attn = PagedAttentionWithALiBi(
+            self.num_heads, self.head_dim, scaling, alibi_slopes
+        )
 
     def forward(
         self,
@@ -107,14 +111,12 @@ class MPTAttention(nn.Module):
             q = self.q_ln(q)
             k = self.k_ln(k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
-                                cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, cache_event)
         output, _ = self.out_proj(attn_output)
         return output
 
 
 class MPTMLP(nn.Module):
-
     def __init__(
         self,
         config: MPTConfig,
@@ -146,7 +148,6 @@ class MPTMLP(nn.Module):
 
 
 class MPTBlock(nn.Module):
-
     def __init__(
         self,
         config: MPTConfig,
@@ -183,7 +184,6 @@ class MPTBlock(nn.Module):
 
 
 class MPTModel(nn.Module):
-
     def __init__(
         self,
         config: MPTConfig,
@@ -198,7 +198,8 @@ class MPTModel(nn.Module):
             config.d_model,
         )
         self.blocks = nn.ModuleList(
-            [MPTBlock(config, linear_method) for _ in range(config.n_layers)])
+            [MPTBlock(config, linear_method) for _ in range(config.n_layers)]
+        )
         self.norm_f = nn.LayerNorm(config.d_model)
         if config.no_bias:
             for module in self.modules():
@@ -234,7 +235,6 @@ class MPTModel(nn.Module):
 
 
 class MPTForCausalLM(nn.Module):
-
     def __init__(
         self,
         config: MPTConfig,
@@ -257,21 +257,23 @@ class MPTForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   input_metadata)
+        hidden_states = self.transformer(
+            input_ids, positions, kv_caches, input_metadata, cache_events
+        )
+        next_tokens = self.sampler(self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+            model_name_or_path, cache_dir, load_format, revision
+        ):
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)

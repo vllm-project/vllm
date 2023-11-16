@@ -16,17 +16,24 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    LinearMethodBase,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    VocabParallelEmbedding,
+    ParallelLMHead,
+)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+    get_tensor_model_parallel_world_size,
+)
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
 
@@ -34,7 +41,6 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GLMAttention(nn.Module):
-
     def __init__(
         self,
         config,
@@ -47,9 +53,11 @@ class GLMAttention(nn.Module):
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.multi_query_attention = config.multi_query_attention
-        self.total_num_kv_heads = (config.multi_query_group_num
-                                   if config.multi_query_attention else
-                                   config.num_attention_heads)
+        self.total_num_kv_heads = (
+            config.multi_query_group_num
+            if config.multi_query_attention
+            else config.num_attention_heads
+        )
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
@@ -174,14 +182,16 @@ class GLMBlock(nn.Module):
     ):
         super().__init__()
         self.apply_residual_connection_post_layernorm = (
-            config.apply_residual_connection_post_layernorm)
+            config.apply_residual_connection_post_layernorm
+        )
 
         self.fp32_residual_connection = config.fp32_residual_connection
 
         layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
         # Layernorm on the input data.
-        self.input_layernorm = layer_norm_func(config.hidden_size,
-                                               eps=config.layernorm_epsilon)
+        self.input_layernorm = layer_norm_func(
+            config.hidden_size, eps=config.layernorm_epsilon
+        )
 
         # Self attention.
         self.self_attention = GLMAttention(config, linear_method)
@@ -189,7 +199,8 @@ class GLMBlock(nn.Module):
 
         # Layernorm on the attention output
         self.post_attention_layernorm = layer_norm_func(
-            config.hidden_size, eps=config.layernorm_epsilon)
+            config.hidden_size, eps=config.layernorm_epsilon
+        )
 
         # MLP
         self.mlp = GLMMLP(config, linear_method)
@@ -252,13 +263,15 @@ class GLMTransformer(nn.Module):
 
         # Transformer layers.
         self.layers = nn.ModuleList(
-            [GLMBlock(config, linear_method) for i in range(self.num_layers)])
+            [GLMBlock(config, linear_method) for i in range(self.num_layers)]
+        )
 
         if self.post_layer_norm:
             layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
             # Final layer norm before output.
             self.final_layernorm = layer_norm_func(
-                config.hidden_size, eps=config.layernorm_epsilon)
+                config.hidden_size, eps=config.layernorm_epsilon
+            )
 
     def forward(
         self,
@@ -289,7 +302,6 @@ class GLMTransformer(nn.Module):
 
 
 class ChatGLMModel(nn.Module):
-
     def __init__(
         self,
         config,
@@ -297,16 +309,16 @@ class ChatGLMModel(nn.Module):
     ):
         super().__init__()
 
-        self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
-                                                config.hidden_size)
+        self.embedding = VocabParallelEmbedding(
+            config.padded_vocab_size, config.hidden_size
+        )
 
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
         self.encoder = GLMTransformer(config, linear_method)
 
-        self.output_layer = ParallelLMHead(config.padded_vocab_size,
-                                           config.hidden_size)
+        self.output_layer = ParallelLMHead(config.padded_vocab_size, config.hidden_size)
 
     def forward(
         self,
@@ -331,7 +343,6 @@ class ChatGLMModel(nn.Module):
 
 
 class ChatGLMForCausalLM(nn.Module):
-
     def __init__(
         self,
         config: ChatGLMConfig,
@@ -352,25 +363,27 @@ class ChatGLMForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   input_metadata)
+        hidden_states = self.transformer(
+            input_ids, positions, kv_caches, input_metadata, cache_events
+        )
+        next_tokens = self.sampler(self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+            model_name_or_path, cache_dir, load_format, revision
+        ):
             if "rotary_pos_emb.inv_freq" in name:
                 continue
             if "word_embeddings" in name:
                 name = name.replace(".word_embeddings", "")
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)

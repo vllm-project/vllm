@@ -17,17 +17,24 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    LinearMethodBase,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    VocabParallelEmbedding,
+    ParallelLMHead,
+)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+    get_tensor_model_parallel_world_size,
+)
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.qwen import QWenConfig
 
@@ -35,7 +42,6 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class QWenMLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -45,16 +51,19 @@ class QWenMLP(nn.Module):
     ):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
+            hidden_size,
+            [intermediate_size] * 2,
             bias=False,
-            linear_method=linear_method)
-        self.c_proj = RowParallelLinear(intermediate_size,
-                                        hidden_size,
-                                        bias=False,
-                                        linear_method=linear_method)
+            linear_method=linear_method,
+        )
+        self.c_proj = RowParallelLinear(
+            intermediate_size, hidden_size, bias=False, linear_method=linear_method
+        )
         if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. "
+                "Only silu is supported for now."
+            )
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -65,7 +74,6 @@ class QWenMLP(nn.Module):
 
 
 class QWenAttention(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -77,12 +85,10 @@ class QWenAttention(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
-        )
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = (self.total_num_heads //
-                          tensor_model_parallel_world_size)
+        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
         self.head_dim = hidden_size // self.total_num_heads
 
         self.c_attn = QKVParallelLinear(
@@ -106,7 +112,8 @@ class QWenAttention(nn.Module):
             rotary_dim=self.head_dim,
             base=rope_theta,
             max_position=max_position_embeddings,
-            rope_scaling=rope_scaling)
+            rope_scaling=rope_scaling,
+        )
 
     def forward(
         self,
@@ -120,15 +127,15 @@ class QWenAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
 
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(
+            positions, q, k, v, k_cache, v_cache, input_metadata, cache_event
+        )
 
         output, _ = self.c_proj(attn_output)
         return output
 
 
 class QWenBlock(nn.Module):
-
     def __init__(
         self,
         config: QWenConfig,
@@ -139,18 +146,22 @@ class QWenBlock(nn.Module):
 
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        self.attn = QWenAttention(config.hidden_size,
-                                  config.num_attention_heads,
-                                  config.max_position_embeddings,
-                                  rope_theta=rope_theta,
-                                  rope_scaling=rope_scaling,
-                                  linear_method=linear_method)
+        self.attn = QWenAttention(
+            config.hidden_size,
+            config.num_attention_heads,
+            config.max_position_embeddings,
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            linear_method=linear_method,
+        )
 
         self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
-        self.mlp = QWenMLP(config.hidden_size,
-                           config.intermediate_size // 2,
-                           linear_method=linear_method)
+        self.mlp = QWenMLP(
+            config.hidden_size,
+            config.intermediate_size // 2,
+            linear_method=linear_method,
+        )
 
     def forward(
         self,
@@ -181,7 +192,6 @@ class QWenBlock(nn.Module):
 
 
 class QWenModel(nn.Module):
-
     def __init__(
         self,
         config: QWenConfig,
@@ -195,10 +205,9 @@ class QWenModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
-        self.h = nn.ModuleList([
-            QWenBlock(config, linear_method)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.h = nn.ModuleList(
+            [QWenBlock(config, linear_method) for _ in range(config.num_hidden_layers)]
+        )
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -228,7 +237,6 @@ class QWenModel(nn.Module):
 
 
 class QWenLMHeadModel(nn.Module):
-
     def __init__(
         self,
         config: QWenConfig,
@@ -249,17 +257,19 @@ class QWenLMHeadModel(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata)
+        hidden_states = self.transformer(
+            input_ids, positions, kv_caches, input_metadata, cache_events
+        )
+        next_tokens = self.sampler(self.lm_head.weight, hidden_states, input_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w2", 0),
@@ -267,10 +277,11 @@ class QWenLMHeadModel(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+            model_name_or_path, cache_dir, load_format, revision
+        ):
             if "rotary_emb.inv_freq" in name:
                 continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 param = params_dict[name.replace(weight_name, param_name)]
@@ -279,6 +290,5 @@ class QWenLMHeadModel(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)

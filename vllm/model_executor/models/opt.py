@@ -30,25 +30,28 @@ from transformers import OPTConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearMethodBase,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+    get_tensor_model_parallel_world_size,
+)
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class OPTLearnedPositionalEmbedding(nn.Embedding):
-
     def __init__(self, num_embeddings: int, embedding_dim: int):
         # OPT is set up so that if padding_idx is specified then offset the
         # embedding ids by 2 and adjust num_embeddings appropriately. Other
@@ -61,7 +64,6 @@ class OPTLearnedPositionalEmbedding(nn.Embedding):
 
 
 class OPTAttention(nn.Module):
-
     def __init__(
         self,
         embed_dim: int,
@@ -71,8 +73,7 @@ class OPTAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
-        tensor_model_parallel_world_size = (
-            get_tensor_model_parallel_world_size())
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
         total_num_heads = num_heads
         assert num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
@@ -92,9 +93,7 @@ class OPTAttention(nn.Module):
             bias=bias,
             linear_method=linear_method,
         )
-        self.attn = PagedAttention(self.num_heads,
-                                   self.head_dim,
-                                   scale=self.scaling)
+        self.attn = PagedAttention(self.num_heads, self.head_dim, scale=self.scaling)
 
     def forward(
         self,
@@ -106,14 +105,14 @@ class OPTAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         key_cache, value_cache = kv_cache
-        attn_output = self.attn(q, k, v, key_cache, value_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(
+            q, k, v, key_cache, value_cache, input_metadata, cache_event
+        )
         output, _ = self.out_proj(attn_output)
         return output
 
 
 class OPTDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: OPTConfig,
@@ -132,8 +131,8 @@ class OPTDecoderLayer(nn.Module):
         self.activation_fn = get_act_fn(config.activation_function)
 
         self.self_attn_layer_norm = nn.LayerNorm(
-            self.embed_dim,
-            elementwise_affine=config.layer_norm_elementwise_affine)
+            self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
+        )
         self.fc1 = ColumnParallelLinear(
             self.embed_dim,
             config.ffn_dim,
@@ -147,8 +146,8 @@ class OPTDecoderLayer(nn.Module):
             linear_method=linear_method,
         )
         self.final_layer_norm = nn.LayerNorm(
-            self.embed_dim,
-            elementwise_affine=config.layer_norm_elementwise_affine)
+            self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
+        )
 
     def forward(
         self,
@@ -162,10 +161,12 @@ class OPTDecoderLayer(nn.Module):
         # 125m, 1.7B, ..., 175B applies layer norm BEFORE attention
         if self.do_layer_norm_before:
             hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states,
-                                       kv_cache=kv_cache,
-                                       input_metadata=input_metadata,
-                                       cache_event=cache_event)
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            input_metadata=input_metadata,
+            cache_event=cache_event,
+        )
         hidden_states = residual + hidden_states
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
@@ -187,7 +188,6 @@ class OPTDecoderLayer(nn.Module):
 
 
 class OPTDecoder(nn.Module):
-
     def __init__(
         self,
         config: OPTConfig,
@@ -205,22 +205,27 @@ class OPTDecoder(nn.Module):
         )
         # Positional embeddings are replicated (not sharded).
         self.embed_positions = OPTLearnedPositionalEmbedding(
-            config.max_position_embeddings, config.hidden_size)
+            config.max_position_embeddings, config.hidden_size
+        )
 
         # Project out & in will be replicated if they exist.
         if config.word_embed_proj_dim != config.hidden_size:
-            self.project_out = ReplicatedLinear(config.hidden_size,
-                                                config.word_embed_proj_dim,
-                                                bias=False,
-                                                linear_method=linear_method)
+            self.project_out = ReplicatedLinear(
+                config.hidden_size,
+                config.word_embed_proj_dim,
+                bias=False,
+                linear_method=linear_method,
+            )
         else:
             self.project_out = None
 
         if config.word_embed_proj_dim != config.hidden_size:
-            self.project_in = ReplicatedLinear(config.word_embed_proj_dim,
-                                               config.hidden_size,
-                                               bias=False,
-                                               linear_method=linear_method)
+            self.project_in = ReplicatedLinear(
+                config.word_embed_proj_dim,
+                config.hidden_size,
+                bias=False,
+                linear_method=linear_method,
+            )
         else:
             self.project_in = None
 
@@ -231,14 +236,17 @@ class OPTDecoder(nn.Module):
         if config.do_layer_norm_before and not config._remove_final_layer_norm:
             self.final_layer_norm = nn.LayerNorm(
                 config.hidden_size,
-                elementwise_affine=config.layer_norm_elementwise_affine)
+                elementwise_affine=config.layer_norm_elementwise_affine,
+            )
         else:
             self.final_layer_norm = None
 
-        self.layers = nn.ModuleList([
-            OPTDecoderLayer(config, linear_method)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                OPTDecoderLayer(config, linear_method)
+                for _ in range(config.num_hidden_layers)
+            ]
+        )
 
     def forward(
         self,
@@ -260,8 +268,9 @@ class OPTDecoder(nn.Module):
             else:
                 cache_event = cache_events[i]
             layer = self.layers[i]
-            hidden_states = layer(hidden_states, kv_caches[i], input_metadata,
-                                  cache_event)
+            hidden_states = layer(
+                hidden_states, kv_caches[i], input_metadata, cache_event
+            )
 
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
@@ -271,7 +280,6 @@ class OPTDecoder(nn.Module):
 
 
 class OPTModel(nn.Module):
-
     def __init__(
         self,
         config: OPTConfig,
@@ -288,12 +296,12 @@ class OPTModel(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        return self.decoder(input_ids, positions, kv_caches, input_metadata,
-                            cache_events)
+        return self.decoder(
+            input_ids, positions, kv_caches, input_metadata, cache_events
+        )
 
 
 class OPTForCausalLM(nn.Module):
-
     def __init__(
         self,
         config,
@@ -314,17 +322,19 @@ class OPTForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata, cache_events)
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   input_metadata)
+        hidden_states = self.model(
+            input_ids, positions, kv_caches, input_metadata, cache_events
+        )
+        next_tokens = self.sampler(self.lm_head_weight, hidden_states, input_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -333,10 +343,11 @@ class OPTForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+            model_name_or_path, cache_dir, load_format, revision
+        ):
             if "lm_head.weight" in name:
                 continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 param = params_dict[name.replace(weight_name, param_name)]
@@ -345,6 +356,5 @@ class OPTForCausalLM(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)

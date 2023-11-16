@@ -47,8 +47,9 @@ class QuantizationConfig(ABC):
         for key in keys:
             if key in config:
                 return config[key]
-        raise ValueError(f"Cannot find any of {keys} in the model's "
-                         "quantization config.")
+        raise ValueError(
+            f"Cannot find any of {keys} in the model's " "quantization config."
+        )
 
     @abstractmethod
     def get_linear_method(self) -> LinearMethodBase:

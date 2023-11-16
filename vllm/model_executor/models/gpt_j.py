@@ -29,24 +29,30 @@ from transformers import GPTJConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearMethodBase,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    VocabParallelEmbedding,
+    ParallelLMHead,
+)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+    get_tensor_model_parallel_world_size,
+)
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GPTJAttention(nn.Module):
-
     def __init__(
         self,
         config: GPTJConfig,
@@ -79,8 +85,7 @@ class GPTJAttention(nn.Module):
         assert getattr(config, "rotary", True)
         assert config.rotary_dim % 2 == 0
         rope_theta = getattr(config, "rope_theta", 10000)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.attn = PagedAttentionWithRoPE(
             self.num_heads,
             self.head_size,
@@ -88,7 +93,8 @@ class GPTJAttention(nn.Module):
             config.rotary_dim,
             base=rope_theta,
             max_position=max_position_embeddings,
-            is_neox_style=False)
+            is_neox_style=False,
+        )
         self.warmup = False
 
     def forward(
@@ -102,14 +108,14 @@ class GPTJAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(position_ids, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(
+            position_ids, q, k, v, k_cache, v_cache, input_metadata, cache_event
+        )
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
 
 class GPTJMLP(nn.Module):
-
     def __init__(
         self,
         intermediate_size: int,
@@ -138,7 +144,6 @@ class GPTJMLP(nn.Module):
 
 
 class GPTJBlock(nn.Module):
-
     def __init__(
         self,
         config: GPTJConfig,
@@ -176,7 +181,6 @@ class GPTJBlock(nn.Module):
 
 
 class GPTJModel(nn.Module):
-
     def __init__(
         self,
         config: GPTJConfig,
@@ -190,7 +194,8 @@ class GPTJModel(nn.Module):
             self.embed_dim,
         )
         self.h = nn.ModuleList(
-            [GPTJBlock(config, linear_method) for _ in range(config.n_layer)])
+            [GPTJBlock(config, linear_method) for _ in range(config.n_layer)]
+        )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -220,7 +225,6 @@ class GPTJModel(nn.Module):
 
 
 class GPTJForCausalLM(nn.Module):
-
     def __init__(
         self,
         config: GPTJConfig,
@@ -246,17 +250,21 @@ class GPTJForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata, self.lm_head.bias)
+        hidden_states = self.transformer(
+            input_ids, positions, kv_caches, input_metadata, cache_events
+        )
+        next_tokens = self.sampler(
+            self.lm_head.weight, hidden_states, input_metadata, self.lm_head.bias
+        )
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -267,10 +275,11 @@ class GPTJForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+            model_name_or_path, cache_dir, load_format, revision
+        ):
             if "attn.bias" in name or "attn.masked_bias" in name:
                 continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 param = params_dict[name.replace(weight_name, param_name)]
@@ -279,6 +288,5 @@ class GPTJForCausalLM(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
