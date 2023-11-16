@@ -13,6 +13,8 @@ class Prefix:
         self.prefix_id = prefix_id
         self.token_ids = token_ids
         self.length = len(token_ids)
+        print("prefix length: ", self.length)
+        print("block size: ", block_size)
         assert self.length % block_size == 0
         self.on_gpu = False
         self.on_cpu = False
@@ -70,7 +72,7 @@ class PrefixPool:
         prefix = Prefix(prefix_id, token_ids, self.block_size)
         self.prefixes.append(prefix)
         # @TODO: compute the hash of the prefix
-        prefix_hash = hash(prefix.token_ids)
+        prefix_hash = hash(tuple(prefix.token_ids))
         self.prefixes_hash[prefix.prefix_id] = prefix_hash
         return prefix
         
@@ -84,6 +86,8 @@ class PrefixPool:
     
     # use this first, if we already know from the application which part of the tokens are prefix.
     def fixed_search(self, prefix_hash):
+        if prefix_hash not in self.prefixes_hash:
+            return None
         prefix_id = self.prefixes_hash[prefix_hash]
         return self.prefixes[prefix_id]
 

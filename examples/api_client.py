@@ -15,12 +15,14 @@ def clear_line(n: int = 1) -> None:
 
 
 def post_http_request(prompt: str,
+                      prefix_pos: int,
                       api_url: str,
                       n: int = 1,
                       stream: bool = False) -> requests.Response:
     headers = {"User-Agent": "Test Client"}
     pload = {
         "prompt": prompt,
+        "prefix_pos": prefix_pos,
         "n": n,
         "use_beam_search": True,
         "temperature": 0.0,
@@ -52,7 +54,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--n", type=int, default=4)
-    parser.add_argument("--prompt", type=str, default="San Francisco is a")
+    parser.add_argument("--prompt", type=str, default="San Francisco is a "*32)
     parser.add_argument("--stream", action="store_true")
     args = parser.parse_args()
     prompt = args.prompt
@@ -61,7 +63,7 @@ if __name__ == "__main__":
     stream = args.stream
 
     print(f"Prompt: {prompt!r}\n", flush=True)
-    response = post_http_request(prompt, api_url, n, stream)
+    response = post_http_request(prompt, 32, api_url, n, stream)
 
     if stream:
         num_printed_lines = 0

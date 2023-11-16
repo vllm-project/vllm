@@ -357,6 +357,7 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        prefix_pos: Optional[int] = None,
     ) -> AsyncStream:
         if self.log_requests:
             shortened_prompt = prompt
@@ -369,6 +370,7 @@ class AsyncLLMEngine:
                                                               max_log_len]
             logger.info(f"Received request {request_id}: "
                         f"prompt: {shortened_prompt!r}, "
+                        f"prefix_pos: {prefix_pos},"
                         f"sampling params: {sampling_params}, "
                         f"prompt token ids: {shortened_token_ids}.")
 
@@ -387,13 +389,15 @@ class AsyncLLMEngine:
             prompt=prompt,
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
-            arrival_time=arrival_time)
+            arrival_time=arrival_time,
+            prefix_pos=prefix_pos)
 
         return stream
 
     async def generate(
             self,
             prompt: Optional[str],
+            prefix_pos: Optional[int],
             sampling_params: SamplingParams,
             request_id: str,
             prompt_token_ids: Optional[List[int]] = None) -> RequestOutput:
@@ -424,7 +428,8 @@ class AsyncLLMEngine:
                                             prompt,
                                             sampling_params,
                                             prompt_token_ids=prompt_token_ids,
-                                            arrival_time=arrival_time)
+                                            arrival_time=arrival_time,
+                                            prefix_pos=prefix_pos)
 
             async for request_output in stream:
                 yield request_output
