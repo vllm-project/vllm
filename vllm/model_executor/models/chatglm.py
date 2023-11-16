@@ -17,7 +17,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               PackedColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.sampler import Sampler
@@ -134,7 +134,7 @@ class GLMMLP(nn.Module):
         self.add_bias = config.add_bias_linear
 
         # Project to 4h.
-        self.dense_h_to_4h = PackedColumnParallelLinear(
+        self.dense_h_to_4h = MergedColumnParallelLinear(
             config.hidden_size,
             [config.ffn_hidden_size] * 2,
             bias=config.add_bias_linear,

@@ -37,6 +37,7 @@ _MODEL_REGISTRY = {
     "YiForCausalLM": YiForCausalLM,
 }
 
+
 @contextlib.contextmanager
 def _set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""

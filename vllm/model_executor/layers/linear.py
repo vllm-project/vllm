@@ -35,8 +35,8 @@ class LinearMethodBase(ABC):
         raise NotImplementedError
 
 
-class FullPrecisionLinearMethod(LinearMethodBase):
-    """Full precision linear method without quantization.
+class UnquantizedLinearMethod(LinearMethodBase):
+    """Linear method without quantization.
 
     Args:
         separate_bias_add: If true, add bias separately after matrix
@@ -99,7 +99,7 @@ class ReplicatedLinear(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
         if linear_method is None:
-            linear_method = FullPrecisionLinearMethod()
+            linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
             self.input_size, self.output_size, self.params_dtype)
@@ -165,7 +165,7 @@ class ColumnParallelLinear(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
         if linear_method is None:
-            linear_method = FullPrecisionLinearMethod()
+            linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
             self.input_size, self.output_size_per_partition, self.params_dtype)
@@ -211,7 +211,7 @@ class ColumnParallelLinear(torch.nn.Module):
         return output, output_bias
 
 
-class PackedColumnParallelLinear(ColumnParallelLinear):
+class MergedColumnParallelLinear(ColumnParallelLinear):
     """Packed linear layers with column parallelism.
 
     Similar to ColumnParallelLinear, but the weight matrix is concatenated
@@ -297,7 +297,7 @@ class PackedColumnParallelLinear(ColumnParallelLinear):
         else:
             logger.warning(
                 "Loading a weight without `output_dim` attribute in "
-                "PackedColumnParallelLinear, assume the weight is "
+                "MergedColumnParallelLinear, assume the weight is "
                 "the same for all partitions.")
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -478,7 +478,7 @@ class RowParallelLinear(torch.nn.Module):
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.skip_bias_add = skip_bias_add
         if linear_method is None:
-            linear_method = FullPrecisionLinearMethod()
+            linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
             self.input_size_per_partition, self.output_size, self.params_dtype)
