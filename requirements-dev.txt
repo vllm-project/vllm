@@ -1,5 +1,5 @@
 # formatting
-yapf==0.32.0
+ruff==0.1.5
 pylint==2.8.2
 
 # type checking

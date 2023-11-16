@@ -1,4 +1,4 @@
-name: yapf
+name: ruff format
 
 on:
   # Trigger the workflow on push or pull request,
@@ -10,7 +10,7 @@ on:
     branches:
       - main
 jobs:
-  yapf:
+  ruff-format:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -24,8 +24,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install yapf==0.32.0
-        pip install toml==0.10.2
-    - name: Running yapf
+        pip install ruff==0.1.5
+    - name: Running format
       run: |
-        yapf --diff --recursive vllm tests
+        ruff format --check vllm tests

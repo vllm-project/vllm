@@ -7,7 +7,7 @@
 #    # Format files that differ from origin/main.
 #    bash format.sh
 
-#    # Commit changed files with message 'Run yapf and pylint'
+#    # Commit changed files with message 'Run ruff format and pylint'
 #
 #
 # YAPF + Clang formatter (if installed). This script formats all changed files from the last mergebase.
@@ -21,7 +21,6 @@ builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
 ROOT="$(git rev-parse --show-toplevel)"
 builtin cd "$ROOT" || exit 1
 
-YAPF_VERSION=$(yapf --version | awk '{print $2}')
 PYLINT_VERSION=$(pylint --version | head -n 1 | awk '{print $2}')
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
 
@@ -33,29 +32,23 @@ tool_version_check() {
     fi
 }
 
-tool_version_check "yapf" $YAPF_VERSION "$(grep yapf requirements-dev.txt | cut -d'=' -f3)"
 tool_version_check "pylint" $PYLINT_VERSION "$(grep "pylint==" requirements-dev.txt | cut -d'=' -f3)"
 tool_version_check "mypy" "$MYPY_VERSION" "$(grep mypy requirements-dev.txt | cut -d'=' -f3)"
 
-YAPF_FLAGS=(
-    '--recursive'
-    '--parallel'
-)
-
-YAPF_EXCLUDES=(
-    '--exclude' 'build/**'
+RUFF_FORMAT_FLAGS=(
+    '--respect-gitignore'
 )
 
 # Format specified files
 format() {
-    yapf --in-place "${YAPF_FLAGS[@]}" "$@"
+    ruff format "${RUFF_FORMAT_FLAGS[@]}" "$@"
 }
 
 # Format files that differ from main branch. Ignores dirs that are not slated
 # for autoformat yet.
 format_changed() {
     # The `if` guard ensures that the list of filenames is not empty, which
-    # could cause yapf to receive 0 positional arguments, making it hang
+    # could cause ruff to receive 0 positional arguments, making it hang
     # waiting for STDIN.
     #
     # `diff-filter=ACM` and $MERGEBASE is to ensure we only format files that
@@ -64,14 +57,14 @@ format_changed() {
 
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs -P 5 \
-             yapf --in-place "${YAPF_EXCLUDES[@]}" "${YAPF_FLAGS[@]}"
+            ruff format "${RUFF_FORMAT_FLAGS[@]}"
     fi
 
 }
 
 # Format all files
 format_all() {
-    yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" vllm tests
+    ruff format "${RUFF_FORMAT_FLAGS[@]}" vllm tests
 }
 
 ## This flag formats individual files. --files *must* be the first command line
@@ -86,7 +79,7 @@ else
    # Format only the files that changed in last commit.
    format_changed
 fi
-echo 'vLLM yapf: Done'
+echo 'vLLM ruff format: Done'
 
 # Run mypy
 # TODO(zhuohan): Enable mypy
