@@ -29,8 +29,8 @@ _MODEL_REGISTRY = {
     "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
     "MistralForCausalLM": MistralForCausalLM,
     # transformers's mpt class has lower case
-    "MptForCausalLM": MptForCausalLM,
-    "MPTForCausalLM": MptForCausalLM,
+    "MptForCausalLM": MPTForCausalLM,
+    "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
     "RWForCausalLM": FalconForCausalLM,
