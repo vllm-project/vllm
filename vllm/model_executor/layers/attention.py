@@ -4,8 +4,10 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
+from xformers.ops.fmha.attn_bias import (
+    BlockDiagonalCausalMask,
+    LowerTriangularMaskWithTensorBias,
+)
 
 from vllm import attention_ops
 from vllm import cache_ops
@@ -38,12 +40,14 @@ class PagedAttention(nn.Module):
     5. Return the output tensor.
     """
 
-    def __init__(self,
-                 num_heads: int,
-                 head_size: int,
-                 scale: float,
-                 num_kv_heads: Optional[int] = None,
-                 sliding_window: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: Optional[int] = None,
+        sliding_window: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
@@ -55,11 +59,14 @@ class PagedAttention(nn.Module):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.head_mapping = torch.repeat_interleave(
             torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
-            self.num_queries_per_kv)
+            self.num_queries_per_kv,
+        )
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
-            raise ValueError(f"head_size ({self.head_size}) is not supported. "
-                             f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
+            raise ValueError(
+                f"head_size ({self.head_size}) is not supported. "
+                f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}."
+            )
 
     def set_attn_bias(
         self,
@@ -70,8 +77,7 @@ class PagedAttention(nn.Module):
         if input_metadata.attn_bias is not None:
             # Already set by a previous layer.
             return
-        prompt_lens = [input_metadata.max_prompt_len
-                       ] * input_metadata.num_prompts
+        prompt_lens = [input_metadata.max_prompt_len] * input_metadata.num_prompts
         attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
         if self.sliding_window is not None:
             attn_bias = attn_bias.make_local_attention(self.sliding_window)
@@ -97,9 +103,7 @@ class PagedAttention(nn.Module):
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
             key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
-            value = torch.repeat_interleave(value,
-                                            self.num_queries_per_kv,
-                                            dim=1)
+            value = torch.repeat_interleave(value, self.num_queries_per_kv, dim=1)
 
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(
@@ -146,8 +150,8 @@ class PagedAttention(nn.Module):
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
         max_num_partitions = (
-            (input_metadata.max_context_len + _PARTITION_SIZE - 1) //
-            _PARTITION_SIZE)
+            input_metadata.max_context_len + _PARTITION_SIZE - 1
+        ) // _PARTITION_SIZE
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
         # V1 to avoid the overhead of reduction. Also, if the number of
@@ -156,7 +160,8 @@ class PagedAttention(nn.Module):
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = input_metadata.max_context_len <= 8192 and (
-            max_num_partitions == 1 or num_seqs * num_heads > 512)
+            max_num_partitions == 1 or num_seqs * num_heads > 512
+        )
         if use_v1:
             # Run PagedAttention V1.
             attention_ops.paged_attention_v1(
@@ -283,17 +288,21 @@ class PagedAttention(nn.Module):
             # Decoding run.
             assert input_metadata.num_prompt_tokens == 0
             assert key_cache is not None and value_cache is not None, (
-                "key_cache and value_cache must be provided when "
-                "generating tokens.")
+                "key_cache and value_cache must be provided when " "generating tokens."
+            )
             # Compute the attention op for generation tokens.
-            self.single_query_cached_kv_attention(output, query, key_cache,
-                                                  value_cache, input_metadata,
-                                                  self.get_alibi_slopes())
+            self.single_query_cached_kv_attention(
+                output,
+                query,
+                key_cache,
+                value_cache,
+                input_metadata,
+                self.get_alibi_slopes(),
+            )
 
         # Reshape the output tensor.
         # NOTE(woosuk): The output tensor may include paddings.
-        return output.view(batch_size, seq_len,
-                           self.num_heads * self.head_size)
+        return output.view(batch_size, seq_len, self.num_heads * self.head_size)
 
 
 class PagedAttentionWithRoPE(PagedAttention):
@@ -312,13 +321,12 @@ class PagedAttentionWithRoPE(PagedAttention):
         rope_scaling: Optional[Dict[str, Any]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
-        super().__init__(num_heads,
-                         head_size,
-                         scale,
-                         num_kv_heads,
-                         sliding_window=sliding_window)
-        self.rotary_emb = get_rope(head_size, rotary_dim, max_position, base,
-                                   is_neox_style, rope_scaling)
+        super().__init__(
+            num_heads, head_size, scale, num_kv_heads, sliding_window=sliding_window
+        )
+        self.rotary_emb = get_rope(
+            head_size, rotary_dim, max_position, base, is_neox_style, rope_scaling
+        )
 
     def forward(
         self,
@@ -331,7 +339,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        """ PagedAttention forward pass with rotary embedding.
+        """PagedAttention forward pass with rotary embedding.
 
         Args:
             positions: shape = [batch_size, seq_len]
@@ -366,20 +374,21 @@ class PagedAttentionWithRoPE(PagedAttention):
 class PagedAttentionWithALiBi(PagedAttention):
     """PagedAttention with ALiBi attention bias."""
 
-    def __init__(self,
-                 num_heads: int,
-                 head_size: int,
-                 scale: float,
-                 slopes: List[float],
-                 num_kv_heads: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        slopes: List[float],
+        num_kv_heads: Optional[int] = None,
+    ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
         assert len(slopes) == num_heads
 
         slopes = torch.tensor(slopes, dtype=torch.float32)
         self.register_buffer("alibi_slopes", slopes, persistent=False)
 
-    def set_attn_bias(self, input_metadata: InputMetadata,
-                      dtype: torch.dtype) -> None:
+    def set_attn_bias(self, input_metadata: InputMetadata, dtype: torch.dtype) -> None:
         if input_metadata.attn_bias is not None:
             # Already set by a previous layer.
             return
@@ -429,9 +438,7 @@ class PagedAttentionWithALiBi(PagedAttention):
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
             key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
-            value = torch.repeat_interleave(value,
-                                            self.num_queries_per_kv,
-                                            dim=1)
+            value = torch.repeat_interleave(value, self.num_queries_per_kv, dim=1)
         batch_size = input_metadata.num_prompts
         seq_len = input_metadata.max_prompt_len
 

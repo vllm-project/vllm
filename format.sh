@@ -64,7 +64,7 @@ format_changed() {
 
 # Format all files
 format_all() {
-    ruff format "${RUFF_FORMAT_FLAGS[@]}" vllm tests
+    ruff format "${RUFF_FORMAT_FLAGS[@]}" .
 }
 
 ## This flag formats individual files. --files *must* be the first command line

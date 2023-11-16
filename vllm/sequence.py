@@ -12,6 +12,7 @@ SampleLogprobs = List[Dict[int, float]]
 
 class SequenceStatus(enum.Enum):
     """Status of a sequence."""
+
     WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()
@@ -90,10 +91,12 @@ class SequenceData:
         return self.output_token_ids[-1]
 
     def __repr__(self) -> str:
-        return (f"SequenceData("
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"output_token_ids={self.output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob})")
+        return (
+            f"SequenceData("
+            f"prompt_token_ids={self.prompt_token_ids}, "
+            f"output_token_ids={self.output_token_ids}, "
+            f"cumulative_logprob={self.cumulative_logprob})"
+        )
 
 
 class Sequence:
@@ -152,8 +155,7 @@ class Sequence:
                 last_block = self.logical_token_blocks[-1]
 
             num_empty_slots = last_block.get_num_empty_slots()
-            last_block.append_tokens(token_ids[cursor:cursor +
-                                               num_empty_slots])
+            last_block.append_tokens(token_ids[cursor : cursor + num_empty_slots])
             cursor += num_empty_slots
 
     def append_token_id(
@@ -187,10 +189,12 @@ class Sequence:
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
 
-    def get_beam_search_score(self,
-                              length_penalty: float = 0.0,
-                              seq_len: Optional[int] = None,
-                              eos_token_id: Optional[int] = None) -> float:
+    def get_beam_search_score(
+        self,
+        length_penalty: float = 0.0,
+        seq_len: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+    ) -> float:
         """Calculate the beam search score with length penalty.
 
         Adapted from
@@ -201,8 +205,7 @@ class Sequence:
             seq_len = self.get_len()
             # NOTE: HF implementation does not count the EOS token
             # towards the length, we align with that here for testing.
-            if (eos_token_id is not None
-                    and self.get_last_token_id() == eos_token_id):
+            if eos_token_id is not None and self.get_last_token_id() == eos_token_id:
                 seq_len -= 1
         return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
@@ -215,9 +218,11 @@ class Sequence:
         return new_seq
 
     def __repr__(self) -> str:
-        return (f"Sequence(seq_id={self.seq_id}, "
-                f"status={self.status.name}, "
-                f"num_blocks={len(self.logical_token_blocks)})")
+        return (
+            f"Sequence(seq_id={self.seq_id}, "
+            f"status={self.status.name}, "
+            f"num_blocks={len(self.logical_token_blocks)})"
+        )
 
 
 class SequenceGroup:
@@ -279,14 +284,10 @@ class SequenceGroup:
         if status is None:
             return list(self.seqs_dict.values())
         else:
-            return [
-                seq for seq in self.seqs_dict.values() if seq.status == status
-            ]
+            return [seq for seq in self.seqs_dict.values() if seq.status == status]
 
     def get_unfinished_seqs(self) -> List[Sequence]:
-        return [
-            seq for seq in self.seqs_dict.values() if not seq.is_finished()
-        ]
+        return [seq for seq in self.seqs_dict.values() if not seq.is_finished()]
 
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
@@ -319,9 +320,11 @@ class SequenceGroup:
         return all(seq.is_finished() for seq in self.get_seqs())
 
     def __repr__(self) -> str:
-        return (f"SequenceGroup(request_id={self.request_id}, "
-                f"sampling_params={self.sampling_params}, "
-                f"num_seqs={len(self.seqs_dict)})")
+        return (
+            f"SequenceGroup(request_id={self.request_id}, "
+            f"sampling_params={self.sampling_params}, "
+            f"num_seqs={len(self.seqs_dict)})"
+        )
 
 
 class SequenceGroupMetadata:
@@ -374,16 +377,20 @@ class SequenceOutputs:
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
-                f"output_token={self.output_token}, "
-                f"logprobs={self.logprobs})")
+        return (
+            f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
+            f"output_token={self.output_token}, "
+            f"logprobs={self.logprobs})"
+        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutputs):
             raise NotImplementedError()
-        return (self.parent_seq_id == other.parent_seq_id
-                and self.output_token == other.output_token
-                and self.logprobs == other.logprobs)
+        return (
+            self.parent_seq_id == other.parent_seq_id
+            and self.output_token == other.output_token
+            and self.logprobs == other.logprobs
+        )
 
 
 class SequenceGroupOutputs:
@@ -398,14 +405,18 @@ class SequenceGroupOutputs:
         self.prompt_logprobs = prompt_logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceGroupOutputs(samples={self.samples}, "
-                f"prompt_logprobs={self.prompt_logprobs})")
+        return (
+            f"SequenceGroupOutputs(samples={self.samples}, "
+            f"prompt_logprobs={self.prompt_logprobs})"
+        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceGroupOutputs):
             raise NotImplementedError()
-        return (self.samples == other.samples
-                and self.prompt_logprobs == other.prompt_logprobs)
+        return (
+            self.samples == other.samples
+            and self.prompt_logprobs == other.prompt_logprobs
+        )
 
 
 # For each sequence group, we generate a list of SequenceOutputs object,

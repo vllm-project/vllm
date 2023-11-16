@@ -93,8 +93,7 @@ class LLM:
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
         self.request_counter = Counter()
 
-    def get_tokenizer(
-            self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    def get_tokenizer(self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer
 
     def set_tokenizer(
@@ -129,15 +128,15 @@ class LLM:
             completions in the same order as the input prompts.
         """
         if prompts is None and prompt_token_ids is None:
-            raise ValueError("Either prompts or prompt_token_ids must be "
-                             "provided.")
+            raise ValueError("Either prompts or prompt_token_ids must be " "provided.")
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
         if prompts is not None and prompt_token_ids is not None:
             if len(prompts) != len(prompt_token_ids):
-                raise ValueError("The lengths of prompts and prompt_token_ids "
-                                 "must be the same.")
+                raise ValueError(
+                    "The lengths of prompts and prompt_token_ids " "must be the same."
+                )
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
@@ -163,8 +162,9 @@ class LLM:
         prompt_token_ids: Optional[List[int]],
     ) -> None:
         request_id = str(next(self.request_counter))
-        self.llm_engine.add_request(request_id, prompt, sampling_params,
-                                    prompt_token_ids)
+        self.llm_engine.add_request(
+            request_id, prompt, sampling_params, prompt_token_ids
+        )
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.

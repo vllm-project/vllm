@@ -18,6 +18,7 @@ try:
             if init_cached_hf_modules:
                 # pylint: disable=import-outside-toplevel
                 from transformers.dynamic_module_utils import init_hf_modules
+
                 init_hf_modules()
             self.worker = None
 
@@ -32,9 +33,11 @@ try:
             return executor(*args, **kwargs)
 
 except ImportError as e:
-    logger.warning(f"Failed to import Ray with {e!r}. "
-                   "For distributed inference, please install Ray with "
-                   "`pip install ray pandas pyarrow`.")
+    logger.warning(
+        f"Failed to import Ray with {e!r}. "
+        "For distributed inference, please install Ray with "
+        "`pip install ray pandas pyarrow`."
+    )
     ray = None
     TorchDistributedWorker = None
     RayWorker = None  # pylint: disable=invalid-name
@@ -72,7 +75,8 @@ def initialize_cluster(
         if ray is None:
             raise ImportError(
                 "Ray is not installed. Please install Ray to use distributed "
-                "serving.")
+                "serving."
+            )
         # Connect to a ray cluster.
         ray.init(address=ray_address, ignore_reinit_error=True)
 
@@ -93,24 +97,25 @@ def initialize_cluster(
         for bundle in bundles:
             bundle_gpus = bundle.get("GPU", 0)
             if bundle_gpus > 1:
-                raise ValueError(
-                    "Placement group bundle cannot have more than 1 GPU.")
+                raise ValueError("Placement group bundle cannot have more than 1 GPU.")
             if bundle_gpus:
                 gpu_bundles += 1
         if parallel_config.world_size > gpu_bundles:
             raise ValueError(
                 "The number of required GPUs exceeds the total number of "
-                "available GPUs in the placement group.")
+                "available GPUs in the placement group."
+            )
     else:
         num_gpus_in_cluster = ray.cluster_resources().get("GPU", 0)
         if parallel_config.world_size > num_gpus_in_cluster:
             raise ValueError(
                 "The number of required GPUs exceeds the total number of "
-                "available GPUs in the cluster.")
+                "available GPUs in the cluster."
+            )
         # Create a new placement group
-        current_placement_group = ray.util.placement_group([{
-            "GPU": 1
-        }] * parallel_config.world_size)
+        current_placement_group = ray.util.placement_group(
+            [{"GPU": 1}] * parallel_config.world_size
+        )
         # Wait until PG is ready - this will block until all
         # requested resources are available, and will timeout
         # if they cannot be provisioned.

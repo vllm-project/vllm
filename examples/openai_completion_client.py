@@ -18,7 +18,8 @@ completion = openai.Completion.create(
     echo=False,
     n=2,
     stream=stream,
-    logprobs=3)
+    logprobs=3,
+)
 
 print("Completion results:")
 if stream:

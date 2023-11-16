@@ -17,14 +17,13 @@ class SiluAndMul(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
+        output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         activation_ops.silu_and_mul(out, x)
         return out
 
 
 class NewGELU(nn.Module):
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
         activation_ops.gelu_new(out, x)
@@ -32,7 +31,6 @@ class NewGELU(nn.Module):
 
 
 class FastGELU(nn.Module):
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
         activation_ops.gelu_fast(out, x)

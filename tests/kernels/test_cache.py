@@ -54,9 +54,9 @@ def test_copy_blocks(
         block_mapping[src] = [dst1, dst2]
 
     # Create the KV caches.
-    key_caches, value_caches = kv_cache_factory(num_blocks, block_size,
-                                                num_layers, num_heads,
-                                                head_size, dtype, seed)
+    key_caches, value_caches = kv_cache_factory(
+        num_blocks, block_size, num_layers, num_heads, head_size, dtype, seed
+    )
 
     # Clone the KV caches.
     cloned_key_caches = [key_cache.clone() for key_cache in key_caches]
@@ -76,8 +76,7 @@ def test_copy_blocks(
     # Compare the results.
     for key_cache, cloned_key_cache in zip(key_caches, cloned_key_caches):
         assert torch.allclose(key_cache, cloned_key_cache)
-    for value_cache, cloned_value_cache in zip(value_caches,
-                                               cloned_value_caches):
+    for value_cache, cloned_value_cache in zip(value_caches, cloned_value_caches):
         assert torch.allclose(value_cache, cloned_value_cache)
 
 
@@ -108,18 +107,13 @@ def test_reshape_and_cache(
     slot_mapping = random.sample(range(num_slots), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device="cuda")
 
-    qkv = torch.randn(num_tokens,
-                      3,
-                      num_heads,
-                      head_size,
-                      dtype=dtype,
-                      device="cuda")
+    qkv = torch.randn(num_tokens, 3, num_heads, head_size, dtype=dtype, device="cuda")
     _, key, value = qkv.unbind(dim=1)
 
     # Create the KV caches.
-    key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
-                                                num_heads, head_size, dtype,
-                                                seed)
+    key_caches, value_caches = kv_cache_factory(
+        num_blocks, block_size, 1, num_heads, head_size, dtype, seed
+    )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
@@ -127,8 +121,7 @@ def test_reshape_and_cache(
     cloned_value_cache = value_cache.clone()
 
     # Call the reshape_and_cache kernel.
-    cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                slot_mapping)
+    cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
 
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)

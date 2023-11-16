@@ -27,4 +27,4 @@ jobs:
         pip install ruff==0.1.5
     - name: Running format
       run: |
-        ruff format --check vllm tests
+        ruff format --check .

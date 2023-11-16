@@ -17,9 +17,9 @@
 
 # -- Project information -----------------------------------------------------
 
-project = 'vLLM'
-copyright = '2023, vLLM Team'
-author = 'the vLLM Team'
+project = "vLLM"
+copyright = "2023, vLLM Team"
+author = "the vLLM Team"
 
 
 # -- General configuration ---------------------------------------------------
@@ -35,7 +35,7 @@ extensions = [
 ]
 
 # Add any paths that contain templates here, relative to this directory.
-templates_path = ['_templates']
+templates_path = ["_templates"]
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
@@ -52,16 +52,16 @@ copybutton_prompt_is_regexp = True
 # a list of builtin themes.
 #
 html_title = project
-html_theme = 'sphinx_book_theme'
-html_logo = 'assets/logos/vllm-logo-text-light.png'
+html_theme = "sphinx_book_theme"
+html_logo = "assets/logos/vllm-logo-text-light.png"
 html_theme_options = {
-    'logo_only': True,
-    'path_to_docs': 'docs/source',
-    'repository_url': 'https://github.com/vllm-project/vllm',
-    'use_repository_button': True,
+    "logo_only": True,
+    "path_to_docs": "docs/source",
+    "repository_url": "https://github.com/vllm-project/vllm",
+    "use_repository_button": True,
 }
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['_static']
+html_static_path = ["_static"]

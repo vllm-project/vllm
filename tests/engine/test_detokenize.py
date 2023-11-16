@@ -8,7 +8,7 @@ TRUTH = [
     # pylint: disable=line-too-long
     "Hello here, this is a simple test",
     "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be used in production environments, where inference and serving",
-    "我很感谢你的热情"
+    "我很感谢你的热情",
 ]
 TOKENIZERS = [
     "facebook/opt-125m",
@@ -24,8 +24,7 @@ TOKENIZERS = [
 ]
 
 
-def _run_incremental_decode(tokenizer, all_input_ids,
-                            skip_special_tokens: bool):
+def _run_incremental_decode(tokenizer, all_input_ids, skip_special_tokens: bool):
     decoded_text = ""
     offset = 0
     token_offset = 0
@@ -33,11 +32,12 @@ def _run_incremental_decode(tokenizer, all_input_ids,
     for i in range(len(all_input_ids)):
         new_tokens, text, offset, token_offset = detokenize_incrementally(
             tokenizer,
-            all_input_ids[:i + 1],
+            all_input_ids[: i + 1],
             prev_tokens,
             offset,
             token_offset,
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens,
+        )
         decoded_text += text
         if prev_tokens is None:
             prev_tokens = new_tokens
@@ -53,11 +53,14 @@ def test_decode_streaming(tokenizer_id, truth, skip_special_tokens):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
     all_input_ids = tokenizer(truth, add_special_tokens=False)["input_ids"]
     if skip_special_tokens:
-        all_input_ids = ([tokenizer.bos_token_id]
-                         if tokenizer.bos_token_id is not None else
-                         []) + all_input_ids + [tokenizer.eos_token_id]
+        all_input_ids = (
+            ([tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else [])
+            + all_input_ids
+            + [tokenizer.eos_token_id]
+        )
 
     decoded_text = _run_incremental_decode(
-        tokenizer, all_input_ids, skip_special_tokens=skip_special_tokens)
+        tokenizer, all_input_ids, skip_special_tokens=skip_special_tokens
+    )
 
     assert decoded_text == truth

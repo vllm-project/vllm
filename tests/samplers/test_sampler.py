@@ -13,16 +13,18 @@ from vllm.worker.worker import Worker
 
 
 class MockLogitsSampler(Sampler):
-
     def __init__(self, vocab_size: int, fake_logits: torch.Tensor):
         super().__init__(vocab_size=vocab_size)
         self.fake_logits = fake_logits
 
     def forward(self, *args, **kwargs):
-        with patch("vllm.model_executor.layers.sampler._prune_hidden_states",
-                   lambda x, y: x):
-            with patch("vllm.model_executor.layers.sampler._get_logits",
-                       lambda *args, **kwargs: self.fake_logits):
+        with patch(
+            "vllm.model_executor.layers.sampler._prune_hidden_states", lambda x, y: x
+        ):
+            with patch(
+                "vllm.model_executor.layers.sampler._get_logits",
+                lambda *args, **kwargs: self.fake_logits,
+            ):
                 return super().forward(*args, **kwargs)
 
 
@@ -30,13 +32,13 @@ def _prepare_test(
     batch_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, Worker]:
     vocab_size = 32000
-    input_tensor = torch.rand((batch_size, 1024),
-                              device="cuda",
-                              dtype=torch.float16)
-    fake_logits = torch.full((batch_size, vocab_size),
-                             1e-2,
-                             device=input_tensor.device,
-                             dtype=input_tensor.dtype)
+    input_tensor = torch.rand((batch_size, 1024), device="cuda", dtype=torch.float16)
+    fake_logits = torch.full(
+        (batch_size, vocab_size),
+        1e-2,
+        device=input_tensor.device,
+        dtype=input_tensor.dtype,
+    )
     sampler = MockLogitsSampler(32000, fake_logits)
     worker = Worker(None, None, None)
     worker.block_size = 16
@@ -59,14 +61,17 @@ def test_sampler_all_greedy(seed: int):
                 request_id=f"test_{i}",
                 is_prompt=True,
                 seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0, ),
+                sampling_params=SamplingParams(
+                    temperature=0,
+                ),
                 block_tables={0: [1]},
-            ))
+            )
+        )
 
     _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             input_metadata=input_metadata)
+    sampler_output = sampler(
+        embedding=None, hidden_states=input_tensor, input_metadata=input_metadata
+    )
     expected = torch.argmax(fake_logits, dim=-1)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -94,12 +99,13 @@ def test_sampler_all_random(seed: int):
                     n=random.randint(1, 10),
                 ),
                 block_tables={0: [1]},
-            ))
+            )
+        )
 
     _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             input_metadata=input_metadata)
+    sampler_output = sampler(
+        embedding=None, hidden_states=input_tensor, input_metadata=input_metadata
+    )
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token == i
@@ -124,12 +130,11 @@ def test_sampler_all_beam(seed: int):
                     use_beam_search=True,
                 ),
                 block_tables={0: [1]},
-            ))
+            )
+        )
 
     _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
-    sampler(embedding=None,
-            hidden_states=input_tensor,
-            input_metadata=input_metadata)
+    sampler(embedding=None, hidden_states=input_tensor, input_metadata=input_metadata)
     # no assertion here as I am not sure how to determine whether
     # the outputs are expected - in other words, this just tests
     # whether there are no exceptions in the sampler
@@ -159,9 +164,9 @@ def test_sampler_mixed(seed: int):
                 presence_penalty=random.randint(0, 1),
             )
         else:
-            sampling_params = SamplingParams(temperature=0,
-                                             use_beam_search=True,
-                                             best_of=2)
+            sampling_params = SamplingParams(
+                temperature=0, use_beam_search=True, best_of=2
+            )
         for idx in range(n):
             fake_logits[i, i + idx] = 1e2
             expected_tokens.append(i + idx)
@@ -172,12 +177,13 @@ def test_sampler_mixed(seed: int):
                 seq_data={0: SequenceData([1, 2, 3])},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
-            ))
+            )
+        )
 
     _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             input_metadata=input_metadata)
+    sampler_output = sampler(
+        embedding=None, hidden_states=input_tensor, input_metadata=input_metadata
+    )
     for i, sequence_output in enumerate(sampler_output):
         if seq_group_metadata_list[i].sampling_params.use_beam_search:
             continue
@@ -205,15 +211,17 @@ def test_sampler_logits_processors(seed: int):
                 request_id=f"test_{i}",
                 is_prompt=True,
                 seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0,
-                                               logits_processors=[pick_ith]),
+                sampling_params=SamplingParams(
+                    temperature=0, logits_processors=[pick_ith]
+                ),
                 block_tables={0: [1]},
-            ))
+            )
+        )
 
     _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             input_metadata=input_metadata)
+    sampler_output = sampler(
+        embedding=None, hidden_states=input_tensor, input_metadata=input_metadata
+    )
     for i, sequence_output in enumerate(sampler_output):
         for idx, nth_output in enumerate(sequence_output.samples):
             assert nth_output.output_token == idx

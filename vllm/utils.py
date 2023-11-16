@@ -14,7 +14,6 @@ class Device(enum.Enum):
 
 
 class Counter:
-
     def __init__(self, start: int = 0) -> None:
         self.counter = start
 
@@ -32,7 +31,8 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
     cudaDevAttrMaxSharedMemoryPerBlockOptin = 97  # pylint: disable=invalid-name
     max_shared_mem = cuda_utils.get_device_attribute(
-        cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
+        cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu
+    )
     return int(max_shared_mem)
 
 

@@ -13,7 +13,6 @@ class RequestOutput:
 
 
 class MockEngine:
-
     def __init__(self):
         self.step_calls = 0
         self.add_request_calls = 0
@@ -22,8 +21,7 @@ class MockEngine:
 
     async def step_async(self):
         self.step_calls += 1
-        return [RequestOutput(
-            request_id=self.request_id)] if self.request_id else []
+        return [RequestOutput(request_id=self.request_id)] if self.request_id else []
 
     def generate(self, request_id):
         self.request_id = request_id
@@ -41,7 +39,6 @@ class MockEngine:
 
 
 class MockAsyncLLMEngine(AsyncLLMEngine):
-
     def _init_engine(self, *args, **kwargs):
         return MockEngine()
 

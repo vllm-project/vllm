@@ -33,7 +33,6 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 
 
 class HfRunner:
-
     def __init__(
         self,
         model_name: str,
@@ -78,9 +77,7 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
     ) -> List[Tuple[List[int], str]]:
-        outputs = self.generate(prompts,
-                                do_sample=False,
-                                max_new_tokens=max_tokens)
+        outputs = self.generate(prompts, do_sample=False, max_new_tokens=max_tokens)
         for i in range(len(outputs)):
             output_ids, output_str = outputs[i]
             outputs[i] = (output_ids[0], output_str[0])
@@ -92,17 +89,18 @@ class HfRunner:
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[int], str]]:
-        outputs = self.generate(prompts,
-                                do_sample=False,
-                                max_new_tokens=max_tokens,
-                                num_beams=beam_width,
-                                num_return_sequences=beam_width)
+        outputs = self.generate(
+            prompts,
+            do_sample=False,
+            max_new_tokens=max_tokens,
+            num_beams=beam_width,
+            num_return_sequences=beam_width,
+        )
         for i in range(len(outputs)):
             output_ids, output_str = outputs[i]
             for j in range(len(output_ids)):
                 output_ids[j] = [
-                    x for x in output_ids[j]
-                    if x != self.tokenizer.pad_token_id
+                    x for x in output_ids[j] if x != self.tokenizer.pad_token_id
                 ]
             outputs[i] = (output_ids, output_str)
         return outputs
@@ -131,11 +129,10 @@ class HfRunner:
                     self.model.get_output_embeddings().weight.t(),
                 )
                 if self.model.get_output_embeddings().bias is not None:
-                    logits += self.model.get_output_embeddings(
-                    ).bias.unsqueeze(0)
-                logprobs = torch.nn.functional.log_softmax(logits,
-                                                           dim=-1,
-                                                           dtype=torch.float32)
+                    logits += self.model.get_output_embeddings().bias.unsqueeze(0)
+                logprobs = torch.nn.functional.log_softmax(
+                    logits, dim=-1, dtype=torch.float32
+                )
                 seq_logprobs.append(logprobs)
             all_logprobs.append(seq_logprobs)
         return all_logprobs
@@ -147,7 +144,6 @@ def hf_runner():
 
 
 class VllmRunner:
-
     def __init__(
         self,
         model_name: str,
@@ -167,8 +163,7 @@ class VllmRunner:
         prompts: List[str],
         sampling_params: SamplingParams,
     ) -> List[Tuple[List[int], str]]:
-        req_outputs = self.model.generate(prompts,
-                                          sampling_params=sampling_params)
+        req_outputs = self.model.generate(prompts, sampling_params=sampling_params)
         outputs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
@@ -190,8 +185,7 @@ class VllmRunner:
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params)
-        return [(output_ids[0], output_str[0])
-                for output_ids, output_str in outputs]
+        return [(output_ids[0], output_str[0]) for output_ids, output_str in outputs]
 
     def generate_beam_search(
         self,
@@ -199,10 +193,9 @@ class VllmRunner:
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[int], str]]:
-        beam_search_params = SamplingParams(n=beam_width,
-                                            use_beam_search=True,
-                                            temperature=0.0,
-                                            max_tokens=max_tokens)
+        beam_search_params = SamplingParams(
+            n=beam_width, use_beam_search=True, temperature=0.0, max_tokens=max_tokens
+        )
         outputs = self.generate(prompts, beam_search_params)
         return outputs
 

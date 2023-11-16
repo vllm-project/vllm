@@ -9,9 +9,10 @@ Yi_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
 
 class YiConfig(PretrainedConfig):
     r"""
-        Reference:
-        https://huggingface.co/01-ai/Yi-6B/blob/main/configuration_yi.py
+    Reference:
+    https://huggingface.co/01-ai/Yi-6B/blob/main/configuration_yi.py
     """
+
     model_type = "Yi"
     keys_to_ignore_at_inference = ["past_key_values"]
 

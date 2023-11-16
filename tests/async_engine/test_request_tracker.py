@@ -5,7 +5,6 @@ from vllm.outputs import RequestOutput
 
 
 class DummyEvent:
-
     def __init__(self):
         self.flag = False
 
@@ -64,7 +63,8 @@ def test_request_tracker():
     stream_5 = tracker.add_request("5")
     assert tracker.new_requests_event.flag
     tracker.process_request_output(
-        RequestOutput("2", "output", [], [], [], finished=True))
+        RequestOutput("2", "output", [], [], [], finished=True)
+    )
     new, finished = tracker.get_new_and_finished_requests()
     assert not tracker.new_requests_event.flag
     assert len(finished) == 1

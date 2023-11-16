@@ -89,8 +89,7 @@ def ref_single_query_cached_kv_attention(
             # Create the ALiBi bias used in the paged attention kernel.
             position_ids = torch.arange(context_len, device="cuda").int()
             alibi_bias = (position_ids - context_len + 1).float()
-            alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
-                1, 1, -1)
+            alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(1, 1, -1)
 
         out = ref_masked_attention(q, keys, values, scale, alibi_bias)
         out = out.view(num_query_heads, head_size)
@@ -122,23 +121,19 @@ def test_paged_attention(
 
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
-    query = torch.empty(num_seqs,
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype,
-                        device="cuda")
+    query = torch.empty(
+        num_seqs, num_query_heads, head_size, dtype=dtype, device="cuda"
+    )
     query.uniform_(-scale, scale)
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_mapping = torch.repeat_interleave(
-        torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"),
-        num_queries_per_kv)
+        torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"), num_queries_per_kv
+    )
     alibi_slopes = None
     if use_alibi:
-        alibi_slopes = torch.randn(num_query_heads,
-                                   dtype=torch.float,
-                                   device="cuda")
+        alibi_slopes = torch.randn(num_query_heads, dtype=torch.float, device="cuda")
 
     context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
     context_lens[-1] = MAX_SEQ_LEN
@@ -150,16 +145,15 @@ def test_paged_attention(
     block_tables = []
     for _ in range(num_seqs):
         block_table = [
-            random.randint(0, NUM_BLOCKS - 1)
-            for _ in range(max_num_blocks_per_seq)
+            random.randint(0, NUM_BLOCKS - 1) for _ in range(max_num_blocks_per_seq)
         ]
         block_tables.append(block_table)
     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
 
     # Create the KV caches.
-    key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
-                                                num_kv_heads, head_size, dtype,
-                                                seed)
+    key_caches, value_caches = kv_cache_factory(
+        NUM_BLOCKS, block_size, 1, num_kv_heads, head_size, dtype, seed
+    )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Call the paged attention kernel.
@@ -179,8 +173,7 @@ def test_paged_attention(
             alibi_slopes,
         )
     elif version == "v2":
-        num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
-                          PARTITION_SIZE)
+        num_partitions = (max_context_len + PARTITION_SIZE - 1) // PARTITION_SIZE
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
         tmp_output = torch.empty(
@@ -249,8 +242,7 @@ def ref_multi_query_kv_attention(
         seq_len = end_idx - start_idx
 
         # Create attention mask.
-        attn_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=dtype),
-                               diagonal=1)
+        attn_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=dtype), diagonal=1)
         attn_mask = attn_mask * torch.finfo(dtype).min
         attn_mask = attn_mask.to(dtype=dtype, device="cuda")
 
@@ -293,14 +285,15 @@ def test_multi_query_kv_attention(
 
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
-    qkv = torch.empty(num_tokens,
-                      num_query_heads + 2 * num_kv_heads,
-                      head_size,
-                      dtype=dtype,
-                      device="cuda")
+    qkv = torch.empty(
+        num_tokens,
+        num_query_heads + 2 * num_kv_heads,
+        head_size,
+        dtype=dtype,
+        device="cuda",
+    )
     qkv.uniform_(-scale, scale)
-    query, key, value = qkv.split(
-        [num_query_heads, num_kv_heads, num_kv_heads], dim=1)
+    query, key, value = qkv.split([num_query_heads, num_kv_heads, num_kv_heads], dim=1)
 
     num_queries_per_kv = num_query_heads // num_kv_heads
     if num_queries_per_kv > 1:

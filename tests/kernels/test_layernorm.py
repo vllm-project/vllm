@@ -11,7 +11,6 @@ SEEDS = [0]
 
 
 class RefRMSNorm(nn.Module):
-
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
         weight = torch.empty(hidden_size)
@@ -23,8 +22,7 @@ class RefRMSNorm(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance +
-                                                    self.variance_epsilon)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
 

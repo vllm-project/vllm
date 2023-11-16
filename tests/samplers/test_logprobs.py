@@ -24,12 +24,12 @@ def test_get_prompt_logprobs(
     del hf_model
 
     vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
-                                          logprobs=5,
-                                          prompt_logprobs=5,
-                                          temperature=0.0)
+    vllm_sampling_params = SamplingParams(
+        max_tokens=max_tokens, logprobs=5, prompt_logprobs=5, temperature=0.0
+    )
     vllm_results = vllm_model.model.generate(
-        example_prompts, sampling_params=vllm_sampling_params)
+        example_prompts, sampling_params=vllm_sampling_params
+    )
 
     # Test whether logprobs are included in the results.
     for result in vllm_results:
@@ -42,14 +42,12 @@ def test_get_prompt_logprobs(
         vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
         for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
             for token_id, logprob in vllm_prompt_logprob_dict.items():
-                torch.testing.assert_close(logprob,
-                                           hf_logprob[0][i][token_id].item(),
-                                           atol=1e-2,
-                                           rtol=1e-2)
+                torch.testing.assert_close(
+                    logprob, hf_logprob[0][i][token_id].item(), atol=1e-2, rtol=1e-2
+                )
         vllm_sample_logprobs = vllm_result.outputs[0].logprobs
         for i, vllm_sample_logprob_dict in enumerate(vllm_sample_logprobs):
             for token_id, logprob in vllm_sample_logprob_dict.items():
-                torch.testing.assert_close(logprob,
-                                           hf_logprob[i][-1][token_id].item(),
-                                           atol=1e-2,
-                                           rtol=1e-2)
+                torch.testing.assert_close(
+                    logprob, hf_logprob[i][-1][token_id].item(), atol=1e-2, rtol=1e-2
+                )

@@ -27,13 +27,13 @@ def test_beam_search_single_input(
     beam_width: int,
 ) -> None:
     hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width,
-                                               max_tokens)
+    hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width, max_tokens)
     del hf_model
 
     vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.generate_beam_search(example_prompts, beam_width,
-                                                   max_tokens)
+    vllm_outputs = vllm_model.generate_beam_search(
+        example_prompts, beam_width, max_tokens
+    )
     del vllm_model
 
     for i in range(len(example_prompts)):
@@ -42,5 +42,5 @@ def test_beam_search_single_input(
         assert len(hf_output_ids) == len(vllm_output_ids)
         for j in range(len(hf_output_ids)):
             assert hf_output_ids[j] == vllm_output_ids[j], (
-                f"Test{i} output{j}:\nHF: {hf_output_ids}\n"
-                f"vLLM: {vllm_output_ids}")
+                f"Test{i} output{j}:\nHF: {hf_output_ids}\n" f"vLLM: {vllm_output_ids}"
+            )

@@ -5,11 +5,9 @@ from typing import Dict, List, Tuple, Optional
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.model_executor import get_model, InputMetadata, set_random_seed
-from vllm.model_executor.parallel_utils.parallel_state import (
-    initialize_model_parallel)
+from vllm.model_executor.parallel_utils.parallel_state import initialize_model_parallel
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
@@ -51,8 +49,7 @@ class Worker:
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
         # Env vars will be set by Ray.
-        self.rank = self.rank if self.rank is not None else int(
-            os.getenv("RANK", "-1"))
+        self.rank = self.rank if self.rank is not None else int(os.getenv("RANK", "-1"))
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         self.device = torch.device(f"cuda:{local_rank}")
         if self.rank < 0:
@@ -62,8 +59,9 @@ class Worker:
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 
         # Initialize the distributed environment.
-        _init_distributed_environment(self.parallel_config, self.rank,
-                                      self.distributed_init_method)
+        _init_distributed_environment(
+            self.parallel_config, self.rank, self.distributed_init_method
+        )
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
@@ -91,8 +89,9 @@ class Worker:
         max_num_seqs = self.scheduler_config.max_num_seqs
         seqs = []
         for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
+            seq_len = max_num_batched_tokens // max_num_seqs + (
+                group_id < max_num_batched_tokens % max_num_seqs
+            )
             seq_data = SequenceData([0] * seq_len)
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
@@ -103,8 +102,7 @@ class Worker:
             )
             seqs.append(seq)
 
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
-            seqs)
+        input_tokens, input_positions, input_metadata = self._prepare_inputs(seqs)
 
         # Execute the model.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
@@ -122,10 +120,12 @@ class Worker:
         peak_memory = torch.cuda.max_memory_allocated()
         total_gpu_memory = get_gpu_memory()
         cache_block_size = CacheEngine.get_cache_block_size(
-            block_size, self.model_config, self.parallel_config)
+            block_size, self.model_config, self.parallel_config
+        )
         num_gpu_blocks = int(
-            (total_gpu_memory * gpu_memory_utilization - peak_memory) //
-            cache_block_size)
+            (total_gpu_memory * gpu_memory_utilization - peak_memory)
+            // cache_block_size
+        )
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
@@ -141,8 +141,9 @@ class Worker:
         self.block_size = cache_config.block_size
         self.sliding_window = cache_config.sliding_window
 
-        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
+        self.cache_engine = CacheEngine(
+            self.cache_config, self.model_config, self.parallel_config
+        )
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
 
@@ -182,7 +183,8 @@ class Worker:
                 categorized_sample_indices_start_idx += prompt_len - 1
 
             categorized_sample_indices[sampling_params.sampling_type].append(
-                categorized_sample_indices_start_idx)
+                categorized_sample_indices_start_idx
+            )
             categorized_sample_indices_start_idx += 1
 
             input_tokens.append(prompt_tokens)
@@ -214,17 +216,18 @@ class Worker:
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             if seq_group_metadata.is_prompt:
                 # We need to do this in this loop as we need to know max_seq_len
-                assert len(
-                    seq_ids) == 1, "Prompt input should have only one seq."
+                assert len(seq_ids) == 1, "Prompt input should have only one seq."
                 sampling_params = seq_group_metadata.sampling_params
                 assert len(prompt_lens) == len(seq_group_metadata_list)
                 prompt_len = prompt_lens[i]
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
-                        range(selected_token_start_idx,
-                              selected_token_start_idx + prompt_len - 1))
-                selected_token_indices.append(selected_token_start_idx +
-                                              prompt_len - 1)
+                        range(
+                            selected_token_start_idx,
+                            selected_token_start_idx + prompt_len - 1,
+                        )
+                    )
+                selected_token_indices.append(selected_token_start_idx + prompt_len - 1)
                 selected_token_start_idx += max_seq_len
                 continue
 
@@ -234,13 +237,16 @@ class Worker:
 
             num_seqs = len(seq_ids)
             selected_token_indices.extend(
-                range(selected_token_start_idx,
-                      selected_token_start_idx + num_seqs))
+                range(selected_token_start_idx, selected_token_start_idx + num_seqs)
+            )
             selected_token_start_idx += num_seqs
 
             categorized_sample_indices[sampling_params.sampling_type].extend(
-                range(categorized_sample_indices_start_idx,
-                      categorized_sample_indices_start_idx + num_seqs))
+                range(
+                    categorized_sample_indices_start_idx,
+                    categorized_sample_indices_start_idx + num_seqs,
+                )
+            )
             categorized_sample_indices_start_idx += num_seqs
 
             for seq_id in seq_ids:
@@ -257,8 +263,7 @@ class Worker:
                 block_table = seq_group_metadata.block_tables[seq_id]
 
                 max_context_len = max(max_context_len, context_len)
-                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
-                                             len(block_table))
+                max_num_blocks_per_seq = max(max_num_blocks_per_seq, len(block_table))
                 context_lens.append(context_len)
 
                 block_number = block_table[position // self.block_size]
@@ -267,8 +272,7 @@ class Worker:
                 slot_mapping.append([slot])
 
                 if self.sliding_window is not None:
-                    sliding_window_blocks = (self.sliding_window //
-                                             self.block_size)
+                    sliding_window_blocks = self.sliding_window // self.block_size
                     block_table = block_table[-sliding_window_blocks:]
                 generation_block_tables.append(block_table)
 
@@ -276,12 +280,10 @@ class Worker:
             _pad_to_max(tokens, max_seq_len, pad=0) for tokens in input_tokens
         ]
         padded_input_positions = [
-            _pad_to_max(positions, max_seq_len, pad=0)
-            for positions in input_positions
+            _pad_to_max(positions, max_seq_len, pad=0) for positions in input_positions
         ]
         padded_slot_mapping = [
-            _pad_to_max(mapping, max_seq_len, pad=-1)
-            for mapping in slot_mapping
+            _pad_to_max(mapping, max_seq_len, pad=-1) for mapping in slot_mapping
         ]
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq, pad=0)
@@ -289,28 +291,26 @@ class Worker:
         ]
 
         # Convert to tensors.
-        tokens_tensor = torch.tensor(padded_input_tokens,
-                                     dtype=torch.long,
-                                     device="cuda")
-        positions_tensor = torch.tensor(padded_input_positions,
-                                        dtype=torch.long,
-                                        device="cuda")
-        slot_mapping_tensor = torch.tensor(padded_slot_mapping,
-                                           dtype=torch.long,
-                                           device="cuda")
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device="cuda")
-        selected_token_indices = torch.tensor(selected_token_indices,
-                                              dtype=torch.long,
-                                              device="cuda")
+        tokens_tensor = torch.tensor(
+            padded_input_tokens, dtype=torch.long, device="cuda"
+        )
+        positions_tensor = torch.tensor(
+            padded_input_positions, dtype=torch.long, device="cuda"
+        )
+        slot_mapping_tensor = torch.tensor(
+            padded_slot_mapping, dtype=torch.long, device="cuda"
+        )
+        context_lens_tensor = torch.tensor(context_lens, dtype=torch.int, device="cuda")
+        selected_token_indices = torch.tensor(
+            selected_token_indices, dtype=torch.long, device="cuda"
+        )
         categorized_sample_indices = {
             t: torch.tensor(seq_ids, dtype=torch.int, device="cuda")
             for t, seq_ids in categorized_sample_indices.items()
         }
-        block_tables_tensor = torch.tensor(padded_block_tables,
-                                           dtype=torch.int,
-                                           device="cuda")
+        block_tables_tensor = torch.tensor(
+            padded_block_tables, dtype=torch.int, device="cuda"
+        )
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
@@ -364,7 +364,8 @@ class Worker:
 
         # Prepare input tensors.
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
-            seq_group_metadata_list)
+            seq_group_metadata_list
+        )
 
         # Execute the model.
         output = self.model(
@@ -389,11 +390,13 @@ def _init_distributed_environment(
             raise RuntimeError(
                 "torch.distributed is already initialized but the torch world "
                 "size does not match parallel_config.world_size "
-                f"({torch_world_size} vs. {parallel_config.world_size}).")
+                f"({torch_world_size} vs. {parallel_config.world_size})."
+            )
     elif not distributed_init_method:
         raise ValueError(
             "distributed_init_method must be set if torch.distributed "
-            "is not already initialized")
+            "is not already initialized"
+        )
     else:
         torch.distributed.init_process_group(
             backend="nccl",
@@ -404,8 +407,9 @@ def _init_distributed_environment(
 
     # A small all_reduce for warmup.
     torch.distributed.all_reduce(torch.zeros(1).cuda())
-    initialize_model_parallel(parallel_config.tensor_parallel_size,
-                              parallel_config.pipeline_parallel_size)
+    initialize_model_parallel(
+        parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size
+    )
 
 
 def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
@@ -425,4 +429,5 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}.")
+                f"{compute_capability[0]}.{compute_capability[1]}."
+            )

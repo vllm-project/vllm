@@ -29,23 +29,19 @@ def main(
     torch.cuda.manual_seed(seed)
 
     scale = float(1.0 / (head_size**0.5))
-    query = torch.empty(num_seqs,
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype,
-                        device="cuda")
+    query = torch.empty(
+        num_seqs, num_query_heads, head_size, dtype=dtype, device="cuda"
+    )
     query.uniform_(-scale, scale)
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_mapping = torch.repeat_interleave(
-        torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"),
-        num_queries_per_kv)
+        torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"), num_queries_per_kv
+    )
     alibi_slopes = None
     if use_alibi:
-        alibi_slopes = torch.randn(num_query_heads,
-                                   dtype=torch.float,
-                                   device="cuda")
+        alibi_slopes = torch.randn(num_query_heads, dtype=torch.float, device="cuda")
 
     context_lens = [context_len for _ in range(num_seqs)]
     max_context_len = max(context_lens)
@@ -56,8 +52,7 @@ def main(
     block_tables = []
     for _ in range(num_seqs):
         block_table = [
-            random.randint(0, NUM_BLOCKS - 1)
-            for _ in range(max_num_blocks_per_seq)
+            random.randint(0, NUM_BLOCKS - 1) for _ in range(max_num_blocks_per_seq)
         ]
         block_tables.append(block_table)
     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
@@ -68,16 +63,13 @@ def main(
     key_cache = torch.empty(size=key_cache_shape, dtype=dtype, device="cuda")
     key_cache.uniform_(-scale, scale)
     value_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size, block_size)
-    value_cache = torch.empty(size=value_cache_shape,
-                              dtype=dtype,
-                              device="cuda")
+    value_cache = torch.empty(size=value_cache_shape, dtype=dtype, device="cuda")
     value_cache.uniform_(-scale, scale)
 
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v2":
-        num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
-                          PARTITION_SIZE)
+        num_partitions = (max_context_len + PARTITION_SIZE - 1) // PARTITION_SIZE
         tmp_output = torch.empty(
             size=(num_seqs, num_query_heads, num_partitions, head_size),
             dtype=output.dtype,
@@ -149,27 +141,23 @@ def main(
     print(f"Kernel running time: {latency * 1000000:.3f} us")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Benchmark the paged attention kernel.")
-    parser.add_argument("--version",
-                        type=str,
-                        choices=["v1", "v2"],
-                        default="v2")
+        description="Benchmark the paged attention kernel."
+    )
+    parser.add_argument("--version", type=str, choices=["v1", "v2"], default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--context-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
-    parser.add_argument("--head-size",
-                        type=int,
-                        choices=[64, 80, 96, 112, 128, 256],
-                        default=128)
+    parser.add_argument(
+        "--head-size", type=int, choices=[64, 80, 96, 112, 128, 256], default=128
+    )
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--use-alibi", action="store_true")
-    parser.add_argument("--dtype",
-                        type=str,
-                        choices=["half", "bfloat16", "float"],
-                        default="half")
+    parser.add_argument(
+        "--dtype", type=str, choices=["half", "bfloat16", "float"], default="half"
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()

@@ -9,26 +9,28 @@ import requests
 
 
 def _query_server(prompt: str) -> dict:
-    response = requests.post("http://localhost:8000/generate",
-                             json={
-                                 "prompt": prompt,
-                                 "max_tokens": 100,
-                                 "temperature": 0,
-                                 "ignore_eos": True
-                             })
+    response = requests.post(
+        "http://localhost:8000/generate",
+        json={
+            "prompt": prompt,
+            "max_tokens": 100,
+            "temperature": 0,
+            "ignore_eos": True,
+        },
+    )
     response.raise_for_status()
     return response.json()
 
 
 @pytest.fixture
 def api_server():
-    script_path = Path(__file__).parent.joinpath(
-        "api_server_async_engine.py").absolute()
+    script_path = (
+        Path(__file__).parent.joinpath("api_server_async_engine.py").absolute()
+    )
     # pylint: disable=consider-using-with
-    uvicorn_process = subprocess.Popen([
-        sys.executable, "-u",
-        str(script_path), "--model", "facebook/opt-125m"
-    ])
+    uvicorn_process = subprocess.Popen(
+        [sys.executable, "-u", str(script_path), "--model", "facebook/opt-125m"]
+    )
     yield
     uvicorn_process.terminate()
 
@@ -61,8 +63,9 @@ def test_api_server(api_server):
         for result in pool.map(_query_server, prompts):
             assert result
 
-        num_aborted_requests = requests.get(
-            "http://localhost:8000/stats").json()["num_aborted_requests"]
+        num_aborted_requests = requests.get("http://localhost:8000/stats").json()[
+            "num_aborted_requests"
+        ]
         assert num_aborted_requests == 0
 
         # Try with 100 prompts
@@ -77,8 +80,9 @@ def test_api_server(api_server):
         pool.join()
 
         # check cancellation stats
-        num_aborted_requests = requests.get(
-            "http://localhost:8000/stats").json()["num_aborted_requests"]
+        num_aborted_requests = requests.get("http://localhost:8000/stats").json()[
+            "num_aborted_requests"
+        ]
         assert num_aborted_requests > 0
 
     # check that server still runs after cancellations
