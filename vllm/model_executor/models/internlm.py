@@ -9,15 +9,17 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
-                                                       RowParallelLinear,
-                                                       VocabParallelEmbedding)
-from vllm.model_executor.weight_utils import (
-    hf_model_weights_iterator, load_padded_tensor_parallel_vocab,
-    load_tensor_parallel_weights)
+    get_tensor_model_parallel_world_size)
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -30,20 +32,17 @@ class InternLMMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(
-            hidden_size,
-            2 * intermediate_size,
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2,
             bias=False,
-            gather_output=False,
-        )
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            input_is_parallel=True,
-        )
+            linear_method=linear_method)
+        self.down_proj = RowParallelLinear(intermediate_size,
+                                           hidden_size,
+                                           bias=False,
+                                           linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -65,6 +64,7 @@ class InternLMAttention(nn.Module):
         bias: bool,
         rope_theta: float = 10000,
         max_position_embeddings: int = 8192,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -79,17 +79,18 @@ class InternLMAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = ColumnParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
             hidden_size,
-            3 * self.total_num_heads * self.head_dim,
+            self.head_dim,
+            self.total_num_heads,
             bias=bias,
-            gather_output=False,
+            linear_method=linear_method,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=bias,
-            input_is_parallel=True,
+            linear_method=linear_method,
         )
         self.attn = PagedAttentionWithRoPE(
             self.num_heads,
@@ -118,7 +119,11 @@ class InternLMAttention(nn.Module):
 
 class InternLMDecoderLayer(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -130,11 +135,13 @@ class InternLMDecoderLayer(nn.Module):
             bias=config.bias,
             rope_theta=rope_theta,
             max_position_embeddings=max_position_embeddings,
+            linear_method=linear_method,
         )
         self.mlp = InternLMMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
+            linear_method=linear_method,
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -171,7 +178,11 @@ class InternLMDecoderLayer(nn.Module):
 
 class InternLMModel(nn.Module):
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -183,7 +194,7 @@ class InternLMModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            InternLMDecoderLayer(config)
+            InternLMDecoderLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -216,17 +227,16 @@ class InternLMModel(nn.Module):
 
 class InternLMForCausalLM(nn.Module):
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
-        self.model = InternLMModel(config)
-        vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.lm_head = ColumnParallelLinear(
-            config.hidden_size,
-            vocab_size,
-            bias=False,
-            gather_output=False,
-        )
+        self.linear_method = linear_method
+        self.model = InternLMModel(config, linear_method)
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -243,69 +253,33 @@ class InternLMForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    _column_parallel_weights = [
-        "qkv_proj.weight", "gate_proj.weight", "up_proj.weight"
-    ]
-    _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
-
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        state_dict = self.state_dict()
-
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
-
-            if "embed_tokens" in name or "lm_head" in name:
-                param = state_dict[name]
-                load_padded_tensor_parallel_vocab(param, loaded_weight,
-                                                  tensor_model_parallel_rank)
-                continue
-
-            is_attention_weight = False
-            for stride_id, att_weight_name in enumerate(
-                ["q_proj", "k_proj", "v_proj"]):
-                if att_weight_name not in name:
-                    continue
-                param = state_dict[name.replace(att_weight_name, "qkv_proj")]
-                shard_size = param.shape[0] // 3
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_attention_weight = True
-                break
-            if is_attention_weight:
-                continue
-
-            is_gate_up_weight = False
-            for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                param = state_dict[name.replace(weight_name, "gate_up_proj")]
-                shard_size = param.shape[0] // 2
-                loaded_weight = loaded_weight[
-                    shard_size * tensor_model_parallel_rank:shard_size *
-                    (tensor_model_parallel_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_gate_up_weight = True
+                param = params_dict[name.replace(weight_name, param_name)]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
                 break
-            if is_gate_up_weight:
-                continue
-
-            param = state_dict[name]
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         self._column_parallel_weights,
-                                         self._row_parallel_weights,
-                                         tensor_model_parallel_rank)
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
