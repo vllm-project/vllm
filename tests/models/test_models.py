@@ -15,6 +15,7 @@ MODELS = [
     "EleutherAI/pythia-70m",
     "bigscience/bloom-560m",
     "mosaicml/mpt-7b",
+    "microsoft/phi-1_5",
 ]
 
 

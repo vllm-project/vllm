@@ -32,6 +32,7 @@ _MODEL_REGISTRY = {
     "MptForCausalLM": MPTForCausalLM,
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
+    "PhiForCausalLM": PhiForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
     "RWForCausalLM": FalconForCausalLM,
     "YiForCausalLM": YiForCausalLM,
