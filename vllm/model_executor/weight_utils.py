@@ -262,7 +262,7 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
             x = x[:]
         except IndexError:
             # IndexError happens when the tensor is empty.
-            # e.g. transformer.h.0.attn.masked_bias is empty in some gpt2 models.
+            # transformer.h.0.attn.masked_bias is empty in some gpt2 models.
             return torch.Tensor()
     return x
 
