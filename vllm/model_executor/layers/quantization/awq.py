@@ -6,7 +6,7 @@ from torch.nn.parameter import Parameter
 from vllm import quantization_ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
-from vllm.model_executor.layers.quantized_linear.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 
 class AWQConfig(QuantizationConfig):

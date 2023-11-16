@@ -1,8 +1,8 @@
 from typing import Type
 
-from vllm.model_executor.layers.quantized_linear.awq import AWQConfig
-from vllm.model_executor.layers.quantized_linear.squeezellm import SqueezeLLMConfig
-from vllm.model_executor.layers.quantized_linear.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 _QUANTIZATION_CONFIG_REGISTRY = {
     "awq": AWQConfig,
