@@ -31,20 +31,17 @@ class SqueezeLLMConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return f"SqueezeLLMConfig(weight_bits={self.weight_bits})"
 
-    @classmethod
-    def get_name(cls) -> str:
+    def get_name(self) -> str:
         return "squeezellm"
 
-    @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
         return [torch.half]
 
-    @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(self) -> int:
         return 70
 
-    @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    @staticmethod
+    def get_config_filenames() -> List[str]:
         return ["quant_config.json"]
 
     @classmethod

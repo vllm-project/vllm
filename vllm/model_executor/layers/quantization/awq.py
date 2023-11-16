@@ -36,21 +36,18 @@ class AWQConfig(QuantizationConfig):
                 f"group_size={self.group_size}, "
                 f"zero_point={self.zero_point})")
 
-    @classmethod
-    def get_name(cls) -> str:
+    def get_name(self) -> str:
         return "awq"
 
-    @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
         return [torch.half]
 
-    @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(self) -> int:
         # The AWQ kernel only supports Turing or newer GPUs.
         return 75
 
-    @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    @staticmethod
+    def get_config_filenames() -> List[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
             "quantize_config.json",  # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq  # pylint: disable=line-too-long
