@@ -1,5 +1,6 @@
 # coding=utf-8
-# Copied from https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py # pylint: disable=line-too-long
+# Copied from
+# https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py
 """A HuggingFace-style model configuration."""
 import warnings
 from typing import Any, Dict, Optional, Union
@@ -197,7 +198,7 @@ class MPTConfig(PretrainedConfig):
             )
         if self.embedding_fraction > 1 or self.embedding_fraction <= 0:
             raise ValueError(
-                'model.embedding_fraction must be between 0 (exclusive) and 1 (inclusive)!'
+                'model.embedding_fraction must be between 0 (exclusive) and 1 (inclusive)!'  # pylint: disable=line-too-long
             )
         if isinstance(self.logit_scale,
                       str) and self.logit_scale != 'inv_sqrt_d_model':
