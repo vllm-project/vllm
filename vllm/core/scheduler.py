@@ -300,13 +300,25 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_invalid_kv(self, seq: Sequence, seq_out: SequenceOutputs):
+        # always clear draft tokens
+        seq.data.draft_token_probs = []
+        
         invalid_token_cnt = max(len(seq.data.draft_token_probs) - len(seq_out.accepted_tokens), 0)
+        # if all the tokens are accepted
+        # add the last accept token to the output_token_ids
+        # TODO: how to handle the kv cache of the last token?
+        # TODO: we need to get the logprob of the last token
+        if invalid_token_cnt == 0:
+            last_token_id = seq_out.accepted_tokens[-1]
+            seq.append_token_id(last_token_id, {last_token_id: -1})
+            return
+
         # delete from logical table
         seq.delete_tailing_tokens(invalid_token_cnt)
         # delete from physical table
         self.block_manager.free_tailing_blocks(seq)
-        # clear draft tokens
-        seq.data.draft_token_probs = []
+        # update the output_token_ids with only accepted tokens
+        seq.data.output_token_ids = seq.data.output_token_ids[:-invalid_token_cnt]
     
     def free_finished_seq_groups(self) -> None:
         self.running = [

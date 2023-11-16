@@ -103,7 +103,7 @@ class SequenceData:
         draft_token_ids = self.get_draft_token_ids()
         assert self.output_token_ids[-len(draft_token_ids):] == draft_token_ids
         if len(draft_token_ids) == len(self.output_token_ids):
-            return self.prompt_token_ids[-1] + draft_token_ids
+            return [self.prompt_token_ids[-1]] + draft_token_ids
         return self.output_token_ids[-len(draft_token_ids) - 1:]
     
     def __repr__(self) -> str:
@@ -400,6 +400,7 @@ class SequenceOutputs:
         logprobs: The logprobs of the output token.
             (Token id -> logP(x_i+1 | x_0, ..., x_i))
         accepted_tokens: The tokens that are accepted by the speculative decoding.
+        probdis: The probability distribution of the output token. It is used in speculative decoding.
     """
 
     def __init__(
@@ -407,12 +408,14 @@ class SequenceOutputs:
         parent_seq_id: int,
         output_token: Union[int, List[int]],
         logprobs: Union[Dict[int, float], List[Dict[int, float]]],
+        probdis: Optional[List[Dict[int, torch.Tensor]]] = None,
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
         
         self.accepted_tokens = None
+        self.probdis = probdis
 
     def __repr__(self) -> str:
         return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
@@ -434,9 +437,11 @@ class SequenceGroupOutputs:
         self,
         samples: List[SequenceOutputs],
         prompt_logprobs: Optional[PromptLogprobs],
+        prompt_probdis: Optional[List[Dict[int, torch.Tensor]]] = None 
     ) -> None:
         self.samples = samples
         self.prompt_logprobs = prompt_logprobs
+        self.prompt_probdis = prompt_probdis
 
     def __repr__(self) -> str:
         return (f"SequenceGroupOutputs(samples={self.samples}, "

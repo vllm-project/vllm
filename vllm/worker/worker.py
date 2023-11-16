@@ -242,7 +242,7 @@ class Worker:
             seq = seq_group_metadata.seq_data[seq_ids[0]]
             if len(seq.draft_token_probs) > 0:
                 assert num_seqs == 1
-                selected_token_end_idx = selected_token_start_idx + len(seq.draft_token_probs)
+                selected_token_end_idx = selected_token_start_idx + len(seq.draft_token_probs) + 1
             else:
                 selected_token_end_idx = selected_token_start_idx + num_seqs
             selected_token_indices.extend(
@@ -402,6 +402,7 @@ class Worker:
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
 
+        print("========Start Exec Model=========")
         # Execute the model.
         output = self.model(
             input_ids=input_tokens,
@@ -410,6 +411,7 @@ class Worker:
             input_metadata=input_metadata,
             cache_events=cache_events,
         )
+        print("========End Exec Model=========")
         return output
 
 

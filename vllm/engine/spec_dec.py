@@ -110,14 +110,23 @@ class SpecDecWorker(Worker):
                 seq_group_metadata.block_tables[seq_id] = self.scheduler.block_manager.get_block_table(seqs[seq_id])
                 
             logger.info(f"Seq draft tokens: {seq_data.get_draft_token_ids()}")
-            # logger.info(f"Seq draft prob: {seq.draft_token_probs}")
+            logger.info(f"All tokens: {seq_data.get_token_ids()}")
 
     @staticmethod
-    def _extract_target_prob_dis(seq_grou_output: SequenceGroupOutputs,
-                                 token_id: int):
-        # TODO: implement this
-        vocab_size = 50272
-        return torch.rand(1, vocab_size, device='cuda').squeeze(0)
+    def _extract_target_prob_dis(seq_group_output: SequenceGroupOutputs,
+                                 token_id: int,
+                                 pos: int,
+                                 draft_len: int):
+        # prefill phase
+        if seq_group_output.prompt_probdis:
+            prompt_dis = seq_group_output.prompt_probdis
+            draft_dis = prompt_dis[-draft_len-1:]
+            return list(draft_dis[pos].values())[0].cuda()
+        
+        # generation phase
+        sample_prob = seq_group_output.samples[0].probs
+        dis = list(sample_prob[pos].values())[0]
+        return dis.cuda()
 
     # Accept draft tokens based on draft probabilities and target probabilities
     # The implementation strictly follows rejection sampling:
@@ -130,6 +139,7 @@ class SpecDecWorker(Worker):
                target_outputs: List[SamplerOutput],
                scheduler_outputs: SchedulerOutputs):
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
+        assert len(scheduled_seq_groups) == len(target_outputs)
         for seq_group, seq_group_output in zip(scheduled_seq_groups, target_outputs):
             assert seq_group.num_seqs() == 1
             sample: SequenceOutputs = seq_group_output.samples[0]
@@ -144,7 +154,7 @@ class SpecDecWorker(Worker):
                 token_id = list(token_prob.keys())[0]
                 draft_prob_dis = cur_seq.get_draft_probdis(token_id, i)
                 target_prob_dis = SpecDecWorker._extract_target_prob_dis(
-                    seq_group_output, token_id)
+                    seq_group_output, token_id, i, len(cur_seq.data.draft_token_probs))
                 p, q = draft_prob_dis[token_id].item(
                 ), target_prob_dis[token_id].item()
                 r = torch.rand(1).item()
@@ -154,6 +164,7 @@ class SpecDecWorker(Worker):
                 else:  # reject and resample
                     new_dis = torch.clamp(
                         target_prob_dis - draft_prob_dis, min=0)
+                    print(draft_prob_dis)
                     logger.info((draft_prob_dis - target_prob_dis).max())
                     new_dis = new_dis / new_dis.sum(dim=-1, keepdim=True)
                     next_token = torch.multinomial(new_dis, num_samples=1)
@@ -161,8 +172,12 @@ class SpecDecWorker(Worker):
 
             # all proposed tokens are accepted
             if len(accepted_token_ids) == len(cur_seq.data.draft_token_probs):
-                accepted_token_ids.append(sample.output_token)
-            logger.info(f"accept tokens: {accepted_token_ids}")
+                if isinstance(sample.output_token, int):
+                    last_token = sample.output_token
+                else:
+                    last_token = sample.output_token[-1].item()
+                accepted_token_ids.append(last_token)
+            logger.info(f"accept tokens: {accepted_token_ids}, {sample.output_token}")
             sample.accepted_tokens = accepted_token_ids
 
 
