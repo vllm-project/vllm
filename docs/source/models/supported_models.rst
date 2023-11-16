@@ -20,7 +20,7 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
     - :code:`baichuan-inc/Baichuan-7B`, :code:`baichuan-inc/Baichuan-13B-Chat`, etc.
-  * - :code: `ChatGLMModel`
+  * - :code:`ChatGLMModel`
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
   * - :code:`BloomForCausalLM`
@@ -56,13 +56,13 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.
-  * - :code: `PhiForCausalLM`
+  * - :code:`PhiForCausalLM`
     - Phi-1.5
     - :code:`microsoft/phi-1_5`, etc.
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
-  * - :code: `YiForCausalLM`
+  * - :code:`YiForCausalLM`
     - Yi
     - :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
 
