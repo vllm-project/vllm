@@ -164,15 +164,28 @@ class PagedAttention(nn.Module):
             output = out.view_as(query)
         else:
             # Decoding run.
-            output = _paged_attention(
-                query,
-                key_cache,
-                value_cache,
-                input_metadata,
-                self.head_mapping,
-                self.scale,
-                self.alibi_slopes,
-            )
+            if input_metadata.draft_lens is not None:
+                output = _paged_attention(
+                    query,
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                    self.head_mapping,
+                    self.scale,
+                    self.alibi_slopes,
+                )
+            else:
+                # Normal single query run
+                # Compute the attention op for generation tokens.
+                output = _paged_attention(
+                    query,
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                    self.head_mapping,
+                    self.scale,
+                    self.alibi_slopes,
+                )
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
@@ -282,29 +295,62 @@ def _paged_attention(
     return output
 
 def _multi_query_paged_attention(
-    self,
+    output: torch.Tensor,
     query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     input_metadata: InputMetadata,
-    cache_event: Optional[torch.cuda.Event],
-) -> torch.Tensor:
-    """ PagedAttention forward pass for multiple query vectors.
+    max_num_query: int,
+    head_mapping: torch.Tensor,
+    scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+) -> None:
+    """PagedAttention for the generation tokens assuming multiple draft tokens.
+    Assumes that the key and value have already been cached.
 
     Args:
-        query: shape = [batch_size, seq_len, num_query, num_heads * head_size]
-        key: shape = [batch_size, seq_len, num_query, num_kv_heads * head_size]
-        value: shape = [batch_size, seq_len, num_query, num_kv_heads * head_size]
+        output: shape = [num_generation_tokens * max_num_query, num_heads, head_size]
+        query: shape = [num_generation_tokens * max_num_query, num_heads, head_size]
         key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
             block_size, x]
         value_cache: shape = [num_blocks, num_kv_heads, head_size,
             block_size]
         input_metadata: metadata for paged attention.
-        cache_event: event to wait for the cache operations to finish.
-
-    Returns:
-        shape = [batch_size, seq_len, num_query, num_heads * head_size]
+        alibi_slopes: shape = [num_heads]
     """
-    return torch.zeros(query.shape)
+    block_size = value_cache.shape[3]
+    num_seqs = input_metadata.context_lens.shape[0]
+    assert num_seqs * max_num_query == query.shape[0]
+
+    # duplicate block tables
+    block_tables = torch.repeat_interleave(input_metadata.block_tables,
+                                           max_num_query,
+                                           dim=0)
+
+    # interpolate context lens
+    context_lens = torch.repeat_interleave(input_metadata.context_lens,
+                                           max_num_query,
+                                           dim=0)
+    context_lens += torch.arange(0, max_num_query).cuda().repeat(num_seqs)
+
+    # TODO vectorize
+    for i in range(context_lens.shape[0]):
+        if input_metadata.draft_lens[i // max_num_query] <= i % max_num_query:
+            context_lens[i] = -1
+
+    # TODO add grid stride over sequences to kernel to increase cache locality,
+    # in effect enabling pseudo matrix blocking
+    # TODO exit from kernel early if seq_len is -1
+    ops.paged_attention_v1(
+        output,
+        query,
+        key_cache,
+        value_cache,
+        head_mapping,
+        scale,
+        block_tables,
+        context_lens,
+        block_size,
+        input_metadata.max_context_len,
+        alibi_slopes,
+    )

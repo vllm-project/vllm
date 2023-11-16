@@ -96,7 +96,7 @@ def ref_single_query_cached_kv_attention(
             alibi_bias = (position_ids - context_len + 1).float()
             alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
                 1, 1, -1)
-                
+
         out = ref_masked_attention(q, keys, values, scale, alibi_bias)
         out = out.view(num_query_heads, head_size)
         output[i].copy_(out, non_blocking=True)
@@ -257,13 +257,13 @@ def ref_multi_query_cached_kv_attention(
 
     block_tables = block_tables.cpu().tolist()
     context_lens = context_lens.cpu().tolist()
-    query_lens = num_query.cpu().tolist()
+    query_lens = num_query
     for i in range(num_seqs):
         block_table = block_tables[i]
         context_len = int(context_lens[i])
 
         for query_num in range(query_lens[i]):
-            q = query[i, query_num].unsqueeze(0)
+            q = query[i, query_num].reshape(1, num_heads, head_size)
 
             keys = []
             values = []
@@ -290,13 +290,13 @@ def ref_multi_query_cached_kv_attention(
             values = torch.stack(values, dim=0)
 
             out = ref_masked_attention(q, keys, values, scale)
-            out = out.view(num_heads, head_size)
+            out = out.view(-1)
             output[i, query_num].copy_(out, non_blocking=True)
 
 
 @pytest.mark.parametrize("num_seqs", [2])
 @pytest.mark.parametrize("max_num_query", [8])
-@pytest.mark.parametrize("num_heads", [(32,)])
+@pytest.mark.parametrize("num_heads", [(32, )])
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("dtype", [torch.half])
@@ -327,14 +327,16 @@ def test_multi_query_cached_kv_attention(
 
     # maximum number of draft tokens are included despite not necessarily needing.
     # Additionally, kernel expects the tensor sliced in this odd way.
-    query = qkv[:, :, :num_heads*head_size]
-    key = qkv[:, :, num_heads*head_size:2*num_heads*head_size]
-    value = qkv[:, :, 2*num_heads*head_size:]
+    query = qkv[:, :, :num_heads * head_size]
+    key = qkv[:, :, num_heads * head_size:2 * num_heads * head_size]
+    value = qkv[:, :, 2 * num_heads * head_size:]
 
-    context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
-    context_lens[-1] = MAX_SEQ_LEN
+    context_lens = [random.randint(1, 100) for _ in range(num_seqs)]
+    context_lens[-1] = 100
     max_context_len = max(context_lens)
-    context_lens_tensor = torch.tensor(context_lens, dtype=torch.int, device="cuda")
+    context_lens_tensor = torch.tensor(context_lens,
+                                       dtype=torch.int,
+                                       device="cuda")
 
     query_lens = [random.randint(1, max_num_query) for _ in range(num_seqs)]
     query_lens[-1] = max_num_query
@@ -348,7 +350,9 @@ def test_multi_query_cached_kv_attention(
             for _ in range(max_num_blocks_per_seq)
         ]
         block_tables_tensor.append(block_table)
-    block_tables_tensor = torch.tensor(block_tables_tensor, dtype=torch.int, device="cuda")
+    block_tables_tensor = torch.tensor(block_tables_tensor,
+                                       dtype=torch.int,
+                                       device="cuda")
 
     # create slot mapping
     slot_mapping = []
@@ -359,16 +363,17 @@ def test_multi_query_cached_kv_attention(
             abs_position = context_lens[i] + j
             logical_block_idx = abs_position // block_size
             logical_block_offset = abs_position % block_size
+            #__import__('pdb').set_trace()
             phys_block_idx = block_tables_tensor[i][logical_block_idx]
             slot_mapping[i][j] = phys_block_idx * block_size + logical_block_offset
-    slot_mapping_tensor = torch.tensor(slot_mapping, dtype=torch.int, device="cuda")
+    slot_mapping_tensor = torch.tensor(slot_mapping,
+                                       dtype=torch.int64,
+                                       device="cuda")
 
     key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
                                                 num_heads, head_size, dtype,
                                                 seed)
     key_cache, value_cache = key_caches[0], value_caches[0]
-
-    num_seqs, _, num_heads, head_size = query.shape
 
     # need for block_tables, slot_mapping
     input_metadata = InputMetadata(
@@ -385,8 +390,9 @@ def test_multi_query_cached_kv_attention(
         draft_lens=query_lens)
 
     attn = PagedAttention(num_heads, head_size, scale)
-    output = attn.forward(output, query, key, value, key_cache,
-                            value_cache, input_metadata, None)
+    __import__('pdb').set_trace()
+    output = attn.forward(query, key, value, key_cache, value_cache,
+                          input_metadata, None)
     assert output.shape == query.shape
 
     ref_output = torch.zeros_like(query)
@@ -403,6 +409,7 @@ def test_multi_query_cached_kv_attention(
         scale,
     )
 
+    __import__('pdb').set_trace()
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
