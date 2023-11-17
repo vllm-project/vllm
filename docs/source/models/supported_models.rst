@@ -74,7 +74,7 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
     
     To use model from www.modelscope.cn 
     .. code-block:: shell
-      export MODELS_FROM_MODELSCOPE=True
+      export FROM_MODELSCOPE=True
       
     .. code-block:: python
         from vllm import LLM

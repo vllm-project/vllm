@@ -13,7 +13,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Use model from www.modelscope.cn
-# MODELS_FROM_MODELSCOPE=True python examples/offline_inference.py \
+# FROM_MODELSCOPE=True python examples/offline_inference.py \
 # --model="damo/nlp_gpt2_text-generation_english-base" \
 # --revision="v1.0.0" --from_modelscope
 if __name__ == "__main__":

@@ -57,7 +57,7 @@ def main(args: argparse.Namespace):
 
 
 # test model from modelscope:
-# MODELS_FROM_MODELSCOPE=True python examples/llm_engine_example.py \
+# FROM_MODELSCOPE=True python examples/llm_engine_example.py \
 # --model="damo/nlp_gpt2_text-generation_english-base" \
 # --revision="v1.0.0"
 if __name__ == "__main__":
