@@ -62,31 +62,34 @@ Next, you need to rewrite the :code:`forward` methods of your model by following
     +) -> SamplerOutput:
 
 3. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
-4. Replace the attention operation with either :code:`GPTPagedAttention` or :code:`GPTNeoXPagedAttention`, depending on the model's architecture.
+4. Replace the attention operation with either :code:`PagedAttention`, :code:`PagedAttentionWithRoPE`, or :code:`PagedAttentionWithALiBi` depending on the model's architecture.
 
 .. note::
     Currently, vLLM supports the basic multi-head attention mechanism and its variant with rotary positional embeddings.
     If your model employs a different attention mechanism, you will need to implement a new attention layer in vLLM.
 
 
-3. (Optional) Implement tensor parallelism support
---------------------------------------------------
+3. (Optional) Implement tensor parallelism and quantization support
+-------------------------------------------------------------------
 
 If your model is too large to fit into a single GPU, you can use tensor parallelism to manage it.
 To do this, substitute your model's linear and embedding layers with their tensor-parallel versions.
-For the embedding layer, you can simply replace :code:`nn.Embedding` with :code:`VocabParallelEmbedding`.
-When it comes to the linear layers, you should use either :code:`RowParallelLinear` or :code:`ColumnParallelLinear`.
-Typically, :code:`ColumnParallelLinear` is used for QKV linear layers and the first linear layers of the MLP blocks.
-For the remaining linear layers, :code:`RowParallelLinear` is used.
+For the embedding layer, you can simply replace :code:`nn.Embedding` with :code:`VocabParallelEmbedding`. For the output LM head, you can use :code:`ParallelLMHead`.
+When it comes to the linear layers, we provide the following options to parallelize them:
 
+* :code:`ReplicatedLinear`: Replicates the inputs and weights across multiple GPUs. No memory saving.
+* :code:`RowParallelLinear`: The input tensor is partitioned along the hidden dimension. The weight matrix is partitioned along the rows (input dimension). An *all-reduce* operation is performed after the matrix multiplication to reduce the results. Typically used for the second FFN layer and the output linear transformation of the attention layer.
+* :code:`ColumnParallelLinear`: The input tensor is replicated. The weight matrix is partitioned along the columns (output dimension). The result is partitioned along the column dimension. Typically used for the first FFN layer and the separated QKV transformation of the attention layer in the original Transformer.
+* :code:`MergedColumnParallelLinear`: Column-parallel linear that merges multiple `ColumnParallelLinear` operators. Typically used for the first FFN layer with weighted activation functions (e.g., SiLU). This class handles the sharded weight loading logic of multiple weight matrices.
+* :code:`QKVParallelLinear`: Parallel linear layer for the query, key, and value projections of the multi-head and grouped-query attention mechanisms. When number of key/value heads are less than the world size, this class replicates the key/value heads properly. This class handles the weight loading and replication of the weight matrices.
+
+Note that all the linear layers above take `linear_method` as an input. vLLM will set this parameter according to different quantization schemes to support weight quantization.
 
 4. Implement the weight loading logic
 -------------------------------------
 
 You now need to implement the :code:`load_weights` method in your :code:`*ForCausalLM` class.
-This method should load the weights from the HuggingFace's checkpoint file and assign them to the corresponding layers in your model.
-While the process is straightforward for most layers, the tensor-parallel layers necessitate some additional care as their weights should be partitioned to multiple GPUs.
-
+This method should load the weights from the HuggingFace's checkpoint file and assign them to the corresponding layers in your model. Specifically, for `MergedColumnParallelLinear` and `QKVParallelLinear` layers, if the original model has separated weight matrices, you need to load the different parts separately.
 
 5. Register your model
 ----------------------
