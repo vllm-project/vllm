@@ -1,0 +1,135 @@
+---
+MainSourceFile:  '/home/majumder/vllm_proto/csrc/csrc/attention/dpct_output/attention_dtypes.h'
+Replacements:
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/attention/attention_dtypes.h'
+    Offset:          14
+    Length:          32
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n#include \"attention_generic.dp.hpp\""
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/attention/attention_dtypes.h'
+    Offset:          47
+    Length:          28
+    ReplacementText: '#include "dtype_float16.dp.hpp"'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/attention/attention_dtypes.h'
+    Offset:          76
+    Length:          28
+    ReplacementText: '#include "dtype_float32.dp.hpp"'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/attention/attention_dtypes.h'
+    Offset:          105
+    Length:          29
+    ReplacementText: '#include "dtype_bfloat16.dp.hpp"'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+MainSourceFilesDigest:
+  - MainSourceFile:  '/home/majumder/vllm_proto/csrc/csrc/attention/attention_dtypes.h'
+    Digest:          ffb3fa108d0c1615b361d1f958450a71
+DpctVersion:     2023.1.0
+MainHelperFileName: dpct
+USMLevel:        ''
+FeatureMap:
+  device.hpp:
+    typedef_queue_ptr:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/attention/attention_kernels.cu'
+      FeatureName:     queue_ptr
+      SubFeatureMap:   {}
+  dpct.hpp:
+    dpct_compatibility_temp:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/attention/dtype_bfloat16.cuh'
+        - '/home/majumder/vllm_proto/csrc/csrc/attention/dtype_float16.cuh'
+      FeatureName:     DPCT_COMPATIBILITY_TEMP
+      SubFeatureMap:   {}
+  util.hpp:
+    permute_sub_group_by_xor:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/attention/attention_kernels.cu'
+        - '/home/majumder/vllm_proto/csrc/csrc/attention/attention_utils.cuh'
+      FeatureName:     permute_sub_group_by_xor
+      SubFeatureMap:   {}
+    select_from_sub_group:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/attention/attention_kernels.cu'
+      FeatureName:     select_from_sub_group
+      SubFeatureMap:   {}
+CompileTargets:  {}
+OptionMap:
+  AnalysisScopePath:
+    Value:           '/home/majumder/vllm_proto/csrc/csrc/attention'
+    Specified:       false
+  AsyncHandler:
+    Value:           'false'
+    Specified:       false
+  CommentsEnabled:
+    Value:           'false'
+    Specified:       false
+  CompilationsDir:
+    Value:           ''
+    Specified:       false
+  CtadEnabled:
+    Value:           'false'
+    Specified:       false
+  CustomHelperFileName:
+    Value:           dpct
+    Specified:       false
+  EnablepProfiling:
+    Value:           'false'
+    Specified:       false
+  ExperimentalFlag:
+    Value:           '0'
+    Specified:       false
+  ExplicitClNamespace:
+    Value:           'false'
+    Specified:       false
+  ExplicitNamespace:
+    Value:           '20'
+    Specified:       false
+  ExtensionDDFlag:
+    Value:           '0'
+    Specified:       false
+  ExtensionDEFlag:
+    Value:           '4294967295'
+    Specified:       false
+  NDRangeDim:
+    Value:           '3'
+    Specified:       false
+  NoDRYPattern:
+    Value:           'false'
+    Specified:       false
+  OptimizeMigration:
+    Value:           'false'
+    Specified:       false
+  ProcessAll:
+    Value:           'false'
+    Specified:       false
+  RuleFile:
+    Value:           ''
+    Specified:       false
+  SyclNamedLambda:
+    Value:           'false'
+    Specified:       false
+  UsmLevel:
+    Value:           '1'
+    Specified:       false
+...

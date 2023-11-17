@@ -1,0 +1,1113 @@
+---
+MainSourceFile:  MainSrcFiles_placehold
+Replacements:
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          0
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          133
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          144
+    Length:          15
+    ReplacementText: __dpct_inline__
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          237
+    Length:          16
+    ReplacementText: 'sycl::exp((float) -x)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          288
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          453
+    Length:          0
+    ReplacementText: ",\n  const sycl::nd_item<3> &item_ct1"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          485
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          518
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          547
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          954
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          964
+    Length:          10
+    ReplacementText: 1, 1, num_tokens
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          979
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          1018
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          1459
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          1619
+    Length:          0
+    ReplacementText: ",\n  const sycl::nd_item<3> &item_ct1"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          1651
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          1684
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          1713
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          2176
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          2186
+    Length:          10
+    ReplacementText: 1, 1, num_tokens
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          2268
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          2366
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          3234
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          3245
+    Length:          15
+    ReplacementText: __dpct_inline__
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          3480
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Offset:          3491
+    Length:          15
+    ReplacementText: __dpct_inline__
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          0
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          371
+    Length:          14
+    ReplacementText: 'dpct::memcpy_direction'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          582
+    Length:          24
+    ReplacementText: 'dpct::device_to_device'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          686
+    Length:          22
+    ReplacementText: 'dpct::device_to_host'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          788
+    Length:          22
+    ReplacementText: 'dpct::host_to_device'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          1034
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          1644
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          1808
+    Length:          0
+    ReplacementText: ",\n  const sycl::nd_item<3> &item_ct1"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          1836
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          1871
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(1)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          2326
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          2365
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          2543
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          2582
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          4603
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          4613
+    Length:          21
+    ReplacementText: 1, num_pairs, num_layers
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          4639
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          4692
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          5150
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          5752
+    Length:          0
+    ReplacementText: ",\n  const sycl::nd_item<3> &item_ct1"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          5784
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          6092
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          6117
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          7752
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          7762
+    Length:          10
+    ReplacementText: 1, 1, num_tokens
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          7777
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          7835
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          8462
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          9069
+    Length:          0
+    ReplacementText: ",\n  const sycl::nd_item<3> &item_ct1"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          9099
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          9330
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          9364
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          10446
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          11081
+    Length:          0
+    ReplacementText: ",\n    const sycl::nd_item<3> &item_ct1"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          11111
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          11482
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          11518
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          14129
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          14139
+    Length:          10
+    ReplacementText: 1, 1, num_tokens
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          14154
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Offset:          14212
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+    Offset:          0
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+    Offset:          122
+    Length:          22
+    ReplacementText: 'device = dpct::dev_mgr::instance().current_device_id()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+    Offset:          197
+    Length:          0
+    ReplacementText: "    /*\n    DPCT1076:2: The device attribute was not recognized. You may need to adjust the code.\n    */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+    Offset:          244
+    Length:          14
+    ReplacementText: int
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          0
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          93
+    Length:          30
+    ReplacementText: '#include "reduction_utils.dp.hpp"'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          218
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          508
+    Length:          0
+    ReplacementText: ",\n  const sycl::nd_item<3> &item_ct1,\n  float &s_variance"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          514
+    Length:          28
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          586
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          625
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          673
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          785
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          822
+    Length:          40
+    ReplacementText: 'sycl::rsqrt(variance / hidden_size + epsilon)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          870
+    Length:          15
+    ReplacementText: "/*\n  DPCT1065:1: Consider replacing sycl::nd_item::barrier() with sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better performance if there is no access to global memory.\n  */\n  item_ct1.barrier()"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          905
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          944
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          986
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          1027
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          1397
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          1407
+    Length:          10
+    ReplacementText: 1, 1, num_tokens
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          1422
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Offset:          1471
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          0
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          161
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          970
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          1596
+    Length:          0
+    ReplacementText: ",\n  const sycl::nd_item<3> &item_ct1"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          1677
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          1972
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          1998
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          2387
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          2413
+    Length:          10
+    ReplacementText: 'item_ct1.get_local_range(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          3477
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          3487
+    Length:          10
+    ReplacementText: 1, 1, num_tokens
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          3502
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Offset:          3562
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+MainSourceFilesDigest:
+  - MainSourceFile:  '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+    Digest:          17d16ab288bc35c5b935267f1e8d6eb2
+  - MainSourceFile:  '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+    Digest:          8586c9fe4a686ac841d4ec59ae43821c
+  - MainSourceFile:  '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+    Digest:          935354334a96d7aa133b80a28c8b27d5
+  - MainSourceFile:  '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+    Digest:          b74b4c7cc27c8cd61b694105c64964f9
+  - MainSourceFile:  '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+    Digest:          c9568a2277288e7a1e4c15f54b6acffc
+DpctVersion:     2023.1.0
+MainHelperFileName: dpct
+USMLevel:        ''
+FeatureMap:
+  device.hpp:
+    dev_mgr:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+      FeatureName:     dev_mgr
+      SubFeatureMap:
+        dev_mgr_1:
+          IsCalled:        true
+          CallerSrcFiles:
+            - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+          FeatureName:     dev_mgr
+          SubFeatureMap:   {}
+        dev_mgr_2:
+          IsCalled:        true
+          CallerSrcFiles:
+            - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+          FeatureName:     dev_mgr
+          SubFeatureMap:   {}
+        dev_mgr_3:
+          IsCalled:        true
+          CallerSrcFiles:
+            - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+          FeatureName:     dev_mgr
+          SubFeatureMap:   {}
+        dev_mgr_4:
+          IsCalled:        true
+          CallerSrcFiles:
+            - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+          FeatureName:     dev_mgr
+          SubFeatureMap:   {}
+        dev_mgr_current_device_id:
+          IsCalled:        true
+          CallerSrcFiles:
+            - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+          FeatureName:     'dev_mgr::current_device_id'
+          SubFeatureMap:   {}
+    device_ext:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+      FeatureName:     device_ext
+      SubFeatureMap:
+        device_ext_1:
+          IsCalled:        true
+          CallerSrcFiles:
+            - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+          FeatureName:     device_ext
+          SubFeatureMap:   {}
+        device_ext_2:
+          IsCalled:        true
+          CallerSrcFiles:
+            - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+          FeatureName:     device_ext
+          SubFeatureMap:   {}
+        device_ext_create_queue:
+          IsCalled:        true
+          CallerSrcFiles:
+            - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+          FeatureName:     'device_ext::create_queue'
+          SubFeatureMap:   {}
+        device_ext_get_default_property_list_for_queue:
+          IsCalled:        true
+          CallerSrcFiles:
+            - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+          FeatureName:     device_ext_get_default_property_list_for_queue
+          SubFeatureMap:   {}
+    exception_handler:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+      FeatureName:     exception_handler
+      SubFeatureMap:   {}
+    get_tid:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/cuda_utils_kernels.cu'
+      FeatureName:     get_tid
+      SubFeatureMap:   {}
+    typedef_queue_ptr:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+        - '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+        - '/home/majumder/vllm_proto/csrc/csrc/layernorm_kernels.cu'
+        - '/home/majumder/vllm_proto/csrc/csrc/pos_encoding_kernels.cu'
+      FeatureName:     queue_ptr
+      SubFeatureMap:   {}
+  dpct.hpp:
+    dpct_align_and_inline:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/activation_kernels.cu'
+      FeatureName:     '__dpct_align__(n) and __dpct_inline__'
+      SubFeatureMap:   {}
+    non_local_include_dependency:
+      IsCalled:        true
+      CallerSrcFiles:
+        - ''
+      FeatureName:     ''
+      SubFeatureMap:   {}
+  memory.hpp:
+    memcpy_direction:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/cache_kernels.cu'
+      FeatureName:     memcpy_direction
+      SubFeatureMap:   {}
+CompileTargets:  {}
+OptionMap:
+  AnalysisScopePath:
+    Value:           '/home/majumder/vllm_proto/csrc/csrc'
+    Specified:       false
+  AsyncHandler:
+    Value:           'false'
+    Specified:       false
+  CommentsEnabled:
+    Value:           'false'
+    Specified:       false
+  CompilationsDir:
+    Value:           ''
+    Specified:       false
+  CtadEnabled:
+    Value:           'false'
+    Specified:       false
+  CustomHelperFileName:
+    Value:           dpct
+    Specified:       false
+  EnablepProfiling:
+    Value:           'false'
+    Specified:       false
+  ExperimentalFlag:
+    Value:           '0'
+    Specified:       false
+  ExplicitClNamespace:
+    Value:           'false'
+    Specified:       false
+  ExplicitNamespace:
+    Value:           '20'
+    Specified:       false
+  ExtensionDDFlag:
+    Value:           '0'
+    Specified:       false
+  ExtensionDEFlag:
+    Value:           '4294967295'
+    Specified:       false
+  NDRangeDim:
+    Value:           '3'
+    Specified:       false
+  NoDRYPattern:
+    Value:           'false'
+    Specified:       false
+  OptimizeMigration:
+    Value:           'false'
+    Specified:       false
+  ProcessAll:
+    Value:           'false'
+    Specified:       false
+  RuleFile:
+    Value:           ''
+    Specified:       false
+  SyclNamedLambda:
+    Value:           'false'
+    Specified:       false
+  UsmLevel:
+    Value:           '1'
+    Specified:       false
+...

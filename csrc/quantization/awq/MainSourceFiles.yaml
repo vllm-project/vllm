@@ -1,0 +1,415 @@
+---
+MainSourceFile:  MainSrcFiles_placehold
+Replacements:
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          310
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          372
+    Length:          25
+    ReplacementText: '#include "dequantize.dp.hpp"'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          399
+    Length:          23
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          496
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          507
+    Length:          9
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          544
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          558
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          679
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          695
+    Length:          22
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          777
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          820
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          904
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          941
+    Length:          13
+    ReplacementText: DPCT_COMPATIBILITY_TEMP
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          959
+    Length:          13
+    ReplacementText: DPCT_COMPATIBILITY_TEMP
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          14254
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          14270
+    Length:          22
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          14351
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          14394
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          14478
+    Length:          4
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          14515
+    Length:          13
+    ReplacementText: DPCT_COMPATIBILITY_TEMP
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          14533
+    Length:          13
+    ReplacementText: DPCT_COMPATIBILITY_TEMP
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          29635
+    Length:          12
+    ReplacementText: 'dpct::queue_ptr'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          29795
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          29811
+    Length:          58
+    ReplacementText: '1, 1, (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          29959
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          29982
+    Length:          5
+    ReplacementText: 1, 2, 32
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          29990
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:0: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          29998
+    Length:          232
+    ReplacementText: "stream->parallel_for(\n          sycl::nd_range<3>(num_blocks * threads_per_block, threads_per_block), \n          [=](sycl::nd_item<3> item_ct1) {\n            vllm::awq::gemm_forward_4bit_cuda_m16n128k32(group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);\n          });"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          30230
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          30345
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          30361
+    Length:          62
+    ReplacementText: '1, 1, 1 * (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          30518
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          30541
+    Length:          5
+    ReplacementText: 1, 2, 32
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          30549
+    Length:          0
+    ReplacementText: "        /*\n        DPCT1049:1: The work-group size passed to the SYCL kernel may exceed the limit. To get the device limit, query info::device::max_work_group_size. Adjust the work-group size if needed.\n        */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          30557
+    Length:          231
+    ReplacementText: "stream->parallel_for(\n          sycl::nd_range<3>(num_blocks * threads_per_block, threads_per_block), \n          [=](sycl::nd_item<3> item_ct1) {\n            vllm::awq::gemm_forward_4bit_cuda_m16n64k32(group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);\n          });"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: true
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Offset:          30788
+    Length:          1
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+MainSourceFilesDigest:
+  - MainSourceFile:  '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+    Digest:          d1f468fd3dc8e324e77eaaa586504812
+DpctVersion:     2023.1.0
+MainHelperFileName: dpct
+USMLevel:        ''
+FeatureMap:
+  device.hpp:
+    typedef_queue_ptr:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+      FeatureName:     queue_ptr
+      SubFeatureMap:   {}
+  dpct.hpp:
+    dpct_compatibility_temp:
+      IsCalled:        true
+      CallerSrcFiles:
+        - '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/dequantize.cuh'
+        - '/home/majumder/vllm_proto/csrc/csrc/quantization/awq/gemm_kernels.cu'
+      FeatureName:     DPCT_COMPATIBILITY_TEMP
+      SubFeatureMap:   {}
+    non_local_include_dependency:
+      IsCalled:        true
+      CallerSrcFiles:
+        - ''
+      FeatureName:     ''
+      SubFeatureMap:   {}
+CompileTargets:  {}
+OptionMap:
+  AnalysisScopePath:
+    Value:           '/home/majumder/vllm_proto/csrc/csrc/quantization/awq'
+    Specified:       false
+  AsyncHandler:
+    Value:           'false'
+    Specified:       false
+  CommentsEnabled:
+    Value:           'false'
+    Specified:       false
+  CompilationsDir:
+    Value:           ''
+    Specified:       false
+  CtadEnabled:
+    Value:           'false'
+    Specified:       false
+  CustomHelperFileName:
+    Value:           dpct
+    Specified:       false
+  EnablepProfiling:
+    Value:           'false'
+    Specified:       false
+  ExperimentalFlag:
+    Value:           '0'
+    Specified:       false
+  ExplicitClNamespace:
+    Value:           'false'
+    Specified:       false
+  ExplicitNamespace:
+    Value:           '20'
+    Specified:       false
+  ExtensionDDFlag:
+    Value:           '0'
+    Specified:       false
+  ExtensionDEFlag:
+    Value:           '4294967295'
+    Specified:       false
+  NDRangeDim:
+    Value:           '3'
+    Specified:       false
+  NoDRYPattern:
+    Value:           'false'
+    Specified:       false
+  OptimizeMigration:
+    Value:           'false'
+    Specified:       false
+  ProcessAll:
+    Value:           'false'
+    Specified:       false
+  RuleFile:
+    Value:           ''
+    Specified:       false
+  SyclNamedLambda:
+    Value:           'false'
+    Specified:       false
+  UsmLevel:
+    Value:           '1'
+    Specified:       false
+...

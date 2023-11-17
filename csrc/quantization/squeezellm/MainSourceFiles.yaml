@@ -1,0 +1,500 @@
+---
+MainSourceFile:  MainSrcFiles_placehold
+Replacements:
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          0
+    Length:          0
+    ReplacementText: "#include <sycl/sycl.hpp>\n#include <dpct/dpct.hpp>\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          49
+    Length:          18
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          67
+    Length:          26
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          93
+    Length:          23
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          298
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          435
+    Length:          11
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          480
+    Length:          5
+    ReplacementText: 'sycl::half2'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          552
+    Length:          5
+    ReplacementText: 'sycl::half2'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          588
+    Length:          6
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          688
+    Length:          0
+    ReplacementText: ",\n    const sycl::nd_item<3> &item_ct1,\n    sycl::half2 *blockvec,\n    sycl::local_accessor<sycl::half, 2> deq2"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          763
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          801
+    Length:          10
+    ReplacementText: 'item_ct1.get_group(1)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          814
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          830
+    Length:          39
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          873
+    Length:          39
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          925
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1106
+    Length:          6
+    ReplacementText: 'sycl::half'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1120
+    Length:          5
+    ReplacementText: 'sycl::half2'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1134
+    Length:          5
+    ReplacementText: 'sycl::half2'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1299
+    Length:          16
+    ReplacementText: 'sycl::vec<int, 1>{0}.convert<sycl::half, sycl::rounding_mode::rtn>()[0]'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1333
+    Length:          15
+    ReplacementText: "/*\n    DPCT1065:0: Consider replacing sycl::nd_item::barrier() with sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better performance if there is no access to global memory.\n    */\n    item_ct1.barrier()"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1358
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1400
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1477
+    Length:          11
+    ReplacementText: 'item_ct1.get_local_id(2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1495
+    Length:          15
+    ReplacementText: "/*\n    DPCT1065:1: Consider replacing sycl::nd_item::barrier() with sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better performance if there is no access to global memory.\n    */\n    item_ct1.barrier()"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1693
+    Length:          1
+    ReplacementText: 'x()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1731
+    Length:          1
+    ReplacementText: 'y()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1771
+    Length:          36
+    ReplacementText: 'sycl::fma(tmp2, blockvec[k + 0], res2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1898
+    Length:          1
+    ReplacementText: 'x()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1936
+    Length:          1
+    ReplacementText: 'y()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          1976
+    Length:          36
+    ReplacementText: 'sycl::fma(tmp2, blockvec[k + 1], res2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2104
+    Length:          1
+    ReplacementText: 'x()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2142
+    Length:          1
+    ReplacementText: 'y()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2182
+    Length:          36
+    ReplacementText: 'sycl::fma(tmp2, blockvec[k + 2], res2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2310
+    Length:          1
+    ReplacementText: 'x()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2348
+    Length:          1
+    ReplacementText: 'y()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2388
+    Length:          36
+    ReplacementText: 'sycl::fma(tmp2, blockvec[k + 3], res2)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2427
+    Length:          0
+    ReplacementText: "      /*\n      DPCT1007:3: Migration of __hadd is not supported.\n      */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2439
+    Length:          35
+    ReplacementText: '__hadd(__hadd(res2.x(), res2.y()), res)'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2567
+    Length:          5
+    ReplacementText: 'sycl::half2'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2619
+    Length:          1
+    ReplacementText: 'x()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2652
+    Length:          1
+    ReplacementText: 'y()'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          2668
+    Length:          0
+    ReplacementText: "    /*\n    DPCT1007:2: Migration of half version of atomicAdd is not supported.\n    */\n"
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          3045
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          3057
+    Length:          93
+    ReplacementText: '1, (width + BLOCKWIDTH - 1) / BLOCKWIDTH, (height + BLOCKHEIGHT4 - 1) / BLOCKHEIGHT4'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          3155
+    Length:          4
+    ReplacementText: 'sycl::range<3>'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+  - FilePath:        '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Offset:          3168
+    Length:          10
+    ReplacementText: 1, 1, BLOCKWIDTH
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+    BlockLevelFormatFlag: false
+MainSourceFilesDigest:
+  - MainSourceFile:  '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm/quant_cuda_kernel.cu'
+    Digest:          0278d35c31a71a70b868bd29da3993de
+DpctVersion:     2023.1.0
+MainHelperFileName: dpct
+USMLevel:        ''
+FeatureMap:
+  dpct.hpp:
+    non_local_include_dependency:
+      IsCalled:        true
+      CallerSrcFiles:
+        - ''
+      FeatureName:     ''
+      SubFeatureMap:   {}
+CompileTargets:  {}
+OptionMap:
+  AnalysisScopePath:
+    Value:           '/home/majumder/vllm_proto/csrc/csrc/quantization/squeezellm'
+    Specified:       false
+  AsyncHandler:
+    Value:           'false'
+    Specified:       false
+  CommentsEnabled:
+    Value:           'false'
+    Specified:       false
+  CompilationsDir:
+    Value:           ''
+    Specified:       false
+  CtadEnabled:
+    Value:           'false'
+    Specified:       false
+  CustomHelperFileName:
+    Value:           dpct
+    Specified:       false
+  EnablepProfiling:
+    Value:           'false'
+    Specified:       false
+  ExperimentalFlag:
+    Value:           '0'
+    Specified:       false
+  ExplicitClNamespace:
+    Value:           'false'
+    Specified:       false
+  ExplicitNamespace:
+    Value:           '20'
+    Specified:       false
+  ExtensionDDFlag:
+    Value:           '0'
+    Specified:       false
+  ExtensionDEFlag:
+    Value:           '4294967295'
+    Specified:       false
+  NDRangeDim:
+    Value:           '3'
+    Specified:       false
+  NoDRYPattern:
+    Value:           'false'
+    Specified:       false
+  OptimizeMigration:
+    Value:           'false'
+    Specified:       false
+  ProcessAll:
+    Value:           'false'
+    Specified:       false
+  RuleFile:
+    Value:           ''
+    Specified:       false
+  SyclNamedLambda:
+    Value:           'false'
+    Specified:       false
+  UsmLevel:
+    Value:           '1'
+    Specified:       false
+...
