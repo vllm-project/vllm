@@ -12,8 +12,8 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-# use model from www.modelscope.cn
-# python vllm_modelscope/examples/offline_inference.py \
+# Use model from www.modelscope.cn
+# MODELS_FROM_MODELSCOPE=True python examples/offline_inference.py \
 # --model="damo/nlp_gpt2_text-generation_english-base" \
 # --revision="v1.0.0" --from_modelscope
 if __name__ == "__main__":
@@ -30,14 +30,9 @@ if __name__ == "__main__":
         help="the specific model version to use. It can be a branch "
         "name, a tag name, or a commit id. If unspecified, will use "
         "the default version.")
-    parser.add_argument("--from_modelscope",
-                        action="store_true",
-                        help="use modelscope model.")
     args = parser.parse_args()
     # Create an LLM.
-    llm = LLM(model=args.model,
-              revision=args.revision,
-              from_modelscope=args.from_modelscope)
+    llm = LLM(model=args.model, revision=args.revision)
     # Generate texts from the prompts. The output is a list
     # of RequestOutput objects that contain the prompt,
     # generated text, and other information.

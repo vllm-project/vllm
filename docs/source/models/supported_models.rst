@@ -73,10 +73,13 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
         print(output)
     
     To use model from www.modelscope.cn 
+    .. code-block:: shell
+      export MODELS_FROM_MODELSCOPE=True
+      
     .. code-block:: python
         from vllm import LLM
 
-        llm = LLM(model=..., revision=..., from_modelscope=True)  # Name or path of your model
+        llm = LLM(model=..., revision=...)  # Name or path of your model
         output = llm.generate("Hello, my name is")
         print(output)      
 

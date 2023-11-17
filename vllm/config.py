@@ -1,4 +1,5 @@
 from typing import Optional
+import os
 
 import torch
 from transformers import PretrainedConfig
@@ -16,8 +17,8 @@ class ModelConfig:
     """Configuration for the model.
 
     Args:
-        model: Name or path of the huggingface/modelscope model to use.
-        tokenizer: Name or path of the huggingface/modelscope tokenizer to use.
+        model: Name or path of the huggingface model to use.
+        tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
@@ -48,7 +49,6 @@ class ModelConfig:
             output). If None, will be derived from the model.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
-        from_modelscope: Download models from modelscope.
     """
 
     def __init__(
@@ -65,7 +65,6 @@ class ModelConfig:
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
-        from_modelscope: Optional[bool] = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -77,8 +76,8 @@ class ModelConfig:
         self.revision = revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
-        self.from_modelscope = from_modelscope
-        if from_modelscope:
+
+        if os.environ.get("MODELS_FROM_MODELSCOPE", False):
             # download model from modelscope
             # import here for compatible.
             from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C

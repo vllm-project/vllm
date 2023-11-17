@@ -56,9 +56,10 @@ def main(args: argparse.Namespace):
     process_requests(engine, test_prompts)
 
 
-# test model from modelscope: python examples/llm_engine_example.py \
+# test model from modelscope:
+# MODELS_FROM_MODELSCOPE=True python examples/llm_engine_example.py \
 # --model="damo/nlp_gpt2_text-generation_english-base" \
-# --revision="v1.0.0" --from_modelscope
+# --revision="v1.0.0"
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Demo on using the LLMEngine class directly")

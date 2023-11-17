@@ -32,7 +32,6 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-    from_modelscope: Optional[bool] = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -60,9 +59,6 @@ class EngineArgs:
             help='the specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
-        parser.add_argument('--from_modelscope',
-                            action='store_true',
-                            help='use modelscope model.')
         parser.add_argument(
             '--tokenizer-revision',
             type=str,
@@ -193,7 +189,7 @@ class EngineArgs:
                                    self.download_dir, self.load_format,
                                    self.dtype, self.seed, self.revision,
                                    self.tokenizer_revision, self.max_model_len,
-                                   self.quantization, self.from_modelscope)
+                                   self.quantization)
         cache_config = CacheConfig(
             self.block_size, self.gpu_memory_utilization, self.swap_space,
             getattr(model_config.hf_config, 'sliding_window', None))

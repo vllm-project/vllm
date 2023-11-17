@@ -55,7 +55,6 @@ class LLM:
             when their `best_of` sampling parameters are larger than 1. If all
             requests will have `best_of=1`, you can safely set this to 0.
             Otherwise, too small values may cause out-of-memory (OOM) errors.
-        from_modelscope: Download models from modelscope.
     """
 
     def __init__(
@@ -72,7 +71,6 @@ class LLM:
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
-        from_modelscope: bool = False,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -90,7 +88,6 @@ class LLM:
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             swap_space=swap_space,
-            from_modelscope=from_modelscope,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
