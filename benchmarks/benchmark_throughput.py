@@ -100,7 +100,7 @@ def run_vllm(
         )
 
     start = time.perf_counter()
-    # FIXME(woosuk): Do use internal method.
+    # FIXME(woosuk): Do not use internal method.
     llm._run_engine(use_tqdm=True)
     end = time.perf_counter()
     return end - start
