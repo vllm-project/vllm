@@ -43,6 +43,9 @@ def initialize_model_parallel(
     ranks 8 to 15 belong to the second box.
     """
     # Get world size and rank. Ensure some consistencies.
+    if model_parallel_is_initialized():
+        return
+
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
 
