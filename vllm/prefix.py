@@ -73,7 +73,8 @@ class PrefixPool:
         self.prefixes.append(prefix)
         # @TODO: compute the hash of the prefix
         prefix_hash = hash(tuple(prefix.token_ids))
-        self.prefixes_hash[prefix.prefix_id] = prefix_hash
+        # self.prefixes_hash[prefix.prefix_id] = prefix_hash
+        self.prefixes_hash[prefix_hash] = prefix.prefix_id
         return prefix
         
     # @TODO: this one should also come with a method to identify the prefix
@@ -88,6 +89,7 @@ class PrefixPool:
     def fixed_search(self, prefix_hash):
         if prefix_hash not in self.prefixes_hash:
             return None
+        print("Found prefix in the pool.")
         prefix_id = self.prefixes_hash[prefix_hash]
         return self.prefixes[prefix_id]
 

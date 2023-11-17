@@ -293,7 +293,7 @@ class PagedAttention(nn.Module):
         if num_prompt_tokens > 0:
             # Prompt run.
             assert input_metadata.num_generation_tokens == 0
-            if key_cache is None or value_cache is None:
+            if key_cache is None or value_cache is None or input_metadata.block_tables.numel() == 0:
                 # No cache provided. Perform normal attention.
                 self.set_attn_bias(input_metadata, dtype=query.dtype)
                 self.multi_query_kv_attention(
@@ -304,6 +304,8 @@ class PagedAttention(nn.Module):
                     input_metadata,
                 )
             else:
+                print("Using prefix-enabled prefill attention")
+                print("num_prompt_tokens: ", num_prompt_tokens)
                 self.multi_query_cached_kv_attention(
                     output[:num_prompt_tokens],
                     query[:num_prompt_tokens],
@@ -334,6 +336,7 @@ class PagedAttention(nn.Module):
                 value_cache,
                 slot_mapping,
             )
+            torch.cuda.synchronize()
 
         if input_metadata.num_generation_tokens > 0:
             # Decoding run.
