@@ -217,6 +217,7 @@ class QWenModel(nn.Module):
                 kv_caches[i],
                 input_metadata,
                 cache_event,
+                residual,
             )
         hidden_states, _ = self.ln_f(hidden_states, residual)
         return hidden_states
