@@ -202,7 +202,7 @@ class LlamaDecoderLayer(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
         residual: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
