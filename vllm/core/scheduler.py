@@ -190,12 +190,6 @@ class Scheduler:
                 num_curr_seqs += num_new_seqs
                 scheduled.append(seq_group)
 
-            # set the prefix state
-            for seq_group in scheduled:
-                if seq_group.prefix is not None:
-                    seq_group.prefix.on_gpu = True
-                    seq_group.prefix.swap_to_gpu = False
-
             if scheduled or ignored_seq_groups:
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
