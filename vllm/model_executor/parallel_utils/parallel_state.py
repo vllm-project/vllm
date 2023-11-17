@@ -42,10 +42,10 @@ def initialize_model_parallel(
     with a total of 16 GPUs, rank 0 to 7 belong to the first box and
     ranks 8 to 15 belong to the second box.
     """
-    # Get world size and rank. Ensure some consistencies.
     if model_parallel_is_initialized():
         return
 
+    # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
 
