@@ -201,7 +201,6 @@ class MistralDecoderLayer(nn.Module):
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
-        hidden_states = residual + hidden_states
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
