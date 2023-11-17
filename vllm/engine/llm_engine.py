@@ -124,9 +124,9 @@ class LLMEngine:
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
         
-        self.spec_worker: SpecDecWorker = None
+        self.spec_dec_worker: SpecDecWorker = None
         if spec_dec_config:
-            self.spec_worker = SpecDecWorker(spec_dec_config, self.scheduler)
+            self.spec_dec_worker = SpecDecWorker(spec_dec_config, self.scheduler)
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -400,8 +400,21 @@ class LLMEngine:
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
             if last_child_sample.accepted_tokens:
-                # invlidate kv cache for non-accepted tokens
-                self.scheduler.free_invalid_kv(parent, last_child_sample)
+                # Speculative Decoding enabled: invlidate kv cache for non-accepted tokens
+                invalid_cnt = self.scheduler.free_invalid_kv(parent, last_child_sample)
+                
+                if invalid_cnt == 0:
+                    # if all the tokens are accepted
+                    # add the last accept token to the output_token_ids
+                    # TODO: how to handle the kv cache of the last token?
+                    # TODO: we need to get the logprob of the last token
+                    last_token_id = last_child_sample.accepted_tokens[-1]
+                    parent.append_token_id(last_token_id, {last_token_id: -1})
+                else:
+                    # update the output_token_ids with only accepted tokens
+                    parent.data.output_token_ids = parent.data.output_token_ids[:-invalid_cnt]
+                # always clear draft tokens
+                parent.data.draft_token_probs = []
             else:
                 parent.append_token_id(last_child_sample.output_token,
                                     last_child_sample.logprobs)
@@ -568,8 +581,8 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
 
-        if self.spec_worker:
-            self.spec_worker.set_draft_tokens(seq_group_metadata_list,
+        if self.spec_dec_worker:
+            self.spec_dec_worker.set_draft_tokens(seq_group_metadata_list,
                                               scheduler_outputs)
 
         # Execute the model.
@@ -581,9 +594,9 @@ class LLMEngine:
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
         
-        if self.spec_worker:
+        if self.spec_dec_worker:
             # accept will set accepted_token_ids and accepted_token_probs in output
-            self.spec_worker.accept(output, scheduler_outputs)
+            self.spec_dec_worker.accept(output, scheduler_outputs)
 
         return self._process_model_outputs(output, scheduler_outputs) + ignored
 

@@ -182,7 +182,7 @@ class EngineArgs:
                             help='name or path of the huggingface model to use as the draft model')
         parser.add_argument('--propose-cnt',
                             type=int,
-                            default=None,
+                            default=5,
                             help='for speculative decoding, number of tokens to propose each step')
         
         return parser

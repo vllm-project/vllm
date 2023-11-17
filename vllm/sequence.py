@@ -99,7 +99,7 @@ class SequenceData:
         draft_tokens = [list(tp.keys())[0] for tp in self.draft_token_probs]
         return draft_tokens
     
-    def get_verify_token_ids(self) -> List[int]:
+    def get_verified_token_ids(self) -> List[int]:
         draft_token_ids = self.get_draft_token_ids()
         assert self.output_token_ids[-len(draft_token_ids):] == draft_token_ids
         if len(draft_token_ids) == len(self.output_token_ids):

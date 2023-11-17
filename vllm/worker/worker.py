@@ -269,7 +269,7 @@ class Worker:
                 if draft_len > 0:
                     kv_mqa = True
                     prompt_lens.append(prompt_len)
-                    verify_tokens = seq_data.get_verify_token_ids()
+                    verify_tokens = seq_data.get_verified_token_ids()
                     verify_len = len(verify_tokens)
                     input_tokens.append(verify_tokens)
                     assert not self.sliding_window, "Speculative Decoding does not support sliding window for now"

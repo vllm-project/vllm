@@ -1,23 +1,23 @@
+import math
 from vllm.config import SpecDecConfig
 from vllm.model_executor import get_model
 from vllm.sequence import SequenceGroupMetadata
 from transformers import AutoModelForCausalLM
 import torch
 from typing import List, Dict
-from vllm.sequence import SamplerOutput, SequenceGroupOutputs, SequenceOutputs
+from vllm.sequence import SamplerOutput, SequenceGroupOutputs, SequenceOutputs, Sequence
 from vllm.core.scheduler import SchedulerOutputs, Scheduler
 from vllm.worker.worker import Worker
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-import math
 
 # FIXME: we should get pad_token_id from tokenizer
 PAD_TOKEN_ID = 0
 
 
 class SpecDecWorker(Worker):
-    def __init__(self, 
+    def __init__(self,
                  config: SpecDecConfig,
                  scheduler: Scheduler) -> None:
         self.propose_cnt = config.propose_cnt
@@ -86,7 +86,7 @@ class SpecDecWorker(Worker):
             draft_tokens.append(input_tensor)
 
         # seq_id -> Sequence
-        seqs = {} 
+        seqs = {}
         for seq_group in scheduler_outputs.scheduled_seq_groups:
             for id in seq_group.seqs_dict:
                 assert id not in seqs
@@ -96,19 +96,19 @@ class SpecDecWorker(Worker):
             seq_data = seq_group_metadata.seq_data[seq_id]
             for j in range(self.propose_cnt):
                 draft_token = draft_tokens[j][i].item()
-                seq_data
                 seq_data.draft_token_probs.append(
                     {draft_token: draft_distributions[j][i]})
                 # need to update seqs and seq_metadata
                 # update seqs to allocate logical block
                 # update seq_metadata to align with seqs, seq_metadata will be used in the next step to prepare inputs
-                seqs[seq_id].append_token_id(draft_token, 
+                seqs[seq_id].append_token_id(draft_token,
                                              {draft_token: math.log(draft_distributions[j][i][draft_token].item())})
                 seq_group_metadata.seq_data[seq_id] = seqs[seq_id].data
                 # allocate physical block
                 self.scheduler.block_manager.append_slot(seqs[seq_id])
-                seq_group_metadata.block_tables[seq_id] = self.scheduler.block_manager.get_block_table(seqs[seq_id])
-                
+                seq_group_metadata.block_tables[seq_id] = self.scheduler.block_manager.get_block_table(
+                    seqs[seq_id])
+
             logger.info(f"Seq draft tokens: {seq_data.get_draft_token_ids()}")
             logger.info(f"All tokens: {seq_data.get_token_ids()}")
 
@@ -122,12 +122,13 @@ class SpecDecWorker(Worker):
             prompt_dis = seq_group_output.prompt_probdis
             draft_dis = prompt_dis[-draft_len-1:]
             return list(draft_dis[pos].values())[0].cuda()
-        
+
         # generation phase
         sample_prob = seq_group_output.samples[0].probs
         dis = list(sample_prob[pos].values())[0]
         return dis.cuda()
 
+    @staticmethod
     # Accept draft tokens based on draft probabilities and target probabilities
     # The implementation strictly follows rejection sampling:
     # r = rand(0, 1)
@@ -135,6 +136,31 @@ class SpecDecWorker(Worker):
     # reject and sample from a new distribution if r > p/q
     # The function reads draft tokens/probs from scheduler_outputs and set accepted token_ids
     # in traget_outputs
+    def _accept_tokens(seq: Sequence,
+                       seq_group_output: SequenceGroupOutputs):
+        accepted_token_ids = []
+        for i, token_prob in enumerate(seq.data.draft_token_probs):
+            token_id = list(token_prob.keys())[0]
+            draft_prob_dis = seq.get_draft_probdis(token_id, i)
+            target_prob_dis = SpecDecWorker._extract_target_prob_dis(
+                seq_group_output, token_id, i, len(seq.data.draft_token_probs))
+            p, q = draft_prob_dis[token_id].item(
+            ), target_prob_dis[token_id].item()
+            r = torch.rand(1).item()
+            logger.info(f"p: {p}, q: {q}, r: {r}")
+            if r <= p/q:  # accept
+                accepted_token_ids.append(token_id)
+            else:  # reject and resample
+                new_dis = torch.clamp(
+                    target_prob_dis - draft_prob_dis, min=0)
+                logger.info((draft_prob_dis - target_prob_dis).max())
+                new_dis = new_dis / new_dis.sum(dim=-1, keepdim=True)
+                next_token = torch.multinomial(new_dis, num_samples=1)
+                accepted_token_ids.append(next_token.item())
+                break
+
+        return accepted_token_ids
+
     def accept(self,
                target_outputs: List[SamplerOutput],
                scheduler_outputs: SchedulerOutputs):
@@ -146,29 +172,10 @@ class SpecDecWorker(Worker):
             seq_id = list(seq_group.seqs_dict.keys())[0]
             cur_seq = seq_group.seqs_dict[seq_id]
             assert seq_id == sample.parent_seq_id, \
-                    (f"seq_group: {seq_id} and",
-                     f"seq_group_output: {sample.parent_seq_id} are not aligned")
-            
-            accepted_token_ids = []
-            for i, token_prob in enumerate(cur_seq.data.draft_token_probs):
-                token_id = list(token_prob.keys())[0]
-                draft_prob_dis = cur_seq.get_draft_probdis(token_id, i)
-                target_prob_dis = SpecDecWorker._extract_target_prob_dis(
-                    seq_group_output, token_id, i, len(cur_seq.data.draft_token_probs))
-                p, q = draft_prob_dis[token_id].item(
-                ), target_prob_dis[token_id].item()
-                r = torch.rand(1).item()
-                logger.info(f"p: {p}, q: {q}, r: {r}")
-                if r <= p/q:  # accept
-                    accepted_token_ids.append(token_id)
-                else:  # reject and resample
-                    new_dis = torch.clamp(
-                        target_prob_dis - draft_prob_dis, min=0)
-                    print(draft_prob_dis)
-                    logger.info((draft_prob_dis - target_prob_dis).max())
-                    new_dis = new_dis / new_dis.sum(dim=-1, keepdim=True)
-                    next_token = torch.multinomial(new_dis, num_samples=1)
-                    accepted_token_ids.append(next_token.item())
+                (f"seq_group: {seq_id} and",
+                 f"seq_group_output: {sample.parent_seq_id} are not aligned")
+
+            accepted_token_ids = self._accept_tokens(cur_seq, seq_group_output)
 
             # all proposed tokens are accepted
             if len(accepted_token_ids) == len(cur_seq.data.draft_token_probs):
@@ -177,7 +184,8 @@ class SpecDecWorker(Worker):
                 else:
                     last_token = sample.output_token[-1].item()
                 accepted_token_ids.append(last_token)
-            logger.info(f"accept tokens: {accepted_token_ids}, {sample.output_token}")
+            logger.info(
+                f"accept tokens: {accepted_token_ids}, {sample.output_token}")
             sample.accepted_tokens = accepted_token_ids
 
 

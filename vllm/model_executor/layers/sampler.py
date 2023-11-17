@@ -43,11 +43,11 @@ class Sampler(nn.Module):
         # this checks if we use multi_query_cached_kv_attention correctly
         assert not torch.isnan(hidden_states).any()
         if input_metadata.kv_mqa:
-            return self.spec_forward(embedding, hidden_states, input_metadata, embedding_bias)
+            return self._sd_forward(embedding, hidden_states, input_metadata, embedding_bias)
         else:
-            return self.org_forward(embedding, hidden_states, input_metadata, embedding_bias)
+            return self._forward(embedding, hidden_states, input_metadata, embedding_bias)
 
-    def org_forward(self,
+    def _forward(self,
         embedding: torch.Tensor,
         hidden_states: torch.Tensor,
         input_metadata: InputMetadata,
@@ -107,12 +107,16 @@ class Sampler(nn.Module):
         return _build_sampler_output(sample_results, input_metadata,
                                      prompt_logprobs, sample_logprobs, prompt_dis)
 
-    def spec_forward(self,
+    def _sd_forward(self,
         embedding: torch.Tensor,
         hidden_states: torch.Tensor,
         input_metadata: InputMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
+        # Sampler forward for speculative decoding.
+        # It is a simiplified version of the original forward
+        # and only supports argmax sampling
+    
         # Get the hidden states that we use for sampling.
         batch_size = hidden_states.shape[0]
 
@@ -121,7 +125,7 @@ class Sampler(nn.Module):
         logits = _get_logits(hidden_states, embedding, embedding_bias,
                              self.vocab_size)
         
-        # # Apply temperature scaling.
+        # TODO: Apply temperature scaling.
         # temperatures = _get_temperatures(input_metadata)
 
         # if any(t != 1.0 for t in temperatures):
