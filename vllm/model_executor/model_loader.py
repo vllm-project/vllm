@@ -66,6 +66,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config.quantization,
                                         model_config.model,
+                                        model_config.hf_config,
                                         model_config.download_dir)
         capability = torch.cuda.get_device_capability()
         capability = capability[0] * 10 + capability[1]

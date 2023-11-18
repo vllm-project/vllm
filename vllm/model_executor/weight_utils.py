@@ -7,9 +7,10 @@ from collections import defaultdict
 from typing import Any, Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download
-from safetensors.torch import load_file, save_file, safe_open
 import numpy as np
+from safetensors.torch import load_file, save_file, safe_open
 import torch
+from transformers import PretrainedConfig
 from tqdm.auto import tqdm
 
 from vllm.logger import init_logger
@@ -84,8 +85,15 @@ def convert_bin_to_safetensor_file(
 def get_quant_config(
     quantization: str,
     model_name_or_path: str,
+    hf_config: PretrainedConfig,
     cache_dir: Optional[str] = None,
 ) -> QuantizationConfig:
+    quant_cls = get_quantization_config(quantization)
+    # Read the quantization config from the HF model config, if available.
+    hf_quant_config = getattr(hf_config, "quantization_config", None)
+    if hf_quant_config is not None:
+        return quant_cls.from_config(hf_quant_config)
+
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
@@ -98,7 +106,6 @@ def get_quant_config(
         hf_folder = model_name_or_path
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
-    quant_cls = get_quantization_config(quantization)
     quant_config_files = [
         f for f in config_files if any(
             f.endswith(x) for x in quant_cls.get_config_filenames())
