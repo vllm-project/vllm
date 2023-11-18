@@ -77,9 +77,9 @@ class ModelConfig:
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
 
-        if os.environ.get("VLLM_USE_MODELSCOPE", False):
+        if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
-            # use on-demand import for compatibility.
+            # lazy import so that modelscope is not required for normal use.
             from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
             model_path = snapshot_download(model_id=model,
                                            cache_dir=download_dir,
