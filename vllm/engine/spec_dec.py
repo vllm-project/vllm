@@ -53,7 +53,7 @@ class SpecDecWorker(Worker):
 
     # TODO: we need to align draft and target model's sampler
     def _sample_method(self, logits):
-        temperature = 1.0
+        temperature = 0.001
         return torch.softmax(logits / temperature, dim=-1)
 
     # propose draft tokens
@@ -120,7 +120,7 @@ class SpecDecWorker(Worker):
         # prefill phase
         if seq_group_output.prompt_probdis:
             prompt_dis = seq_group_output.prompt_probdis
-            draft_dis = prompt_dis[-draft_len-1:]
+            draft_dis = prompt_dis[-draft_len:]
             return list(draft_dis[pos].values())[0].cuda()
 
         # generation phase
