@@ -42,7 +42,7 @@ Initialize vLLM's engine for offline inference with the ``LLM`` class and the `O
 
 Use model from www.modelscope.cn
 .. code-block:: shell
-    export FROM_MODELSCOPE=True
+    export VLLM_USE_MODELSCOPE=True
 
 .. code-block:: python
 
@@ -79,7 +79,7 @@ Use model from www.modelscope.cn
 
 .. code-block:: console
 
-    $ FROM_MODELSCOPE=True python -m vllm.entrypoints.api_server \
+    $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.api_server \
     $    --model="damo/nlp_gpt2_text-generation_english-base" 
     $    --revision="v1.0.0"
 
@@ -114,7 +114,7 @@ Start the server:
 
 Use model from www.modelscope.cn
 .. code-block:: console
-    $ FROM_MODELSCOPE=True python -m vllm.entrypoints.openai.api_server \
+    $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.openai.api_server \
     $     --model="damo/nlp_gpt2_text-generation_english-base" --revision="v1.0.0"
 
 By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the above command) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_ and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.

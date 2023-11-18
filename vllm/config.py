@@ -77,7 +77,7 @@ class ModelConfig:
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
 
-        if os.environ.get("FROM_MODELSCOPE", False):
+        if os.environ.get("VLLM_USE_MODELSCOPE", False):
             # download model from modelscope
             # import here for compatible.
             from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
