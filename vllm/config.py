@@ -1,4 +1,5 @@
 from typing import Optional, Union
+import os
 
 import torch
 from transformers import PretrainedConfig
@@ -76,7 +77,18 @@ class ModelConfig:
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
 
-        self.hf_config = get_config(model, trust_remote_code, revision)
+        if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
+            # download model from ModelScope hub,
+            # lazy import so that modelscope is not required for normal use.
+            from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
+            model_path = snapshot_download(model_id=model,
+                                           cache_dir=download_dir,
+                                           revision=revision)
+            self.model = model_path
+            self.download_dir = model_path
+            self.tokenizer = model_path
+
+        self.hf_config = get_config(self.model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_config,
                                                      max_model_len)
