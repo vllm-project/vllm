@@ -300,7 +300,7 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_invalid_kv(self, seq: Sequence, seq_out: SequenceOutputs):
-        invalid_token_cnt = len(seq.data.get_draft_token_ids) + 1 - len(seq_out.accepted_tokens)
+        invalid_token_cnt = len(seq.data.get_draft_token_ids()) + 1 - len(seq_out.accepted_tokens)
         assert invalid_token_cnt >= 0
 
         if invalid_token_cnt == 0:
@@ -310,6 +310,7 @@ class Scheduler:
         seq.delete_tailing_tokens(invalid_token_cnt)
         # delete from physical table
         self.block_manager.free_tailing_blocks(seq)
+        return invalid_token_cnt
     
     def free_finished_seq_groups(self) -> None:
         self.running = [

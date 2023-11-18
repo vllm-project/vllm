@@ -124,7 +124,7 @@ class SpecDecWorker(Worker):
             return list(draft_dis[pos].values())[0].cuda()
 
         # generation phase
-        sample_prob = seq_group_output.samples[0].probs
+        sample_prob = seq_group_output.samples[0].probdis
         dis = list(sample_prob[pos].values())[0]
         return dis.cuda()
 
@@ -144,7 +144,7 @@ class SpecDecWorker(Worker):
             draft_prob_dis = seq.get_draft_probdis(token_id, i)
             target_prob_dis = SpecDecWorker._extract_target_prob_dis(
                 seq_group_output, token_id, i, len(seq.data.draft_token_probs))
-            p, q = draft_prob_dis[token_id].item(
+            q, p = draft_prob_dis[token_id].item(
             ), target_prob_dis[token_id].item()
             r = torch.rand(1).item()
             logger.info(f"p: {p}, q: {q}, r: {r}")

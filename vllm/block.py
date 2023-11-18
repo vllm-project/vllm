@@ -51,7 +51,8 @@ class LogicalTokenBlock:
         assert num > 0
         assert num <= self.num_tokens
         self.num_tokens -= num
-        self.token_ids[self.num_tokens:] = _BLANK_TOKEN_ID
+        for i in range(self.num_tokens, len(self.token_ids)):
+            self.token_ids[i] = _BLANK_TOKEN_ID
 
 
 class PhysicalTokenBlock:

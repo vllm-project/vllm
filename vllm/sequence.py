@@ -191,11 +191,12 @@ class Sequence:
         while n > 0:
             assert len(self.logical_token_blocks) > 0
             last_block = self.logical_token_blocks[-1]
-            if last_block.get_num_tokens() <= n:
-                n -= last_block.get_num_tokens()
+            if last_block.num_tokens < n:
+                n -= last_block.num_tokens
                 self._delete_logical_block(last_block)
             else:
                 last_block.delete_last_tokens(n)
+                break
 
     def get_len(self) -> int:
         return self.data.get_len()
