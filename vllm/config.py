@@ -104,14 +104,30 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = ["awq", "squeezellm"]
-        if self.quantization is None:
-            return
-        quantization = self.quantization.lower()
-        if quantization not in supported_quantization:
-            raise ValueError(
-                f"Unknown quantization: {self.quantization}. Must be one of "
-                f"{supported_quantization}.")
-        self.quantization = quantization
+        if self.quantization is not None:
+            self.quantization = self.quantization.lower()
+
+        # Parse quantization method from the HF model config, if available.
+        hf_quant_config = getattr(self.hf_config, "quantization_config", None)
+        if hf_quant_config is not None:
+            hf_quant_method = str(hf_quant_config["quant_method"]).lower()
+            if self.quantization is None:
+                self.quantization = hf_quant_method
+            elif self.quantization != hf_quant_method:
+                raise ValueError(
+                    "Quantization method specified in the model config "
+                    f"({hf_quant_method}) does not match the quantization "
+                    f"method specified in the `quantization` argument "
+                    f"({self.quantization}).")
+
+        if self.quantization is not None:
+            if self.quantization not in supported_quantization:
+                raise ValueError(
+                    f"Unknown quantization method: {self.quantization}. Must "
+                    f"be one of {supported_quantization}.")
+        logger.warning(f"{self.quantization} quantization is not fully "
+                       "optimized yet. The speed can be slower than "
+                       "non-quantized models.")
 
     def verify_with_parallel_config(
         self,
