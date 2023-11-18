@@ -41,7 +41,9 @@ Initialize vLLM's engine for offline inference with the ``LLM`` class and the `O
     llm = LLM(model="facebook/opt-125m")
 
 Use model from www.modelscope.cn
+
 .. code-block:: shell
+
     export VLLM_USE_MODELSCOPE=True
 
 .. code-block:: python
@@ -114,7 +116,9 @@ Start the server:
     $     --model facebook/opt-125m
 
 Use model from www.modelscope.cn
+
 .. code-block:: console
+
     $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.openai.api_server \
     $     --model="qwen/Qwen-7B-Chat" --revision="v1.1.8" --trust-remote-code
 
