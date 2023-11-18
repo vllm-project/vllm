@@ -89,7 +89,7 @@ class PrefixPool:
     def fixed_search(self, prefix_hash):
         if prefix_hash not in self.prefixes_hash:
             return None
-        print("Found prefix in the pool.")
+        # print("Found prefix in the pool.")
         prefix_id = self.prefixes_hash[prefix_hash]
         return self.prefixes[prefix_id]
 
