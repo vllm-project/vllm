@@ -648,9 +648,10 @@ if __name__ == "__main__":
     max_model_len = engine_model_config.max_model_len
 
     # A separate tokenizer to map token IDs to strings.
-    tokenizer = get_tokenizer(engine_args.tokenizer,
-                              tokenizer_mode=engine_args.tokenizer_mode,
-                              trust_remote_code=engine_args.trust_remote_code)
+    tokenizer = get_tokenizer(
+        engine_model_config.tokenizer,
+        tokenizer_mode=engine_model_config.tokenizer_mode,
+        trust_remote_code=engine_model_config.trust_remote_code)
 
     uvicorn.run(app,
                 host=args.host,
