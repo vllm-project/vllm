@@ -185,6 +185,8 @@ class Worker:
                 assert prefix_len % self.block_size == 0
                 prompt_tokens = prompt_tokens[prefix_len:]
                 prefix_block_tables.append(seq_group_metadata.prefix.get_block_table_num())
+            else:
+                prefix_block_tables.append([])
             # actual prompt lens
             context_lens.append(prefix_len)
             subquery_lens.append(prompt_len-prefix_len)
@@ -301,7 +303,7 @@ class Worker:
             for mapping in slot_mapping
         ]
         block_tables = generation_block_tables if prefix_block_tables == [] else prefix_block_tables
-        print("block_tables", block_tables)
+        # print("block_tables", block_tables)
         padded_block_tables = [
             _pad_to_max(block_table, max_num_blocks_per_seq, pad=0)
             for block_table in block_tables

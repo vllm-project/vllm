@@ -274,15 +274,16 @@ class LLMEngine:
         if prefix_pos is not None:
             # a temp workaround
             prefix_pos = (prefix_pos // block_size) * block_size
-            truncated_prefix_token_ids = prompt_token_ids[:prefix_pos]
-            prefix = self.scheduler.prefix_pool.fixed_search(hash(tuple(truncated_prefix_token_ids)))
-            if prefix is not None:
-                seq.prefix = prefix
-                print("prefix status: ", "on gpu" if prefix.get_status() else "on cpu")
-                # prefix.update_freq(1.0)
-            else:
-                # create a new prefix
-                seq.prefix = self.scheduler.prefix_pool.add_prefix(truncated_prefix_token_ids)
+            if prefix_pos > 0:
+                truncated_prefix_token_ids = prompt_token_ids[:prefix_pos]
+                prefix = self.scheduler.prefix_pool.fixed_search(hash(tuple(truncated_prefix_token_ids)))
+                if prefix is not None:
+                    seq.prefix = prefix
+                    # print("prefix status: ", "on gpu" if prefix.get_status() else "on cpu")
+                    # prefix.update_freq(1.0)
+                else:
+                    # create a new prefix
+                    seq.prefix = self.scheduler.prefix_pool.add_prefix(truncated_prefix_token_ids)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,

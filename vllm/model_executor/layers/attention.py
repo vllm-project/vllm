@@ -304,13 +304,13 @@ class PagedAttention(nn.Module):
                     input_metadata,
                 )
             else:
-                print("Using prefix-enabled prefill attention")
-                print("num_prompt_tokens: ", num_prompt_tokens)
+                # print("Using prefix-enabled prefill attention")
+                # print("block tables: ", input_metadata.block_tables)
                 self.multi_query_cached_kv_attention(
-                    output[:num_prompt_tokens],
-                    query[:num_prompt_tokens],
-                    key[:num_prompt_tokens],
-                    value[:num_prompt_tokens],
+                    output,
+                    query,
+                    key,
+                    value,
                     key_cache,
                     value_cache,
                     input_metadata,
@@ -336,7 +336,6 @@ class PagedAttention(nn.Module):
                 value_cache,
                 slot_mapping,
             )
-            torch.cuda.synchronize()
 
         if input_metadata.num_generation_tokens > 0:
             # Decoding run.
