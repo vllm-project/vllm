@@ -326,20 +326,16 @@ def _apply_min_p(
     logits: torch.Tensor,
     min_ps: List[float],
 ) -> torch.Tensor:
+    """
+    Adapted from
+    https://github.com/oobabooga/text-generation-webui/blob/3146124ec01f02c8fb1650a6517cf1b60b537aaf/modules/sampler_hijack.py#L16C17-L16C17
+    """
     min_p = torch.tensor(min_ps, dtype=logits.dtype, device=logits.device)
     probs = torch.softmax(logits, dim=-1)
     top_probs, _ = probs.max(dim=-1, keepdim=True)
     scaled_min_p = min_p.unsqueeze(dim=1) * top_probs
     tokens_to_remove = probs < scaled_min_p
-
-    sorted_indices = torch.argsort(logits, descending=True, dim=-1)
-    sorted_indices_to_remove = torch.gather(tokens_to_remove,
-                                            dim=-1,
-                                            index=sorted_indices)
-
-    indices_to_remove = sorted_indices_to_remove.scatter(
-        1, sorted_indices, sorted_indices_to_remove)
-    logits = logits.masked_fill(indices_to_remove, -float("inf"))
+    logits = logits.masked_fill(tokens_to_remove, -float("inf"))
 
     return logits
 
