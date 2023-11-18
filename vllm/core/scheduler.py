@@ -300,7 +300,8 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_invalid_kv(self, seq: Sequence, seq_out: SequenceOutputs):
-        invalid_token_cnt = max(len(seq.data.draft_token_probs) - len(seq_out.accepted_tokens), 0)
+        invalid_token_cnt = len(seq.data.get_draft_token_ids) + 1 - len(seq_out.accepted_tokens)
+        assert invalid_token_cnt >= 0
 
         if invalid_token_cnt == 0:
             return invalid_token_cnt
