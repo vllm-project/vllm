@@ -46,7 +46,7 @@ Use model from www.modelscope.cn
 
 .. code-block:: python
 
-    llm = LLM(model="damo/nlp_gpt2_text-generation_english-base", revision="v1.0.0")
+    llm = LLM(model="qwen/Qwen-7B-Chat", revision="v1.1.8", trust_remote_code=True)
 
 Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of ``RequestOutput`` objects, which include all the output tokens.
 
@@ -80,8 +80,9 @@ Use model from www.modelscope.cn
 .. code-block:: console
 
     $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.api_server \
-    $    --model="damo/nlp_gpt2_text-generation_english-base" 
-    $    --revision="v1.0.0"
+    $    --model="qwen/Qwen-7B-Chat" \
+    $    --revision="v1.1.8" \
+    $    --trust-remote-code
 
 
 By default, this command starts the server at ``http://localhost:8000`` with the OPT-125M model.
@@ -115,7 +116,7 @@ Start the server:
 Use model from www.modelscope.cn
 .. code-block:: console
     $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.openai.api_server \
-    $     --model="damo/nlp_gpt2_text-generation_english-base" --revision="v1.0.0"
+    $     --model="qwen/Qwen-7B-Chat" --revision="v1.1.8" --trust-remote-code
 
 By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the above command) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_ and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
 

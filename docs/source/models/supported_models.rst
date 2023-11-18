@@ -88,7 +88,7 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
     .. code-block:: python
         from vllm import LLM
 
-        llm = LLM(model=..., revision=...)  # Name or path of your model
+        llm = LLM(model=..., revision=..., trust_remote_code=True)  # Name or path of your model
         output = llm.generate("Hello, my name is")
         print(output)      
 
