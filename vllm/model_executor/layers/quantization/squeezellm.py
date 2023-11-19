@@ -52,6 +52,9 @@ class SqueezeLLMConfig(QuantizationConfig):
     def get_linear_method(self) -> "SqueezeLLMLinearMethod":
         return SqueezeLLMLinearMethod(self)
 
+    def get_scaled_act_names(self) -> List[str]:
+        return []
+
 
 class SqueezeLLMLinearMethod(LinearMethodBase):
     """Linear method for SqueezeLLM.
