@@ -128,7 +128,9 @@ class GPTJMLP(nn.Module):
             hidden_size,
             linear_method=linear_method,
         )
-        self.act = get_act_fn(config.activation_function)
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.act = get_act_fn(config.activation_function, quant_config,
+                              intermediate_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc_in(hidden_states)

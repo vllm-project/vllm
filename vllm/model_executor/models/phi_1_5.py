@@ -168,7 +168,9 @@ class PhiMLP(nn.Module):
             config.hidden_size,
             linear_method=linear_method,
         )
-        self.act = get_act_fn(config.activation_function)
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.act = get_act_fn(config.activation_function, quant_config,
+                              n_inner)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.fc1(hidden_states)
