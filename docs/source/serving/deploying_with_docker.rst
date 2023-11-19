@@ -5,7 +5,7 @@ Deploying with Docker
 
 vLLM offers official docker image for deployment.
 The image can be used to run OpenAI compatible server.
-The image is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai>`_.
+The image is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai/tags>`_.
 
 ... code-block:: console
 
@@ -13,7 +13,7 @@ The image is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.co
         -v ~/.cache/huggingface:/root/.cache/huggingface \
         -p 8000:8000 \
         --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
-        vllm/vllm-openai \
+        vllm/vllm-openai:latest \
         --model mistralai/Mistral-7B-v0.1
 
 
