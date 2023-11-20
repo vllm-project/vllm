@@ -155,9 +155,8 @@ class Scheduler:
 
                 if not self.block_manager.can_allocate_in_future(seq_group):
                     logger.warning(
-                        f"This sequence group cannot be scheduled due to the "
-                        f"GPU memory limit"
-                    )
+                        "This sequence group cannot be scheduled due to the "
+                        "GPU memory limit")
                     for seq in seq_group.get_seqs():
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
@@ -197,8 +196,8 @@ class Scheduler:
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
-                    num_batched_tokens=len(seq_lens) * max(seq_lens)
-                        if seq_lens else 0,
+                    num_batched_tokens=len(seq_lens) *
+                    max(seq_lens) if seq_lens else 0,
                     blocks_to_swap_in=blocks_to_swap_in,
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
