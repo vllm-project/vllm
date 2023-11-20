@@ -112,7 +112,7 @@ class BlockSpaceManager:
                                       self.block_sliding_window)
         num_gpu_blocks = self.gpu_allocator.get_num_blocks()
         # Use watermark to avoid frequent cache eviction.
-        return (num_gpu_blocks - num_required_blocks >= self.watermark_blocks)
+        return num_gpu_blocks - num_required_blocks >= self.watermark_blocks
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same
