@@ -63,6 +63,9 @@ class AWQConfig(QuantizationConfig):
     def get_linear_method(self) -> "AWQLinearMethod":
         return AWQLinearMethod(self)
 
+    def get_scaled_act_names(self) -> List[str]:
+        return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
+
 
 class AWQLinearMethod(LinearMethodBase):
     """Linear method for AWQ.

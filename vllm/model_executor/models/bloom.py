@@ -145,7 +145,8 @@ class BloomMLP(nn.Module):
             4 * hidden_size,
             linear_method=linear_method,
         )
-        self.act = get_act_fn("gelu")
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.gelu_impl = get_act_fn("gelu", quant_config, 4 * hidden_size)
         self.dense_4h_to_h = RowParallelLinear(
             4 * hidden_size,
             hidden_size,
@@ -154,7 +155,7 @@ class BloomMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.dense_h_to_4h(x)
-        x = self.act(x)
+        x = self.gelu_impl(x)
         x, _ = self.dense_4h_to_h(x)
         return x
 
