@@ -33,7 +33,7 @@ from transformers import LlamaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul, DequantSiluAndMulQuant
-from vllm.model_executor.layers.layernorm import RMSNorm, I8RMSNorm, DequantAddResidualI8RMSNormQuant
+from vllm.model_executor.layers.layernorm import RMSNorm, DequantAddResidualI8RMSNormQuant
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, DequantPagedAttentionWithRoPEQuant
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.quantized_linear import ParallelLinear
@@ -88,8 +88,12 @@ class LlamaMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        # FIXME: currently gate up share same scale, plan to use seperate scales
-        x = self.act_fn(gate_up)
+        scale = None
+        if self.use_int8:
+            # FIXME: currently gate up share same scale, plan to use seperate scales
+            x, *scale = self.act_fn(gate_up)
+        else:
+            x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
 
@@ -182,11 +186,15 @@ class LlamaAttention(nn.Module):
         # FIXME: currently qkv share same scale, plan to use seperate scales
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        scale = None
+        if self.use_int8:
+            attn_output, *scale = self.attn(positions, q, k, v, k_cache, v_cache,
+                                        input_metadata, cache_event)
+        else:
+            attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
+                                        input_metadata, cache_event)
         output, _ = self.o_proj(attn_output)
-        # output = output.half()
-        return output
+        return output, scale
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -221,13 +229,12 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
         )
         if self.use_int8:
-            self.input_layernorm = I8RMSNorm(config.hidden_size,
-                                             eps=config.rms_norm_eps)
-            # kernel fusion, post_attention_layernorm
-            # are fused into DequantAddResidualI8RMSNormQuant
-            self.dequant_add_residual_layernorm_quant = \
-                DequantAddResidualI8RMSNormQuant(config.hidden_size,
-                                                 eps=config.rms_norm_eps)
+            self.input_layernorm = RMSNorm(config.hidden_size,
+                                        eps=config.rms_norm_eps,
+                                        use_quant=True)
+            # kernel fusion, post_attention_layernorm are fused into DequantAddResidualI8RMSNormQuant
+            self.dequant_add_residual_layernorm_quant = DequantAddResidualI8RMSNormQuant(config.hidden_size,
+                                                    eps=config.rms_norm_eps)
             self.dequant_add_residual = DequantAddResidual()
         else:
             self.input_layernorm = RMSNorm(config.hidden_size,
@@ -264,7 +271,7 @@ class LlamaDecoderLayer(nn.Module):
             # Fully Connected
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
-            hidden_states = self.mlp(hidden_states)
+            hidden_states, scale = self.mlp(hidden_states)
             hidden_states = residual + hidden_states
 
         return hidden_states
@@ -355,19 +362,19 @@ class LlamaForCausalLM(nn.Module):
 
     _column_parallel_layers = []
     _row_parallel_layers = ["o_proj", "down_proj"]
+    # name map, you may need to modify it according to your situation
     _int8_scale_params = {
-        "self_attn.q_proj.a": "self_attn.attn.a",
-        "self_attn.k_proj.a": "self_attn.attn.a",
-        "self_attn.v_proj.a": "self_attn.attn.a",
-        "self_attn.o_proj.inscale": "self_attn.attn.inscale",
-        "self_attn.o_proj.a": "dequant_add_residual_layernorm_quant.a",
-        "post_attention_layernorm.weight":
-        "dequant_add_residual_layernorm_quant.weight",
-        "mlp.gate_proj.a": "mlp.act_fn.a",
-        "mlp.up_proj.a": "mlp.act_fn.a",
-        "mlp.down_proj.inscale": "mlp.act_fn.inscale",
-        "mlp.down_proj.a": "dequant_add_residual.a"
-    }
+                "self_attn.q_proj.dequant_scale": "self_attn.attn.dequant_scale",
+                "self_attn.k_proj.dequant_scale": "self_attn.attn.dequant_scale",
+                "self_attn.v_proj.dequant_scale": "self_attn.attn.dequant_scale",
+                # "self_attn.o_proj.quant_scale": "self_attn.attn.quant_scale",
+                "self_attn.o_proj.dequant_scale": "dequant_add_residual_layernorm_quant.dequant_scale",
+                "post_attention_layernorm.weight": "dequant_add_residual_layernorm_quant.weight",
+                "mlp.gate_proj.dequant_scale": "mlp.act_fn.dequant_scale",
+                "mlp.up_proj.dequant_scale": "mlp.act_fn.dequant_scale",
+                # "mlp.down_proj.quant_scale": "mlp.act_fn.quant_scale",
+                "mlp.down_proj.dequant_scale": "dequant_add_residual.dequant_scale"
+            }
 
     def load_weights(self,
                      model_name_or_path: str,
