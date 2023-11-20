@@ -240,7 +240,7 @@ def hf_model_weights_iterator(
     elif use_safetensors:
         for st_file in hf_weights_files:
             with safe_open(st_file, framework="pt") as f:
-                for name in f:
+                for name in f.keys():  # noqa: SIM118
                     param = f.get_tensor(name)
                     yield name, param
     else:
