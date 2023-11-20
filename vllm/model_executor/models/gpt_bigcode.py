@@ -225,10 +225,7 @@ class GPTBigCodeModel(nn.Module):
         hidden_states = inputs_embeds + position_embeds
 
         for i in range(len(self.h)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(hidden_states, kv_caches[i], input_metadata,
                                   cache_event)

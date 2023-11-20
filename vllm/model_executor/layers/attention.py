@@ -18,7 +18,6 @@ _PARTITION_SIZE = 512
 
 
 class PagedAttention(nn.Module):
-    # pylint: disable=line-too-long
     """GPT-style multi-head PagedAttention.
 
     This class takes query, key, and value tensors as input. The input tensors

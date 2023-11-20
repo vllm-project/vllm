@@ -84,15 +84,14 @@ def get_act_fn(
             f"Activation function {act_fn_name!r} is not supported.")
 
     act_fn = _ACTIVATION_REGISTRY[act_fn_name]
-    if quant_config is not None:
-        if act_fn_name in quant_config.get_scaled_act_names():
-            if intermediate_size is None:
-                raise ValueError(
-                    "intermediate_size must be specified for scaled "
-                    "activation functions.")
-            return ScaledActivation(
-                act_fn,
-                intermediate_size,
-                params_dtype=torch.get_default_dtype(),
-            )
+    if quant_config is not None and act_fn_name in quant_config.get_scaled_act_names(
+    ):
+        if intermediate_size is None:
+            raise ValueError("intermediate_size must be specified for scaled "
+                             "activation functions.")
+        return ScaledActivation(
+            act_fn,
+            intermediate_size,
+            params_dtype=torch.get_default_dtype(),
+        )
     return act_fn

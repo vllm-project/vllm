@@ -2,7 +2,7 @@ from typing import Optional
 
 from transformers import AutoConfig, PretrainedConfig
 
-from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
+from vllm.transformers_utils.configs import *
 
 _CONFIG_REGISTRY = {
     "aquila": AquilaConfig,

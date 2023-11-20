@@ -16,7 +16,6 @@ try:
 
         def __init__(self, init_cached_hf_modules=False) -> None:
             if init_cached_hf_modules:
-                # pylint: disable=import-outside-toplevel
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
             self.worker = None
@@ -37,7 +36,7 @@ except ImportError as e:
                    "`pip install ray pandas pyarrow`.")
     ray = None
     TorchDistributedWorker = None
-    RayWorker = None  # pylint: disable=invalid-name
+    RayWorker = None
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup

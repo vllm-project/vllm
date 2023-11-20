@@ -350,7 +350,7 @@ class Scheduler:
         elif preemption_mode == PreemptionMode.SWAP:
             self._preempt_by_swap(seq_group, blocks_to_swap_out)
         else:
-            assert False, "Invalid preemption mode."
+            raise AssertionError("Invalid preemption mode.")
 
     def _preempt_by_recompute(
         self,

@@ -1,4 +1,3 @@
-# pylint: disable=protected-access
 import random
 from typing import Tuple
 from unittest.mock import patch
@@ -20,10 +19,10 @@ class MockLogitsSampler(Sampler):
 
     def forward(self, *args, **kwargs):
         with patch("vllm.model_executor.layers.sampler._prune_hidden_states",
-                   lambda x, y: x):
-            with patch("vllm.model_executor.layers.sampler._get_logits",
+                   lambda x, y: x), patch(
+                       "vllm.model_executor.layers.sampler._get_logits",
                        lambda *args, **kwargs: self.fake_logits):
-                return super().forward(*args, **kwargs)
+            return super().forward(*args, **kwargs)
 
 
 def _prepare_test(
@@ -214,6 +213,6 @@ def test_sampler_logits_processors(seed: int):
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              input_metadata=input_metadata)
-    for i, sequence_output in enumerate(sampler_output):
+    for _, sequence_output in enumerate(sampler_output):
         for idx, nth_output in enumerate(sequence_output.samples):
             assert nth_output.output_token == idx

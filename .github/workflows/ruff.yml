@@ -1,4 +1,4 @@
-name: pylint
+name: ruff
 
 on:
   # Trigger the workflow on push or pull request,
@@ -11,7 +11,7 @@ on:
       - main
 
 jobs:
-  pylint:
+  ruff:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -25,7 +25,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pylint==2.8.2
-    - name: Analysing the code with pylint
+        pip install ruff==0.1.5
+    - name: Analysing the code with ruff
       run: |
-        pylint vllm tests
+        ruff vllm tests

@@ -8,7 +8,6 @@ from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 _TEST_PROMPTS = [
-    # pylint: disable=line-too-long
     "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
     "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
     "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",

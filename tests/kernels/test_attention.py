@@ -211,7 +211,7 @@ def test_paged_attention(
             alibi_slopes,
         )
     else:
-        assert False, f"Unknown version: {version}"
+        raise AssertionError(f"Unknown version: {version}")
 
     # Run the reference implementation.
     ref_output = torch.empty_like(query)
