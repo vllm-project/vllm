@@ -13,7 +13,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
-from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
+from vllm.utils import get_gpu_memory
 
 
 class Worker:
@@ -141,13 +141,6 @@ class Worker:
         self.block_size = cache_config.block_size
         self.sliding_window = cache_config.sliding_window
 
-        if self.sliding_window is None:
-            max_seq_len = self.scheduler_config.max_model_len
-        else:
-            max_seq_len = min(self.scheduler_config.max_model_len,
-                              self.sliding_window)
-        _check_if_can_support_max_seq_len(max_seq_len, self.block_size)
-
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.cache_events = self.cache_engine.events
@@ -218,12 +211,14 @@ class Worker:
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
         max_seq_len = max(prompt_lens) if prompt_lens else 1
-        for seq_group_metadata in seq_group_metadata_list:
+        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             if seq_group_metadata.is_prompt:
                 # We need to do this in this loop as we need to know max_seq_len
                 assert len(
                     seq_ids) == 1, "Prompt input should have only one seq."
                 sampling_params = seq_group_metadata.sampling_params
+                assert len(prompt_lens) == len(seq_group_metadata_list)
+                prompt_len = prompt_lens[i]
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
                         range(selected_token_start_idx,
@@ -355,10 +350,7 @@ class Worker:
             self.cache_engine.copy(blocks_to_copy)
             issued_cache_op = True
 
-        if issued_cache_op:
-            cache_events = self.cache_events
-        else:
-            cache_events = None
+        cache_events = self.cache_events if issued_cache_op else None
 
         # If there is no input, we don't need to execute the model.
         if not seq_group_metadata_list:
@@ -419,26 +411,6 @@ def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
 
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     return x + [pad] * (max_len - len(x))
-
-
-def _check_if_can_support_max_seq_len(max_seq_len: int,
-                                      block_size: int) -> None:
-    # Follows the logic in
-    # attention_kernels.cu::single_query_cached_kv_attention_launcher
-    max_shared_mem = get_max_shared_memory_bytes()
-    float32_bytes = torch.finfo(torch.float).bits // 8
-    padded_max_seq_len = (
-        (max_seq_len + block_size - 1) / block_size) * block_size
-    # padded_max_seq_len + extra buffer
-    required_shared_mem = (padded_max_seq_len + 512) * float32_bytes
-    if padded_max_seq_len * float32_bytes > max_shared_mem:
-        raise RuntimeError(
-            f"vLLM cannot currently support max_model_len={max_seq_len} "
-            f"with block_size={block_size} on GPU with compute "
-            f"capability {torch.cuda.get_device_capability()} "
-            f"(required shared memory {required_shared_mem} > "
-            f"available shared memory {max_shared_mem}). "
-            "This will be fixed in a future release.")
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

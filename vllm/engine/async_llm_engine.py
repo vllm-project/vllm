@@ -142,10 +142,10 @@ class RequestTracker:
 
         self._request_streams[request_id].finish()
 
-    def get_new_and_finished_requests(self) -> Tuple[List[dict], Set[str]]:
+    def get_new_and_finished_requests(self) -> Tuple[List[Dict], Set[str]]:
         """Get the new requests and finished requests to be
         sent to the engine."""
-        new_requests: List[dict] = []
+        new_requests: List[Dict] = []
         finished_requests: Set[str] = set()
 
         while not self._finished_requests.empty():
@@ -206,18 +206,17 @@ class _AsyncLLMEngine(LLMEngine):
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
-        all_outputs = []
+        coros = []
         for worker in self.workers:
             if self.parallel_config.worker_use_ray:
-                executor = partial(worker.execute_method.remote, method)
+                coros.append(
+                    worker.execute_method.remote(method, *args, **kwargs))
             else:
                 executor = getattr(worker, method)
+                coros.append(asyncio.get_event_loop().run_in_executor(
+                    None, partial(executor, *args, **kwargs)))
 
-            output = executor(*args, **kwargs)
-            all_outputs.append(output)
-
-        if self.parallel_config.worker_use_ray:
-            all_outputs = await asyncio.gather(*all_outputs)
+        all_outputs = await asyncio.gather(*coros)
 
         if get_all_outputs:
             return all_outputs
@@ -484,7 +483,7 @@ class AsyncLLMEngine:
         distributed_init_method, placement_group = initialize_cluster(
             parallel_config, engine_args.engine_use_ray)
         # Create the async LLM engine.
-        engine = cls(engine_args.worker_use_ray,
+        engine = cls(parallel_config.worker_use_ray,
                      engine_args.engine_use_ray,
                      *engine_configs,
                      distributed_init_method,

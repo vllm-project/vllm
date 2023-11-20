@@ -1,8 +1,11 @@
 """Custom activation functions."""
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
 from vllm import activation_ops
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
 class SiluAndMul(nn.Module):
@@ -39,6 +42,27 @@ class FastGELU(nn.Module):
         return out
 
 
+class ScaledActivation(nn.Module):
+    """An activation function with post-scale parameters.
+
+    This is used for some quantization methods like AWQ.
+    """
+
+    def __init__(
+        self,
+        act_module: nn.Module,
+        hidden_size: int,
+        params_dtype: torch.dtype,
+    ):
+        super().__init__()
+        self.act = act_module
+        self.scales = nn.Parameter(
+            torch.empty(hidden_size, dtype=params_dtype, device="cuda"))
+
+    def forward(self, x: torch.Tensor):
+        return self.act(x) / self.scales
+
+
 _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU(),
     "gelu_fast": FastGELU(),
@@ -48,9 +72,26 @@ _ACTIVATION_REGISTRY = {
 }
 
 
-def get_act_fn(act_fn: str) -> nn.Module:
+def get_act_fn(
+    act_fn_name: str,
+    quant_config: Optional[QuantizationConfig] = None,
+    intermediate_size: Optional[int] = None,
+) -> nn.Module:
     """Get an activation function by name."""
-    act_fn = act_fn.lower()
-    if act_fn in _ACTIVATION_REGISTRY:
-        return _ACTIVATION_REGISTRY[act_fn]
-    raise ValueError(f"Activation function {act_fn!r} is not supported.")
+    act_fn_name = act_fn_name.lower()
+    if act_fn_name not in _ACTIVATION_REGISTRY:
+        raise ValueError(
+            f"Activation function {act_fn_name!r} is not supported.")
+
+    act_fn = _ACTIVATION_REGISTRY[act_fn_name]
+    if quant_config is not None and act_fn_name in quant_config.get_scaled_act_names(
+    ):
+        if intermediate_size is None:
+            raise ValueError("intermediate_size must be specified for scaled "
+                             "activation functions.")
+        return ScaledActivation(
+            act_fn,
+            intermediate_size,
+            params_dtype=torch.get_default_dtype(),
+        )
+    return act_fn
