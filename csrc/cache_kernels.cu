@@ -194,7 +194,7 @@ __global__ void reshape_and_cache_quantized_kernel(
   const attn_dtype* __restrict__ value,   // [num_tokens, num_heads, head_size]
   cache_dtype* __restrict__ key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
   cache_dtype* __restrict__ value_cache,   // [num_blocks, num_heads, head_size, block_size]
-  const int* __restrict__ slot_mapping, // [num_tokens]
+  const int64_t* __restrict__ slot_mapping, // [num_tokens]
   const int key_stride,
   const int value_stride,
   const int num_heads,
@@ -205,27 +205,32 @@ __global__ void reshape_and_cache_quantized_kernel(
   const float k_zp,
   const float v_scale,
   const float v_zp) {
-  const int token_idx = blockIdx.x;
-  const int slot_idx = slot_mapping[token_idx];
-  const int block_idx = slot_idx / block_size;
-  const int block_offset = slot_idx % block_size;
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  if (slot_idx < 0) {
+    // Padding token that should be ignored.
+    return;
+  }
+  
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
 
   const int n = num_heads * head_size;
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
-    const int src_key_idx = token_idx * key_stride + i;
-    const int src_value_idx = token_idx * value_stride + i;
+    const int64_t src_key_idx = token_idx * key_stride + i;
+    const int64_t src_value_idx = token_idx * value_stride + i;
 
     const int head_idx = i / head_size;
     const int head_offset = i % head_size;
     const int x_idx = head_offset / x;
     const int x_offset = head_offset % x;
 
-    const int tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
+    const int64_t tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
                             + head_idx * (head_size / x) * block_size * x
                             + x_idx * block_size * x
                             + block_offset * x
                             + x_offset;
-    const int tgt_value_idx = block_idx * num_heads * head_size * block_size
+    const int64_t tgt_value_idx = block_idx * num_heads * head_size * block_size
                               + head_idx * head_size * block_size
                               + head_offset * block_size
                               + block_offset;
@@ -308,7 +313,7 @@ void reshape_and_cache_quantized(
         value.data_ptr<scalar_t>(),
         key_cache.data_ptr<int8_t>(),
         value_cache.data_ptr<int8_t>(),
-        slot_mapping.data_ptr<int>(),
+        slot_mapping.data_ptr<int64_t>(),
         key_stride,
         value_stride,
         num_heads,
