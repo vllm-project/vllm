@@ -131,11 +131,9 @@ def prepare_hf_model_weights(
 ) -> Tuple[str, List[str], bool]:
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
-    if use_safetensors:
-        allow_patterns = ["*.safetensors"]
-    else:
-        # Some quantized models use .pt files for storing the weights.
-        allow_patterns = ["*.bin", "*.pt"]
+    # Some quantized models use .pt files for storing the weights.
+    allow_patterns = ["*.safetensors"
+                      ] if use_safetensors else ["*.bin", "*.pt"]
     if not is_local:
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
@@ -242,7 +240,7 @@ def hf_model_weights_iterator(
     elif use_safetensors:
         for st_file in hf_weights_files:
             with safe_open(st_file, framework="pt") as f:
-                for name in f.keys():
+                for name in f:
                     param = f.get_tensor(name)
                     yield name, param
     else:

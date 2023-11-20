@@ -257,10 +257,7 @@ class OPTDecoder(nn.Module):
         hidden_states = inputs_embeds + pos_embeds
 
         for i in range(len(self.layers)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
             hidden_states = layer(hidden_states, kv_caches[i], input_metadata,
                                   cache_event)

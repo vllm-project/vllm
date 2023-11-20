@@ -258,10 +258,7 @@ class PhiModel(nn.Module):
     ) -> SamplerOutput:
         hidden_states = self.embd(input_ids)
         for i in range(self.config.num_hidden_layers):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(
                 positions,
