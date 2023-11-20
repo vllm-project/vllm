@@ -131,7 +131,8 @@ class MPTMLP(nn.Module):
             linear_method=linear_method,
         )
         quant_config = getattr(linear_method, "quant_config", None)
-        self.act = get_act_fn("gelu", quant_config, intermediate_size)
+        self.act = get_act_fn("gelu", quant_config,
+                              self.up_proj.output_size_per_partition)
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,

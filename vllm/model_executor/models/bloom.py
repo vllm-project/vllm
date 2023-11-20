@@ -146,7 +146,8 @@ class BloomMLP(nn.Module):
             linear_method=linear_method,
         )
         quant_config = getattr(linear_method, "quant_config", None)
-        self.gelu_impl = get_act_fn("gelu", quant_config, 4 * hidden_size)
+        self.gelu_impl = get_act_fn(
+            "gelu", quant_config, self.dense_h_to_4h.output_size_per_partition)
         self.dense_4h_to_h = RowParallelLinear(
             4 * hidden_size,
             hidden_size,

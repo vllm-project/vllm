@@ -209,7 +209,8 @@ class FalconMLP(nn.Module):
                                                   skip_bias_add=True,
                                                   linear_method=linear_method)
         quant_config = getattr(linear_method, "quant_config", None)
-        self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
+        self.act = get_act_fn("gelu", quant_config,
+                              self.dense_h_to_4h.output_size_per_partition)
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
         self.dense_4h_to_h = RowParallelLinear(
