@@ -14,8 +14,8 @@ ROTARY_DIMS = [None]  # None means rotary dim == head size
 NUM_HEADS = [7, 12, 40, 52]  # Arbitrary values for testing
 NUM_TOKENS = [11, 83, 2048]  # Arbitrary values for testing
 SEEDS = [0]
-QUERY_SCALE = [0.0002, 0.0008]
-KEY_SCALE = [0.0002, 0.0008]
+QUERY_SCALE = [0.02, 0.08]
+KEY_SCALE = [0.02, 0.08]
 
 
 def rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -247,17 +247,18 @@ def test_dequant_rotary_embedding(
     out2_query = torch.empty_like(query_)
     out2_key = torch.empty_like(key_)
 
-    pos_encoding_ops.invoke_dequant_rotary_embedding(
+    pos_encoding_ops.rotary_embedding(
         positions,
         query,
-        out2_query,
         key,
-        out2_key,
         head_size,
         cos_sin_cache,
+        is_neox_style,
+        out2_query,
+        out2_key,
+        True, # use quant
         query_scale,
         key_scale,
-        is_neox_style,
     )
-    assert torch.allclose(ref_key, out2_key, atol=1e-4)
-    assert torch.allclose(ref_query, out2_query, atol=1e-4)
+    assert torch.allclose(ref_key, out2_key, atol=1e-4), f"diff: {torch.max(ref_key - out2_key)}"
+    assert torch.allclose(ref_query, out2_query, atol=1e-4), f"diff: {torch.max(ref_query - out2_query)}"

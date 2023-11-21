@@ -87,8 +87,7 @@ def test_rms_norm_quant(
     )
     out1 = out1.clamp(-128, 127).round().to(torch.int8)
     out2 = torch.empty_like(x, dtype=torch.int8)
-    layernorm_ops.invoke_rms_norm_quant(out2, x, ref.weight.data,
-                                        ref.variance_epsilon)
+    layernorm_ops.rms_norm(out2, x, ref.weight.data, ref.variance_epsilon, True)
     assert torch.allclose(out1, out2, atol=1.0)
 
 
@@ -124,81 +123,41 @@ def test_dequant_add_residual_rms_norm_quant(num_tokens: int, hidden_size: int,
     out1 = out1.round().clamp(-128, 127).to(torch.int8)
     out2 = torch.empty_like(x, dtype=torch.int8)
     layernorm_ops.invoke_dequant_add_residual_rms_norm_quant(
-        out2, x, residual, ref.weight.data, ref.variance_epsilon, scale)
-
+        out2, x, residual, ref.weight.data, scale, ref.variance_epsilon
+    )
     assert torch.allclose(out1, out2, atol=1.0)
 
-
+    
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("scale", SCALE)
 @torch.inference_mode()
-def test_dequant_add_residual(num_tokens: int, hidden_size: int,
-                              dtype: torch.dtype, seed: int,
-                              scale: float) -> None:
+def test_per_token_dequant_add_residual_rms_norm_quant(
+    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
+) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-
     s = float(hidden_size**-0.5)
     residual = torch.empty(num_tokens, hidden_size, dtype=dtype, device="cuda")
     x = torch.randint(
-        torch.iinfo(torch.int32).min,
-        torch.iinfo(torch.int32).max,
-        (num_tokens, hidden_size),
-        dtype=torch.int32,
-        device="cuda",
+        -1000, 1000, (num_tokens, hidden_size), dtype=torch.int32, device="cuda"
     )
+    scale = torch.rand(num_tokens, 1, dtype=torch.float32, device="cuda")
     residual.uniform_(-s, s)
-    out1 = (x * scale + residual).to(dtype)
-
-    out2 = torch.empty_like(x, dtype=dtype)
-    fused_kernels.invoke_dequant_add_residual(out2, x, residual, scale)
-
-    assert torch.allclose(out1, out2,
-                          atol=0.001), f"diff: {torch.max(out1 - out2)}"
-
-
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("scale", SCALE)
-@torch.inference_mode()
-def test_dequant(num_tokens: int, hidden_size: int, dtype: torch.dtype,
-                 seed: int, scale: float) -> None:
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-
-    x = torch.randint(
-        torch.iinfo(torch.int32).min,
-        torch.iinfo(torch.int32).max,
-        (num_tokens, hidden_size),
-        dtype=torch.int32,
-        device="cuda",
+    ref = RefRMSNorm(hidden_size).to(dtype).cuda()
+    x_ = (x * scale + residual).to(dtype)
+    out1 = torch.empty_like(x_)
+    layernorm_ops.rms_norm(
+        out1,
+        x_,
+        ref.weight.data,
+        ref.variance_epsilon,
     )
-    out1 = (x * scale).to(dtype)
-
-    out2 = torch.empty_like(x, dtype=dtype)
-    fused_kernels.invoke_dequant(out2, x, scale)
-    assert torch.allclose(out1, out2, atol=0.001)
-
-
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("scale", SCALE)
-@torch.inference_mode()
-def test_quant(num_tokens: int, hidden_size: int, dtype: torch.dtype,
-               seed: int, scale: float) -> None:
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-
-    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
-    out1 = (x / scale).round().clamp(-128, 127).to(torch.int8)
-
+    out1 = out1.round().clamp(-128, 127).to(torch.int8)
     out2 = torch.empty_like(x, dtype=torch.int8)
-    fused_kernels.invoke_quant(out2, x, scale)
-    assert torch.allclose(out1, out2, atol=1)
+    scale = torch.squeeze(scale)
+    layernorm_ops.invoke_dequant_add_residual_rms_norm_quant(
+        out2, x, residual, ref.weight.data, scale, ref.variance_epsilon
+    )
+    assert torch.allclose(out1, out2, atol=1.0)
