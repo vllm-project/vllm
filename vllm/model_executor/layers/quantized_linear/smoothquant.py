@@ -1,8 +1,10 @@
 from typing import Optional
 
 import torch
-from vllm.model_executor.parallel_utils.tensor_parallel.layers import (
-    ColumnParallelLinear, RowParallelLinear)
+from vllm.model_executor.parallel_utils.layers import (
+    ColumnParallelLinear, 
+    RowParallelLinear
+)
 from vllm.i8cugemm import I8CUGEMM
 
 i8cugemm = I8CUGEMM()
@@ -15,18 +17,17 @@ class SQColumnParallelLinear(ColumnParallelLinear):
         assert dtype in [torch.half, torch.float16, torch.float]
         self.register_buffer(
             'weight',
-            torch.randint(-127,
-                          127,
-                          (self.output_size_per_partition, self.input_size),
-                          dtype=torch.int8,
-                          requires_grad=False))
+            torch.empty(
+                self.output_size_per_partition, 
+                self.input_size, 
+                dtype=torch.int8))
 
     def apply_weights(
         self,
         x: torch.Tensor,
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        assert bias is not None
+        assert bias is None
 
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
@@ -46,15 +47,13 @@ class SQRowParallelLinear(RowParallelLinear):
         assert dtype in [torch.half, torch.float16, torch.float]
         self.register_buffer(
             'weight',
-            torch.randint(-127,
-                          127,
-                          (self.output_size, self.input_size_per_partition),
-                          dtype=torch.int8,
-                          requires_grad=False))
+            torch.empty(
+                self.output_size, 
+                self.input_size_per_partition, 
+                dtype=torch.int8))
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         x_shape = x.shape
-        x = x.view(-1, x_shape[-1])
         y = torch.empty((x.shape[0], self.output_size),
                         dtype=torch.int32,
                         device=x.device)

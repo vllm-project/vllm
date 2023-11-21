@@ -68,3 +68,15 @@ class SmoothQuantConfig(QuantizationConfig):
     @classmethod
     def get_tp_tensor_names(cls) -> List[str]:
         return ["weight"]
+
+    @classmethod
+    def get_col_parallel_tensor_names(cls) -> List[str]:
+        return ["weight"]
+
+    @classmethod
+    def get_row_parallel_tensor_names(cls) -> List[str]:
+        return ["weight"]
+
+    @classmethod
+    def get_packed_tensors(cls) -> Dict[str, int]:
+        return {}
