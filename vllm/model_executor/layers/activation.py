@@ -56,12 +56,19 @@ class ScaledActivation(nn.Module):
         self,
         act_module: nn.Module,
         intermediate_size: int,
-        params_dtype: torch.dtype,
+        input_is_parallel: bool = True,
+        params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.act = act_module
-        tp_size = get_tensor_model_parallel_world_size()
-        intermediate_size_per_partition = divide(intermediate_size, tp_size)
+        if input_is_parallel:
+            tp_size = get_tensor_model_parallel_world_size()
+            intermediate_size_per_partition = divide(intermediate_size,
+                                                     tp_size)
+        else:
+            intermediate_size_per_partition = intermediate_size
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
         self.scales = nn.Parameter(
             torch.empty(intermediate_size_per_partition,
                         dtype=params_dtype,
@@ -94,6 +101,8 @@ def get_act_fn(
     act_fn_name: str,
     quant_config: Optional[QuantizationConfig] = None,
     intermediate_size: Optional[int] = None,
+    input_is_parallel: bool = True,
+    params_dtype: Optional[torch.dtype] = None,
 ) -> nn.Module:
     """Get an activation function by name."""
     act_fn_name = act_fn_name.lower()
@@ -107,9 +116,6 @@ def get_act_fn(
         if intermediate_size is None:
             raise ValueError("intermediate_size must be specified for scaled "
                              "activation functions.")
-        return ScaledActivation(
-            act_fn,
-            intermediate_size,
-            params_dtype=torch.get_default_dtype(),
-        )
+        return ScaledActivation(act_fn, intermediate_size, input_is_parallel,
+                                params_dtype)
     return act_fn
