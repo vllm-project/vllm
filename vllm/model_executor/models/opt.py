@@ -141,9 +141,7 @@ class OPTDecoderLayer(nn.Module):
         )
         quant_config = getattr(linear_method, "quant_config", None)
         self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config,
-                                        self.fc1.output_size_per_partition)
-
+                                        quant_config, config.ffn_dim)
         self.fc2 = RowParallelLinear(
             config.ffn_dim,
             self.embed_dim,

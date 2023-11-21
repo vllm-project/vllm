@@ -126,7 +126,7 @@ class GPTNeoXMLP(nn.Module):
         )
         quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn(config.hidden_act, quant_config,
-                              self.dense_h_to_4h.output_size_per_partition)
+                              config.intermediate_size)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.dense_h_to_4h(hidden_states)

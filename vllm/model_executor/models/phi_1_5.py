@@ -170,7 +170,7 @@ class PhiMLP(nn.Module):
         )
         quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn(config.activation_function, quant_config,
-                              self.fc1.output_size_per_partition)
+                              n_inner)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.fc1(hidden_states)
