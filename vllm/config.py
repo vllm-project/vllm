@@ -298,9 +298,10 @@ class ParallelConfig:
         self._verify_args()
 
     def _verify_args(self) -> None:
-        if self.pipeline_parallel_size > 1:
-            raise NotImplementedError(
-                "Pipeline parallelism is not supported yet.")
+        return 
+        # if self.pipeline_parallel_size > 1:
+        #     raise NotImplementedError(
+        #         "Pipeline parallelism is not supported yet.")
 
 
 class SchedulerConfig:
