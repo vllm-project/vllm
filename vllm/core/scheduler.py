@@ -3,7 +3,7 @@ import time
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import CacheConfig, SchedulerConfig
-from vllm.core.block_manager import BlockSpaceManager
+from vllm.core.block_manager import AllocStatus, BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
@@ -154,8 +154,18 @@ class Scheduler:
                     continue
 
                 # If the sequence group cannot be allocated, stop.
-                if not self.block_manager.can_allocate(seq_group):
+                can_allocate = self.block_manager.can_allocate(seq_group)
+                if can_allocate == AllocStatus.LATER:
                     break
+                elif can_allocate == AllocStatus.NEVER:
+                    logger.warning(
+                        f"Input prompt ({num_prompt_tokens} tokens) is too long"
+                        f" and exceeds the capacity of block_manager")
+                    for seq in seq_group.get_seqs():
+                        seq.status = SequenceStatus.FINISHED_IGNORED
+                    ignored_seq_groups.append(seq_group)
+                    self.waiting.pop(0)
+                    continue
 
                 # If the number of batched tokens exceeds the limit, stop.
                 new_seq_lens = seq_lens + [num_prompt_tokens]
