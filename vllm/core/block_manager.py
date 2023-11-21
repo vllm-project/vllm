@@ -1,6 +1,6 @@
 """A block manager that manages token blocks."""
-from typing import Dict, List, Optional, Set, Tuple
 import enum
+from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
