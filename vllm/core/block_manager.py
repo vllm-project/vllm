@@ -50,9 +50,6 @@ class BlockAllocator:
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
 
-    def get_num_blocks(self) -> int:
-        return self.num_blocks
-
 
 # Mapping: logical block number -> physical block.
 BlockTable = List[PhysicalTokenBlock]
@@ -122,18 +119,6 @@ class BlockSpaceManager:
             return AllocStatus.OK
         else:
             return AllocStatus.LATER
-
-    def can_allocate_in_future(self, seq_group: SequenceGroup) -> bool:
-        # Note: Here we assume that all sequences in the group share
-        # the same prompt.
-        seq = seq_group.get_seqs()[0]
-        num_required_blocks = len(seq.logical_token_blocks)
-        if self.block_sliding_window is not None:
-            num_required_blocks = min(num_required_blocks,
-                                      self.block_sliding_window)
-        num_gpu_blocks = self.gpu_allocator.get_num_blocks()
-        # Use watermark to avoid frequent cache eviction.
-        return num_gpu_blocks - num_required_blocks >= self.watermark_blocks
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same

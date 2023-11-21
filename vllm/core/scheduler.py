@@ -153,16 +153,6 @@ class Scheduler:
                     self.waiting.pop(0)
                     continue
 
-                if not self.block_manager.can_allocate_in_future(seq_group):
-                    logger.warning(
-                        "This sequence group cannot be scheduled due to the "
-                        "GPU memory limit")
-                    for seq in seq_group.get_seqs():
-                        seq.status = SequenceStatus.FINISHED_IGNORED
-                    ignored_seq_groups.append(seq_group)
-                    self.waiting.pop(0)
-                    continue
-
                 # If the sequence group cannot be allocated, stop.
                 can_allocate = self.block_manager.can_allocate(seq_group)
                 if can_allocate == AllocStatus.LATER:
