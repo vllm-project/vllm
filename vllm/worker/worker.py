@@ -67,6 +67,8 @@ class Worker:
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
+
+    def load_model(self):
         self.model = get_model(self.model_config)
 
     @torch.inference_mode()
