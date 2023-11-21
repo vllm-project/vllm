@@ -1,10 +1,9 @@
-#include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include "dispatch_utils.h"
 
 namespace vllm {
-
 template <typename scalar_t, typename input_type, bool IS_NEOX,
             bool use_dequant>
   inline __device__ void apply_rotary_embedding(
@@ -26,16 +25,14 @@ template <typename scalar_t, typename input_type, bool IS_NEOX,
       cos = __ldg(cos_ptr + x_index / 2);
       sin = __ldg(sin_ptr + x_index / 2);
     }
-    input_type x = arr[x_index];
-    input_type y = arr[y_index];
     if constexpr (use_dequant) {
-      x = (scalar_t)((float)(x)*scale);
-      y = (scalar_t)((float)(y)*scale);
-    }
-    if constexpr (use_dequant) {
+      const scalar_t x = (scalar_t)((float)arr[x_index] * scale);
+      const scalar_t y = (scalar_t)((float)arr[y_index] * scale);
       arr_out[x_index] = x * cos - y * sin;
       arr_out[y_index] = y * cos + x * sin;
     } else {
+      const scalar_t x = arr[x_index];
+      const scalar_t y = arr[y_index];
       arr[x_index] = x * cos - y * sin;
       arr[y_index] = y * cos + x * sin;
     }
@@ -100,7 +97,6 @@ template <typename scalar_t, typename input_type, bool IS_NEOX,
       }
     }
   }
-
 } // namespace vllm
 
 void rotary_embedding(
@@ -157,7 +153,7 @@ void rotary_embedding(
                     cos_sin_cache.data_ptr<scalar_t>(), rot_dim, query_stride,
                     key_stride, num_heads, num_kv_heads, head_size);
           } else {
-            vllm::rotary_embedding_kernel<scalar_t, scalar_t, false, true>
+            vllm::rotary_embedding_kernel<scalar_t, scalar_t, false, false>
                 <<<grid, block, 0, stream>>>(
                     positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
                     key.data_ptr<scalar_t>(),

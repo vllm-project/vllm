@@ -28,8 +28,8 @@ class RMSNorm(nn.Module):
             out,
             x,
             self.weight.data,
-            self.use_quant,
             self.variance_epsilon,
+            self.use_quant
         )
         return out
 
