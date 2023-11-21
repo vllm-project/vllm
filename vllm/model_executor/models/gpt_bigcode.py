@@ -137,7 +137,9 @@ class GPTBigMLP(nn.Module):
             bias=True,
             linear_method=linear_method,
         )
-        self.act = get_act_fn(config.activation_function)
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.act = get_act_fn(config.activation_function, quant_config,
+                              intermediate_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.c_fc(hidden_states)
@@ -223,10 +225,7 @@ class GPTBigCodeModel(nn.Module):
         hidden_states = inputs_embeds + position_embeds
 
         for i in range(len(self.h)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(hidden_states, kv_caches[i], input_metadata,
                                   cache_event)

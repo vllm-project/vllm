@@ -128,7 +128,9 @@ class GPTJMLP(nn.Module):
             hidden_size,
             linear_method=linear_method,
         )
-        self.act = get_act_fn(config.activation_function)
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.act = get_act_fn(config.activation_function, quant_config,
+                              intermediate_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc_in(hidden_states)
@@ -145,10 +147,7 @@ class GPTJBlock(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        if config.n_inner is None:
-            inner_dim = 4 * config.n_embd
-        else:
-            inner_dim = config.n_inner
+        inner_dim = 4 * config.n_embd if config.n_inner is None else config.n_inner
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = GPTJAttention(config, linear_method)
         self.mlp = GPTJMLP(inner_dim, config, linear_method)
@@ -203,10 +202,7 @@ class GPTJModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
         for i in range(len(self.h)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(
                 position_ids,

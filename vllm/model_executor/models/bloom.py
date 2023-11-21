@@ -145,7 +145,8 @@ class BloomMLP(nn.Module):
             4 * hidden_size,
             linear_method=linear_method,
         )
-        self.act = get_act_fn("gelu")
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.gelu_impl = get_act_fn("gelu", quant_config, 4 * hidden_size)
         self.dense_4h_to_h = RowParallelLinear(
             4 * hidden_size,
             hidden_size,
@@ -154,7 +155,7 @@ class BloomMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.dense_h_to_4h(x)
-        x = self.act(x)
+        x = self.gelu_impl(x)
         x, _ = self.dense_4h_to_h(x)
         return x
 
@@ -255,10 +256,7 @@ class BloomModel(nn.Module):
         hidden_states = self.word_embeddings(input_ids)
         hidden_states = self.word_embeddings_layernorm(hidden_states)
         for i in range(len(self.h)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(
                 position_ids,

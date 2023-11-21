@@ -27,6 +27,7 @@ from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (PagedAttention,
                                                   PagedAttentionWithALiBi,
                                                   PagedAttentionWithRoPE)
@@ -131,6 +132,7 @@ class FalconAttention(nn.Module):
             self.hidden_size,
             bias=config.bias,
             skip_bias_add=True,
+            linear_method=linear_method,
             reduce_results=self.reduce_row_parallel_results)
 
         self.use_rotary = config.rotary
@@ -206,7 +208,8 @@ class FalconMLP(nn.Module):
                                                   bias=config.bias,
                                                   skip_bias_add=True,
                                                   linear_method=linear_method)
-        self.act = nn.GELU()
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
         self.dense_4h_to_h = RowParallelLinear(
@@ -350,10 +353,7 @@ class FalconModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.word_embeddings(input_ids)
         for i in range(len(self.h)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(
                 positions,

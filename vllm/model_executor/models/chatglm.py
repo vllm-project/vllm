@@ -269,10 +269,7 @@ class GLMTransformer(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         for i in range(self.num_layers):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
             hidden_states = layer(
                 hidden_states=hidden_states,

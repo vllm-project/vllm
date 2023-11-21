@@ -50,7 +50,7 @@ class AWQConfig(QuantizationConfig):
     def get_config_filenames() -> List[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
-            "quantize_config.json",  # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq  # pylint: disable=line-too-long
+            "quantize_config.json",  # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
         ]
 
     @classmethod
@@ -62,6 +62,9 @@ class AWQConfig(QuantizationConfig):
 
     def get_linear_method(self) -> "AWQLinearMethod":
         return AWQLinearMethod(self)
+
+    def get_scaled_act_names(self) -> List[str]:
+        return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
 
 
 class AWQLinearMethod(LinearMethodBase):

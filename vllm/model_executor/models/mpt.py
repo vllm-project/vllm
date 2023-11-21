@@ -130,7 +130,8 @@ class MPTMLP(nn.Module):
             bias=not config.no_bias,
             linear_method=linear_method,
         )
-        self.act = get_act_fn("gelu")
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.act = get_act_fn("gelu", quant_config, intermediate_size)
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
@@ -202,10 +203,10 @@ class MPTModel(nn.Module):
         self.norm_f = nn.LayerNorm(config.d_model)
         if config.no_bias:
             for module in self.modules():
-                if hasattr(module, "bias"):
-                    if isinstance(module.bias, nn.Parameter):
-                        # Remove the bias term in Linear and LayerNorm.
-                        module.register_parameter("bias", None)
+                if hasattr(module, "bias") and isinstance(
+                        module.bias, nn.Parameter):
+                    # Remove the bias term in Linear and LayerNorm.
+                    module.register_parameter("bias", None)
 
     def forward(
         self,
@@ -217,10 +218,7 @@ class MPTModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
         for i in range(len(self.blocks)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             block = self.blocks[i]
             hidden_states = block(
                 position_ids,

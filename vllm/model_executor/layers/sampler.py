@@ -71,12 +71,17 @@ class Sampler(nn.Module):
             logits.div_(t.unsqueeze(dim=1))
 
         # Apply top-p and top-k truncation.
-        top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
+        top_ps, top_ks, min_ps = _get_top_p_top_k_min_p(
+            input_metadata, self.vocab_size)
         assert len(top_ps) == len(top_ks) == logits.shape[0]
         do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
         do_top_k = any(k != self.vocab_size for k in top_ks)
         if do_top_p or do_top_k:
             logits = _apply_top_p_top_k(logits, top_ps, top_ks)
+
+        do_min_p = any(mp > _SAMPLING_EPS for mp in min_ps)
+        if do_min_p:
+            logits = _apply_min_p(logits, min_ps)
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
@@ -261,15 +266,17 @@ def _get_temperatures(input_metadata: InputMetadata) -> List[float]:
     return temperatures
 
 
-def _get_top_p_top_k(
+def _get_top_p_top_k_min_p(
     input_metadata: InputMetadata,
     vocab_size: int,
-) -> Tuple[List[float], List[int]]:
+) -> Tuple[List[float], List[int], List[float]]:
     top_ps: List[float] = []
     top_ks: List[int] = []
+    min_ps: List[float] = []
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
         top_p = sampling_params.top_p
+        min_p = sampling_params.min_p
         # k should not be greater than the vocab size.
         top_k = min(sampling_params.top_k, vocab_size)
         # k=-1 means no truncation.
@@ -279,9 +286,11 @@ def _get_top_p_top_k(
             prompt_len = input_metadata.prompt_lens[i]
             top_ps += [top_p] * (prompt_len - 1)
             top_ks += [top_k] * (prompt_len - 1)
+            min_ps += [min_p] * (prompt_len - 1)
         top_ps += [top_p] * len(seq_ids)
         top_ks += [top_k] * len(seq_ids)
-    return top_ps, top_ks
+        min_ps += [min_p] * len(seq_ids)
+    return top_ps, top_ks, min_ps
 
 
 def _apply_top_p_top_k(
@@ -310,6 +319,24 @@ def _apply_top_p_top_k(
     logits = torch.gather(logits_sort,
                           dim=-1,
                           index=torch.argsort(logits_idx, dim=-1))
+    return logits
+
+
+def _apply_min_p(
+    logits: torch.Tensor,
+    min_ps: List[float],
+) -> torch.Tensor:
+    """
+    Adapted from
+    https://github.com/oobabooga/text-generation-webui/blob/3146124ec01f02c8fb1650a6517cf1b60b537aaf/modules/sampler_hijack.py#L16C17-L16C17
+    """
+    min_p = torch.tensor(min_ps, dtype=logits.dtype, device=logits.device)
+    probs = torch.softmax(logits, dim=-1)
+    top_probs, _ = probs.max(dim=-1, keepdim=True)
+    scaled_min_p = min_p.unsqueeze(dim=1) * top_probs
+    tokens_to_remove = probs < scaled_min_p
+    logits = logits.masked_fill(tokens_to_remove, -float("inf"))
+
     return logits
 
 

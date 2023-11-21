@@ -124,7 +124,9 @@ class GPTNeoXMLP(nn.Module):
             config.hidden_size,
             linear_method=linear_method,
         )
-        self.act = get_act_fn(config.hidden_act)
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.act = get_act_fn(config.hidden_act, quant_config,
+                              config.intermediate_size)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.dense_h_to_4h(hidden_states)
@@ -214,10 +216,7 @@ class GPTNeoXModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.embed_in(input_ids)
         for i in range(len(self.layers)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
             hidden_states = layer(
                 position_ids,

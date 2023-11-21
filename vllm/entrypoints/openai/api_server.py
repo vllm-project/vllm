@@ -55,7 +55,7 @@ def create_error_response(status_code: HTTPStatus,
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request, exc):  # pylint: disable=unused-argument
+async def validation_exception_handler(_, exc):
     return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
 
@@ -124,10 +124,8 @@ async def check_length(
     assert (not (prompt is None and prompt_ids is None)
             and not (prompt is not None and prompt_ids is not None)
             ), "Either prompt or prompt_ids should be provided."
-    if prompt_ids is not None:
-        input_ids = prompt_ids
-    else:
-        input_ids = tokenizer(prompt).input_ids
+    input_ids = prompt_ids if prompt_ids is not None else tokenizer(
+        prompt).input_ids
     token_num = len(input_ids)
 
     if request.max_tokens is None:
@@ -648,9 +646,10 @@ if __name__ == "__main__":
     max_model_len = engine_model_config.max_model_len
 
     # A separate tokenizer to map token IDs to strings.
-    tokenizer = get_tokenizer(engine_args.tokenizer,
-                              tokenizer_mode=engine_args.tokenizer_mode,
-                              trust_remote_code=engine_args.trust_remote_code)
+    tokenizer = get_tokenizer(
+        engine_model_config.tokenizer,
+        tokenizer_mode=engine_model_config.tokenizer_mode,
+        trust_remote_code=engine_model_config.trust_remote_code)
 
     uvicorn.run(app,
                 host=args.host,
