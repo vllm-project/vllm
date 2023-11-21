@@ -6,6 +6,10 @@ import torch.nn as nn
 
 from vllm import activation_ops
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.model_executor.parallel_utils.utils import divide
+from vllm.model_executor.utils import set_weight_attrs
 
 
 class SiluAndMul(nn.Module):
@@ -51,16 +55,30 @@ class ScaledActivation(nn.Module):
     def __init__(
         self,
         act_module: nn.Module,
-        hidden_size: int,
+        intermediate_size: int,
         params_dtype: torch.dtype,
     ):
         super().__init__()
         self.act = act_module
+        tp_size = get_tensor_model_parallel_world_size()
+        intermediate_size_per_partition = divide(intermediate_size, tp_size)
         self.scales = nn.Parameter(
-            torch.empty(hidden_size, dtype=params_dtype, device="cuda"))
+            torch.empty(intermediate_size_per_partition,
+                        dtype=params_dtype,
+                        device="cuda"))
+        set_weight_attrs(self.scales, {"weight_loader": self.weight_loader})
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(x) / self.scales
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        tp_rank = get_tensor_model_parallel_rank()
+        param_data = param.data
+        shard_size = param_data.shape[0]
+        start_idx = tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
+        assert param_data.shape == loaded_weight.shape
+        param_data.copy_(loaded_weight)
 
 
 _ACTIVATION_REGISTRY = {
@@ -84,8 +102,8 @@ def get_act_fn(
             f"Activation function {act_fn_name!r} is not supported.")
 
     act_fn = _ACTIVATION_REGISTRY[act_fn_name]
-    if quant_config is not None and act_fn_name in quant_config.get_scaled_act_names(
-    ):
+    if (quant_config is not None
+            and act_fn_name in quant_config.get_scaled_act_names()):
         if intermediate_size is None:
             raise ValueError("intermediate_size must be specified for scaled "
                              "activation functions.")
