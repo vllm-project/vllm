@@ -129,9 +129,6 @@ class OPTDecoderLayer(nn.Module):
             linear_method=linear_method,
         )
         self.do_layer_norm_before = config.do_layer_norm_before
-        quant_config = getattr(linear_method, "quant_config", None)
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config, config.ffn_dim)
 
         self.self_attn_layer_norm = nn.LayerNorm(
             self.embed_dim,
@@ -142,6 +139,9 @@ class OPTDecoderLayer(nn.Module):
             bias=config.enable_bias,
             linear_method=linear_method,
         )
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.activation_fn = get_act_fn(config.activation_function,
+                                        quant_config, config.ffn_dim)
         self.fc2 = RowParallelLinear(
             config.ffn_dim,
             self.embed_dim,
