@@ -26,7 +26,7 @@ from typing import Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm import pos_encoding_ops
+from vllm import pos_encoding_ops, fused_kernels
 
 
 class RotaryEmbedding(nn.Module):
@@ -94,6 +94,37 @@ class RotaryEmbedding(nn.Module):
         return query, key
 
 
+class DequantRotaryEmbedding(RotaryEmbedding):
+    
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        dequant_scale: float
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # pos_encoding_ops.rotary_embedding() is an in-place operation that
+        # updates the query and key tensors.
+        query_dequant = torch.empty_like(query, dtype=self.cos_sin_cache.dtype)
+        key_dequant = torch.empty_like(key, dtype=self.cos_sin_cache.dtype)
+        value_dequant = torch.empty_like(value, dtype=self.cos_sin_cache.dtype)
+
+        fused_kernels.invoke_dequant(value_dequant, value, dequant_scale)
+        pos_encoding_ops.rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+            self.is_neox_style,
+            query_dequant,
+            key_dequant,
+            True, # enable dequant
+            dequant_scale,
+            dequant_scale,
+        )
+        return query_dequant, key_dequant, value_dequant
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with linear scaling.
 
@@ -129,6 +160,20 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
+class DequantLinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding, DequantRotaryEmbedding):
+
+    def __init__(self, *args, **kwargs):
+        super(LinearScalingRotaryEmbedding, self).__init__(*args, **kwargs)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        dequant_scale: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return super(DequantRotaryEmbedding, self).forward(positions, query, key, value, dequant_scale)
 
 class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with Dynamic NTK scaling.
@@ -167,3 +212,19 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
         return cache
+
+
+class DequantDynamicNTKScalingRotaryEmbedding(DynamicNTKScalingRotaryEmbedding, DequantRotaryEmbedding):
+
+    def __init__(self, *args, **kwargs):
+        super(DynamicNTKScalingRotaryEmbedding, self).__init__(*args, **kwargs)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        dequant_scale: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return super(DequantRotaryEmbedding, self).forward(positions, query, key, value, dequant_scale)

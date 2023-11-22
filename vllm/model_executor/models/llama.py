@@ -95,7 +95,7 @@ class LlamaMLP(nn.Module):
         else:
             x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
-        return x
+        return x, scale
 
 
 class LlamaAttention(nn.Module):
@@ -253,19 +253,17 @@ class LlamaDecoderLayer(nn.Module):
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        hidden_states, scale = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
-
         if self.use_int8:
-            residual, hidden_states = self.dequant_add_residual_layernorm_quant(
-                residual, hidden_states)
-            hidden_states = self.mlp(hidden_states)
-            hidden_states = self.dequant_add_residual(residual, hidden_states)
+            residual, hidden_states = self.dequant_add_residual_layernorm_quant(residual, hidden_states, *scale)
+            hidden_states, scale = self.mlp(hidden_states)
+            hidden_states = self.dequant_add_residual(residual, hidden_states, *scale)
         else:
             hidden_states = residual + hidden_states
             # Fully Connected

@@ -1,7 +1,7 @@
 from typing import Optional
 
 import torch
-from vllm.model_executor.parallel_utils.tensor_parallel.layers import (
+from vllm.model_executor.parallel_utils.layers import (
     ColumnParallelLinear, RowParallelLinear)
 from vllm.i8cugemm import I8CUGEMM
 
@@ -23,7 +23,7 @@ class SQColumnParallelLinear(ColumnParallelLinear):
         x: torch.Tensor,
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        assert bias is not None
+        assert bias is None
 
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])

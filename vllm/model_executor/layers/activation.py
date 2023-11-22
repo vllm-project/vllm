@@ -53,9 +53,9 @@ class DequantSiluAndMulQuant(nn.Module):
         return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        num_tokens = x.shape[0]
-        d = x.shape[1] // 2
-        out = torch.empty(num_tokens, d, dtype=torch.int8, device=x.device)
+        num_tokens = x.numel() // x.shape[-1]
+        d = x.shape[-1] // 2
+        out = torch.empty(*x.shape[:-1], d, dtype=torch.int8, device=x.device)
         if self.use_per_token_quant: 
             scale = torch.empty(num_tokens, dtype=torch.float32, device=x.device)
             # tmp is used in kernel func
