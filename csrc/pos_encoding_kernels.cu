@@ -44,17 +44,17 @@ template <typename scalar_t, typename input_type, bool IS_NEOX,
 template <typename scalar_t, typename input_type, bool IS_NEOX,
             bool use_dequant>
   __global__ void rotary_embedding_kernel(
-      const int64_t *__restrict__ positions, // [num_tokens]
-      input_type *__restrict__ query, // [num_tokens, num_heads, head_size]
-      input_type *__restrict__ key,   // [num_tokens, num_kv_heads, head_size]
+      const int64_t *__restrict__ positions, 
+      input_type *__restrict__ query, 
+      input_type *__restrict__ key,
       const scalar_t
-          *__restrict__ cos_sin_cache, // [max_position, 2, rot_dim // 2]
+          *__restrict__ cos_sin_cache,
       const int rot_dim, const int query_stride, const int key_stride,
       const int num_heads, const int num_kv_heads, const int head_size,
       scalar_t *__restrict__ query_out =
-          nullptr, // [num_tokens, num_heads, head_size]
+          nullptr,
       scalar_t * __restrict__ key_out =
-          nullptr, // [num_tokens, num_kv_heads, head_size]
+          nullptr,
       const int query_out_stride = 1, const int key_out_stride = 1,
       const float query_scale = 1.0f, const float key_scale = 1.0f) {
     // Each thread block is responsible for one token.
@@ -104,14 +104,14 @@ template <typename scalar_t, typename input_type, bool IS_NEOX,
 } // namespace vllm
 
 void rotary_embedding(
-    torch::Tensor &positions, // [num_tokens]
-    torch::Tensor &query,     // [num_tokens, num_heads * head_size]
-    torch::Tensor &key,       // [num_tokens, num_kv_heads * head_size]
+    torch::Tensor &positions, // [batch_size, seq_len] or [num_tokens]
+    torch::Tensor &query,     // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
+    torch::Tensor &key,       // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
     int head_size,
     torch::Tensor &cos_sin_cache, // [max_position, rot_dim]
     bool is_neox,
-    torch::Tensor &query_out, // [num_tokens, num_heads * head_size]
-    torch::Tensor &key_out, // [num_tokens, num_kv_heads * head_size]
+    torch::Tensor &query_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
+    torch::Tensor &key_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
     bool use_dequant = false, const float query_scale = 1.0f,
     const float key_scale = 1.0f) {
   int num_tokens = query.size(0);
@@ -127,8 +127,8 @@ void rotary_embedding(
   VLLM_DISPATCH_FLOATING_TYPES(
       cos_sin_cache.scalar_type(), "rotary_embedding_kernel", [&] {
         if (use_dequant) {
-          int query_out_stride = query_out.stride(0);
-          int key_out_stride = key_out.stride(0);
+          int query_out_stride = query_out.stride(-2);
+          int key_out_stride = key_out.stride(-2);
           if (is_neox) {
             vllm::rotary_embedding_kernel<scalar_t, int32_t, true, true>
                 <<<grid, block, 0, stream>>>(

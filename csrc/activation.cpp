@@ -1,22 +1,24 @@
 #include <torch/extension.h>
 
-void silu_and_mul(torch::Tensor &out, torch::Tensor &input);
+void silu_and_mul(torch::Tensor &out,    // [..., d]
+                  torch::Tensor &input); // [..., 2 * d]
 
 void gelu_new(torch::Tensor &out, torch::Tensor &input);
 
 void gelu_fast(torch::Tensor &out, torch::Tensor &input);
 
-void invoke_dequant_silu_and_mul_quant(torch::Tensor &out, torch::Tensor &input,
+void invoke_dequant_silu_and_mul_quant(torch::Tensor &out,   // [..., d]
+                                       torch::Tensor &input, // [..., 2 * d]
                                        const float scale_gate,
                                        const float scale_up,
                                        const float scale_out);
 
-void invoke_dequant_silu_and_mul_quant(
-    torch::Tensor &out,   // [num_tokens, d]
-    torch::Tensor &input, // [num_tokens, 2 * d]
-    const float scale_gate, const float scale_up,
-    torch::Tensor &scale_out, // [num_tokens]
-    torch::Tensor &tmp        // [num_tokens, d]
+void invoke_dequant_silu_and_mul_quant(torch::Tensor &out,   // [..., d]
+                                       torch::Tensor &input, // [..., 2 * d]
+                                       const float scale_gate,
+                                       const float scale_up,
+                                       torch::Tensor &scale_out, // [num_tokens]
+                                       torch::Tensor &tmp // [num_tokens, d]
 );
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

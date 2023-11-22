@@ -1,28 +1,28 @@
 #include <torch/extension.h>
 
 void invoke_dequant_add_residual(
-    torch::Tensor &out,      // [num_tokens, hidden_size]
-    torch::Tensor &input,    // [num_tokens, hidden_size]
-    torch::Tensor &residual, // [num_tokens, hidden_size]
+    torch::Tensor &out,      // [..., hidden_size]
+    torch::Tensor &input,    // [..., hidden_size]
+    torch::Tensor &residual, // [..., hidden_size]
     float scale);
 
 void invoke_dequant_add_residual(
-    torch::Tensor &out,      // [num_tokens, hidden_size]
-    torch::Tensor &input,    // [num_tokens, hidden_size]
-    torch::Tensor &residual, // [num_tokens, hidden_size]
-    torch::Tensor &scale);
+    torch::Tensor &out,      // [..., hidden_size]
+    torch::Tensor &input,    // [..., hidden_size]
+    torch::Tensor &residual, // [..., hidden_size]
+    torch::Tensor &scale);   // [num_tokens]
 
-void invoke_dequant(torch::Tensor &out,   // [num_tokens, hidden_size]
-                    torch::Tensor &input, // [num_tokens, hidden_size]
+void invoke_dequant(torch::Tensor &out,   // [..., hidden_size]
+                    torch::Tensor &input, // [..., hidden_size]
                     float scale);
 
-void invoke_quant(torch::Tensor &out,   // [num_tokens, hidden_size]
-                  torch::Tensor &input, // [num_tokens, hidden_size]
+void invoke_quant(torch::Tensor &out,   // [..., hidden_size]
+                  torch::Tensor &input, // [..., hidden_size]
                   float scale);
 
-void invoke_quant(torch::Tensor &out,   // [num_tokens, hidden_size]
-                  torch::Tensor &input, // [num_tokens, hidden_size]
-                  torch::Tensor &scale);
+void invoke_quant(torch::Tensor &out,   // [..., hidden_size]
+                  torch::Tensor &input, // [..., hidden_size]
+                  torch::Tensor &scale);  // [num_tokens]
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("invoke_dequant_add_residual",

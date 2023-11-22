@@ -1,24 +1,25 @@
 #include <torch/extension.h>
 
-void rms_norm(torch::Tensor &out,    // [num_tokens, hidden_size]
-                     torch::Tensor &input,  // [num_tokens, hidden_size]
-                     torch::Tensor &weight, // [hidden_size]
-                     bool use_quant, float epsilon);
+void rms_norm(torch::Tensor &out,    // [..., hidden_size]
+              torch::Tensor &input,  // [..., hidden_size]
+              torch::Tensor &weight, // [hidden_size]
+              float epsilon,
+              bool use_quant);
 
 void invoke_dequant_add_residual_rms_norm_quant(
-    torch::Tensor &out,      // [num_tokens, hidden_size]
-    torch::Tensor &input,    // [num_tokens, hidden_size]
-    torch::Tensor &residual, // [num_tokens, hidden_size]
+    torch::Tensor &out,      // [..., hidden_size]
+    torch::Tensor &input,    // [..., hidden_size]
+    torch::Tensor &residual, // [..., hidden_size]
     torch::Tensor &gamma,    // [hidden_size]
     float scale,
     float epsilon);
 
 void invoke_dequant_add_residual_rms_norm_quant(
-    torch::Tensor &out,      // [num_tokens, hidden_size]
-    torch::Tensor &input,    // [num_tokens, hidden_size]
-    torch::Tensor &residual, // [num_tokens, hidden_size]
+    torch::Tensor &out,      // [..., hidden_size]
+    torch::Tensor &input,    // [..., hidden_size]
+    torch::Tensor &residual, // [..., hidden_size]
     torch::Tensor &gamma,    // [hidden_size]
-    torch::Tensor &scale,
+    torch::Tensor &scale,    // [num_tokens]
     float epsilon);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

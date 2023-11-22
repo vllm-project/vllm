@@ -3,6 +3,7 @@
 
 #include "dispatch_utils.h"
 #include "utils.cuh"
+#include "reduction_utils.cuh"
 
 namespace vllm {
 
@@ -15,7 +16,7 @@ template <typename T> __device__ __forceinline__ T silu(const T &x) {
 template<typename scalar_t>
 __global__ void silu_and_mul_kernel(
   scalar_t* __restrict__ out,               // [..., d]
-  const scalar_t* __restrict__ input,       // [..., 2, d]
+  const scalar_t* __restrict__ input,       // [..., 2 * d]
   const int d) {
 
   const int token_idx = blockIdx.x;
@@ -29,8 +30,8 @@ __global__ void silu_and_mul_kernel(
 // dequant int32 input, apply silu and mul, then per token quant to int8
 template <typename scale_type, bool use_per_token_quant>
 __global__ void dequant_silu_and_mul_quant_kernel(
-    int8_t *__restrict__ out,          // [num_tokens, d]
-    const int32_t *__restrict__ input, // [num_tokens, 2, d]
+    int8_t *__restrict__ out,          // [..., d]
+    const int32_t *__restrict__ input, // [..., 2 * d]
     const int d, const float scale_gate, const float scale_up,
     scale_type scale_out,                  // [num_tokens]
     float *__restrict__ tmp = nullptr // [num_tokens, d]
@@ -82,9 +83,8 @@ void silu_and_mul(
   torch::Tensor& out,      // [..., d]
   torch::Tensor& input)    // [..., 2 * d]
 {
-  int num_tokens = input.numel() / input.size(-1);
+  int64_t num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1) / 2;
-
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -95,12 +95,11 @@ void silu_and_mul(
 }
 
 void invoke_dequant_silu_and_mul_quant(
-    torch::Tensor &out,   // [num_tokens, d]
-    torch::Tensor &input, // [num_tokens, 2 * d]
+    torch::Tensor &out,   // [..., d]
+    torch::Tensor &input, // [..., 2 * d]
     const float scale_gate, const float scale_up, const float scale_out) {
-  int num_tokens = input.size(0);
-  int d = input.size(1) / 2;
-
+  int64_t num_tokens = input.numel() / input.size(-1);
+  int d = input.size(-1) / 2;
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -111,15 +110,14 @@ void invoke_dequant_silu_and_mul_quant(
 
 
 void invoke_dequant_silu_and_mul_quant(
-    torch::Tensor &out,   // [num_tokens, d]
-    torch::Tensor &input, // [num_tokens, 2 * d]
+    torch::Tensor &out,   // [..., d]
+    torch::Tensor &input, // [..., 2 * d]
     const float scale_gate, const float scale_up,
     torch::Tensor &scale_out, // [num_tokens]
-    torch::Tensor &tmp // [num_tokens, d]
+    torch::Tensor &tmp // [..., d]
 ) {
-  int num_tokens = input.size(0);
-  int d = input.size(1) / 2;
-
+  int64_t num_tokens = input.numel() / input.size(-1);
+  int d = input.size(-1) / 2;
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();

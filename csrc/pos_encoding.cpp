@@ -1,14 +1,14 @@
 #include <torch/extension.h>
 
 void rotary_embedding(
-    torch::Tensor &positions, // [num_tokens]
-    torch::Tensor &query,     // [num_tokens, num_heads * head_size]
-    torch::Tensor &key,       // [num_tokens, num_kv_heads * head_size]
+    torch::Tensor &positions, // [batch_size, seq_len] or [num_tokens]
+    torch::Tensor &query,     // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
+    torch::Tensor &key,       // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
     int head_size,
     torch::Tensor &cos_sin_cache, // [max_position, rot_dim]
     bool is_neox,
-    torch::Tensor &query_out, // [num_tokens, num_heads * head_size]
-    torch::Tensor &key_out, // [num_tokens, num_kv_heads * head_size]
+    torch::Tensor &query_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
+    torch::Tensor &key_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
     bool use_dequant = false, const float query_scale = 1.0f,
     const float key_scale = 1.0f);
 
