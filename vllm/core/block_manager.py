@@ -101,14 +101,18 @@ class BlockSpaceManager:
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
-    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
-        # FIXME(woosuk): Here we assume that all sequences in the group share
-        # the same prompt. This may not be true for preempted sequences.
+    def get_num_required_blocks(self, seq_group: SequenceGroup) -> int:
         seq = seq_group.get_seqs()[0]
         num_required_blocks = len(seq.logical_token_blocks)
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
+        return num_required_blocks
+
+    def can_allocate(self, seq_group: SequenceGroup) -> bool:
+        # FIXME(woosuk): Here we assume that all sequences in the group share
+        # the same prompt. This may not be true for preempted sequences.
+        num_required_blocks = self.get_num_required_blocks(seq_group)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
 
         # Use watermark to avoid frequent cache eviction.

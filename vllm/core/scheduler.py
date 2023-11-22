@@ -153,6 +153,19 @@ class Scheduler:
                     self.waiting.pop(0)
                     continue
 
+                num_required_blocks = self.block_manager.get_num_required_blocks(
+                    seq_group)
+                if num_required_blocks > self.block_manager.num_total_gpu_blocks:
+                    logger.warning(
+                        f"Input prompt require too many blocks ({num_required_blocks} blocks)"
+                        f" and exceed gpu blocks limit of {self.block_manager.num_total_gpu_blocks}"
+                    )
+                    for seq in seq_group.get_seqs():
+                        seq.status = SequenceStatus.FINISHED_IGNORED
+                    ignored_seq_groups.append(seq_group)
+                    self.waiting.pop(0)
+                    break
+
                 # If the sequence group cannot be allocated, stop.
                 can_allocate = self.block_manager.can_allocate(seq_group)
                 if can_allocate == AllocStatus.LATER:
