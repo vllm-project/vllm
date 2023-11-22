@@ -133,7 +133,6 @@ class LlamaAttention(nn.Module):
             input_is_parallel=True,
             quant_config=quant_config,
         )
-        print(f"init PagedAttentionWithRoPE with kv quant: {quant_kv_cache}")
         self.attn = PagedAttentionWithRoPE(
             self.num_heads,
             self.head_dim,
@@ -285,7 +284,6 @@ class LlamaForCausalLM(nn.Module):
                  quant_kv_cache: bool = False,
                  kv_quant_params_list: List[List[float]] = None) -> None:
         super().__init__()
-        print(f"init llama with kv quant {quant_kv_cache}")
         self.config = config
         self.quant_config = quant_config
         self.model = LlamaModel(config, quant_config, quant_kv_cache,

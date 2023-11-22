@@ -57,7 +57,6 @@ class PagedAttention(nn.Module):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        print(f"PagedAttention init with kv quant: {quant_kv_cache}")
         self.quant_kv_cache = quant_kv_cache
         self.kv_quant_params = kv_quant_params
         self.head_mapping = torch.repeat_interleave(
@@ -165,7 +164,6 @@ class PagedAttention(nn.Module):
         use_v1 = input_metadata.max_context_len <= 8192 and (
             max_num_partitions == 1 or num_seqs * num_heads > 512)
         if self.quant_kv_cache:
-            print(f'run int quant kv cache')
             attention_ops.paged_attention_quantized(
                 output,
                 query,
@@ -295,7 +293,6 @@ class PagedAttention(nn.Module):
                 slot_mapping = slot_mapping[input_metadata.to_cache]
 
             if self.quant_kv_cache:
-                print(f'get quantized cache')
                 cache_ops.reshape_and_cache_quantized(
                     key_to_cache,
                     value_to_cache,
