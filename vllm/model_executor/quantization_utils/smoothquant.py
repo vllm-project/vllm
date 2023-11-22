@@ -56,7 +56,7 @@ class SmoothQuantConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         quant_type = cls.get_from_keys(config, ["quant_type", "q_type"])
         return cls(weight_bits, quant_type)
-    
+
     @classmethod
     def get_packed_dim(cls, tensor_name: str) -> Optional[int]:
         return None
@@ -64,11 +64,11 @@ class SmoothQuantConfig(QuantizationConfig):
     @classmethod
     def get_transposed_tensor_names(cls) -> List[str]:
         return []
-    
+
     @classmethod
     def is_transposed(cls, tensor_name: str) -> bool:
         return False
-    
+
     @classmethod
     def get_col_parallel_tensor_names(cls) -> List[str]:
         return ["weight"]

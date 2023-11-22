@@ -1,14 +1,8 @@
 from typing import Optional
 
 import torch
-from vllm.model_executor.parallel_utils.layers import (
-<<<<<<< HEAD
-    ColumnParallelLinear, RowParallelLinear)
-=======
-    ColumnParallelLinear, 
-    RowParallelLinear
-)
->>>>>>> 2de11d9dff03d88d346b5b78d169fc6302f9c605
+from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
+                                                       RowParallelLinear)
 from vllm.i8cugemm import I8CUGEMM
 
 i8cugemm = I8CUGEMM()
@@ -18,11 +12,12 @@ class SQColumnParallelLinear(ColumnParallelLinear):
 
     def create_weights(self, dtype: torch.dtype) -> None:
         assert self.input_size % self.quant_config.weight_bits == 0
-        self.register_buffer('weight', 
-                            torch.empty(self.output_size_per_partition,
-                                           self.input_size, 
-                                           dtype=torch.int8, 
-                                           requires_grad=False))
+        self.register_buffer(
+            'weight',
+            torch.empty(self.output_size_per_partition,
+                        self.input_size,
+                        dtype=torch.int8,
+                        requires_grad=False))
 
     def apply_weights(
         self,
@@ -46,12 +41,12 @@ class SQRowParallelLinear(RowParallelLinear):
     def create_weights(self, dtype: torch.dtype) -> None:
         assert (self.input_size_per_partition %
                 self.quant_config.weight_bits == 0)
-        self.register_buffer('weight', 
-                            torch.empty(self.output_size,
-                                           self.input_size_per_partition, 
-                                           dtype=torch.int8, 
-                                           requires_grad=False))
-
+        self.register_buffer(
+            'weight',
+            torch.empty(self.output_size,
+                        self.input_size_per_partition,
+                        dtype=torch.int8,
+                        requires_grad=False))
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         x_shape = x.shape

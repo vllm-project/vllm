@@ -70,9 +70,8 @@ def test_dequant_silu_and_mul_quant(
     activation_ops.silu_and_mul(out1, x_)
     out1 = (out1 / scale_out).round().clamp(-128, 127).to(torch.int8)
     out2 = torch.empty(num_tokens, d, dtype=torch.int8, device="cuda")
-    activation_ops.invoke_dequant_silu_and_mul_quant(
-        out2, x, scale_up, scale_out, scale_gate
-    )
+    activation_ops.invoke_dequant_silu_and_mul_quant(out2, x, scale_up,
+                                                     scale_out, scale_gate)
     assert torch.allclose(out1, out2, atol=2)
 
 
@@ -93,9 +92,10 @@ def test_dequant_silu_and_mul_per_token_quant(
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    x = torch.randint(
-        -1000, 1000, (num_tokens, 2 * d), dtype=torch.int32, device="cuda"
-    )
+    x = torch.randint(-1000,
+                      1000, (num_tokens, 2 * d),
+                      dtype=torch.int32,
+                      device="cuda")
 
     x_ = torch.empty_like(x, dtype=dtype)
     x_[:, :d] = x[:, :d] * scale_gate
@@ -105,11 +105,10 @@ def test_dequant_silu_and_mul_per_token_quant(
     scale1 = torch.max(out1, dim=1)[0].to(torch.float32) / 127.0
     out1 = (out1 / scale1.view(-1, 1)).round().clamp(-128, 127).to(torch.int8)
     out2 = torch.empty(num_tokens, d, dtype=torch.int8, device="cuda")
-    tmp =  torch.empty(num_tokens, d, dtype=torch.float32, device="cuda")
+    tmp = torch.empty(num_tokens, d, dtype=torch.float32, device="cuda")
     scale2 = torch.empty(num_tokens, dtype=torch.float32, device="cuda")
-    activation_ops.invoke_dequant_silu_and_mul_quant(
-        out2, x, scale_gate, scale_up, scale2, tmp
-    )
+    activation_ops.invoke_dequant_silu_and_mul_quant(out2, x, scale_gate,
+                                                     scale_up, scale2, tmp)
     assert torch.allclose(out1, out2, atol=2)
 
 

@@ -87,7 +87,8 @@ def test_rms_norm_quant(
     )
     out1 = out1.clamp(-128, 127).round().to(torch.int8)
     out2 = torch.empty_like(x, dtype=torch.int8)
-    layernorm_ops.rms_norm(out2, x, ref.weight.data, ref.variance_epsilon, True)
+    layernorm_ops.rms_norm(out2, x, ref.weight.data, ref.variance_epsilon,
+                           True)
     assert torch.allclose(out1, out2, atol=1.0)
 
 
@@ -123,26 +124,27 @@ def test_dequant_add_residual_rms_norm_quant(num_tokens: int, hidden_size: int,
     out1 = out1.round().clamp(-128, 127).to(torch.int8)
     out2 = torch.empty_like(x, dtype=torch.int8)
     layernorm_ops.invoke_dequant_add_residual_rms_norm_quant(
-        out2, x, residual, ref.weight.data, scale, ref.variance_epsilon
-    )
+        out2, x, residual, ref.weight.data, scale, ref.variance_epsilon)
     assert torch.allclose(out1, out2, atol=1.0)
 
-    
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def test_per_token_dequant_add_residual_rms_norm_quant(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
-) -> None:
+def test_per_token_dequant_add_residual_rms_norm_quant(num_tokens: int,
+                                                       hidden_size: int,
+                                                       dtype: torch.dtype,
+                                                       seed: int) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     s = float(hidden_size**-0.5)
     residual = torch.empty(num_tokens, hidden_size, dtype=dtype, device="cuda")
-    x = torch.randint(
-        -1000, 1000, (num_tokens, hidden_size), dtype=torch.int32, device="cuda"
-    )
+    x = torch.randint(-1000,
+                      1000, (num_tokens, hidden_size),
+                      dtype=torch.int32,
+                      device="cuda")
     scale = torch.rand(num_tokens, 1, dtype=torch.float32, device="cuda")
     residual.uniform_(-s, s)
     ref = RefRMSNorm(hidden_size).to(dtype).cuda()
@@ -158,6 +160,5 @@ def test_per_token_dequant_add_residual_rms_norm_quant(
     out2 = torch.empty_like(x, dtype=torch.int8)
     scale = torch.squeeze(scale)
     layernorm_ops.invoke_dequant_add_residual_rms_norm_quant(
-        out2, x, residual, ref.weight.data, scale, ref.variance_epsilon
-    )
+        out2, x, residual, ref.weight.data, scale, ref.variance_epsilon)
     assert torch.allclose(out1, out2, atol=1.0)

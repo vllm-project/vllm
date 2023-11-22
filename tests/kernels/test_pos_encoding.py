@@ -256,9 +256,12 @@ def test_dequant_rotary_embedding(
         is_neox_style,
         out2_query,
         out2_key,
-        True, # use quant
+        True,  # use quant
         query_scale,
         key_scale,
     )
-    assert torch.allclose(ref_key, out2_key, atol=1e-4), f"diff: {torch.max(ref_key - out2_key)}"
-    assert torch.allclose(ref_query, out2_query, atol=1e-4), f"diff: {torch.max(ref_query - out2_query)}"
+    assert torch.allclose(ref_key, out2_key,
+                          atol=1e-4), f"diff: {torch.max(ref_key - out2_key)}"
+    assert torch.allclose(
+        ref_query, out2_query,
+        atol=1e-4), f"diff: {torch.max(ref_query - out2_query)}"

@@ -9,12 +9,12 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 
 from vllm import attention_ops
 from vllm import cache_ops
-from vllm import pos_encoding_ops
 from vllm import fused_kernels
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.rotary_embedding import (
     DynamicNTKScalingRotaryEmbedding, LinearScalingRotaryEmbedding,
-    RotaryEmbedding, DequantDynamicNTKScalingRotaryEmbedding, DequantLinearScalingRotaryEmbedding, DequantRotaryEmbedding)
+    RotaryEmbedding, DequantDynamicNTKScalingRotaryEmbedding,
+    DequantLinearScalingRotaryEmbedding, DequantRotaryEmbedding)
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -381,8 +381,10 @@ class PagedAttentionWithRoPE(PagedAttention):
             cache_event,
         )
 
+
 class DequantPagedAttentionWithRoPEQuant(PagedAttention):
     """PagedAttention with rotary embedding."""
+
     # TODO(Zhang Ying): use_per_token_quant
     def __init__(
         self,
@@ -407,8 +409,8 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
                          sliding_window=sliding_window)
         if rope_scaling is None:
             self.rotary_emb = DequantRotaryEmbedding(head_size, rotary_dim,
-                                              max_position, base,
-                                              is_neox_style)
+                                                     max_position, base,
+                                                     is_neox_style)
         else:
             scaling_type = rope_scaling["type"]
             scaling_factor = rope_scaling["factor"]
@@ -423,11 +425,14 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
         self.register_buffer(
-            'dequant_scale',
+            "dequant_scale",
             torch.tensor(dequant_scale,
                          dtype=torch.float32,
                          requires_grad=False))
-        self.register_buffer('quant_scale', torch.tensor(quant_scale, dtype=torch.float32, requires_grad=False))
+        self.register_buffer(
+            "quant_scale",
+            torch.tensor(quant_scale, dtype=torch.float32,
+                         requires_grad=False))
         self.use_per_token_quant = use_per_token_quant
 
     def _apply(self, fn):
@@ -443,7 +448,6 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
         self.quant_scale = self.quant_scale.to(*args, **kwargs)
         self.quant_scale = self.quant_scale.to(torch.float32)
         return self
-    
 
     def forward(
         self,
@@ -476,7 +480,8 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
 
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
-        query_dequant, key_dequant, value_dequant = self.rotary_emb(positions, query, key, value, self.dequant_scale.item())
+        query_dequant, key_dequant, value_dequant = self.rotary_emb(
+            positions, query, key, value, self.dequant_scale.item())
         out = super().forward(
             query_dequant,
             key_dequant,
@@ -488,12 +493,15 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
         )
         quant_out = torch.empty_like(out, dtype=torch.int8)
         if self.use_per_token_quant:
-            scale = torch.empty(out.numel() // out.shape[-1], dtype=torch.float32, device=out.device)
+            scale = torch.empty(out.numel() // out.shape[-1],
+                                dtype=torch.float32,
+                                device=out.device)
             fused_kernels.invoke_quant(quant_out, out, scale)
             return quant_out, scale
         else:
             fused_kernels.invoke_quant(quant_out, out, self.quant_scale.item())
-            return (quant_out,)
+            return (quant_out, )
+
 
 class PagedAttentionWithALiBi(PagedAttention):
     """PagedAttention with ALiBi attention bias."""

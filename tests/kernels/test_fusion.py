@@ -10,15 +10,16 @@ NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
 SEEDS = [0]
 SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
 
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("scale", SCALE)
 @torch.inference_mode()
-def test_dequant_add_residual(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int, scale: float
-) -> None:
+def test_dequant_add_residual(num_tokens: int, hidden_size: int,
+                              dtype: torch.dtype, seed: int,
+                              scale: float) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     s = float(hidden_size**-0.5)
@@ -35,7 +36,8 @@ def test_dequant_add_residual(
     out1 = (x * scale + residual).to(dtype)
     out2 = torch.empty_like(x, dtype=dtype)
     fused_kernels.invoke_dequant_add_residual(out2, x, residual, scale)
-    assert torch.allclose(out1, out2, atol=0.001), f"diff: {torch.max(out1 - out2)}"
+    assert torch.allclose(out1, out2,
+                          atol=0.001), f"diff: {torch.max(out1 - out2)}"
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -43,9 +45,8 @@ def test_dequant_add_residual(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def test_per_token_dequant_add_residual(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
-) -> None:
+def test_per_token_dequant_add_residual(num_tokens: int, hidden_size: int,
+                                        dtype: torch.dtype, seed: int) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     s = float(hidden_size**-0.5)
@@ -64,7 +65,8 @@ def test_per_token_dequant_add_residual(
     scale = torch.squeeze(scale)
     out2 = torch.empty_like(x, dtype=dtype)
     fused_kernels.invoke_dequant_add_residual(out2, x, residual, scale)
-    assert torch.allclose(out1, out2, atol=0.001), f"diff: {torch.max(out1 - out2)}"
+    assert torch.allclose(out1, out2,
+                          atol=0.001), f"diff: {torch.max(out1 - out2)}"
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -73,9 +75,8 @@ def test_per_token_dequant_add_residual(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("scale", SCALE)
 @torch.inference_mode()
-def test_dequant(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int, scale: float
-) -> None:
+def test_dequant(num_tokens: int, hidden_size: int, dtype: torch.dtype,
+                 seed: int, scale: float) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     x = torch.randint(
@@ -98,9 +99,8 @@ def test_dequant(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("scale", SCALE)
 @torch.inference_mode()
-def test_quant(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int, scale: float
-) -> None:
+def test_quant(num_tokens: int, hidden_size: int, dtype: torch.dtype,
+               seed: int, scale: float) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
@@ -110,14 +110,14 @@ def test_quant(
     fused_kernels.invoke_quant(out2, x, scale)
     assert torch.allclose(out1, out2, atol=1)
 
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def test_per_token_quant(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
-) -> None:
+def test_per_token_quant(num_tokens: int, hidden_size: int, dtype: torch.dtype,
+                         seed: int) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
