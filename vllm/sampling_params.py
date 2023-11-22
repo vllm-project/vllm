@@ -147,6 +147,8 @@ class SamplingParams:
             self._verify_non_beam_search()
             if self.temperature < _SAMPLING_EPS:
                 # Zero temperature means greedy sampling.
+                self.top_p = 1.0
+                self.top_k = -1
                 self._verify_greedy_sampling()
 
     def _verify_args(self) -> None:
@@ -214,10 +216,6 @@ class SamplingParams:
         if self.best_of > 1:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
-        if self.top_p < 1.0 - _SAMPLING_EPS:
-            raise ValueError("top_p must be 1 when using greedy sampling.")
-        if self.top_k != -1:
-            raise ValueError("top_k must be -1 when using greedy sampling.")
 
     @cached_property
     def sampling_type(self) -> SamplingType:
