@@ -2,7 +2,13 @@ from typing import Optional
 
 import torch
 from vllm.model_executor.parallel_utils.layers import (
+<<<<<<< HEAD
     ColumnParallelLinear, RowParallelLinear)
+=======
+    ColumnParallelLinear, 
+    RowParallelLinear
+)
+>>>>>>> 2de11d9dff03d88d346b5b78d169fc6302f9c605
 from vllm.i8cugemm import I8CUGEMM
 
 i8cugemm = I8CUGEMM()
@@ -49,7 +55,6 @@ class SQRowParallelLinear(RowParallelLinear):
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         x_shape = x.shape
-        x = x.view(-1, x_shape[-1])
         y = torch.empty((x.shape[0], self.output_size),
                         dtype=torch.int32,
                         device=x.device)
