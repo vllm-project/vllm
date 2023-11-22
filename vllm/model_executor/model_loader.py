@@ -95,6 +95,7 @@ def get_model(model_config: ModelConfig, parallel_config: ParallelConfig,
         # The weights will be initialized as empty tensors.
         num_layers = model_config.get_num_layers(parallel_config)
         kv_quant_params_list = []
+        print(f"enable kv quant: {model_config.quant_kv_cache}")
         if model_config.quant_kv_cache:
             for i in range(num_layers):
                 path = model_config.kv_quant_params_path + \

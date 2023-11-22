@@ -211,7 +211,7 @@ __global__ void reshape_and_cache_quantized_kernel(
     // Padding token that should be ignored.
     return;
   }
-  
+
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
 
