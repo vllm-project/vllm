@@ -10,6 +10,8 @@ from vllm.config import ModelConfig
 from vllm.model_executor.models import *
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_pipeline_model_parallel_world_size)
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
@@ -38,6 +40,16 @@ _MODEL_REGISTRY = {
     "YiForCausalLM": YiForCausalLM,
 }
 
+_MODEL_SUPPORT_PP = [
+    LlamaForCausalLM,
+]
+
+
+def _check_model_supported(model_class) -> None:
+    if get_pipeline_model_parallel_world_size() > 1:
+        assert model_class in _MODEL_SUPPORT_PP, \
+            f"{model_class} does not support pipeline parallelism."
+
 
 @contextlib.contextmanager
 def _set_default_torch_dtype(dtype: torch.dtype):
@@ -60,6 +72,7 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 
 def get_model(model_config: ModelConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
+    _check_model_supported(model_class)
 
     # Get the (maybe quantized) linear method.
     linear_method = None

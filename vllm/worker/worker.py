@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import get_model, InputMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
-    initialize_model_parallel)
+    initialize_model_parallel, get_pipeline_model_parallel_rank)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
@@ -64,6 +64,7 @@ class Worker:
         # Initialize the distributed environment.
         _init_distributed_environment(self.parallel_config, self.rank,
                                       self.distributed_init_method)
+        self.pp_rank = get_pipeline_model_parallel_rank()
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
@@ -109,7 +110,8 @@ class Worker:
             seqs)
 
         # Execute the model.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        num_layers = self.model_config.get_num_layers(self.parallel_config,
+                                                      self.pp_rank)
         self.model(
             input_ids=input_tokens,
             positions=input_positions,
@@ -124,7 +126,7 @@ class Worker:
         peak_memory = torch.cuda.max_memory_allocated()
         total_gpu_memory = get_gpu_memory()
         cache_block_size = CacheEngine.get_cache_block_size(
-            block_size, self.model_config, self.parallel_config)
+            block_size, self.model_config, self.parallel_config, self.pp_rank)
         num_gpu_blocks = int(
             (total_gpu_memory * gpu_memory_utilization - peak_memory) //
             cache_block_size)
@@ -144,7 +146,7 @@ class Worker:
         self.sliding_window = cache_config.sliding_window
 
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
+                                        self.parallel_config, self.pp_rank)
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
 

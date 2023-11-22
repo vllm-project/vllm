@@ -153,14 +153,6 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        total_num_hidden_layers = self.hf_config.num_hidden_layers
-        pipeline_parallel_size = parallel_config.pipeline_parallel_size
-        if total_num_hidden_layers % pipeline_parallel_size != 0:
-            raise ValueError(
-                f"Total number of hidden layers ({total_num_hidden_layers}) "
-                "must be divisible by pipeline parallel size "
-                f"({pipeline_parallel_size}).")
-
     def get_hidden_size(self) -> int:
         return self.hf_config.hidden_size
 
@@ -212,9 +204,16 @@ class ModelConfig:
         return max(1,
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
 
-    def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
+    def get_num_layers(
+        self,
+        parallel_config: "ParallelConfig",
+        pp_rank: int,
+    ) -> int:
         total_num_hidden_layers = self.hf_config.num_hidden_layers
-        return total_num_hidden_layers // parallel_config.pipeline_parallel_size
+        return (
+            total_num_hidden_layers // parallel_config.pipeline_parallel_size +
+            (pp_rank <
+             total_num_hidden_layers % parallel_config.pipeline_parallel_size))
 
 
 class CacheConfig:
@@ -295,12 +294,6 @@ class ParallelConfig:
         self.world_size = pipeline_parallel_size * tensor_parallel_size
         if self.world_size > 1:
             self.worker_use_ray = True
-        self._verify_args()
-
-    def _verify_args(self) -> None:
-        if self.pipeline_parallel_size > 1:
-            raise NotImplementedError(
-                "Pipeline parallelism is not supported yet.")
 
 
 class SchedulerConfig:

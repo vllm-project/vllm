@@ -26,13 +26,14 @@ class CacheEngine:
         cache_config: CacheConfig,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        pp_rank: int,
     ) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
         self.parallel_config = parallel_config
 
         self.head_size = model_config.get_head_size()
-        self.num_layers = model_config.get_num_layers(parallel_config)
+        self.num_layers = model_config.get_num_layers(parallel_config, pp_rank)
         self.num_heads = model_config.get_num_kv_heads(parallel_config)
         self.dtype = model_config.dtype
 
@@ -144,10 +145,11 @@ class CacheEngine:
         block_size: int,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        pp_rank: int,
     ) -> int:
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
-        num_layers = model_config.get_num_layers(parallel_config)
+        num_layers = model_config.get_num_layers(parallel_config, pp_rank)
 
         key_cache_block = block_size * num_heads * head_size
         value_cache_block = key_cache_block
