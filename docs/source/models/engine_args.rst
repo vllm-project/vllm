@@ -36,20 +36,24 @@ Below, you can find an explanation of every engine argument for vLLM:
     {auto,half,float16,bfloat16,float,float32} Data type for model weights and activations. 
 
     * -- The "auto" option will use FP16 precision for FP32 and FP16 models, and BF16 precision for BF16 models.
-    * -- Use "half" for AWQ quantization.
+    * -- Use "half" for FP16. It is recommended to use half for AWQ quantization.
+    * -- "float16" is the same as "half".
+    * -- "bfloat16" is similar to FP16, but is used for a better balance between precision and range.
+    * -- "float" is shorthand for FP32 precision.
+    * -- "float32" for FP32 precision.
 
 * --max-model-len
     Model context length. If unspecified, will be automatically derived from the model config.
 * --worker-use-ray
     Use Ray for distributed serving, will be automatically set when using more than 1 GPU.
 * --pipeline-parallel-size
-    (-pp) Number of pipeline stages.
+    (alias: -pp) Number of pipeline stages.
 * --tensor-parallel-size
-    (-tp) Number of tensor parallel replicas.
+    (alias: -tp) Number of tensor parallel replicas.
 * --max-parallel-loading-workers
     Load model sequentially in multiple batches, to avoid RAM OOM when using tensor parallel and large models.
 * --block-size 
-    {8,16,32} Token block size.
+    {8,16,32} Token block size for contiguous chunks of tokens.
 * --seed
     Random seed for operations.
 * --swap-space
@@ -65,4 +69,4 @@ Below, you can find an explanation of every engine argument for vLLM:
 * --disable-log-stats
     Disable logging statistics.
 * --quantization
-    (-q) {awq,squeezellm,None} Method used to quantize the weights.
+    (alias: -q) {awq,squeezellm,None} Method used to quantize the weights.
