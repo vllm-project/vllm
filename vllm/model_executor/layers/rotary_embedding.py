@@ -273,6 +273,107 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         return cache
 
 
+class DynamicNTKScalingRotaryEmbeddingQwen(nn.Module):
+    """RotaryEmbedding extended with Dynamic NTK scaling.
+    reference: https://huggingface.co/Qwen/Qwen-7B-Chat/blob/main/modeling_qwen.py
+    """
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        scaling_factor: float,
+        seq_length: int,
+    ) -> None:
+        super().__init__()
+        self.head_size = head_size
+        self.rotary_dim = rotary_dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        self.is_neox_style = is_neox_style
+        self.scaling_factor = scaling_factor
+        self.seq_length = seq_length
+        self.true_seq_len_cache = 0
+        self.dtype = torch.get_default_dtype()
+
+        logn_list = [
+            math.log(i, self.seq_length) if i > self.seq_length else 1
+            for i in range(1, 32768)
+        ]
+        logn_tensor = torch.tensor(logn_list)[None, :, None]
+        self.register_buffer("logn_tensor", logn_tensor, persistent=False)
+
+    def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
+        """Compute the inverse frequency."""
+        inv_freq = 1.0 / (base**(torch.arange(
+            0, self.rotary_dim, 2, dtype=torch.float, device="cuda") /
+                                 self.rotary_dim))
+        return inv_freq
+
+    def _compute_cos_sin_cache(self, true_seq_len):
+        # refer to the implementation of qwen
+        # https://huggingface.co/Qwen/Qwen-7B-Chat/blob/main/modeling_qwen.py#L779
+
+        if true_seq_len == self.true_seq_len_cache:
+            return
+
+        max_len = self.max_position_embeddings * self.scaling_factor
+
+        ntk_alpha = self.get_ntk_alpha(true_seq_len)
+
+        base = self.base * ntk_alpha**(self.rotary_dim / (self.rotary_dim - 2))
+
+        inv_freq = self._compute_inv_freq(base)
+        t = torch.arange(max_len, dtype=torch.float, device="cuda")
+
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+
+        cache = cache.to(self.dtype)
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        # set cache
+        self.true_seq_len_cache = true_seq_len
+
+    def get_ntk_alpha(self, true_seq_len):
+        context_value = (math.log(true_seq_len / self.seq_length, 2) + 1)
+        ntk_alpha = 2**math.ceil(context_value) - 1
+        ntk_alpha = max(ntk_alpha, 1.0)
+
+        return ntk_alpha
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        true_seq_len,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # pos_encoding_ops.rotary_embedding() is an in-place operation that
+        # updates the query and key tensors.
+        # Convert the tensors to float16 (Half) if they are not already
+        # update cos_sin_cache before compute new positional embedding.
+        self._compute_cos_sin_cache(true_seq_len)
+        pos_encoding_ops.rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+            self.is_neox_style,
+        )
+        seq_start = key.size(1) - query.size(1)
+        seq_end = key.size(1)
+        logn_tensor = self.logn_tensor[:, seq_start:seq_end].type_as(query)
+        query = query * logn_tensor.expand_as(query)
+
+        return query, key
+
+
 def get_rope(
     head_size: int,
     rotary_dim: int,
@@ -296,6 +397,12 @@ def get_rope(
             rotary_emb = DynamicNTKScalingRotaryEmbedding(
                 head_size, rotary_dim, max_position, base, is_neox_style,
                 scaling_factor)
+        elif scaling_type == "dynamic-qwen":
+            # use this branch if using qwen
+            seq_length = rope_scaling.get("seq_len", 2048)
+            rotary_emb = DynamicNTKScalingRotaryEmbeddingQwen(
+                head_size, rotary_dim, max_position, base, is_neox_style,
+                scaling_factor, seq_length)
         elif scaling_type == "yarn":
             original_max_position = rope_scaling[
                 "original_max_position_embeddings"]

@@ -10,7 +10,7 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 from vllm import attention_ops
 from vllm import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import get_rope, DynamicNTKScalingRotaryEmbeddingQwen
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -355,7 +355,14 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
-        query, key = self.rotary_emb(positions, query, key)
+        if not isinstance(self.rotary_emb,
+                          DynamicNTKScalingRotaryEmbeddingQwen):
+            query, key = self.rotary_emb(positions, query, key)
+        else:
+            # need to pass in prompt_token_length to compute dynamic_ntk for qwen
+            query, key = self.rotary_emb(
+                positions, query, key,
+                input_metadata.seq_groups[0][1].prompt_token_length)
         return super().forward(
             query,
             key,

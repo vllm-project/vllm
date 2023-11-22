@@ -138,10 +138,22 @@ class QWenBlock(nn.Module):
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_scaling = getattr(config, "rope_scaling", {})
+
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        seq_length = getattr(config, "seq_length", 2048)
+
+        if config.use_dynamic_ntk:
+            rope_scaling["type"] = "dynamic-qwen"
+            rope_scaling["seq_len"] = seq_length
+            rope_scaling["factor"] = max_position_embeddings / seq_length
+            # in vllm, max_position_embeddings is the true seq length
+            max_position_embeddings = seq_length
+
         self.attn = QWenAttention(config.hidden_size,
                                   config.num_attention_heads,
-                                  config.max_position_embeddings,
+                                  max_position_embeddings,
                                   rope_theta=rope_theta,
                                   rope_scaling=rope_scaling,
                                   linear_method=linear_method)

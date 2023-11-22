@@ -447,7 +447,9 @@ def _get_and_verify_max_len(
             derived_max_model_len = rope_scaling[
                 "original_max_position_embeddings"]
         derived_max_model_len *= scaling_factor
-
+    if getattr(hf_config, "model_type", "") == "qwen":
+        derived_max_model_len = getattr(hf_config, "max_position_embeddings",
+                                        8192)
     if max_model_len is None:
         max_model_len = derived_max_model_len
     elif max_model_len > derived_max_model_len:
