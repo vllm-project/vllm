@@ -51,22 +51,11 @@ def load_chat_template():
     try:
         with open(args.chat_template, "r") as f:
             content = f.read()
-            try:
-                json_data = json.loads(content)
-                if "chat_template" in json_data:
-                    return json_data["chat_template"]
-                else:
-                    return content
-            except json.JSONDecodeError:
-                # If JSON fails, use the file content as raw text
-                return content
+            return content
     except OSError:
-        try:
-            # If opening a file fails, set chat template to be args to
-            # ensure we decode so our escape are interpreted correctly
-            return codecs.decode(args.chat_template, "unicode_escape")
-        except json.JSONDecodeError:
-            logger.error("Unable to set template.")
+        # If opening a file fails, set chat template to be args to
+        # ensure we decode so our escape are interpreted correctly
+        return codecs.decode(args.chat_template, "unicode_escape")
 
 
 @app.exception_handler(RequestValidationError)
