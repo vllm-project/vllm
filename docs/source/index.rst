@@ -73,6 +73,7 @@ Documentation
 
    models/supported_models
    models/adding_model
+   models/engine_args
 
 .. toctree::
    :maxdepth: 1

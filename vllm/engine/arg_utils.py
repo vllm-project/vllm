@@ -42,6 +42,10 @@ class EngineArgs:
     def add_cli_args(
             parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Shared CLI arguments for vLLM engine."""
+
+        # NOTE: If you update any of the arguments below, please also
+        # make sure to update docs/source/models/engine_args.rst
+
         # Model arguments
         parser.add_argument(
             '--model',
