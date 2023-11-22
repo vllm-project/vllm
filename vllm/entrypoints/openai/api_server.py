@@ -35,7 +35,6 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 logger = init_logger(__name__)
 served_model = None
-disabled_endpoints = None
 app = fastapi.FastAPI()
 engine = None
 response_role = None
@@ -125,22 +124,12 @@ async def check_length(
 @app.get("/health")
 async def health() -> Response:
     """Health check."""
-    if "/health" in disabled_endpoints:
-        logger.error("Received request on disabled endpoint '/health'")
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            "The '/health' endpoint is not enabled on this server.")
     return Response(status_code=200)
 
 
 @app.get("/v1/models")
 async def show_available_models():
     """Show available models. Right now we only have one model."""
-    if "/v1/models" in disabled_endpoints:
-        logger.error("Received request on disabled endpoint '/v1/models'")
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            "The '/v1/models' endpoint is not enabled on this server.")
     model_cards = [
         ModelCard(id=served_model,
                   root=served_model,
@@ -196,6 +185,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         - function_call (Users should implement this by themselves)
         - logit_bias (to be supported by vLLM engine)
     """
+    logger.info(f"Received chat completion request: {request}")
 
     error_check_ret = await check_model(request)
     if error_check_ret is not None:
@@ -702,10 +692,6 @@ if __name__ == "__main__":
                         default="assistant",
                         help="The role name to return if "
                         "`request.add_generation_prompt=true`.")
-    parser.add_argument("--disable-endpoints",
-                        type=json.loads,
-                        default=[],
-                        help="List of disabled endpoints")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -724,8 +710,6 @@ if __name__ == "__main__":
         served_model = args.served_model_name
     else:
         served_model = args.model
-
-    disabled_endpoints = args.disable_endpoints
 
     response_role = args.response_role
 
