@@ -158,6 +158,32 @@ def _get_prompt_and_output_tokens(
     return prompt_tokens, output_tokens
 
 
+def _get_bin_counts_and_mask(
+    logits: torch.Tensor,
+    tokens: List[List[int]],
+    vocab_size: int,
+    num_seqs: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    max_len = max(len(tokens) for tokens in tokens)
+    padded_tokens = [
+        tokens + [vocab_size] * (max_len - len(tokens)) for tokens in tokens
+    ]
+    tokens_tensor = torch.tensor(padded_tokens,
+                                 dtype=torch.long,
+                                 device=logits.device)
+
+    # Compute the bin counts for the tokens.
+    # vocab_size + 1 for padding.
+    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
+                             dtype=torch.long,
+                             device=logits.device)
+    bin_counts.scatter_add_(1, tokens_tensor, torch.ones_like(tokens_tensor))
+    bin_counts = bin_counts[:, :vocab_size]
+    mask = bin_counts > 0
+
+    return bin_counts, mask
+
+
 def _apply_penalties(
     logits: torch.Tensor,
     input_metadata: InputMetadata,
@@ -183,43 +209,10 @@ def _apply_penalties(
     assert len(prompt_tokens) == logits.shape[0]
     assert len(output_tokens) == logits.shape[0]
 
-    max_prompt_len = max(len(tokens) for tokens in prompt_tokens)
-    padded_prompt_tokens = [
-        tokens + [vocab_size] * (max_prompt_len - len(tokens))
-        for tokens in prompt_tokens
-    ]
-    prompt_tokens_tensor = torch.tensor(padded_prompt_tokens,
-                                        dtype=torch.long,
-                                        device=logits.device)
-
-    # Compute the bin counts for the prompt tokens.
-    # vocab_size + 1 for padding.
-    prompt_bin_counts = torch.zeros((num_seqs, vocab_size + 1),
-                                    dtype=torch.long,
-                                    device=logits.device)
-    prompt_bin_counts.scatter_add_(1, prompt_tokens_tensor,
-                                   torch.ones_like(prompt_tokens_tensor))
-    prompt_bin_counts = prompt_bin_counts[:, :vocab_size]
-    prompt_mask = prompt_bin_counts > 0
-
-    max_output_len = max(len(tokens) for tokens in output_tokens)
-    padded_output_tokens = [
-        tokens + [vocab_size] * (max_output_len - len(tokens))
-        for tokens in output_tokens
-    ]
-    output_tokens_tensor = torch.tensor(padded_output_tokens,
-                                        dtype=torch.long,
-                                        device=logits.device)
-
-    # Compute the bin counts for the output tokens.
-    # vocab_size + 1 for padding.
-    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
-                             dtype=torch.long,
-                             device=logits.device)
-    bin_counts.scatter_add_(1, output_tokens_tensor,
-                            torch.ones_like(output_tokens_tensor))
-    bin_counts = bin_counts[:, :vocab_size]  # Remove the padding bin.
-    mask = bin_counts > 0
+    prompt_bin_counts, prompt_mask = _get_bin_counts_and_mask(
+        logits, prompt_tokens, vocab_size, num_seqs)
+    output_bin_counts, output_mask = _get_bin_counts_and_mask(
+        logits, output_tokens, vocab_size, num_seqs)
 
     repetition_penalties = torch.tensor(repetition_penalties,
                                         dtype=logits.dtype,
@@ -232,14 +225,14 @@ def _apply_penalties(
                                       device=logits.device)
 
     repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
-    repetition_penalties[~(prompt_mask | mask)] = 1.0
+    repetition_penalties[~(prompt_mask | output_mask)] = 1.0
     logits = torch.where(logits > 0, logits / repetition_penalties,
                          logits * repetition_penalties)
 
     # We follow the definition in OpenAI API.
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits -= frequency_penalties.unsqueeze(dim=1) * bin_counts
-    logits -= presence_penalties.unsqueeze(dim=1) * mask
+    logits -= frequency_penalties.unsqueeze(dim=1) * output_bin_counts
+    logits -= presence_penalties.unsqueeze(dim=1) * output_mask
     return logits
 
 
