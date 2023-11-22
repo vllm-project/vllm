@@ -260,10 +260,8 @@ class LlamaModel(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        if self.pp_rank == 0:
-            hidden_states = self.embed_tokens(input_)
-        else:
-            hidden_states = input_
+        hidden_states = self.embed_tokens(
+            input_) if self.pp_rank == 0 else input_
         residual = None
         for i in range(len(self.layers)):
             cache_event = None if cache_events is None else cache_events[i]
@@ -370,7 +368,7 @@ class LlamaForCausalLM(nn.Module):
             else:
                 # This pipeline parallel rank may not contain all the
                 # parameters.
-                if not name in params_dict:
+                if name not in params_dict:
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
