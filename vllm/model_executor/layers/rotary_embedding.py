@@ -163,14 +163,14 @@ class DequantLinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding,
                                           DequantRotaryEmbedding):
 
     def __init__(self, *args, **kwargs):
-        super(LinearScalingRotaryEmbedding, self).__init__(*args, **kwargs)
+        LinearScalingRotaryEmbedding.__init__(self, *args, **kwargs)
 
     def forward(
             self, positions: torch.Tensor, query: torch.Tensor,
             key: torch.Tensor, value: torch.Tensor,
             dequant_scale: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        return super(DequantRotaryEmbedding,
-                     self).forward(positions, query, key, value, dequant_scale)
+        return DequantRotaryEmbedding.forward(self, positions, query, key,
+                                              value, dequant_scale)
 
 
 class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
@@ -216,11 +216,11 @@ class DequantDynamicNTKScalingRotaryEmbedding(DynamicNTKScalingRotaryEmbedding,
                                               DequantRotaryEmbedding):
 
     def __init__(self, *args, **kwargs):
-        super(DynamicNTKScalingRotaryEmbedding, self).__init__(*args, **kwargs)
+        DynamicNTKScalingRotaryEmbedding.__init__(self, *args, **kwargs)
 
     def forward(
             self, positions: torch.Tensor, query: torch.Tensor,
             key: torch.Tensor, value: torch.Tensor,
             dequant_scale: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        return super(DequantRotaryEmbedding,
-                     self).forward(positions, query, key, value, dequant_scale)
+        return DequantRotaryEmbedding.forward(self, positions, query, key,
+                                              value, dequant_scale)
