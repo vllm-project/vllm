@@ -25,7 +25,6 @@ class SQColumnParallelLinear(ColumnParallelLinear):
         bias: Optional[torch.Tensor],
     ) -> torch.Tensor:
         assert bias is None
-
         x_shape = x.shape
         x = x.view(-1, x_shape[-1])
         y = torch.empty((x.shape[0], self.output_size_per_partition),
@@ -50,6 +49,7 @@ class SQRowParallelLinear(RowParallelLinear):
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         x_shape = x.shape
+        x = x.view(-1, x_shape[-1])
         y = torch.empty((x.shape[0], self.output_size),
                         dtype=torch.int32,
                         device=x.device)
