@@ -14,11 +14,13 @@ void copy_blocks(
   const std::map<int64_t, std::vector<int64_t>>& block_mapping);
 
 void reshape_and_cache(
-  torch::Tensor& key,
-  torch::Tensor& value,
-  torch::Tensor& key_cache,
-  torch::Tensor& value_cache,
-  torch::Tensor& slot_mapping);
+    torch::Tensor& key,   
+    torch::Tensor& value, 
+    torch::Tensor& key_cache, 
+    torch::Tensor& value_cache, 
+    torch::Tensor& slot_mapping, 
+    bool use_quant = false, const float k_scale = 1.0f, const float k_zp = 0.0f,
+    const float v_scale = 1.0f, const float v_zp = 0.0f);
 
 void gather_cached_kv(
   torch::Tensor& key,
@@ -27,16 +29,6 @@ void gather_cached_kv(
   torch::Tensor& value_cache,
   torch::Tensor& slot_mapping);
 
-void reshape_and_cache_quantized(
-  torch::Tensor& key,           // [num_tokens, num_heads, head_size]
-  torch::Tensor& value,         // [num_tokens, num_heads, head_size]
-  torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
-  torch::Tensor& value_cache,   // [num_blocks, num_heads, head_size, block_size]
-  torch::Tensor& slot_mapping,  // [num_tokens]
-  const float k_scale,
-  const float k_zp,
-  const float v_scale,
-  const float v_zp);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
@@ -47,16 +39,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "copy_blocks",
     &copy_blocks,
     "Copy the cache blocks from src to dst");
-  m.def(
-    "reshape_and_cache",
-    &reshape_and_cache,
-    "Reshape the key and value tensors and cache them");
+  m.def("reshape_and_cache", &reshape_and_cache, py::arg("key"),
+        py::arg("value"), py::arg("key_cache"), py::arg("value_cache"),
+        py::arg("slot_mapping"), py::arg("use_quant") = false,
+        py::arg("k_scale") = 1.0f, py::arg("k_zp") = 0.0f,
+        py::arg("v_scale") = 1.0f, py::arg("v_zp") = 0.0f,
+        "Reshape the key and value tensors and cache them");
   m.def(
     "gather_cached_kv",
     &gather_cached_kv,
     "Gather key and value from the cache into contiguous QKV tensors");
-  m.def(
-    "reshape_and_cache_quantized",
-    &reshape_and_cache_quantized,
-    "Reshape and quantized key and value tensors and cache them");
 }

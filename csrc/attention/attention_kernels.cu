@@ -74,8 +74,8 @@ template<
   int HEAD_SIZE,
   int BLOCK_SIZE,
   int NUM_THREADS,
-  int PARTITION_SIZE = 0,
-  bool ENABLE_QUANT = false> // Zero means no partitioning.
+  bool ENABLE_QUANT = false,
+  int PARTITION_SIZE = 0> // Zero means no partitioning.
 __device__ void paged_attention_kernel(
   float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
   float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
@@ -174,7 +174,7 @@ __device__ void paged_attention_kernel(
 
   // x == THREAD_GROUP_SIZE * VEC_SIZE
   // Each thread group fetches x elements from the key at a time.
-  constexpr int x = 16 / sizeof(scalar_t);
+  constexpr int x = 16 / sizeof(cache_t);
   float qk_max = -FLT_MAX;
 
   // Iterate over the key blocks.
@@ -409,41 +409,16 @@ __device__ void paged_attention_kernel(
 // Grid: (num_heads, num_seqs, 1).
 template<
   typename scalar_t,
+  typename cache_t,
   int HEAD_SIZE,
   int BLOCK_SIZE,
-  int NUM_THREADS>
+  int NUM_THREADS,
+  bool ENABLE_QUANT = false>
 __global__ void paged_attention_v1_kernel(
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
-  const scalar_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
-  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
-  const int* __restrict__ head_mapping,   // [num_heads]
-  const float scale,
-  const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
-  const int* __restrict__ context_lens,   // [num_seqs]
-  const int max_num_blocks_per_seq,
-  const float* __restrict__ alibi_slopes, // [num_heads]
-  const int q_stride,
-  const int kv_block_stride,
-  const int kv_head_stride) {
-  paged_attention_kernel<scalar_t, scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>(
-    /* exp_sums */ nullptr, /* max_logits */ nullptr,
-    out, q, k_cache, v_cache, head_mapping, scale, block_tables, context_lens,
-    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride);
-}
-
-
-template<
-  typename scalar_t,
-  typename cache_type,
-  int HEAD_SIZE,
-  int BLOCK_SIZE,
-  int NUM_THREADS>
-__global__ void paged_attention_quantized_kernel(
-  scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
-  const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
-  const cache_type* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
-  const cache_type* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
+  const cache_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
+  const cache_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
   const int* __restrict__ head_mapping,   // [num_heads]
   const float scale,
   const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
@@ -457,273 +432,28 @@ __global__ void paged_attention_quantized_kernel(
   const float k_zp,
   const float v_scale,
   const float v_zp) {
-  constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
-  constexpr int NUM_THREAD_GROUPS = NUM_THREADS / THREAD_GROUP_SIZE; // Note: This assumes THREAD_GROUP_SIZE divides NUM_THREADS
-  assert(NUM_THREADS % THREAD_GROUP_SIZE == 0);
-  constexpr int NUM_TOKENS_PER_THREAD_GROUP = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
-  constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
-  const int thread_idx = threadIdx.x;
-  const int warp_idx = thread_idx / WARP_SIZE;
-  const int lane = thread_idx % WARP_SIZE;
-
-  const int head_idx = blockIdx.x;
-  const int num_heads = gridDim.x;
-  const int kv_head_idx = head_mapping[head_idx];
-  const int seq_idx = blockIdx.y;
-  const float alibi_slope = alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
-
-  // A vector type to store a part of a key or a query.
-  // The vector size is configured in such a way that the threads in a thread group
-  // fetch or compute 16 bytes at a time.
-  // For example, if the size of a thread group is 4 and the data type is half,
-  // then the vector size is 16 / (4 * sizeof(half)) == 2.
-  constexpr int VEC_SIZE = MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)), 1);
-  using K_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
-  using Q_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
-  using Vec_quant = typename Vec<cache_type, VEC_SIZE>::Type;
-  using Vec_dequant = typename FloatVec<Vec_quant>::Type;
-
-  constexpr int NUM_ELEMS_PER_THREAD = HEAD_SIZE / THREAD_GROUP_SIZE;
-  constexpr int NUM_VECS_PER_THREAD = NUM_ELEMS_PER_THREAD / VEC_SIZE;
-
-  const int thread_group_idx = thread_idx / THREAD_GROUP_SIZE;
-  const int thread_group_offset = thread_idx % THREAD_GROUP_SIZE;
-
-  // Load the query to registers.
-  // Each thread in a thread group has a different part of the query.
-  // For example, if the the thread group size is 4, then the first thread in the group
-  // has 0, 4, 8, ... th vectors of the query, and the second thread has 1, 5, 9, ...
-  // th vectors of the query, and so on.
-  // NOTE(woosuk): Because q is split from a qkv tensor, it may not be contiguous.
-  const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
-  __shared__ Q_vec q_vecs[THREAD_GROUP_SIZE][NUM_VECS_PER_THREAD];
-#pragma unroll
-  for (int i = thread_group_idx; i < NUM_VECS_PER_THREAD; i += NUM_THREAD_GROUPS) {
-    const int vec_idx = thread_group_offset + i * THREAD_GROUP_SIZE;
-    q_vecs[thread_group_offset][i] = *reinterpret_cast<const Q_vec*>(q_ptr + vec_idx * VEC_SIZE);
-  }
-  __syncthreads(); // TODO(naed90): possible speedup if this is replaced with a memory wall right before we use q_vecs
-
-  // Memory planning.
-  extern __shared__ char shared_mem[];
-  // NOTE(woosuk): We use FP32 for the softmax logits for better accuracy.
-  float* logits = reinterpret_cast<float*>(shared_mem);
-  // Workspace for reduction.
-  __shared__ float red_smem[2 * NUM_WARPS];
-
-  // x == THREAD_GROUP_SIZE * VEC_SIZE
-  // Each thread group fetches x elements from the key at a time.
-  constexpr int x = 16 / sizeof(cache_type);
-  float qk_max = -FLT_MAX;
-
-  const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
-  const int context_len = context_lens[seq_idx];
-  const int num_blocks = (context_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
-  // Iterate over the key blocks.
-  // Each warp fetches a block of keys for each iteration.
-  // Each thread group in a warp fetches a key from the block, and computes
-  // dot product with the query.
-  for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
-    const int physical_block_number = block_table[block_idx];
-
-    // Load a key to registers.
-    // Each thread in a thread group has a different part of the key.
-    // For example, if the the thread group size is 4, then the first thread in the group
-    // has 0, 4, 8, ... th vectors of the key, and the second thread has 1, 5, 9, ... th
-    // vectors of the key, and so on.
-    for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
-      const int physical_block_offset = (thread_group_idx + i * WARP_SIZE) % BLOCK_SIZE;
-      const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
-      K_vec k_vecs[NUM_VECS_PER_THREAD];
-
-#pragma unroll
-      for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
-        const cache_type* k_ptr = k_cache + physical_block_number * kv_block_stride
-                                        + kv_head_idx * kv_head_stride
-                                        + physical_block_offset * x;
-        const int vec_idx = thread_group_offset + j * THREAD_GROUP_SIZE;
-        const int offset1 = (vec_idx * VEC_SIZE) / x;
-        const int offset2 = (vec_idx * VEC_SIZE) % x;
-        // dequant and conversion
-        Vec_quant k_vec_quant = *reinterpret_cast<const Vec_quant*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
-        Vec_dequant k_vec_dequant = dequant(k_vec_quant, k_scale, k_zp);
-        k_vecs[j] = vec_conversion<K_vec, Vec_dequant>(k_vec_dequant);
-        // k_vecs[j] = *reinterpret_cast<const K_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
-      }
-
-      // Compute dot product.
-      // This includes a reduction across the threads in the same thread group.
-      float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs[thread_group_offset], k_vecs);
-      // Add the ALiBi bias if slopes are given.
-      qk += (alibi_slope != 0) ? alibi_slope * (token_idx - context_len) : 0;
-
-      if (thread_group_offset == 0) {
-        // Store the partial reductions to shared memory.
-        // NOTE(woosuk): It is required to zero out the masked logits.
-        const bool mask = token_idx >= context_len;
-        logits[token_idx] = mask ? 0.f : qk;
-        // Update the max value.
-        qk_max = mask ? qk_max : fmaxf(qk_max, qk);
-      }
-    }
-  }
-
-  // Perform reduction across the threads in the same warp to get the
-  // max qk value for each "warp" (not across the thread block yet).
-  // The 0-th thread of each thread group already has its max qk value.
-#pragma unroll
-  for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
-    qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
-  }
-  if (lane == 0) {
-    red_smem[warp_idx] = qk_max;
-  }
-  __syncthreads();
-
-  // TODO(woosuk): Refactor this part.
-  // Get the max qk value for the sequence.
-  qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
-#pragma unroll
-  for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-    qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
-  }
-  // Broadcast the max qk value to all threads.
-  qk_max = __shfl_sync(uint32_t(-1), qk_max, 0);
-
-  // Get the sum of the exp values.
-  float exp_sum = 0.f;
-  for (int i = thread_idx; i < context_len; i += NUM_THREADS) {
-    float val = __expf(logits[i] - qk_max);
-    logits[i] = val;
-    exp_sum += val;
-  }
-  exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
-
-  // Compute softmax.
-  const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
-  for (int i = thread_idx; i < context_len; i += NUM_THREADS) {
-    logits[i] *= inv_sum;
-  }
-  __syncthreads();
-
-  // Each thread will fetch 16 bytes from the value cache at a time.
-  constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);
-  using V_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
-  using V_vec_quant = typename Vec<cache_type, V_VEC_SIZE>::Type;
-  using V_vec_dequant = typename FloatVec<V_vec_quant>::Type;
-  using L_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
-  using Float_L_vec = typename FloatVec<L_vec>::Type;
-
-  constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;
-  constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
-  constexpr int NUM_ROWS_PER_THREAD = (HEAD_SIZE + NUM_ROWS_PER_ITER - 1) / NUM_ROWS_PER_ITER;
-
-  // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
-  float accs[NUM_ROWS_PER_THREAD];
-#pragma unroll
-  for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-    accs[i] = 0.f;
-  }
-
-  for (int block_idx = warp_idx; block_idx < num_blocks; block_idx += NUM_WARPS) {
-    const int physical_block_number = block_table[block_idx];
-    const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
-    const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
-    L_vec logits_vec;
-    from_float(logits_vec, *reinterpret_cast<Float_L_vec*>(logits + token_idx));
-
-    const cache_type* v_ptr = v_cache + physical_block_number * kv_block_stride
-                                    + kv_head_idx * kv_head_stride;
-#pragma unroll
-    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-      const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-      if (row_idx < HEAD_SIZE) {
-        const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
-        // dequant and conversion
-        V_vec_quant v_vec_quant = *reinterpret_cast<const V_vec_quant*>(v_ptr + offset);
-        V_vec_dequant v_vec_dequant = dequant(v_vec_quant, v_scale, v_zp);
-        V_vec v_vec = vec_conversion<V_vec, V_vec_dequant>(v_vec_dequant);
-        // V_vec v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
-        accs[i] += dot(logits_vec, v_vec);
-      }
-    }
-  }
-
-  // Perform reduction within each warp.
-#pragma unroll
-  for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-    float acc = accs[i];
-#pragma unroll
-    for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
-      acc += __shfl_xor_sync(uint32_t(-1), acc, mask);
-    }
-    accs[i] = acc;
-  }
-
-  // NOTE(woosuk): A barrier is required because the shared memory space for logits
-  // is reused for the output.
-  __syncthreads();
-
-  // Perform reduction across warps.
-  float* out_smem = reinterpret_cast<float*>(shared_mem);
-#pragma unroll
-  for (int i = NUM_WARPS; i > 1; i /= 2) {
-    int mid = i / 2;
-    // Upper warps write to shared memory.
-    if (warp_idx >= mid && warp_idx < i) {
-      float* dst = &out_smem[(warp_idx - mid) * HEAD_SIZE];
-#pragma unroll
-      for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-        const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-        if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
-          dst[row_idx] = accs[i];
-        }
-      }
-    }
-    __syncthreads();
-
-    // Lower warps update the output.
-    if (warp_idx < mid) {
-      const float* src = &out_smem[warp_idx * HEAD_SIZE];
-#pragma unroll
-      for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-        const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-        if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
-          accs[i] += src[row_idx];
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  // Write the final output.
-  if (warp_idx == 0) {
-    scalar_t* out_ptr = out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
-#pragma unroll
-    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-      const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-      if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
-        from_float(*(out_ptr + row_idx), accs[i]);
-      }
-    }
-  }
+  paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT>(
+    /* exp_sums */ nullptr, /* max_logits */ nullptr,
+    out, q, k_cache, v_cache, head_mapping, scale, block_tables, context_lens,
+    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride, k_scale, k_zp, v_scale, v_zp);
 }
 
 // Grid: (num_heads, num_seqs, max_num_partitions).
 template<
   typename scalar_t,
+  typename cache_t,
   int HEAD_SIZE,
   int BLOCK_SIZE,
   int NUM_THREADS,
-  int PARTITION_SIZE>
+  bool ENABLE_QUANT = false,
+  int PARTITION_SIZE = 0>
 __global__ void paged_attention_v2_kernel(
   float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
   float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
   scalar_t* __restrict__ tmp_out,         // [num_seqs, num_heads, max_num_partitions, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
-  const scalar_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
-  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
+  const cache_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
+  const cache_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
   const int* __restrict__ head_mapping,   // [num_heads]
   const float scale,
   const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
@@ -732,11 +462,15 @@ __global__ void paged_attention_v2_kernel(
   const float* __restrict__ alibi_slopes, // [num_heads]
   const int q_stride,
   const int kv_block_stride,
-  const int kv_head_stride) {
-  paged_attention_kernel<scalar_t, scalar_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE>(
+  const int kv_head_stride,
+  const float k_scale,
+  const float k_zp,
+  const float v_scale,
+  const float v_zp) {
+  paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT, PARTITION_SIZE>(
     exp_sums, max_logits, tmp_out, q, k_cache, v_cache, head_mapping, scale,
     block_tables, context_lens, max_num_blocks_per_seq, alibi_slopes,
-    q_stride, kv_block_stride, kv_head_stride);
+    q_stride, kv_block_stride, kv_head_stride, k_scale, k_zp, v_scale, v_zp);
 }
 
 // Grid: (num_heads, num_seqs).
@@ -841,9 +575,9 @@ __global__ void paged_attention_v2_reduce_kernel(
 
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                                  \
   cudaFuncSetAttribute(                                                                       \
-    vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,                   \
+    vllm::paged_attention_v1_kernel<T, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT>,                   \
     cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                            \
-  vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>                      \
+  vllm::paged_attention_v1_kernel<T, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT>                      \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     out_ptr,                                                                                  \
     query_ptr,                                                                                \
@@ -857,12 +591,18 @@ __global__ void paged_attention_v2_reduce_kernel(
     alibi_slopes_ptr,                                                                         \
     q_stride,                                                                                 \
     kv_block_stride,                                                                          \
-    kv_head_stride);
+    kv_head_stride,                                                                           \
+    k_scale,                                                                                  \                                                                          
+    k_zp,                                                                                     \
+    v_scale,                                                                                  \
+    v_zp);
 
 // TODO(woosuk): Tune NUM_THREADS.
 template<
   typename T,
+  typename cache_t,
   int BLOCK_SIZE,
+  bool ENABLE_QUANT = false,
   int NUM_THREADS = 128>
 void paged_attention_v1_launcher(
   torch::Tensor& out,
@@ -874,7 +614,11 @@ void paged_attention_v1_launcher(
   torch::Tensor& block_tables,
   torch::Tensor& context_lens,
   int max_context_len,
-  const c10::optional<torch::Tensor>& alibi_slopes) {
+  const c10::optional<torch::Tensor>& alibi_slopes,
+  const float k_scale,
+  const float k_zp,
+  const float v_scale,
+  const float v_zp) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -885,7 +629,6 @@ void paged_attention_v1_launcher(
 
   int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   assert(head_size % thread_group_size == 0);
-
   // NOTE: alibi_slopes is optional.
   const float* alibi_slopes_ptr = alibi_slopes ?
     reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
@@ -893,8 +636,8 @@ void paged_attention_v1_launcher(
 
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
-  T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
-  T* value_cache_ptr = reinterpret_cast<T*>(value_cache.data_ptr());
+  cache_t* key_cache_ptr = reinterpret_cast<cache_t*>(key_cache.data_ptr());
+  cache_t* value_cache_ptr = reinterpret_cast<cache_t*>(value_cache.data_ptr());
   int* head_mapping_ptr = reinterpret_cast<int*>(head_mapping.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* context_lens_ptr = context_lens.data_ptr<int>();
@@ -914,32 +657,33 @@ void paged_attention_v1_launcher(
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
     // head sizes that we use in the model. However, we can easily extend this
     // to support any head size which is a multiple of 16.
-    case 64:
-      LAUNCH_PAGED_ATTENTION_V1(64);
-      break;
-    case 80:
-      LAUNCH_PAGED_ATTENTION_V1(80);
-      break;
-    case 96:
-      LAUNCH_PAGED_ATTENTION_V1(96);
-      break;
-    case 112:
-      LAUNCH_PAGED_ATTENTION_V1(112);
-      break;
+    // case 64:
+    //   LAUNCH_PAGED_ATTENTION_V1(64);
+    //   break;
+    // case 80:
+    //   LAUNCH_PAGED_ATTENTION_V1(80);
+    //   break;
+    // case 96:
+    //   LAUNCH_PAGED_ATTENTION_V1(96);
+    //   break;
+    // case 112:
+    //   LAUNCH_PAGED_ATTENTION_V1(112);
+    //   break;
     case 128:
       LAUNCH_PAGED_ATTENTION_V1(128);
       break;
-    case 256:
-      LAUNCH_PAGED_ATTENTION_V1(256);
-      break;
+    // case 256:
+    //   LAUNCH_PAGED_ATTENTION_V1(256);
+    //   break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
   }
 }
 
-#define CALL_V1_LAUNCHER(T, BLOCK_SIZE)                             \
-  paged_attention_v1_launcher<T, BLOCK_SIZE>(                       \
+
+#define CALL_V1_LAUNCHER(T, cache_t, BLOCK_SIZE, ENABLE_QUANT)                             \
+  paged_attention_v1_launcher<T, cache_t, BLOCK_SIZE, ENABLE_QUANT>(                       \
     out,                                                            \
     query,                                                          \
     key_cache,                                                      \
@@ -949,20 +693,24 @@ void paged_attention_v1_launcher(
     block_tables,                                                   \
     context_lens,                                                   \
     max_context_len,                                                \
-    alibi_slopes);
+    alibi_slopes,                                                   \
+    k_scale,                                                        \
+    k_zp,                                                           \
+    v_scale,                                                        \
+    v_zp);
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
 // 1, 2, 4, 64, 128, 256.
-#define CALL_V1_LAUNCHER_BLOCK_SIZE(T)                              \
+#define CALL_V1_LAUNCHER_BLOCK_SIZE(T, cache_t, ENABLE_QUANT)                              \
   switch (block_size) {                                             \
     case 8:                                                         \
-      CALL_V1_LAUNCHER(T, 8);                                       \
+      CALL_V1_LAUNCHER(T, cache_t, 8, ENABLE_QUANT);                                       \
       break;                                                        \
     case 16:                                                        \
-      CALL_V1_LAUNCHER(T, 16);                                      \
+      CALL_V1_LAUNCHER(T, cache_t, 16, ENABLE_QUANT);                                      \
       break;                                                        \
     case 32:                                                        \
-      CALL_V1_LAUNCHER(T, 32);                                      \
+      CALL_V1_LAUNCHER(T, cache_t, 32, ENABLE_QUANT);                                      \
       break;                                                        \
     default:                                                        \
       TORCH_CHECK(false, "Unsupported block size: ", block_size);   \
@@ -980,20 +728,37 @@ void paged_attention_v1(
   torch::Tensor& context_lens,    // [num_seqs]
   int block_size,
   int max_context_len,
-  const c10::optional<torch::Tensor>& alibi_slopes) {
-  if (query.dtype() == at::ScalarType::Float) {
-    CALL_V1_LAUNCHER_BLOCK_SIZE(float);
-  } else if (query.dtype() == at::ScalarType::Half) {
-    CALL_V1_LAUNCHER_BLOCK_SIZE(uint16_t);
-  } else if (query.dtype() == at::ScalarType::BFloat16) {
-    CALL_V1_LAUNCHER_BLOCK_SIZE(__nv_bfloat16);
+  const c10::optional<torch::Tensor>& alibi_slopes,
+  bool enable_quant = false,
+  const float k_scale = 1.0f,
+  const float k_zp = 0.0f,
+  const float v_scale = 1.0f,
+  const float v_zp = 0.0f) {
+  if (enable_quant) {
+    if (query.dtype() == at::ScalarType::Float) {
+      CALL_V1_LAUNCHER_BLOCK_SIZE(float, int8_t, true);
+    } else if (query.dtype() == at::ScalarType::Half) {
+      CALL_V1_LAUNCHER_BLOCK_SIZE(uint16_t, int8_t, true);
+    } else if (query.dtype() == at::ScalarType::BFloat16) {
+      CALL_V1_LAUNCHER_BLOCK_SIZE(__nv_bfloat16, int8_t, true);
+    } else {
+      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    }
   } else {
-    TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    if (query.dtype() == at::ScalarType::Float) {
+      CALL_V1_LAUNCHER_BLOCK_SIZE(float, float, false);
+    } else if (query.dtype() == at::ScalarType::Half) {
+      CALL_V1_LAUNCHER_BLOCK_SIZE(uint16_t, uint16_t, false);
+    } else if (query.dtype() == at::ScalarType::BFloat16) {
+      CALL_V1_LAUNCHER_BLOCK_SIZE(__nv_bfloat16, __nv_bfloat16, false);
+    } else {
+      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    }
   }
 }
 
 #define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                                  \
-  vllm::paged_attention_v2_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE>      \
+  vllm::paged_attention_v2_kernel<T, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT, PARTITION_SIZE>      \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     exp_sums_ptr,                                                                             \
     max_logits_ptr,                                                                           \
@@ -1009,7 +774,11 @@ void paged_attention_v1(
     alibi_slopes_ptr,                                                                         \
     q_stride,                                                                                 \
     kv_block_stride,                                                                          \
-    kv_head_stride);                                                                          \
+    kv_head_stride,                                                                           \
+    k_scale,                                                                                  \
+    k_zp,                                                                                     \
+    v_scale,                                                                                  \
+    v_zp);                                                                                    \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS, PARTITION_SIZE>           \
   <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                                   \
     out_ptr,                                                                                  \
@@ -1021,7 +790,9 @@ void paged_attention_v1(
 
 template<
   typename T,
+  typename cache_t,
   int BLOCK_SIZE,
+  bool ENABLE_QUANT = false,
   int NUM_THREADS = 128,
   int PARTITION_SIZE = 512>
 void paged_attention_v2_launcher(
@@ -1037,7 +808,11 @@ void paged_attention_v2_launcher(
   torch::Tensor& block_tables,
   torch::Tensor& context_lens,
   int max_context_len,
-  const c10::optional<torch::Tensor>& alibi_slopes) {
+  const c10::optional<torch::Tensor>& alibi_slopes,
+  const float k_scale,
+  const float k_zp,
+  const float v_scale,
+  const float v_zp) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -1059,8 +834,8 @@ void paged_attention_v2_launcher(
   float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
   T* tmp_out_ptr = reinterpret_cast<T*>(tmp_out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
-  T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
-  T* value_cache_ptr = reinterpret_cast<T*>(value_cache.data_ptr());
+  cache_t* key_cache_ptr = reinterpret_cast<cache_t*>(key_cache.data_ptr());
+  cache_t* value_cache_ptr = reinterpret_cast<cache_t*>(value_cache.data_ptr());
   int* head_mapping_ptr = reinterpret_cast<int*>(head_mapping.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* context_lens_ptr = context_lens.data_ptr<int>();
@@ -1083,32 +858,32 @@ void paged_attention_v2_launcher(
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
     // head sizes that we use in the model. However, we can easily extend this
     // to support any head size which is a multiple of 16.
-    case 64:
-      LAUNCH_PAGED_ATTENTION_V2(64);
-      break;
-    case 80:
-      LAUNCH_PAGED_ATTENTION_V2(80);
-      break;
-    case 96:
-      LAUNCH_PAGED_ATTENTION_V2(96);
-      break;
-    case 112:
-      LAUNCH_PAGED_ATTENTION_V2(112);
-      break;
+    // case 64:
+    //   LAUNCH_PAGED_ATTENTION_V2(64);
+    //   break;
+    // case 80:
+    //   LAUNCH_PAGED_ATTENTION_V2(80);
+    //   break;
+    // case 96:
+    //   LAUNCH_PAGED_ATTENTION_V2(96);
+    //   break;
+    // case 112:
+    //   LAUNCH_PAGED_ATTENTION_V2(112);
+    //   break;
     case 128:
       LAUNCH_PAGED_ATTENTION_V2(128);
       break;
-    case 256:
-      LAUNCH_PAGED_ATTENTION_V2(256);
-      break;
+    // case 256:
+    //   LAUNCH_PAGED_ATTENTION_V2(256);
+    //   break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
   }
 }
 
-#define CALL_V2_LAUNCHER(T, BLOCK_SIZE)                             \
-  paged_attention_v2_launcher<T, BLOCK_SIZE>(                       \
+#define CALL_V2_LAUNCHER(T, cache_t, BLOCK_SIZE, ENABLE_QUANT)                             \
+  paged_attention_v2_launcher<T, cache_t, BLOCK_SIZE, ENABLE_QUANT>(                       \
     out,                                                            \
     exp_sums,                                                       \
     max_logits,                                                     \
@@ -1121,20 +896,24 @@ void paged_attention_v2_launcher(
     block_tables,                                                   \
     context_lens,                                                   \
     max_context_len,                                                \
-    alibi_slopes);
+    alibi_slopes,                                                   \
+    k_scale,                                                        \
+    k_zp,                                                           \
+    v_scale,                                                        \
+    v_zp);
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
 // 1, 2, 4, 64, 128, 256.
-#define CALL_V2_LAUNCHER_BLOCK_SIZE(T)                              \
+#define CALL_V2_LAUNCHER_BLOCK_SIZE(T, cache_t, ENABLE_QUANT)                              \
   switch (block_size) {                                             \
     case 8:                                                         \
-      CALL_V2_LAUNCHER(T, 8);                                       \
+      CALL_V2_LAUNCHER(T, cache_t, 8, ENABLE_QUANT);                                       \
       break;                                                        \
     case 16:                                                        \
-      CALL_V2_LAUNCHER(T, 16);                                      \
+      CALL_V2_LAUNCHER(T, cache_t, 16, ENABLE_QUANT);                                      \
       break;                                                        \
     case 32:                                                        \
-      CALL_V2_LAUNCHER(T, 32);                                      \
+      CALL_V2_LAUNCHER(T, cache_t, 32, ENABLE_QUANT);                                      \
       break;                                                        \
     default:                                                        \
       TORCH_CHECK(false, "Unsupported block size: ", block_size);   \
@@ -1155,172 +934,32 @@ void paged_attention_v2(
   torch::Tensor& context_lens,    // [num_seqs]
   int block_size,
   int max_context_len,
-  const c10::optional<torch::Tensor>& alibi_slopes) {
-  if (query.dtype() == at::ScalarType::Float) {
-    CALL_V2_LAUNCHER_BLOCK_SIZE(float);
-  } else if (query.dtype() == at::ScalarType::Half) {
-    CALL_V2_LAUNCHER_BLOCK_SIZE(uint16_t);
-  } else if (query.dtype() == at::ScalarType::BFloat16) {
-    CALL_V2_LAUNCHER_BLOCK_SIZE(__nv_bfloat16);
-  } else {
-    TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
-  }
-}
-
-// specifying cache type to int8 manually
-#define LAUNCH_ATTENTION_QUANTIZED_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
-  vllm::paged_attention_quantized_kernel<T, int8_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>        \
-  <<<grid, block, shared_mem_size, stream>>>(                                                 \
-    out_ptr,                                                                                  \
-    query_ptr,                                                                                \
-    key_cache_ptr,                                                                            \
-    value_cache_ptr,                                                                          \
-    head_mapping_ptr,                                                                         \
-    scale,                                                                                    \
-    block_tables_ptr,                                                                         \
-    context_lens_ptr,                                                                         \
-    max_num_blocks_per_seq,                                                                   \
-    alibi_slopes_ptr,                                                                         \
-    q_stride,                                                                                 \
-    kv_block_stride,                                                                          \
-    kv_head_stride,                                                                           \
-    k_scale,                                                                                  \
-    k_zp,                                                                                     \
-    v_scale,                                                                                  \
-    v_zp);
-
-
-template<
-  typename T,
-  int BLOCK_SIZE,
-  int NUM_THREADS = 128>
-void paged_attention_quantized_launcher(
-  torch::Tensor& out,
-  torch::Tensor& query,
-  torch::Tensor& key_cache,
-  torch::Tensor& value_cache,
-  torch::Tensor& head_mapping,
-  float scale,
-  torch::Tensor& block_tables,
-  torch::Tensor& context_lens,
-  int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
-  const float k_scale,
-  const float k_zp,
-  const float v_scale,
-  const float v_zp) {
-  int num_seqs = query.size(0);
-  int num_heads = query.size(1);
-  int head_size = query.size(2);
-  int max_num_blocks_per_seq = block_tables.size(1);
-  int q_stride = query.stride(0);
-  int kv_block_stride = key_cache.stride(0);
-  int kv_head_stride = key_cache.stride(1);
-  int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
-  assert(head_size % thread_group_size == 0);
-  // NOTE: alibi_slopes is optional.
-  const float* alibi_slopes_ptr = alibi_slopes ?
-    reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
-    : nullptr;
-  
-  T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
-  T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
-  int8_t* key_cache_ptr = reinterpret_cast<int8_t*>(key_cache.data_ptr()); // TODO: support other types
-  int8_t* value_cache_ptr = reinterpret_cast<int8_t*>(value_cache.data_ptr()); // TODO: support other types
-  int* head_mapping_ptr = reinterpret_cast<int*>(head_mapping.data_ptr());
-  int* block_tables_ptr = block_tables.data_ptr<int>();
-  int* context_lens_ptr = context_lens.data_ptr<int>();
-
-  constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
-  int padded_max_context_len = DIVIDE_ROUND_UP(max_context_len, BLOCK_SIZE) * BLOCK_SIZE;
-  int logits_size = padded_max_context_len * sizeof(float);
-  int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
-  int shared_mem_size = std::max(logits_size, outputs_size);
-  
-  dim3 grid(num_heads, num_seqs);
-  dim3 block(NUM_THREADS);
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  switch (head_size) {
-    case 64:
-      LAUNCH_ATTENTION_QUANTIZED_KERNEL(T, 64, BLOCK_SIZE, NUM_THREADS);
-      break;
-    case 80:
-      LAUNCH_ATTENTION_QUANTIZED_KERNEL(T, 80, BLOCK_SIZE, NUM_THREADS);
-      break;
-    case 96:
-      LAUNCH_ATTENTION_QUANTIZED_KERNEL(T, 96, BLOCK_SIZE, NUM_THREADS);
-      break;
-    case 112:
-      LAUNCH_ATTENTION_QUANTIZED_KERNEL(T, 112, BLOCK_SIZE, NUM_THREADS);
-      break;
-    case 128:
-      LAUNCH_ATTENTION_QUANTIZED_KERNEL(T, 128, BLOCK_SIZE, NUM_THREADS);
-      break;
-    case 256:
-      LAUNCH_ATTENTION_QUANTIZED_KERNEL(T, 256, BLOCK_SIZE, NUM_THREADS);
-      break;
-    default:
-      TORCH_CHECK(false, "Unsupported head size: ", head_size);
-      break;
-  }
-}
-
-#define CALL_QUANTIZED_KERNEL_LAUNCHER(T, BLOCK_SIZE)               \
-  paged_attention_quantized_launcher<T, BLOCK_SIZE>(                \
-    out,                                                            \
-    query,                                                          \
-    key_cache,                                                      \
-    value_cache,                                                    \
-    head_mapping,                                                   \
-    scale,                                                          \
-    block_tables,                                                   \
-    context_lens,                                                   \
-    max_context_len,                                                \
-    alibi_slopes,                                                   \
-    k_scale,                                                        \
-    k_zp,                                                           \
-    v_scale,                                                        \
-    v_zp);
-
-
-#define CALL_QUANTIZED_KERNEL_LAUNCHER_BLOCK_SIZE(T)                          \
-  switch (block_size) {                                             \
-    case 8:                                                         \
-      CALL_QUANTIZED_KERNEL_LAUNCHER(T, 8);                                   \
-      break;                                                        \
-    case 16:                                                        \
-      CALL_QUANTIZED_KERNEL_LAUNCHER(T, 16);                                  \
-      break;                                                        \
-    case 32:                                                        \
-      CALL_QUANTIZED_KERNEL_LAUNCHER(T, 32);                                  \
-      break;                                                        \
-    default:                                                        \
-      TORCH_CHECK(false, "Unsupported block size: ", block_size);   \
-      break;                                                        \
-  }
-
-void paged_attention_quantized(
-  torch::Tensor& out,             // [num_seqs, num_heads, head_size]
-  torch::Tensor& query,           // [num_seqs, num_heads, head_size]
-  torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
-  torch::Tensor& value_cache,     // [num_blocks, num_heads, head_size, block_size]
-  torch::Tensor& head_mapping,    // [num_heads]
-  float scale,
-  torch::Tensor& block_tables,    // [num_seqs, max_num_blocks_per_seq]
-  torch::Tensor& context_lens,    // [num_seqs]
-  int block_size,
-  int max_context_len,
-  const c10::optional<torch::Tensor>& alibi_slopes,
-  const float k_scale,
-  const float k_zp,
-  const float v_scale,
-  const float v_zp) {
-  if (query.dtype() == at::ScalarType::Float) {
-    CALL_QUANTIZED_KERNEL_LAUNCHER_BLOCK_SIZE(float);
-  } else if (query.dtype() == at::ScalarType::Half) {
-    CALL_QUANTIZED_KERNEL_LAUNCHER_BLOCK_SIZE(uint16_t);
+   bool enable_quant = false,
+  const float k_scale = 1.0f,
+  const float k_zp = 0.0f,
+  const float v_scale = 1.0f,
+  const float v_zp = 0.0f) {
+  if (enable_quant) {
+    if (query.dtype() == at::ScalarType::Float) {
+      CALL_V2_LAUNCHER_BLOCK_SIZE(float, int8_t, true);
+    } else if (query.dtype() == at::ScalarType::Half) {
+      CALL_V2_LAUNCHER_BLOCK_SIZE(uint16_t, int8_t, true);
+    } else if (query.dtype() == at::ScalarType::BFloat16) {
+      CALL_V2_LAUNCHER_BLOCK_SIZE(__nv_bfloat16, int8_t, true);
+    } else {
+      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    }
   } else {
-    TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    if (query.dtype() == at::ScalarType::Float) {
+      CALL_V2_LAUNCHER_BLOCK_SIZE(float, float, false);
+    } else if (query.dtype() == at::ScalarType::Half) {
+      CALL_V2_LAUNCHER_BLOCK_SIZE(uint16_t, uint16_t, false);
+    } else if (query.dtype() == at::ScalarType::BFloat16) {
+      CALL_V2_LAUNCHER_BLOCK_SIZE(__nv_bfloat16, __nv_bfloat16, false);
+    } else {
+      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    }
   }
 }
 
