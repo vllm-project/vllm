@@ -7,6 +7,7 @@
 #include <cassert>
 #include <map>
 #include <vector>
+#include "quant_utils.cuh"
 
 void swap_blocks(
   torch::Tensor& src,
@@ -127,7 +128,7 @@ void copy_blocks(
   dim3 grid(num_layers, num_pairs);
   dim3 block(std::min(1024, numel_per_block));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_DISPATCH_QUANT_TYPES(
     key_caches[0].scalar_type(), "copy_blocks_kernel", ([&] {
       vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
         key_cache_ptrs_tensor.data_ptr<int64_t>(),
@@ -137,21 +138,26 @@ void copy_blocks(
     }));
 }
 
+
 namespace vllm {
 
-template<typename scalar_t>
+template<typename attn_dtype, typename cache_dtype, bool use_quant>  // cache_dtype can only be int8_t for now
 __global__ void reshape_and_cache_kernel(
-  const scalar_t* __restrict__ key,           // [num_tokens, num_heads, head_size]
-  const scalar_t* __restrict__ value,         // [num_tokens, num_heads, head_size]
-  scalar_t* __restrict__ key_cache,           // [num_blocks, num_heads, head_size/x, block_size, x]
-  scalar_t* __restrict__ value_cache,         // [num_blocks, num_heads, head_size, block_size]
-  const int64_t* __restrict__ slot_mapping,   // [num_tokens]
+  const attn_dtype* __restrict__ key,     // [num_tokens, num_heads, head_size]
+  const attn_dtype* __restrict__ value,   // [num_tokens, num_heads, head_size]
+  cache_dtype* __restrict__ key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
+  cache_dtype* __restrict__ value_cache,   // [num_blocks, num_heads, head_size, block_size]
+  const int64_t* __restrict__ slot_mapping, // [num_tokens]
   const int key_stride,
   const int value_stride,
   const int num_heads,
   const int head_size,
   const int block_size,
-  const int x) {
+  const int x,
+  const float k_scale,
+  const float k_zp,
+  const float v_scale,
+  const float v_zp) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
@@ -173,19 +179,26 @@ __global__ void reshape_and_cache_kernel(
     const int x_offset = head_offset % x;
 
     const int64_t tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
-                                + head_idx * (head_size / x) * block_size * x
-                                + x_idx * block_size * x
-                                + block_offset * x
-                                + x_offset;
+                            + head_idx * (head_size / x) * block_size * x
+                            + x_idx * block_size * x
+                            + block_offset * x
+                            + x_offset;
     const int64_t tgt_value_idx = block_idx * num_heads * head_size * block_size
-                                  + head_idx * head_size * block_size
-                                  + head_offset * block_size
-                                  + block_offset;
-    key_cache[tgt_key_idx] = key[src_key_idx];
-    value_cache[tgt_value_idx] = value[src_value_idx];
+                              + head_idx * head_size * block_size
+                              + head_offset * block_size
+                              + block_offset;
+    // TODO (Lin Pengyun): use vector reading and quantization to improve IO ultilization
+    if constexpr (use_quant) {
+      attn_dtype tgt_key = key[src_key_idx];
+      key_cache[tgt_key_idx] = quant(tgt_key, k_scale, k_zp);
+      attn_dtype tgt_value = value[src_value_idx];
+      value_cache[tgt_value_idx] = quant(tgt_value, v_scale, v_zp);
+    } else {
+      key_cache[tgt_key_idx] = key[src_key_idx];
+      value_cache[tgt_value_idx] = value[src_value_idx];
+    }
   }
 }
-
 } // namespace vllm
 
 void reshape_and_cache(
@@ -193,7 +206,13 @@ void reshape_and_cache(
   torch::Tensor& value,         // [num_tokens, num_heads, head_size]
   torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
   torch::Tensor& value_cache,   // [num_blocks, num_heads, head_size, block_size]
-  torch::Tensor& slot_mapping)  // [num_tokens]
+  torch::Tensor& slot_mapping,  // [num_tokens]
+  bool use_quant = false,
+  const float k_scale = 1.0f,
+  const float k_zp = 0.0f,
+  const float v_scale = 1.0f,
+  const float v_zp = 0.0f
+  )
 {
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
@@ -211,18 +230,41 @@ void reshape_and_cache(
     key.scalar_type(),
     "reshape_and_cache_kernel",
     [&] {
-      vllm::reshape_and_cache_kernel<scalar_t><<<grid, block, 0, stream>>>(
-        key.data_ptr<scalar_t>(),
-        value.data_ptr<scalar_t>(),
-        key_cache.data_ptr<scalar_t>(),
-        value_cache.data_ptr<scalar_t>(),
-        slot_mapping.data_ptr<int64_t>(),
-        key_stride,
-        value_stride,
-        num_heads,
-        head_size,
-        block_size,
-        x);
+      if (use_quant) {
+        vllm::reshape_and_cache_kernel<scalar_t, int8_t, true><<<grid, block, 0, stream>>>(
+            key.data_ptr<scalar_t>(),
+            value.data_ptr<scalar_t>(),
+            key_cache.data_ptr<int8_t>(),
+            value_cache.data_ptr<int8_t>(),
+            slot_mapping.data_ptr<int64_t>(),
+            key_stride,
+            value_stride,
+            num_heads,
+            head_size,
+            block_size,
+            x,
+            k_scale,
+            k_zp,
+            v_scale,
+            v_zp);
+      } else {
+        vllm::reshape_and_cache_kernel<scalar_t, scalar_t, false><<<grid, block, 0, stream>>>(
+            key.data_ptr<scalar_t>(),
+            value.data_ptr<scalar_t>(),
+            key_cache.data_ptr<scalar_t>(),
+            value_cache.data_ptr<scalar_t>(),
+            slot_mapping.data_ptr<int64_t>(),
+            key_stride,
+            value_stride,
+            num_heads,
+            head_size,
+            block_size,
+            x,
+            k_scale,
+            k_zp,
+            v_scale,
+            v_zp);
+      }
     });
 }
 

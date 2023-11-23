@@ -2,11 +2,12 @@
 import contextlib
 from typing import Type
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, ParallelConfig
 from vllm.model_executor.models import *  # pylint: disable=wildcard-import
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
@@ -61,7 +62,8 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def get_model(model_config: ModelConfig) -> nn.Module:
+def get_model(model_config: ModelConfig, parallel_config: ParallelConfig,
+              rank: int) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
 
     # Get the quantization config.
@@ -91,10 +93,22 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
+        num_layers = model_config.get_num_layers(parallel_config)
+        kv_quant_params_list = []
+        if model_config.quant_kv_cache:
+            for i in range(num_layers):
+                path = model_config.kv_quant_params_path + \
+                       f"/layers.{i}.past_kv_scale.{rank}.weight"
+                kv_quant_params = list(np.fromfile(path, dtype=np.float32))
+                kv_quant_params_list.append(kv_quant_params)
         if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
-            model = model_class(model_config.hf_config, quant_config)
+            model = model_class(model_config.hf_config, quant_config,
+                                model_config.quant_kv_cache,
+                                kv_quant_params_list)
         else:
-            model = model_class(model_config.hf_config)
+            model = model_class(model_config.hf_config, None,
+                                model_config.quant_kv_cache,
+                                kv_quant_params_list)
         if model_config.load_format == "dummy":
             model = model.cuda()
             # NOTE(woosuk): For accurate performance evaluation, we assign

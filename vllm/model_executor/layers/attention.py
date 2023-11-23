@@ -47,7 +47,9 @@ class PagedAttention(nn.Module):
                  head_size: int,
                  scale: float,
                  num_kv_heads: Optional[int] = None,
-                 sliding_window: Optional[int] = None) -> None:
+                 sliding_window: Optional[int] = None,
+                 quant_kv_cache: bool = False,
+                 kv_quant_params: List[float] = None) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
@@ -57,6 +59,8 @@ class PagedAttention(nn.Module):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.quant_kv_cache = quant_kv_cache
+        self.kv_quant_params = kv_quant_params if kv_quant_params is not None else [1.0, 0.0, 1.0, 0.0]
         self.head_mapping = torch.repeat_interleave(
             torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
             self.num_queries_per_kv)
@@ -175,6 +179,8 @@ class PagedAttention(nn.Module):
                 block_size,
                 input_metadata.max_context_len,
                 alibi_slopes,
+                self.quant_kv_cache,
+                *self.kv_quant_params,
             )
         else:
             # Run PagedAttention V2.
@@ -205,6 +211,8 @@ class PagedAttention(nn.Module):
                 block_size,
                 input_metadata.max_context_len,
                 alibi_slopes,
+                self.quant_kv_cache,
+                *self.kv_quant_params,
             )
 
     def forward(
@@ -281,6 +289,8 @@ class PagedAttention(nn.Module):
                 key_cache,
                 value_cache,
                 slot_mapping,
+                self.quant_kv_cache,
+                *self.kv_quant_params,
             )
 
         if input_metadata.num_generation_tokens > 0:
@@ -315,12 +325,16 @@ class PagedAttentionWithRoPE(PagedAttention):
         is_neox_style: bool = True,
         rope_scaling: Optional[Dict[str, Any]] = None,
         sliding_window: Optional[int] = None,
+        quant_kv_cache: bool = False,
+        kv_quant_params: torch.Tensor = None,
     ) -> None:
         super().__init__(num_heads,
                          head_size,
                          scale,
                          num_kv_heads,
-                         sliding_window=sliding_window)
+                         sliding_window=sliding_window,
+                         quant_kv_cache=quant_kv_cache,
+                         kv_quant_params=kv_quant_params)
         if rope_scaling is None:
             self.rotary_emb = RotaryEmbedding(head_size, rotary_dim,
                                               max_position, base,
