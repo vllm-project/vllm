@@ -482,7 +482,7 @@ def test_single_query_cached_kv_attention_quantized(
         device="cuda")
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    attention_ops.paged_attention_quantized(
+    attention_ops.paged_attention_v1(
         output,
         query,
         key_cache,
@@ -494,30 +494,31 @@ def test_single_query_cached_kv_attention_quantized(
         block_size,
         max_context_len,
         None,  # ALiBi slopes.
+        True,  # use quant
         k_scale,
         k_zp,
         v_scale,
         v_zp,
     )
 
-    # ref_output = torch.empty_like(query)
-    # ref_single_query_cached_kv_attention_quantized(
-    #     ref_output,
-    #     query,
-    #     num_queries_per_kv,
-    #     key_cache,
-    #     value_cache,
-    #     block_tables,
-    #     context_lens,
-    #     scale,
-    #     alibi_slopes,
-    #     k_scale,
-    #     k_zp,
-    #     v_scale,
-    #     v_zp,
-    # )
-    # # NOTE(woosuk): Due to the difference in the data types the two
-    # # implementations use for attention softmax logits and accumulation,
-    # # there is a small difference in the final outputs.
-    # # We should use a relaxed tolerance for the test.
-    # assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+    ref_output = torch.empty_like(query)
+    ref_single_query_cached_kv_attention_quantized(
+        ref_output,
+        query,
+        num_queries_per_kv,
+        key_cache,
+        value_cache,
+        block_tables,
+        context_lens,
+        scale,
+        alibi_slopes,
+        k_scale,
+        k_zp,
+        v_scale,
+        v_zp,
+    )
+    # NOTE(woosuk): Due to the difference in the data types the two
+    # implementations use for attention softmax logits and accumulation,
+    # there is a small difference in the final outputs.
+    # We should use a relaxed tolerance for the test.
+    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)

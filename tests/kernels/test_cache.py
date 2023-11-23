@@ -168,64 +168,47 @@ def test_reshape_and_cache_quantized(
 ) -> None:
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.int, device="cuda")
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.int, device='cuda')
 
     qkv = torch.randn(num_tokens,
                       3,
                       num_heads,
                       head_size,
                       dtype=dtype,
-                      device="cuda")
+                      device='cuda')
     _, key, value = qkv.unbind(dim=1)
 
     x = 16 // torch.tensor([], dtype=torch.int8).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
-    key_cache = torch.randint(-10,
-                              10,
-                              size=key_cache_shape,
-                              dtype=torch.int8,
-                              device="cuda")  ## change to int8
+    key_cache = torch.randint(-10, 10, size=key_cache_shape, dtype=torch.int8, device='cuda') ## change to int8
     cloned_key_cache = key_cache.clone()
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
-    value_cache = torch.randint(
-        -10,
-        10,
-        size=value_cache_shape,
-        dtype=torch.int8,  ## change to int8
-        device="cuda")
+    value_cache = torch.randint(-10, 10, size=value_cache_shape,
+                              dtype=torch.int8, ## change to int8
+                              device='cuda')
     cloned_value_cache = value_cache.clone()
 
-    cache_ops.reshape_and_cache_quantized(key, value, key_cache, value_cache,
-                                          slot_mapping, k_scale, k_zp, v_scale,
-                                          v_zp)
-    lower_bound, upper_bound = torch.tensor([-128.0],
-                                            dtype=dtype,
-                                            device="cuda"), torch.tensor(
-                                                [127.0],
-                                                dtype=dtype,
-                                                device="cuda")
+    cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
+                                          slot_mapping, True, k_scale, k_zp, v_scale, v_zp)
+    lower_bound, upper_bound = torch.tensor([-128.0], dtype=dtype, device='cuda'), torch.tensor([127.0], dtype=dtype, device='cuda')
     ## quantize and store here
     ## quantize and store here
     quantized_key = key.reshape(num_tokens, num_heads, head_size // x, x)
     quantized_key = quantized_key.to(torch.float32)
-    quantized_key = torch.maximum(
-        lower_bound,
-        torch.minimum(upper_bound, (quantized_key - k_zp) / k_scale))
+    quantized_key = torch.maximum(lower_bound, torch.minimum(upper_bound, (quantized_key - k_zp) / k_scale))
     quantized_key = torch.round(quantized_key)
-    quantized_key = quantized_key.to(torch.int8)  ## change to int8
+    quantized_key = quantized_key.to(torch.int8) ## change to int8
 
     quantized_value = value.to(torch.float32)
-    quantized_value = torch.maximum(
-        lower_bound,
-        torch.minimum(upper_bound, (quantized_value - v_zp) / v_scale))
+    quantized_value = torch.maximum(lower_bound, torch.minimum(upper_bound, (quantized_value - v_zp) / v_scale))
     quantized_value = torch.round(quantized_value)
     quantized_value = quantized_value.to(torch.int8)
 
     for i in range(num_tokens):
         block_idx = torch.div(slot_mapping[i],
                               block_size,
-                              rounding_mode="floor")
+                              rounding_mode='floor')
         block_offset = slot_mapping[i] % block_size
         cloned_key_cache[block_idx, :, :, block_offset, :] = quantized_key[i]
         cloned_value_cache[block_idx, :, :, block_offset] = quantized_value[i]
