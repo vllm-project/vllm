@@ -412,15 +412,19 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
         is_neox_style: bool = True,
         rope_scaling: Optional[Dict[str, Any]] = None,
         sliding_window: Optional[int] = None,
+        quant_kv_cache: bool = False,
+        kv_quant_params: torch.Tensor = None,
         dequant_scale: float = 1.0,
         quant_scale: float = 1.0,
         use_per_token_quant: bool = True,
     ) -> None:
         super().__init__(num_heads,
-                         head_size,
-                         scale,
-                         num_kv_heads,
-                         sliding_window=sliding_window)
+                    head_size,
+                    scale,
+                    num_kv_heads,
+                    sliding_window=sliding_window,
+                    quant_kv_cache=quant_kv_cache,
+                    kv_quant_params=kv_quant_params)
         if rope_scaling is None:
             self.rotary_emb = DequantRotaryEmbedding(head_size, rotary_dim,
                                                      max_position, base,

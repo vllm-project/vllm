@@ -167,15 +167,6 @@ class LlamaAttention(nn.Module):
                 quant_kv_cache=quant_kv_cache,
                 kv_quant_params=kv_quant_params)
         else:
-            # self.attn = PagedAttentionWithRoPE(
-            #     self.num_heads,
-            #     self.head_dim,
-            #     self.scaling,
-            #     base=self.rope_theta,
-            #     max_position=self.max_position_embeddings,
-            #     rotary_dim=self.head_dim,
-            #     num_kv_heads=self.num_kv_heads,
-            #     rope_scaling=rope_scaling)
             self.attn = PagedAttentionWithRoPE(
                 self.num_heads,
                 self.head_dim,
@@ -185,8 +176,6 @@ class LlamaAttention(nn.Module):
                 rotary_dim=self.head_dim,
                 num_kv_heads=self.num_kv_heads,
                 rope_scaling=rope_scaling,
-                # quant_kv_cache=quant_kv_cache,
-                # kv_quant_params=kv_quant_params
                 )
 
     def forward(
