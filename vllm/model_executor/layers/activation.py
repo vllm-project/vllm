@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from vllm import activation_ops
+from vllm._C import ops
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
@@ -26,7 +26,7 @@ class SiluAndMul(nn.Module):
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        activation_ops.silu_and_mul(out, x)
+        ops.silu_and_mul(out, x)
         return out
 
 
@@ -34,7 +34,7 @@ class NewGELU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
-        activation_ops.gelu_new(out, x)
+        ops.gelu_new(out, x)
         return out
 
 
@@ -42,7 +42,7 @@ class FastGELU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
-        activation_ops.gelu_fast(out, x)
+        ops.gelu_fast(out, x)
         return out
 
 
