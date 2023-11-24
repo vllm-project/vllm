@@ -1,11 +1,7 @@
 # coding=utf-8
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
-"""Inference-only ChatGLM model compatible with THUDM weights.
-
-The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of the input.
-"""
+"""Inference-only ChatGLM model compatible with THUDM weights."""
 from typing import List, Optional, Tuple
 
 import torch
