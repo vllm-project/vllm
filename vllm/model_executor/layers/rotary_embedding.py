@@ -27,7 +27,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm import pos_encoding_ops
+from vllm._C import ops
 
 
 class RotaryEmbedding(nn.Module):
@@ -87,11 +87,10 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # pos_encoding_ops.rotary_embedding() is an in-place operation that
+        # ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
-        pos_encoding_ops.rotary_embedding(positions, query, key,
-                                          self.head_size, self.cos_sin_cache,
-                                          self.is_neox_style)
+        ops.rotary_embedding(positions, query, key, self.head_size,
+                             self.cos_sin_cache, self.is_neox_style)
         return query, key
 
 

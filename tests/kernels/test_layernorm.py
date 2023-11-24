@@ -2,7 +2,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm import layernorm_ops
+from vllm._C import ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [67, 768, 2048, 5120, 8192]  # Arbitrary values for testing
@@ -48,7 +48,7 @@ def test_rms_norm(
     ref = RefRMSNorm(hidden_size).to(dtype).cuda()
 
     out = torch.empty_like(x)
-    layernorm_ops.rms_norm(
+    ops.rms_norm(
         out,
         x,
         ref.weight.data,

@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm import quantization_ops
+from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -116,8 +116,7 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
         reshaped_x = x.reshape(-1, x.shape[-1])
         # NOTE: The output tensor should be zero-initialized.
         out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
-        quantization_ops.squeezellm_gemm(reshaped_x, qweight, out,
-                                         lookup_table)
+        ops.squeezellm_gemm(reshaped_x, qweight, out, lookup_table)
 
         if bias is not None:
             out = out + bias

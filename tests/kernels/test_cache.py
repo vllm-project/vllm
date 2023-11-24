@@ -3,7 +3,7 @@ import random
 import pytest
 import torch
 
-from vllm import cache_ops
+from vllm._C import cache_ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [83]  # Arbitrary values for testing

@@ -5,7 +5,7 @@ from platform import uname
 import psutil
 import torch
 
-from vllm import cuda_utils
+from vllm._C import cuda_utils
 
 
 class Device(enum.Enum):

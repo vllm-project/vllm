@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm import quantization_ops
+from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -151,8 +151,7 @@ class AWQLinearMethod(LinearMethodBase):
         pack_factor = self.quant_config.pack_factor
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
-        out = quantization_ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
-                                        pack_factor)
+        out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, pack_factor)
         if bias is not None:
             out = out + bias
         return out.reshape(out_shape)
