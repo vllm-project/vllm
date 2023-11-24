@@ -19,7 +19,7 @@ def _export_sym(key_stats: dict,
         k_absmax = keys_absmax[name]
         v_absmax = values_absmax[name]
 
-        heads, dims = k_absmax.shape
+        heads, _ = k_absmax.shape
         assert heads % tp == 0
 
         mp_k_absmax = torch.chunk(k_absmax, tp)
@@ -54,7 +54,7 @@ def _export_asym(key_stats: dict,
         k_min = keys_min[name]
         v_min = values_min[name]
 
-        heads, dims = k_min.shape
+        heads, _ = k_min.shape
         assert heads % tp == 0
 
         tp_k_min = torch.chunk(k_min, tp)

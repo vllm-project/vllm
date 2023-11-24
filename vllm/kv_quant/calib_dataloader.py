@@ -124,8 +124,6 @@ def get_c4(tokenizer, nsamples, seed, seqlen, path=None):
         tar[:, :-1] = -100
         trainloader.append((inp, tar))
 
-    import random
-    random.seed(0)
     valenc = []
     for _ in range(256):
         while True:

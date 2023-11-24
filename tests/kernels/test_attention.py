@@ -336,7 +336,6 @@ def test_multi_query_kv_attention(
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
-
 def ref_single_query_cached_kv_attention_quantized(
     output: torch.Tensor,
     query: torch.Tensor,

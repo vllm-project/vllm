@@ -64,8 +64,10 @@ class ModelConfig:
             tokenizer_revision: Optional[str] = None,
             max_model_len: Optional[int] = None,
             quantization: Optional[str] = None,
-            kv_cache_dtype: str = None,  ## for kv cache quantization, only for int8 right now
-            kv_quant_params_path: str = None,  ## path for kv scales and zero points
+            kv_cache_dtype:
+        str = None,  ## for kv cache quantization, only for int8 right now
+            kv_quant_params_path:
+        str = None,  ## path for kv scales and zero points
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer

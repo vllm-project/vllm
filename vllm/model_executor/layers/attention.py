@@ -58,7 +58,9 @@ class PagedAttention(nn.Module):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.quant_kv_cache = quant_kv_cache
-        self.kv_quant_params = kv_quant_params if kv_quant_params is not None else [1.0, 0.0, 1.0, 0.0]
+        self.kv_quant_params = kv_quant_params if kv_quant_params is not None else [
+            1.0, 0.0, 1.0, 0.0
+        ]
         self.head_mapping = torch.repeat_interleave(
             torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
             self.num_queries_per_kv)
