@@ -300,12 +300,18 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_invalid_kv(self, seq: Sequence, seq_out: SequenceOutputs):
+        # if all the tokens are accepted
+        # draft_token_ids: [A, B, C], accepted_tokens: [A, B, C, D], invalid_token_cnt = 3 + 1 - 4 = 0
+        # if part of the tokens are accepted
+        # draft_token_ids: [A, B, C], accepted_tokens: [A, B, D], invalid_token_cnt = 3 + 1 - 3 = 1
         invalid_token_cnt = len(seq.data.get_draft_token_ids()) + 1 - len(seq_out.accepted_tokens)
         assert invalid_token_cnt >= 0
 
         if invalid_token_cnt == 0:
             return invalid_token_cnt
 
+        # delete data
+        seq.data.output_token_ids = seq.data.output_token_ids[:-invalid_token_cnt]
         # delete from logical table
         seq.delete_tailing_tokens(invalid_token_cnt)
         # delete from physical table

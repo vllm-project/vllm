@@ -162,11 +162,12 @@ class BlockSpaceManager:
 
     def free_tailing_blocks(self, seq: Sequence) -> None:
         block_table = self.block_tables[seq.seq_id]
-        start_idx = len(seq.logical_token_blocks) - 1
-        for i in range(start_idx, len(block_table) - 1):
-            block = block_table[i]
+        free_cnt = len(seq.logical_token_blocks) - len(block_table)
+        while free_cnt > 0:
+            block = block_table.pop()
             self.gpu_allocator.free(block)
-        self.block_tables[seq.seq_id] = block_table[:start_idx + 1]
+            free_cnt -= 1
+        self.block_tables[seq.seq_id] = block_table
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.

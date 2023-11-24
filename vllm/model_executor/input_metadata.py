@@ -73,6 +73,7 @@ class InputMetadata:
         self.kv_mqa = kv_mqa
         
         if self.kv_mqa:
+            self.num_prompts = 0
             self.num_prompt_tokens = 0
             # FIXME: This is a hack to make sure the number of generation tokens
             self.num_generation_tokens = context_lens.shape[0]

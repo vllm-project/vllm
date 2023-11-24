@@ -126,14 +126,14 @@ class Sampler(nn.Module):
                              self.vocab_size)
         
         # TODO: Apply temperature scaling.
-        # temperatures = _get_temperatures(input_metadata)
+        temperatures = _get_temperatures(input_metadata)
 
-        # if any(t != 1.0 for t in temperatures):
-        #     t = torch.tensor(temperatures,
-        #                     dtype=logits.dtype,
-        #                     device=logits.device)
-        #     # Use in-place division to avoid creating a new tensor.
-        #     logits.div_(t.unsqueeze(dim=1))
+        if any(t != 1.0 for t in temperatures):
+            t = torch.tensor(temperatures,
+                            dtype=logits.dtype,
+                            device=logits.device)
+            # Use in-place division to avoid creating a new tensor.
+            logits.div_(t.unsqueeze(dim=1))
         
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
@@ -327,7 +327,13 @@ def _get_temperatures(input_metadata: InputMetadata) -> List[float]:
             # NOTE: Zero temperature means deterministic sampling
             # (i.e., greedy sampling or beam search).
             # Set the temperature to 1 to avoid division by zero.
-            temperature = 1.0
+            temperature = _SAMPLING_EPS
+            
+        for seq_id in seq_ids:
+            if input_metadata.num_prompts == 0:
+                seq_data = input_metadata.seq_data[seq_id]
+                temperatures += [temperature]  * len(seq_data.get_draft_token_ids())
+
         if (i < input_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             prompt_len = input_metadata.prompt_lens[i]

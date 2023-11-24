@@ -104,9 +104,9 @@ class SpecDecWorker(Worker):
                 seqs[seq_id].append_token_id(draft_token,
                                              {draft_token: math.log(draft_distributions[j][i][draft_token].item())})
                 seq_group_metadata.seq_data[seq_id] = seqs[seq_id].data
-                # allocate physical block
-                self.scheduler.block_manager.append_slot(seqs[seq_id])
-                seq_group_metadata.block_tables[seq_id] = self.scheduler.block_manager.get_block_table(
+            # allocate physical block
+            self.scheduler.block_manager.append_slot(seqs[seq_id])
+            seq_group_metadata.block_tables[seq_id] = self.scheduler.block_manager.get_block_table(
                     seqs[seq_id])
 
             logger.info(f"Seq draft tokens: {seq_data.get_draft_token_ids()}")

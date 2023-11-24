@@ -401,18 +401,12 @@ class LLMEngine:
             last_child_sample = child_samples[-1]
             if last_child_sample.accepted_tokens:
                 # Speculative Decoding enabled: invlidate kv cache for non-accepted tokens
-                invalid_cnt = self.scheduler.free_invalid_kv(parent, last_child_sample)
-                
-                if invalid_cnt == 0:
-                    # if all the tokens are accepted
-                    # add the last accept token to the output_token_ids
-                    # TODO: how to handle the kv cache of the last token?
-                    # TODO: we need to get the logprob of the last token
-                    last_token_id = last_child_sample.accepted_tokens[-1]
-                    parent.append_token_id(last_token_id, {last_token_id: -1})
-                else:
-                    # update the output_token_ids with only accepted tokens
-                    parent.data.output_token_ids = parent.data.output_token_ids[:-invalid_cnt]
+                self.scheduler.free_invalid_kv(parent, last_child_sample)
+                # add the last accept token to the output_token_ids
+                # TODO: how to handle the kv cache of the last token?
+                # TODO: we need to get the logprob of the last token
+                last_token_id = last_child_sample.accepted_tokens[-1]
+                parent.append_token_id(last_token_id, {last_token_id: -1})
                 # always clear draft tokens
                 parent.data.draft_token_probs = []
             else:
@@ -703,7 +697,7 @@ class LLMEngine:
             return
 
         # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
+        if seq.get_output_len() >= sampling_params.max_tokens:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 

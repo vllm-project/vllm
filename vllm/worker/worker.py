@@ -242,7 +242,7 @@ class Worker:
             seq = seq_group_metadata.seq_data[seq_ids[0]]
             if len(seq.draft_token_probs) > 0:
                 assert num_seqs == 1
-                selected_token_end_idx = selected_token_start_idx + len(seq.draft_token_probs) + 1
+                selected_token_end_idx = selected_token_start_idx + len(seq.get_draft_token_ids()) + 1
             else:
                 selected_token_end_idx = selected_token_start_idx + num_seqs
             selected_token_indices.extend(
@@ -262,6 +262,9 @@ class Worker:
                 draft_len = len(seq_data.get_draft_token_ids())
                 prompt_len = seq_data.get_len()
                 context_len = prompt_len - draft_len
+                # FIXME: too hacky!!!!
+                offset = 1 if draft_len else 0
+                context_len -= offset
                 max_context_len = max(max_context_len, context_len)
                 max_num_blocks_per_seq = max(max_num_blocks_per_seq,
                                                 len(block_table))
@@ -279,7 +282,6 @@ class Worker:
                     input_positions.append(positions)
                     
                     slots = []
-                    block_table = seq_group_metadata.block_tables[seq_id]
                     for position in positions:
                         slots.append(self._get_slot(block_table, position))
                     slot_mapping.append(slots)
@@ -347,7 +349,6 @@ class Worker:
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)
 
-        print("------------", max_seq_len, len(prompt_lens))
         start_loc_tensor = torch.arange(0, len(prompt_lens)*max_seq_len, max_seq_len, dtype=torch.long, device='cuda')
         input_metadata = InputMetadata(
             seq_groups=seq_groups,
@@ -402,7 +403,6 @@ class Worker:
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
 
-        print("========Start Exec Model=========")
         # Execute the model.
         output = self.model(
             input_ids=input_tokens,
@@ -411,7 +411,6 @@ class Worker:
             input_metadata=input_metadata,
             cache_events=cache_events,
         )
-        print("========End Exec Model=========")
         return output
 
 
