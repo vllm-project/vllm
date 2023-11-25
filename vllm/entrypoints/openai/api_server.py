@@ -183,18 +183,15 @@ def create_logprobs(
         if len(logprobs.text_offset) == 0:
             logprobs.text_offset.append(initial_text_offset)
         else:
-            logprobs.text_offset.append(
-                logprobs.text_offset[-1] + last_token_len
-            )
+            logprobs.text_offset.append(logprobs.text_offset[-1] +
+                                        last_token_len)
         last_token_len = len(token)
 
         if num_output_top_logprobs:
-            logprobs.top_logprobs.append(
-                {
-                    tokenizer.convert_ids_to_tokens(i): p
-                    for i, p in step_top_logprobs.items()
-                }
-            )
+            logprobs.top_logprobs.append({
+                tokenizer.convert_ids_to_tokens(i): p
+                for i, p in step_top_logprobs.items()
+            })
     return logprobs
 
 
@@ -452,7 +449,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             stop=request.stop,
             stop_token_ids=request.stop_token_ids,
             ignore_eos=request.ignore_eos,
-            max_tokens=request.max_tokens if not echo_without_generation else 1,
+            max_tokens=request.max_tokens
+            if not echo_without_generation else 1,
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
             prompt_logprobs=request.logprobs if request.echo else None,
@@ -510,9 +508,9 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             res: RequestOutput
             for output in res.outputs:
                 i = output.index
-                delta_text = output.text[len(previous_texts[i]) :]
-                token_ids = output.token_ids[previous_num_tokens[i] :]
-                top_logprobs = output.logprobs[previous_num_tokens[i] :]
+                delta_text = output.text[len(previous_texts[i]):]
+                token_ids = output.token_ids[previous_num_tokens[i]:]
+                top_logprobs = output.logprobs[previous_num_tokens[i]:]
                 offsets = len(previous_texts[i])
                 if request.echo and not has_echoed[i]:
                     if not echo_without_generation:
