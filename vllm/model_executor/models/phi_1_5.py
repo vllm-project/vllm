@@ -34,11 +34,7 @@
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-"""Inference-only Phi-1.5 model compatible with HuggingFace weights.
-
-The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of the input.
-"""
+"""Inference-only Phi-1.5 model compatible with HuggingFace weights."""
 from typing import List, Optional, Tuple
 
 import torch
@@ -258,10 +254,7 @@ class PhiModel(nn.Module):
     ) -> SamplerOutput:
         hidden_states = self.embd(input_ids)
         for i in range(self.config.num_hidden_layers):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(
                 positions,

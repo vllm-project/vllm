@@ -16,11 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GPT-2 model compatible with HuggingFace weights.
-
-The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of the input.
-"""
+"""Inference-only GPT-2 model compatible with HuggingFace weights."""
 from typing import List, Optional, Tuple
 
 import torch
@@ -206,10 +202,7 @@ class GPT2Model(nn.Module):
         hidden_states = inputs_embeds + position_embeds
 
         for i in range(len(self.h)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(hidden_states, kv_caches[i], input_metadata,
                                   cache_event)

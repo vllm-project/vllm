@@ -7,8 +7,8 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
-from vllm import attention_ops
-from vllm import cache_ops
+from vllm._C import ops
+from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
@@ -18,7 +18,6 @@ _PARTITION_SIZE = 512
 
 
 class PagedAttention(nn.Module):
-    # pylint: disable=line-too-long
     """GPT-style multi-head PagedAttention.
 
     This class takes query, key, and value tensors as input. The input tensors
@@ -96,10 +95,15 @@ class PagedAttention(nn.Module):
         """
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
-            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
-            value = torch.repeat_interleave(value,
-                                            self.num_queries_per_kv,
-                                            dim=1)
+            query = query.view(query.shape[0], self.num_kv_heads,
+                               self.num_queries_per_kv, query.shape[-1])
+            key = key[:, :,
+                      None, :].expand(key.shape[0], self.num_kv_heads,
+                                      self.num_queries_per_kv, key.shape[-1])
+            value = value[:, :,
+                          None, :].expand(value.shape[0], self.num_kv_heads,
+                                          self.num_queries_per_kv,
+                                          value.shape[-1])
 
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
         out = xops.memory_efficient_attention_forward(
@@ -111,7 +115,7 @@ class PagedAttention(nn.Module):
             scale=self.scale,
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
-        output.copy_(out.squeeze(0))
+        output.copy_(out.view_as(output))
         return output
 
     def get_alibi_slopes(self) -> Optional[torch.Tensor]:
@@ -159,7 +163,7 @@ class PagedAttention(nn.Module):
             max_num_partitions == 1 or num_seqs * num_heads > 512)
         if use_v1:
             # Run PagedAttention V1.
-            attention_ops.paged_attention_v1(
+            ops.paged_attention_v1(
                 output,
                 query,
                 key_cache,
@@ -186,7 +190,7 @@ class PagedAttention(nn.Module):
                 device=output.device,
             )
             max_logits = torch.empty_like(exp_sums)
-            attention_ops.paged_attention_v2(
+            ops.paged_attention_v2(
                 output,
                 exp_sums,
                 max_logits,
@@ -428,10 +432,15 @@ class PagedAttentionWithALiBi(PagedAttention):
         """
         if self.num_kv_heads != self.num_heads:
             # Project the key and value tensors to the desired number of heads.
-            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
-            value = torch.repeat_interleave(value,
-                                            self.num_queries_per_kv,
-                                            dim=1)
+            query = query.view(query.shape[0], self.num_kv_heads,
+                               self.num_queries_per_kv, query.shape[-1])
+            key = key[:, :,
+                      None, :].expand(key.shape[0], self.num_kv_heads,
+                                      self.num_queries_per_kv, key.shape[-1])
+            value = value[:, :,
+                          None, :].expand(value.shape[0], self.num_kv_heads,
+                                          self.num_queries_per_kv,
+                                          value.shape[-1])
         batch_size = input_metadata.num_prompts
         seq_len = input_metadata.max_prompt_len
 
@@ -444,7 +453,7 @@ class PagedAttentionWithALiBi(PagedAttention):
             scale=self.scale,
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
-        output.copy_(out.view(-1, self.num_heads, self.head_size))
+        output.copy_(out.view_as(output))
         return output
 
     def get_alibi_slopes(self) -> Optional[torch.Tensor]:

@@ -67,6 +67,8 @@ class Worker:
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
+
+    def load_model(self):
         self.model = get_model(self.model_config)
 
     @torch.inference_mode()
@@ -350,10 +352,7 @@ class Worker:
             self.cache_engine.copy(blocks_to_copy)
             issued_cache_op = True
 
-        if issued_cache_op:
-            cache_events = self.cache_events
-        else:
-            cache_events = None
+        cache_events = self.cache_events if issued_cache_op else None
 
         # If there is no input, we don't need to execute the model.
         if not seq_group_metadata_list:

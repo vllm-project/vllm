@@ -1,11 +1,7 @@
 # coding=utf-8
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
-"""Inference-only ChatGLM model compatible with THUDM weights.
-
-The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of the input.
-"""
+"""Inference-only ChatGLM model compatible with THUDM weights."""
 from typing import List, Optional, Tuple
 
 import torch
@@ -269,10 +265,7 @@ class GLMTransformer(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         for i in range(self.num_layers):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
             hidden_states = layer(
                 hidden_states=hidden_states,

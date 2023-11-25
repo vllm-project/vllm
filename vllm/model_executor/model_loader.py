@@ -7,7 +7,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
-from vllm.model_executor.models import *  # pylint: disable=wildcard-import
+from vllm.model_executor.models import *
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
 

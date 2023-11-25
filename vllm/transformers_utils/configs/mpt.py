@@ -62,7 +62,6 @@ class MPTConfig(PretrainedConfig):
                  fc_type: str = 'torch',
                  verbose: Optional[int] = None,
                  **kwargs: Any):
-        # pylint: disable=line-too-long
         """The MPT configuration class.
         Args:
             d_model (int): The size of the embedding dimension of the model.
@@ -139,10 +138,10 @@ class MPTConfig(PretrainedConfig):
         self.init_config = init_config
         self.fc_type = fc_type
         if verbose is not None:
-            warnings.warn(
-                DeprecationWarning(
-                    'verbose argument for MPTConfig is now ignored and will be removed. Use python_log_level instead.'
-                ))
+            warnings.warn(DeprecationWarning(
+                'verbose argument for MPTConfig is now ignored and will be removed. Use python_log_level instead.'
+            ),
+                          stacklevel=2)
         if 'name' in kwargs:
             del kwargs['name']
         if 'loss_fn' in kwargs:
@@ -150,8 +149,8 @@ class MPTConfig(PretrainedConfig):
         if self.attn_config.get('alibi', False):
             self.learned_pos_emb = False
             warnings.warn(
-                f'alibi is turned on, setting `learned_pos_emb` to {self.learned_pos_emb}`'
-            )
+                f'alibi is turned on, setting `learned_pos_emb` to {self.learned_pos_emb}`',
+                stacklevel=2)
         super().__init__(**kwargs)
         self._validate_config()
 
@@ -211,7 +210,8 @@ class MPTConfig(PretrainedConfig):
             )
         if not self.learned_pos_emb and (not self.attn_config['alibi']):
             warnings.warn(
-                'Positional information not being provided to the model.')
+                'Positional information not being provided to the model.',
+                stacklevel=2)
         if self.fc_type == 'te' or self.ffn_config['ffn_type'] == 'te_ln_mlp':
             try:
                 # pylint: disable=import-outside-toplevel
