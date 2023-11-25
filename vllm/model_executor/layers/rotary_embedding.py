@@ -317,8 +317,8 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
 def get_rope(
     head_size: int,
     rotary_dim: int,
-    max_position: int = 8192,
-    base: int = 10000,
+    max_position: int,
+    base: int,
     is_neox_style: bool = True,
     rope_scaling: Optional[Dict[str, Any]] = None,
 ) -> RotaryEmbedding:
