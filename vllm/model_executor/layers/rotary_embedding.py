@@ -26,8 +26,50 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch._custom_ops as torch_custom_ops
 
 from vllm._C import ops
+
+
+@torch_custom_ops.custom_op("vllm::rope")
+def rope(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox_style: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    raise NotImplementedError()
+
+
+@torch_custom_ops.impl("vllm::rope", device_types="cuda")
+def rope_impl(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox_style: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # FIXME: The custom op should not be in-place.
+    out_query = query.clone()
+    out_key = key.clone()
+    ops.rotary_embedding(positions, out_query, out_key, head_size,
+                                      cos_sin_cache, is_neox_style)
+    return out_query, out_key
+
+
+@torch_custom_ops.impl_abstract("vllm::rope")
+def rope_abstract(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox_style: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(query), torch.empty_like(key)
 
 
 class RotaryEmbedding(nn.Module):
@@ -89,7 +131,7 @@ class RotaryEmbedding(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
-        ops.rotary_embedding(positions, query, key, self.head_size,
+        query, key = torch.ops.vllm.rope(positions, query, key, self.head_size,
                              self.cos_sin_cache, self.is_neox_style)
         return query, key
 
@@ -275,10 +317,10 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
 def get_rope(
     head_size: int,
     rotary_dim: int,
-    max_position: int,
-    base: int,
-    is_neox_style: bool,
-    rope_scaling: Optional[Dict[str, Any]],
+    max_position: int = 8192,
+    base: int = 10000,
+    is_neox_style: bool = True,
+    rope_scaling: Optional[Dict[str, Any]] = None,
 ) -> RotaryEmbedding:
     if rope_scaling is None:
         rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
