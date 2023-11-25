@@ -5,7 +5,6 @@ from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from vllm.sequence import PromptLogprobs
 from vllm.utils import random_uuid
 
 
