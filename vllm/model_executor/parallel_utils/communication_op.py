@@ -1,47 +1,110 @@
+from typing import List
+
 import torch
-
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_group,
-)
-
-
-def tensor_model_parallel_all_reduce(input_):
-    """All-reduce the input tensor across model parallel group.
-
-    NOTE: This operation is applied in-place on the input tensor.
-    """
-    # Bypass the function if we are using only 1 GPU.
-    if get_tensor_model_parallel_world_size() == 1:
-        return input_
-    # All-reduce.
-    torch.distributed.all_reduce(input_,
-                                 group=get_tensor_model_parallel_group())
-    return input_
+import torch._inductor.codegen.wrapper as inductor_wrapper
+import torch._inductor.ir as inductor_ir
+import torch._inductor.lowering as inductor_lowering
+import torch.distributed._functional_collectives as distfunc
 
 
-def tensor_model_parallel_all_gather(input_, dim=-1):
-    """All-gather the input tensor across model parallel group."""
-    world_size = get_tensor_model_parallel_world_size()
-    # Bypass the function if we are using only 1 GPU.
+def tp_all_reduce(x: torch.Tensor, reduce_op: str = "sum") -> torch.Tensor:
+    # NOTE: get_tensor_model_parallel_world_size is not compatible with
+    # torch.compile because it uses the _TENSOR_MODEL_PARALLEL_GROUP global
+    # variable.
+    tp_world_size = torch.distributed.get_world_size()
+    if tp_world_size == 1:
+        return x
+    return distfunc.all_reduce(x, reduce_op, list(range(tp_world_size)))
+
+
+# Fix #1 is porting the code changes in https://github.com/pytorch/pytorch/pull/108811
+@classmethod
+def wait_create(cls, collective_op: "inductor_ir.TensorBox"):
+    collective_op.decide_layout()
+    return inductor_ir.Wait(
+        layout=inductor_ir.AliasedLayout(collective_op),
+        inputs=[collective_op],
+    )
+
+
+inductor_ir.Wait.create = wait_create
+
+inductor_ir.AllReduce.get_mutation_names = lambda self: [self.inputs[0].get_name()]
+
+
+@classmethod
+def all_reduce_create(
+    cls,
+    x: "inductor_ir.TensorBox",
+    reduce_op: str,
+    tag: str,
+    ranks: List[int],
+    group_size: int,
+):
+    inplace_inputs = cls.wrap_inputs_as_inplace([x])
+    layout = inductor_ir.MutationLayout(inplace_inputs[0])
+
+    _ = inductor_ir.AllReduce(
+        layout=layout,
+        inputs=inplace_inputs,
+        constant_args=[tag, ranks, group_size],
+        reduce_op=reduce_op,
+    )
+    return inplace_inputs[0]
+
+
+inductor_ir.AllReduce.create = all_reduce_create
+
+
+def wcg_codegen_free(self, buffer):
+    name = buffer.get_name()
+
+    # can be freed but not reused
+    # TODO: Port this one-line fix to PyTorch
+    if isinstance(buffer, (inductor_ir.InputBuffer, inductor_ir.OutputBuffer)):
+        self.writeline(self.make_buffer_free(buffer))
+        return
+
+    if not self.can_reuse(buffer):
+        return
+    self.freed.add(name)
+
+    layout = buffer.get_layout()
+    if isinstance(layout, (inductor_ir.AliasedLayout, inductor_ir.MultiOutputLayout)):
+        self.writeline(self.make_buffer_free(buffer))
+        return
+
+    self.writeline(inductor_wrapper.FreeIfNotReusedLine(self, buffer))
+
+
+inductor_wrapper.WrapperCodeGen.codegen_free = wcg_codegen_free
+# End of fix #1
+
+
+# Fix #3: Avoid recompiles on batch size for embedding + TP
+# (until https://github.com/pytorch/pytorch/pull/109561 lands)
+for overload in torch.ops.c10d_functional.all_gather_into_tensor.overloads():
+    other_fn = getattr(torch.ops.c10d_functional.all_gather_into_tensor, overload)
+    if other_fn in inductor_lowering.lowerings:
+        del inductor_lowering.lowerings[other_fn]
+
+
+@inductor_lowering.register_lowering(torch.ops.c10d_functional.all_gather_into_tensor)
+def all_gather_into_tensor(shard, tag, ranks, group_size):
+    return inductor_ir.TensorBox.create(
+        inductor_ir.AllGatherIntoTensor.create(
+            inductor_ir.ExternKernel.require_contiguous(shard), tag, ranks, group_size
+        )
+    )
+
+
+def tp_all_gather(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    world_size = torch.distributed.get_world_size()
     if world_size == 1:
-        return input_
-    assert -input_.dim() <= dim < input_.dim(), (
-        f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+        return x
+
     if dim < 0:
-        # Convert negative dim to positive.
-        dim += input_.dim()
-    input_size = input_.size()
-    # Allocate output tensor.
-    output_tensor = torch.empty((world_size, ) + input_size,
-                                dtype=input_.dtype,
-                                device=input_.device)
-    # All-gather.
-    torch.distributed.all_gather_into_tensor(
-        output_tensor, input_, group=get_tensor_model_parallel_group())
-    # Reshape
-    output_tensor = output_tensor.movedim(0, dim)
-    output_tensor = output_tensor.reshape(input_size[:dim] +
-                                          (world_size * input_size[dim], ) +
-                                          input_size[dim + 1:])
-    return output_tensor
+        dim = x.dim() + dim
+    return distfunc.all_gather_tensor(
+        x.transpose(0, dim).contiguous(), 0, list(range(world_size))
+    ).transpose(0, dim)

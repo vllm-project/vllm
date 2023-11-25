@@ -5,8 +5,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_gather)
+from vllm.model_executor.parallel_utils.communication_op import tp_all_gather
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceData, SequenceGroupOutputs, SequenceOutputs)
@@ -104,7 +103,7 @@ def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
     logits = torch.matmul(hidden_states, embedding.t())
     if embedding_bias is not None:
         logits += embedding_bias
-    logits = tensor_model_parallel_all_gather(logits)
+    logits = tp_all_gather(logits)
     # Remove paddings in vocab (if any).
     logits = logits[:, :vocab_size]
     return logits

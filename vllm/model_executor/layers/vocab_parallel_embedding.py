@@ -9,8 +9,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.parallel_utils.utils import divide
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce)
+from vllm.model_executor.parallel_utils.communication_op import tp_all_reduce
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -98,7 +97,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         if self.tp_size > 1:
             output_parallel[input_mask, :] = 0.0
         # Reduce across all the model parallel GPUs.
-        output = tensor_model_parallel_all_reduce(output_parallel)
+        output = tp_all_reduce(output_parallel)
         return output
 
 
