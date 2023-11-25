@@ -359,10 +359,9 @@ class Worker:
             self.cache_engine.copy(blocks_to_copy)
             issued_cache_op = True
 
-        cache_events = self.cache_events if issued_cache_op else None
         # If there is no input, we don't need to execute the model.
-        if cache_events is not None:
-            for event in cache_events:
+        if issued_cache_op:
+            for event in self.cache_events:
                 event.wait()
         if not seq_group_metadata_list:
             return {}
