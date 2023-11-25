@@ -1,18 +1,19 @@
 """A GPU worker class."""
 import os
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
-from vllm.model_executor import get_model, InputMetadata, set_random_seed
+from vllm.model_executor import get_model, InputMetadata, SamplingMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
+from vllm.worker.model_wrapper import ModelWrapper
 from vllm.utils import get_gpu_memory
 
 
@@ -105,17 +106,20 @@ class Worker:
             )
             seqs.append(seq)
 
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, input_positions, input_metadata, sampling_metadata = self._prepare_inputs(
             seqs)
 
         # Execute the model.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        self.model(
+        hidden_states = self.model(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=[(None, None)] * num_layers,
             input_metadata=input_metadata,
-            cache_events=None,
+        )
+        self.model.sample(
+            hidden_states=hidden_states,
+            sampling_metadata=sampling_metadata,
         )
 
         # Calculate the number of blocks that can be allocated with the
@@ -319,18 +323,21 @@ class Worker:
             seq_data.update(seq_group_metadata.seq_data)
 
         input_metadata = InputMetadata(
-            seq_groups=seq_groups,
-            seq_data=seq_data,
             prompt_lens=prompt_lens,
             slot_mapping=slot_mapping_tensor,
             context_lens=context_lens_tensor,
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=categorized_sample_indices,
             sliding_window=self.sliding_window,
         )
-        return tokens_tensor, positions_tensor, input_metadata
+        sampling_metadata = SamplingMetadata(
+            seq_groups=seq_groups,
+            seq_data=seq_data,
+            prompt_lens=prompt_lens,
+            selected_token_indices=selected_token_indices,
+            categorized_sample_indices=categorized_sample_indices,
+        )
+        return tokens_tensor, positions_tensor, input_metadata, sampling_metadata
 
     @torch.inference_mode()
     def execute_model(
@@ -353,25 +360,27 @@ class Worker:
             issued_cache_op = True
 
         cache_events = self.cache_events if issued_cache_op else None
-
         # If there is no input, we don't need to execute the model.
+        if cache_events is not None:
+            for event in cache_events:
+                event.wait()
         if not seq_group_metadata_list:
-            if cache_events is not None:
-                for event in cache_events:
-                    event.wait()
             return {}
 
         # Prepare input tensors.
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, input_positions, input_metadata, sampling_metadata = self._prepare_inputs(
             seq_group_metadata_list)
 
         # Execute the model.
-        output = self.model(
+        hidden_states = self.model(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
-            cache_events=cache_events,
+        )
+        output = self.model.sample(
+            hidden_states=hidden_states,
+            sampling_metadata=sampling_metadata,
         )
         return output
 
@@ -405,10 +414,6 @@ def _init_distributed_environment(
     torch.distributed.all_reduce(torch.zeros(1).cuda())
     initialize_model_parallel(parallel_config.tensor_parallel_size,
                               parallel_config.pipeline_parallel_size)
-
-
-def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
-    return x + [pad] * ((-len(x)) % multiple_of)
 
 
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
