@@ -208,7 +208,8 @@ class EngineArgs:
                                    self.tokenizer_revision, self.max_model_len,
                                    self.quantization, self.enforce_eager)
         cache_config = CacheConfig(
-            self.block_size, self.gpu_memory_utilization, self.swap_space)
+            self.block_size, self.gpu_memory_utilization, self.swap_space,
+            model_config.get_sliding_window())
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
