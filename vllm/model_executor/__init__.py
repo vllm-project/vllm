@@ -6,5 +6,6 @@ from vllm.model_executor.utils import set_random_seed
 __all__ = [
     "InputMetadata",
     "get_model",
+    "SamplingMetadata",
     "set_random_seed",
 ]
