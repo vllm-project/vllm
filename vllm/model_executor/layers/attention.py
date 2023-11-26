@@ -11,7 +11,6 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 from vllm._C import ops
 from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.rotary_embedding import get_rope
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -198,20 +197,23 @@ class PagedAttention(nn.Module):
                 # For MQA/GQA, project the key and value tensors to the desired
                 # number of heads.
                 query = query.view(query.shape[0], self.num_kv_heads,
-                                self.num_queries_per_kv, query.shape[-1])
+                                   self.num_queries_per_kv, query.shape[-1])
                 key = key[:, :,
-                        None, :].expand(key.shape[0], self.num_kv_heads,
-                                        self.num_queries_per_kv, key.shape[-1])
-                value = value[:, :,
-                            None, :].expand(value.shape[0], self.num_kv_heads,
-                                            self.num_queries_per_kv,
-                                            value.shape[-1])
+                          None, :].expand(key.shape[0], self.num_kv_heads,
+                                          self.num_queries_per_kv,
+                                          key.shape[-1])
+                value = value[:, :, None, :].expand(value.shape[0],
+                                                    self.num_kv_heads,
+                                                    self.num_queries_per_kv,
+                                                    value.shape[-1])
             # Set attention bias.
-            if input_metadata.attn_bias is None:
+            # FIXME
+            if not hasattr(input_metadata, "attn_bias"):
                 prompt_lens = [seq_len] * batch_size
                 attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
                 if self.sliding_window is not None:
-                    attn_bias = attn_bias.make_local_attention(self.sliding_window)
+                    attn_bias = attn_bias.make_local_attention(
+                        self.sliding_window)
                 input_metadata.attn_bias = attn_bias
 
             # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
