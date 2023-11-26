@@ -7,8 +7,8 @@ from torch.nn.parameter import Parameter
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.communication_op import (
-    tp_all_reduce, tp_all_gather)
+from vllm.model_executor.parallel_utils.communication_op import (tp_all_reduce,
+                                                                 tp_all_gather)
 from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
