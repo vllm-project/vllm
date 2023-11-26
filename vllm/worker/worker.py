@@ -115,6 +115,8 @@ class Worker:
         self.cache_events = self.cache_engine.events
         self.model_runner.set_kv_cache(self.cache_engine.gpu_cache,
                                        cache_config.block_size)
+        # FIXME
+        self.model_runner.compile_model()
 
     @torch.inference_mode()
     def execute_model(

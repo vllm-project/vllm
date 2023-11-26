@@ -1,12 +1,17 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import torch
 import torch.nn as nn
 
 from vllm.config import (ModelConfig, ParallelConfig, SchedulerConfig)
+from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+
+logger = init_logger(__name__)
+
+BATCH_SIZES_TO_COMPILE = [1, 2, 4] + [8 * i for i in range(1, 17)]
 
 
 class ModelRunner:
@@ -22,6 +27,10 @@ class ModelRunner:
         self.scheduler_config = scheduler_config
 
         self.sliding_window = model_config.get_sliding_window()
+        self.model = None
+        self.compiled_model = None
+        self.compiled_batch_sizes: Set[int] = set()
+        self.block_size = None
 
     def load_model(self) -> None:
         model = get_model(self.model_config)
@@ -255,11 +264,17 @@ class ModelRunner:
                                                  input_metadata.prompt_lens)
 
         # Execute the model.
-        hidden_states = self.model(
+        model_executable = self.model
+        if not is_prompt:
+            batch_size = input_tokens.shape[0]
+            if batch_size in self.compiled_batch_sizes:
+                model_executable = self.compiled_model
+        hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             input_metadata=input_metadata,
         )
+
         # Sample the next token.
         output = self.model.sample(
             hidden_states=hidden_states,
@@ -294,6 +309,56 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         self.execute_model(seqs)
         return
+
+    @torch.inference_mode()
+    def compile_model(self) -> None:
+        logger.info("Compiling the model with torch.compile. This may take "
+                    "several minutes. If you want to avoid the compilation "
+                    "at the cost of inference speed, you can set "
+                    "enforce_eager=True or --enforce-eager in CLI.")
+        self.compiled_model = torch.compile(self.model,
+                                            mode="reduce-overhead",
+                                            fullgraph=True)
+
+        for batch_size in reversed(BATCH_SIZES_TO_COMPILE):
+            # Create dummy inputs.
+            input_tokens = _make_tensor_with_pad([[]] * batch_size,
+                                                 max_len=1,
+                                                 pad=0,
+                                                 dtype=torch.long)
+            input_positions = _make_tensor_with_pad([[]] * batch_size,
+                                                    max_len=1,
+                                                    pad=0,
+                                                    dtype=torch.long)
+            slot_mapping = _make_tensor_with_pad([[]] * batch_size,
+                                                 max_len=1,
+                                                 pad=-1,
+                                                 dtype=torch.long)
+            context_lens = torch.tensor([1] * batch_size,
+                                        dtype=torch.int,
+                                        device="cuda")
+            block_tables = _make_tensor_with_pad(
+                [[]] * batch_size,
+                max_len=1000,  # FIXME
+                pad=0,
+                dtype=torch.int)
+            input_metadata = InputMetadata(
+                prompt_lens=[],
+                slot_mapping=slot_mapping,
+                context_lens=context_lens,
+                block_tables=block_tables,
+            )
+
+            # Run the model with the dummy inputs.
+            self.compiled_model(
+                input_tokens,
+                input_positions,
+                input_metadata,
+            )
+            # Add the batch size to the set of compiled batch sizes.
+            self.compiled_batch_sizes.add(batch_size)
+
+        logger.info("Compilation is done.")
 
 
 class ModelWrapper(nn.Module):
