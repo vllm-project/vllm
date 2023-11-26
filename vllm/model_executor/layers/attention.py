@@ -153,22 +153,6 @@ class PagedAttention(nn.Module):
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
 
-    def set_attn_bias(
-        self,
-        input_metadata: InputMetadata,
-        dtype: torch.dtype,
-    ) -> None:
-        del dtype  # Unused.
-        if input_metadata.attn_bias is not None:
-            # Already set by a previous layer.
-            return
-        prompt_lens = [input_metadata.max_prompt_len
-                       ] * input_metadata.num_prompts
-        attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
-        if self.sliding_window is not None:
-            attn_bias = attn_bias.make_local_attention(self.sliding_window)
-        input_metadata.attn_bias = attn_bias
-
     def forward(
         self,
         query: torch.Tensor,
@@ -178,7 +162,7 @@ class PagedAttention(nn.Module):
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        batch_size, seq_len, _ = query.shape
+        batch_size, seq_len, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -221,8 +205,7 @@ class PagedAttention(nn.Module):
                                             value.shape[-1])
             # Set attention bias.
             if input_metadata.attn_bias is None:
-                prompt_lens = [input_metadata.max_prompt_len
-                            ] * input_metadata.num_prompts
+                prompt_lens = [seq_len] * batch_size
                 attn_bias = BlockDiagonalCausalMask.from_seqlens(prompt_lens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(self.sliding_window)
@@ -252,102 +235,9 @@ class PagedAttention(nn.Module):
             )
 
         # Reshape the output tensor.
-        return output.view(batch_size, seq_len,
-                           self.num_heads * self.head_size)
-
-
-class PagedAttentionWithALiBi(PagedAttention):
-    """PagedAttention with ALiBi attention bias."""
-
-    def __init__(self,
-                 num_heads: int,
-                 head_size: int,
-                 scale: float,
-                 slopes: List[float],
-                 num_kv_heads: Optional[int] = None) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads)
-        assert len(slopes) == num_heads
-
-        slopes = torch.tensor(slopes, dtype=torch.float32)
-        self.register_buffer("alibi_slopes", slopes, persistent=False)
-
-    def set_attn_bias(self, input_metadata: InputMetadata,
-                      dtype: torch.dtype) -> None:
-        if input_metadata.attn_bias is not None:
-            # Already set by a previous layer.
-            return
-        # Generates ALiBi mask based on the max prompt length.
-        max_prompt_len = input_metadata.max_prompt_len
-        bias = torch.arange(max_prompt_len, dtype=dtype)
-        # NOTE(zhuohan): HF uses
-        #     `bias = bias[None, :].repeat(prompt_len, 1)`
-        # here. We find that both biases give the same results, but
-        # the bias below more accurately follows the original ALiBi
-        # paper.
-        bias = bias[None, :] - bias[:, None]
-        bias = bias.to(self.alibi_slopes.device)
-
-        # When using custom attention bias, xformers requires the bias to
-        # be sliced from a tensor whose length is a multiple of 8.
-        padded_len = (max_prompt_len + 7) // 8 * 8
-        bias = torch.empty(
-            input_metadata.num_prompts,
-            self.num_heads,
-            max_prompt_len,
-            padded_len,
-            device=self.alibi_slopes.device,
-            dtype=dtype,
-        )[:, :, :, :max_prompt_len].copy_(bias)
-        bias.mul_(self.alibi_slopes[:, None, None])
-        attn_bias = LowerTriangularMaskWithTensorBias(bias)
-        input_metadata.attn_bias = attn_bias
-
-    def multi_query_kv_attention(
-        self,
-        output: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        """Attention with ALiBi bias for the prompt tokens.
-
-        Args:
-            output: shape = [num_prompt_tokens, num_heads, head_size]
-            query: shape = [num_prompt_tokens, num_heads, head_size]
-            key: shape = [num_prompt_tokens, num_kv_heads, head_size]
-            value: shape = [num_prompt_tokens, num_kv_heads, head_size]
-            input_metadata: metadata for paged attention.
-        """
-        if self.num_kv_heads != self.num_heads:
-            # Project the key and value tensors to the desired number of heads.
-            query = query.view(query.shape[0], self.num_kv_heads,
-                               self.num_queries_per_kv, query.shape[-1])
-            key = key[:, :,
-                      None, :].expand(key.shape[0], self.num_kv_heads,
-                                      self.num_queries_per_kv, key.shape[-1])
-            value = value[:, :,
-                          None, :].expand(value.shape[0], self.num_kv_heads,
-                                          self.num_queries_per_kv,
-                                          value.shape[-1])
-        batch_size = input_metadata.num_prompts
-        seq_len = input_metadata.max_prompt_len
-
-        out = xops.memory_efficient_attention_forward(
-            query.view(batch_size, seq_len, self.num_heads, self.head_size),
-            key.view(batch_size, seq_len, self.num_heads, self.head_size),
-            value.view(batch_size, seq_len, self.num_heads, self.head_size),
-            attn_bias=input_metadata.attn_bias,
-            p=0.0,
-            scale=self.scale,
-        )
-        # TODO(woosuk): Unnecessary copy. Optimize.
-        output.copy_(out.view_as(output))
-        return output
-
-    def get_alibi_slopes(self) -> Optional[torch.Tensor]:
-        return self.alibi_slopes
+        return output.view(batch_size, seq_len, hidden_size)
 
 
 # FIXME: Temporary hack to avoid import errors.
 PagedAttentionWithRoPE = PagedAttention
+PagedAttentionWithALiBi = PagedAttention
