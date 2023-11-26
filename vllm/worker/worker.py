@@ -116,7 +116,8 @@ class Worker:
         self.model_runner.set_kv_cache(self.cache_engine.gpu_cache,
                                        cache_config.block_size)
         # FIXME
-        self.model_runner.compile_model()
+        if not self.model_config.enforce_eager:
+            self.model_runner.compile_model()
 
     @torch.inference_mode()
     def execute_model(

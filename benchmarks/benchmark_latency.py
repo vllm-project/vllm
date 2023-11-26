@@ -12,7 +12,6 @@ from vllm import LLM, SamplingParams
 def main(args: argparse.Namespace):
     print(args)
 
-    # Process all the requests in a single batch if possible.
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(
@@ -21,9 +20,9 @@ def main(args: argparse.Namespace):
         quantization=args.quantization,
         tensor_parallel_size=args.tensor_parallel_size,
         max_num_seqs=args.batch_size,
-        max_num_batched_tokens=args.batch_size * args.input_len,
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
+        enforce_eager=args.enforce_eager,
     )
 
     sampling_params = SamplingParams(
@@ -97,5 +96,10 @@ if __name__ == '__main__':
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
+    parser.add_argument(
+        '--enforce-eager',
+        action='store_true',
+        help='enforce eager mode and disable torch.compile'
+    )
     args = parser.parse_args()
     main(args)
