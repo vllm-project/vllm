@@ -93,12 +93,12 @@ class ModelRunner:
                                              dtype=torch.long)
 
         input_metadata = InputMetadata(
-            is_prompt=True,
+            prompt_lens=prompt_lens,
             slot_mapping=slot_mapping,
             context_lens=None,
             block_tables=None,
         )
-        return input_tokens, input_positions, input_metadata, prompt_lens
+        return input_tokens, input_positions, input_metadata
 
     def _prepare_decode(
         self,
@@ -158,7 +158,7 @@ class ModelRunner:
             dtype=torch.int)
 
         input_metadata = InputMetadata(
-            is_prompt=False,
+            prompt_lens=[],
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_tables=block_tables,
@@ -247,13 +247,12 @@ class ModelRunner:
         # Prepare input tensors.
         if is_prompt:
             inputs = self._prepare_prompt(seq_group_metadata_list)
-            input_tokens, input_positions, input_metadata, prompt_lens = inputs
+            input_tokens, input_positions, input_metadata = inputs
         else:
             inputs = self._prepare_decode(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
-            prompt_lens = []
         sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                 prompt_lens)
+                                                 input_metadata.prompt_lens)
 
         # Execute the model.
         hidden_states = self.model(
