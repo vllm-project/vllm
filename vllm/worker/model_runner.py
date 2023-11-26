@@ -1,4 +1,4 @@
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 
 logger = init_logger(__name__)
 
-BATCH_SIZES_TO_COMPILE = [1, 2, 4] + [8 * i for i in range(1, 17)]
+BATCH_SIZES_TO_COMPILE = [1, 2, 4, 8] + [8 * i for i in range(2, 17)]
 
 
 class ModelRunner:
@@ -112,7 +112,9 @@ class ModelRunner:
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        padded_batch_size: Optional[int],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
+        assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
@@ -144,6 +146,16 @@ class ModelRunner:
 
                 # FIXME: Handle sliding window here.
                 block_tables.append(block_table)
+
+        batch_size = len(input_tokens)
+        if padded_batch_size is not None:
+            assert batch_size <= padded_batch_size
+            for _ in range(padded_batch_size - batch_size):
+                input_tokens.append([])
+                input_positions.append([])
+                slot_mapping.append([])
+                context_lens.append(1)
+                block_tables.append([])
 
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_len=1,
@@ -252,28 +264,34 @@ class ModelRunner:
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
+        batch_size = sum(
+            len(metadata.seq_data) for metadata in seq_group_metadata_list)
+        padded_batch_size = None
+        if not self.model_config.enforce_eager and not is_prompt:
+            padded_batch_size = _get_padded_batch_size(batch_size)
 
         # Prepare input tensors.
         if is_prompt:
             inputs = self._prepare_prompt(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
         else:
-            inputs = self._prepare_decode(seq_group_metadata_list)
+            inputs = self._prepare_decode(seq_group_metadata_list,
+                                          padded_batch_size)
             input_tokens, input_positions, input_metadata = inputs
         sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                  input_metadata.prompt_lens)
 
         # Execute the model.
-        model_executable = self.model
-        if not is_prompt:
-            batch_size = input_tokens.shape[0]
-            if batch_size in self.compiled_batch_sizes:
-                model_executable = self.compiled_model
+        use_compiled_model = padded_batch_size is not None
+        model_executable = (self.compiled_model
+                            if use_compiled_model else self.model)
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             input_metadata=input_metadata,
         )
+        if batch_size != padded_batch_size:
+            hidden_states = hidden_states[:batch_size]
 
         # Sample the next token.
         output = self.model.sample(
@@ -356,8 +374,6 @@ class ModelRunner:
                 input_positions,
                 input_metadata,
             )
-            # Add the batch size to the set of compiled batch sizes.
-            self.compiled_batch_sizes.add(batch_size)
 
         logger.info("Compilation is done.")
 
@@ -408,3 +424,14 @@ def _make_tensor_with_pad(
 ) -> torch.Tensor:
     padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
     return torch.tensor(padded_x, dtype=dtype, device="cuda")
+
+
+def _get_padded_batch_size(batch_size: int) -> Optional[int]:
+    if batch_size <= 2:
+        return batch_size
+    elif batch_size <= 4:
+        return 4
+    elif batch_size <= BATCH_SIZES_TO_COMPILE[-1]:
+        return (batch_size + 7) // 8 * 8
+    else:
+        return None
