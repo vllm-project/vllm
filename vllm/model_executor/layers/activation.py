@@ -3,6 +3,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from vllm._C import ops
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -24,10 +25,9 @@ class SiluAndMul(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        ops.silu_and_mul(out, x)
-        return out
+        x1 = x[..., :d]
+        x2 = x[..., d:]
+        return F.silu(x1) * x2
 
 
 class NewGELU(nn.Module):
