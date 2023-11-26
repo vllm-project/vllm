@@ -167,19 +167,22 @@ class PagedAttention(nn.Module):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+        slot_mapping = input_metadata.slot_mapping.flatten()
 
         # Reshape the keys and values and store them in the cache.
-        # When key_cache and value_cache are not provided, the new key
-        # and value vectors will not be cached.
-        if key_cache is not None and value_cache is not None:
-            key_to_cache = key
-            value_to_cache = value
-            slot_mapping = input_metadata.slot_mapping.flatten()
-            if input_metadata.to_cache is not None:
-                key_to_cache = key_to_cache[input_metadata.to_cache]
-                value_to_cache = value_to_cache[input_metadata.to_cache]
-                slot_mapping = slot_mapping[input_metadata.to_cache]
-
+        if input_metadata.is_prompt:
+            # If key_cache and value_cache are not provided, the new key
+            # and value vectors will not be cached. This happens during
+            # the initial profile run.
+            if key_cache is not None and value_cache is not None:
+                cache_ops.reshape_and_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                )
+        else:
             query, key = torch.ops.vllm.cache_kv(
                 query,
                 key,
