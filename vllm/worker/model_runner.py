@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -23,11 +23,10 @@ class ModelRunner:
 
         self.sliding_window = model_config.get_sliding_window()
 
-    def load_model(self):
+    def load_model(self) -> None:
         model = get_model(self.model_config)
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        self.model = ModelWrapper(
-            model, kv_caches=[(None, None)] * num_layers)
+        self.model = ModelWrapper(model, kv_caches=[(None, None)] * num_layers)
 
     def set_kv_cache(
         self,
@@ -80,12 +79,18 @@ class ModelRunner:
                 slot_mapping[-1].append(slot)
 
         max_prompt_len = max(prompt_lens)
-        input_tokens = _make_tensor_with_pad(
-            input_tokens, max_prompt_len, pad=0, dtype=torch.long)
-        input_positions = _make_tensor_with_pad(
-            input_positions, max_prompt_len, pad=0, dtype=torch.long)
-        slot_mapping = _make_tensor_with_pad(
-            slot_mapping, max_prompt_len, pad=-1, dtype=torch.long)
+        input_tokens = _make_tensor_with_pad(input_tokens,
+                                             max_prompt_len,
+                                             pad=0,
+                                             dtype=torch.long)
+        input_positions = _make_tensor_with_pad(input_positions,
+                                                max_prompt_len,
+                                                pad=0,
+                                                dtype=torch.long)
+        slot_mapping = _make_tensor_with_pad(slot_mapping,
+                                             max_prompt_len,
+                                             pad=-1,
+                                             dtype=torch.long)
 
         input_metadata = InputMetadata(
             is_prompt=True,
@@ -131,17 +136,26 @@ class ModelRunner:
                 # FIXME: Handle sliding window here.
                 block_tables.append(block_table)
 
-        input_tokens = _make_tensor_with_pad(
-            input_tokens, 1, pad=0, dtype=torch.long)
-        input_positions = _make_tensor_with_pad(
-            input_positions, 1, pad=0, dtype=torch.long)
-        slot_mapping = _make_tensor_with_pad(
-            slot_mapping, 1, pad=-1, dtype=torch.long)
+        input_tokens = _make_tensor_with_pad(input_tokens,
+                                             max_len=1,
+                                             pad=0,
+                                             dtype=torch.long)
+        input_positions = _make_tensor_with_pad(input_positions,
+                                                max_len=1,
+                                                pad=0,
+                                                dtype=torch.long)
+        slot_mapping = _make_tensor_with_pad(slot_mapping,
+                                             max_len=1,
+                                             pad=-1,
+                                             dtype=torch.long)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device="cuda")
         block_tables = _make_tensor_with_pad(
-            block_tables, 1000, pad=0, dtype=torch.int)  # FIXME
+            block_tables,
+            max_len=1000,  # FIXME
+            pad=0,
+            dtype=torch.int)
 
         input_metadata = InputMetadata(
             is_prompt=False,
@@ -173,29 +187,31 @@ class ModelRunner:
                 prompt_len = prompt_lens[i]
                 if sampling_params.prompt_logprobs is not None:
                     # NOTE: prompt token positions do not need sample, skip
-                    categorized_sample_indices_start_idx += prompt_len - 1        
+                    categorized_sample_indices_start_idx += prompt_len - 1
 
-                categorized_sample_indices[sampling_params.sampling_type].append(
-                    categorized_sample_indices_start_idx)
+                categorized_sample_indices[
+                    sampling_params.sampling_type].append(
+                        categorized_sample_indices_start_idx)
                 categorized_sample_indices_start_idx += 1
 
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
                         range(selected_token_start_idx,
-                                selected_token_start_idx + prompt_len - 1))
+                              selected_token_start_idx + prompt_len - 1))
                 selected_token_indices.append(selected_token_start_idx +
-                                                prompt_len - 1)
+                                              prompt_len - 1)
                 selected_token_start_idx += max_prompt_len
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
                     range(selected_token_start_idx,
-                        selected_token_start_idx + num_seqs))
+                          selected_token_start_idx + num_seqs))
                 selected_token_start_idx += num_seqs
 
-                categorized_sample_indices[sampling_params.sampling_type].extend(
-                    range(categorized_sample_indices_start_idx,
-                        categorized_sample_indices_start_idx + num_seqs))
+                categorized_sample_indices[
+                    sampling_params.sampling_type].extend(
+                        range(categorized_sample_indices_start_idx,
+                              categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
 
         selected_token_indices = torch.tensor(selected_token_indices,
@@ -236,7 +252,8 @@ class ModelRunner:
             inputs = self._prepare_decode(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
             prompt_lens = []
-        sampling_metadata = self._prepare_sample(seq_group_metadata_list, prompt_lens)
+        sampling_metadata = self._prepare_sample(seq_group_metadata_list,
+                                                 prompt_lens)
 
         # Execute the model.
         hidden_states = self.model(

@@ -9,8 +9,8 @@ import torch
 
 from vllm.config import ParallelConfig
 from vllm.engine.ray_utils import get_open_port
-from vllm.model_executor.parallel_utils.communication_op import (
-    tp_all_reduce, tp_all_gather)
+from vllm.model_executor.parallel_utils.communication_op import (tp_all_reduce,
+                                                                 tp_all_gather)
 from vllm.worker.worker import _init_distributed_environment
 
 
