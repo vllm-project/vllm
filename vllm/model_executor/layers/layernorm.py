@@ -3,8 +3,43 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch._custom_ops as torch_custom_ops
 
 from vllm._C import ops
+
+
+@torch_custom_ops.custom_op("vllm::rms")
+def rms(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    raise NotImplementedError()
+
+
+@torch_custom_ops.impl("vllm::rms", device_types="cuda")
+def rms_impl(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    out = torch.empty_like(hidden_states)
+    ops.rms_norm(
+        out,
+        hidden_states,
+        weight,
+        eps,
+    )
+    return out
+
+
+@torch_custom_ops.impl_abstract("vllm::rms")
+def rms_abstract(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
 
 
 class RMSNorm(nn.Module):
@@ -29,18 +64,11 @@ class RMSNorm(nn.Module):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if residual is not None:
-            ops.fused_add_rms_norm(
-                x,
-                residual,
-                self.weight.data,
-                self.variance_epsilon,
-            )
-            return x, residual
-        out = torch.empty_like(x)
-        ops.rms_norm(
-            out,
-            x,
-            self.weight.data,
-            self.variance_epsilon,
-        )
+            # FIXME: Used fused_add_rms_norm.
+            x = x + residual
+            out = torch.ops.vllm.rms(
+                x, self.weight.data, self.variance_epsilon)
+            return out, x
+        out = torch.ops.vllm.rms(
+            x, self.weight.data, self.variance_epsilon)
         return out
