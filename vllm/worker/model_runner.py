@@ -1,9 +1,10 @@
+import time
 from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 
-from vllm.config import (ModelConfig, ParallelConfig, SchedulerConfig)
+from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -335,6 +336,8 @@ class ModelRunner:
                     "several minutes. If you want to avoid the compilation "
                     "at the cost of inference speed, you can set "
                     "enforce_eager=True or --enforce-eager in CLI.")
+
+        start_time = time.perf_counter()
         self.compiled_model = torch.compile(self.model,
                                             mode="reduce-overhead",
                                             fullgraph=True)
@@ -375,7 +378,9 @@ class ModelRunner:
                 input_metadata,
             )
 
-        logger.info("Compilation is done.")
+        end_time = time.perf_counter()
+        compile_time = end_time - start_time
+        logger.info(f"Model compilation finished in {compile_time:.0f} s.")
 
 
 class ModelWrapper(nn.Module):
