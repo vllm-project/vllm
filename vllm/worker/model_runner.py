@@ -332,10 +332,10 @@ class ModelRunner:
     @torch.inference_mode()
     def compile_model(self) -> None:
         assert not self.model_config.enforce_eager
-        logger.info("Compiling the model with torch.compile. This may take "
-                    "several minutes. If you want to avoid the compilation "
-                    "at the cost of inference speed, you can set "
-                    "enforce_eager=True or --enforce-eager in CLI.")
+        logger.info("Compiling the model using torch.compile, which may take "
+                    "several minutes. If you prefer to skip the compilation, "
+                    "albeit with a reduction in inference speed, set "
+                    "'enforce_eager=True' or use '--enforce-eager' in CLI.")
 
         start_time = time.perf_counter()
         self.compiled_model = torch.compile(self.model,
