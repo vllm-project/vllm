@@ -29,7 +29,9 @@ def wait_create(cls, collective_op: "inductor_ir.TensorBox"):
 
 inductor_ir.Wait.create = wait_create
 
-inductor_ir.AllReduce.get_mutation_names = lambda self: [self.inputs[0].get_name()]
+inductor_ir.AllReduce.get_mutation_names = lambda self: [
+    self.inputs[0].get_name()
+]
 
 
 @classmethod
@@ -70,7 +72,8 @@ def wcg_codegen_free(self, buffer):
     self.freed.add(name)
 
     layout = buffer.get_layout()
-    if isinstance(layout, (inductor_ir.AliasedLayout, inductor_ir.MultiOutputLayout)):
+    if isinstance(layout,
+                  (inductor_ir.AliasedLayout, inductor_ir.MultiOutputLayout)):
         self.writeline(self.make_buffer_free(buffer))
         return
 
@@ -80,22 +83,22 @@ def wcg_codegen_free(self, buffer):
 inductor_wrapper.WrapperCodeGen.codegen_free = wcg_codegen_free
 # End of fix #1
 
-
 # Fix #3: Avoid recompiles on batch size for embedding + TP
 # (until https://github.com/pytorch/pytorch/pull/109561 lands)
 for overload in torch.ops.c10d_functional.all_gather_into_tensor.overloads():
-    other_fn = getattr(torch.ops.c10d_functional.all_gather_into_tensor, overload)
+    other_fn = getattr(torch.ops.c10d_functional.all_gather_into_tensor,
+                       overload)
     if other_fn in inductor_lowering.lowerings:
         del inductor_lowering.lowerings[other_fn]
 
 
-@inductor_lowering.register_lowering(torch.ops.c10d_functional.all_gather_into_tensor)
+@inductor_lowering.register_lowering(
+    torch.ops.c10d_functional.all_gather_into_tensor)
 def all_gather_into_tensor(shard, tag, ranks, group_size):
     return inductor_ir.TensorBox.create(
         inductor_ir.AllGatherIntoTensor.create(
-            inductor_ir.ExternKernel.require_contiguous(shard), tag, ranks, group_size
-        )
-    )
+            inductor_ir.ExternKernel.require_contiguous(shard), tag, ranks,
+            group_size))
 
 
 def tp_all_gather(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -105,6 +108,7 @@ def tp_all_gather(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
     if dim < 0:
         dim = x.dim() + dim
-    return distfunc.all_gather_tensor(
-        x.transpose(0, dim).contiguous(), 0, list(range(world_size))
-    ).transpose(0, dim)
+    output = distfunc.all_gather_tensor(
+        x.transpose(0, dim).contiguous(), 0, list(range(world_size)))
+    output = output.transpose(0, dim)
+    return output
