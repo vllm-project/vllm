@@ -53,11 +53,9 @@ def rope_impl(
     is_neox_style: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # FIXME: The custom op should not be in-place.
-    out_query = query.clone()
-    out_key = key.clone()
-    ops.rotary_embedding(positions, out_query, out_key, head_size,
+    ops.rotary_embedding(positions, query, key, head_size,
                          cos_sin_cache, is_neox_style)
-    return out_query, out_key
+    return query, key
 
 
 @torch_custom_ops.impl_abstract("vllm::rope")
