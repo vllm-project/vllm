@@ -66,9 +66,8 @@ class RMSNorm(nn.Module):
         if residual is not None:
             # FIXME: Used fused_add_rms_norm.
             x = x + residual
-            out = torch.ops.vllm.rms(
-                x, self.weight.data, self.variance_epsilon)
+            out = torch.ops.vllm.rms(x, self.weight.data,
+                                     self.variance_epsilon)
             return out, x
-        out = torch.ops.vllm.rms(
-            x, self.weight.data, self.variance_epsilon)
+        out = torch.ops.vllm.rms(x, self.weight.data, self.variance_epsilon)
         return out
