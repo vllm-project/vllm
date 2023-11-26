@@ -88,8 +88,6 @@ class LLMEngine:
 
         self.model_config = model_config
         self.cache_config = cache_config
-        assert self.cache_config.sliding_window == getattr(
-            self.model_config.hf_config, "sliding_window", None)
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
