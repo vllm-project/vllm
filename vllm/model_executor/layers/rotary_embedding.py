@@ -56,7 +56,7 @@ def rope_impl(
     out_query = query.clone()
     out_key = key.clone()
     ops.rotary_embedding(positions, out_query, out_key, head_size,
-                                      cos_sin_cache, is_neox_style)
+                         cos_sin_cache, is_neox_style)
     return out_query, out_key
 
 
@@ -132,7 +132,8 @@ class RotaryEmbedding(nn.Module):
         # ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
         query, key = torch.ops.vllm.rope(positions, query, key, self.head_size,
-                             self.cos_sin_cache, self.is_neox_style)
+                                         self.cos_sin_cache,
+                                         self.is_neox_style)
         return query, key
 
 
