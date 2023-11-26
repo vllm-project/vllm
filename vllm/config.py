@@ -163,6 +163,12 @@ class ModelConfig:
                 "must be divisible by pipeline parallel size "
                 f"({pipeline_parallel_size}).")
 
+    def get_sliding_window(self) -> Optional[int]:
+        return getattr(self.hf_config, "sliding_window", None)
+
+    def get_vocab_size(self) -> int:
+        return self.hf_config.vocab_size
+
     def get_hidden_size(self) -> int:
         return self.hf_config.hidden_size
 
@@ -234,12 +240,10 @@ class CacheConfig:
         block_size: int,
         gpu_memory_utilization: float,
         swap_space: int,
-        sliding_window: Optional[int] = None,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
-        self.sliding_window = sliding_window
         self._verify_args()
 
         # Will be set after profiling.
