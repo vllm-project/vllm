@@ -117,7 +117,6 @@ def paged_attn_abstract(
     context_lens: torch.Tensor,
     alibi_slopes: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    query = query.flatten(start_dim=-2, end_dim=-1)
     return torch.empty_like(query)
 
 
