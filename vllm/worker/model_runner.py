@@ -334,7 +334,7 @@ class ModelRunner:
         assert not self.model_config.enforce_eager
         logger.info("Compiling the model using torch.compile, which may take "
                     "several minutes. If you prefer to skip the compilation, "
-                    "albeit with a reduction in inference speed, set "
+                    "albeit with performance degradation, set "
                     "'enforce_eager=True' or use '--enforce-eager' in CLI.")
 
         start_time = time.perf_counter()
