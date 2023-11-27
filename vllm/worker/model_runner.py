@@ -175,7 +175,7 @@ class ModelRunner:
                                     device="cuda")
         block_tables = _make_tensor_with_pad(
             block_tables,
-            max_len=1000,  # FIXME
+            max_len=512,  # FIXME
             pad=0,
             dtype=torch.int)
 
@@ -361,7 +361,7 @@ class ModelRunner:
                                         device="cuda")
             block_tables = _make_tensor_with_pad(
                 [[]] * batch_size,
-                max_len=1000,  # FIXME
+                max_len=512,  # FIXME
                 pad=0,
                 dtype=torch.int)
             input_metadata = InputMetadata(
