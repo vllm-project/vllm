@@ -18,3 +18,10 @@ class InputMetadata:
         self.block_tables = block_tables
 
         self.is_prompt = len(prompt_lens) > 0
+
+    def __repr__(self) -> str:
+        return (f"InputMetadata("
+                f"prompt_lens={self.prompt_lens}, "
+                f"slot_mapping={self.slot_mapping}, "
+                f"context_lens={self.context_lens}, "
+                f"block_tables={self.block_tables})")

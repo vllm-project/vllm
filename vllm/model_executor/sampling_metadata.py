@@ -24,3 +24,11 @@ class SamplingMetadata:
         self.categorized_sample_indices = categorized_sample_indices
 
         self.num_prompts = len(prompt_lens)
+
+    def __repr__(self) -> str:
+        return (f"SamplingMetadata("
+                f"seq_groups={self.seq_groups}, "
+                f"seq_data={self.seq_data}, "
+                f"prompt_lens={self.prompt_lens}, "
+                f"selected_token_indices={self.selected_token_indices}, "
+                f"categorized_sample_indices={self.categorized_sample_indices})")
