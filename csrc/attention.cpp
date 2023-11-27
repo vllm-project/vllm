@@ -34,7 +34,7 @@ void paged_attention_v2(
   int block_size,
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
-   bool enable_quant = false,
+  bool enable_quant = false,
   const float k_scale = 1.0f,
   const float k_zp = 0.0f,
   const float v_scale = 1.0f,

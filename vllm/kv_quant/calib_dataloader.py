@@ -304,7 +304,7 @@ def get_calib_loaders(name,
       test_data: Full tokenized validation set.
     """
     if 'wikitext2' in name:
-        return get_wikitext2(tokenizer, nsamples, seed, seqlen)
+        return get_wikitext2(tokenizer, nsamples, seed, seqlen, path)
     if 'ptb' in name:
         if 'new' in name:
             return get_ptb_new(tokenizer, nsamples, seed, seqlen)
@@ -312,7 +312,7 @@ def get_calib_loaders(name,
     if 'c4' in name:
         if 'new' in name:
             return get_c4_new(tokenizer, nsamples, seed, seqlen)
-        return get_c4(tokenizer, nsamples, seed, seqlen)
+        return get_c4(tokenizer, nsamples, seed, seqlen, path)
 
     if 'pileval' in name:
         return get_pileval(tokenizer, nsamples, seed, seqlen)
