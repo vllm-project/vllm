@@ -7,8 +7,8 @@ from torch.nn.parameter import Parameter
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.communication_op import (tp_all_reduce,
-                                                                 tp_all_gather)
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather)
 from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
@@ -204,7 +204,7 @@ class ColumnParallelLinear(torch.nn.Module):
             self.linear_weights, input_, bias)
         if self.gather_output:
             # All-gather across the partitions.
-            output = tp_all_gather(output_parallel)
+            output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
@@ -528,7 +528,7 @@ class RowParallelLinear(torch.nn.Module):
         output_parallel = self.linear_method.apply_weights(
             self.linear_weights, input_parallel)
         if self.reduce_results and self.tp_size > 1:
-            output_ = tp_all_reduce(output_parallel)
+            output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output_ = output_parallel
 

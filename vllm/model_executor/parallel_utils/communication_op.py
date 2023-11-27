@@ -7,7 +7,7 @@ import torch._inductor.lowering as inductor_lowering
 import torch.distributed._functional_collectives as distfunc
 
 
-def tp_all_reduce(x: torch.Tensor, reduce_op: str = "sum") -> torch.Tensor:
+def tensor_model_parallel_all_reduce(x: torch.Tensor, reduce_op: str = "sum") -> torch.Tensor:
     # NOTE: get_tensor_model_parallel_world_size is not compatible with
     # torch.compile because it uses the _TENSOR_MODEL_PARALLEL_GROUP global
     # variable.
@@ -101,7 +101,7 @@ def all_gather_into_tensor(shard, tag, ranks, group_size):
             group_size))
 
 
-def tp_all_gather(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+def tensor_model_parallel_all_gather(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     world_size = torch.distributed.get_world_size()
     if world_size == 1:
         return x

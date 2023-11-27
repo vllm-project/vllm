@@ -9,8 +9,10 @@ import torch
 
 from vllm.config import ParallelConfig
 from vllm.engine.ray_utils import get_open_port
-from vllm.model_executor.parallel_utils.communication_op import (tp_all_reduce,
-                                                                 tp_all_gather)
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_all_gather,
+)
 from vllm.worker.worker import _init_distributed_environment
 
 
@@ -37,7 +39,7 @@ def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
     ]
     expected = torch.sum(torch.stack(all_tensors, dim=0), dim=0)
     t = all_tensors[rank]
-    t = tp_all_reduce(t)
+    t = tensor_model_parallel_all_reduce(t)
     assert torch.allclose(t, expected)
 
 
@@ -58,7 +60,7 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
         ]
         expected = torch.cat(all_tensors, dim=all_gather_dimension)
         t = all_tensors[rank]
-        t = tp_all_gather(t, all_gather_dimension)
+        t = tensor_model_parallel_all_gather(t, all_gather_dimension)
         assert torch.allclose(t, expected)
 
 

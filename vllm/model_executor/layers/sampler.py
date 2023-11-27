@@ -4,7 +4,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.parallel_utils.communication_op import tp_all_gather
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
@@ -104,7 +105,7 @@ def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
     logits = torch.matmul(hidden_states, embedding.t())
     if embedding_bias is not None:
         logits += embedding_bias
-    logits = tp_all_gather(logits)
+    logits = tensor_model_parallel_all_gather(logits)
     # Remove paddings in vocab (if any).
     logits = logits[:, :vocab_size]
     return logits
