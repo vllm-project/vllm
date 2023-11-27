@@ -42,6 +42,42 @@ def rms_abstract(
     return torch.empty_like(hidden_states)
 
 
+@torch_custom_ops.custom_op("vllm::fused_add_rms")
+def fused_add_rms(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    raise NotImplementedError()
+
+
+@torch_custom_ops.impl("vllm::fused_add_rms", device_types="cuda")
+def fused_add_rms_impl(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    ops.fused_add_rms_norm(
+        hidden_states,
+        residual,
+        weight,
+        eps,
+    )
+    return hidden_states, residual
+
+
+@torch_custom_ops.impl_abstract("vllm::fused_add_rms")
+def fused_add_rms_abstract(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(hidden_states), torch.empty_like(residual)
+
+
 class RMSNorm(nn.Module):
     """Root mean square normalization.
 
@@ -63,11 +99,11 @@ class RMSNorm(nn.Module):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if residual is not None:
-            # FIXME: Used fused_add_rms_norm.
-            x = x + residual
-            out = torch.ops.vllm.rms(x, self.weight.data,
-                                     self.variance_epsilon)
-            return out, x
-        out = torch.ops.vllm.rms(x, self.weight.data, self.variance_epsilon)
-        return out
+        if residual is None:
+            out = torch.ops.vllm.rms(x, self.weight.data, self.variance_epsilon)
+            return out
+        else:
+            x, residual = torch.ops.vllm.fused_add_rms(x, residual,
+                                                       self.weight.data,
+                                                       self.variance_epsilon)
+            return x, residual
