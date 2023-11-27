@@ -53,8 +53,6 @@ def rope_impl(
     is_neox_style: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # FIXME: The custom op should not be in-place.
-    query = query.clone()
-    key = key.clone()
     ops.rotary_embedding(positions, query, key, head_size,
                          cos_sin_cache, is_neox_style)
     return query, key
@@ -69,7 +67,19 @@ def rope_abstract(
     cos_sin_cache: torch.Tensor,
     is_neox_style: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(query), torch.empty_like(key)
+    out_query = torch.empty_strided(
+        query.shape,
+        query.stride(),
+        dtype=query.dtype,
+        device=query.device,
+    )
+    out_key = torch.empty_strided(
+        key.shape,
+        key.stride(),
+        dtype=key.dtype,
+        device=key.device,
+    )
+    return out_query, out_key
 
 
 class RotaryEmbedding(nn.Module):

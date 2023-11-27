@@ -60,7 +60,19 @@ def cache_kv_abstract(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(query), torch.empty_like(key)
+    out_query = torch.empty_strided(
+        query.shape,
+        query.stride(),
+        dtype=query.dtype,
+        device=query.device,
+    )
+    out_key = torch.empty_strided(
+        key.shape,
+        key.stride(),
+        dtype=key.dtype,
+        device=key.device,
+    )
+    return out_query, out_key
 
 
 @torch_custom_ops.custom_op("vllm::paged_attn")
