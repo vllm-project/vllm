@@ -387,7 +387,7 @@ class SequenceOutput:
 
 
 class SequenceGroupOutput:
-    """The model outputs associated with a sequence group."""
+    """The model output associated with a sequence group."""
 
     def __init__(
         self,
