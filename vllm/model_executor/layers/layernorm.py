@@ -100,7 +100,8 @@ class RMSNorm(nn.Module):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if residual is None:
-            out = torch.ops.vllm.rms(x, self.weight.data, self.variance_epsilon)
+            out = torch.ops.vllm.rms(x, self.weight.data,
+                                     self.variance_epsilon)
             return out
         else:
             x, residual = torch.ops.vllm.fused_add_rms(x, residual,
