@@ -403,7 +403,6 @@ class LLMEngine:
                 # Speculative Decoding enabled: invlidate kv cache for non-accepted tokens
                 self.scheduler.free_invalid_kv(parent, last_child_sample)
                 # add the last accept token to the output_token_ids
-                # TODO: how to handle the kv cache of the last token?
                 # TODO: we need to get the logprob of the last token
                 last_token_id = last_child_sample.accepted_tokens[-1]
                 parent.append_token_id(last_token_id, {last_token_id: -1})

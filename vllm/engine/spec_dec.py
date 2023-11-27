@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 
 # FIXME: we should get pad_token_id from tokenizer
 PAD_TOKEN_ID = 0
+logger.setLevel("WARNING")
 
 
 class SpecDecWorker(Worker):
@@ -33,6 +34,8 @@ class SpecDecWorker(Worker):
             f"seed={self.draft_model_config.seed})")
         self.draft_model = AutoModelForCausalLM.from_pretrained(
             self.draft_model_config.model).cuda()
+        
+        self.alphas = []
 
         ##### values to be set #####
         self.draft_kvs = None  # if we use hf stype kvs
@@ -128,7 +131,6 @@ class SpecDecWorker(Worker):
         dis = list(sample_prob[pos].values())[0]
         return dis.cuda()
 
-    @staticmethod
     # Accept draft tokens based on draft probabilities and target probabilities
     # The implementation strictly follows rejection sampling:
     # r = rand(0, 1)
@@ -136,7 +138,7 @@ class SpecDecWorker(Worker):
     # reject and sample from a new distribution if r > p/q
     # The function reads draft tokens/probs from scheduler_outputs and set accepted token_ids
     # in traget_outputs
-    def _accept_tokens(seq: Sequence,
+    def _accept_tokens(self, seq: Sequence,
                        seq_group_output: SequenceGroupOutputs):
         accepted_token_ids = []
         for i, token_prob in enumerate(seq.data.draft_token_probs):
@@ -146,6 +148,9 @@ class SpecDecWorker(Worker):
                 seq_group_output, token_id, i, len(seq.data.draft_token_probs))
             q, p = draft_prob_dis[token_id].item(
             ), target_prob_dis[token_id].item()
+            self.alphas.append(min(p, q))
+            if len(self.alphas) % 20 == 0:
+                logger.warning(f"alpha: {len(self.alphas)}, {sum(self.alphas) / len(self.alphas)}")
             r = torch.rand(1).item()
             logger.info(f"p: {p}, q: {q}, r: {r}")
             if r <= p/q:  # accept
