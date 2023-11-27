@@ -88,7 +88,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         # Create a model instance.
         # The weights will be initialized as empty tensors.
         with torch.device("cuda"):
-          model = model_class(model_config.hf_config, linear_method)
+            model = model_class(model_config.hf_config, linear_method)
         if model_config.load_format == "dummy":
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
