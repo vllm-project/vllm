@@ -53,8 +53,8 @@ def rope_impl(
     is_neox_style: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # FIXME: The custom op should not be in-place.
-    ops.rotary_embedding(positions, query, key, head_size,
-                         cos_sin_cache, is_neox_style)
+    ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache,
+                         is_neox_style)
     return query, key
 
 

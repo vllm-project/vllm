@@ -39,16 +39,16 @@ def main(args: argparse.Namespace):
     def run_to_completion(profile: bool = False):
         if profile:
             with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CUDA]) as p:
+                    activities=[torch.profiler.ProfilerActivity.CUDA]) as p:
                 llm.generate(prompt_token_ids=dummy_prompt_token_ids,
-                            sampling_params=sampling_params,
-                            use_tqdm=False)
+                             sampling_params=sampling_params,
+                             use_tqdm=False)
             print(p.key_averages())
         else:
             start_time = time.perf_counter()
             llm.generate(prompt_token_ids=dummy_prompt_token_ids,
-                        sampling_params=sampling_params,
-                        use_tqdm=False)
+                         sampling_params=sampling_params,
+                         use_tqdm=False)
             end_time = time.perf_counter()
             latency = end_time - start_time
             return latency
@@ -106,8 +106,9 @@ if __name__ == '__main__':
     parser.add_argument('--enforce-eager',
                         action='store_true',
                         help='enforce eager mode and disable torch.compile')
-    parser.add_argument('--profile',
-                        action='store_true',
-                        help='profile the generation process of a single batch')
+    parser.add_argument(
+        '--profile',
+        action='store_true',
+        help='profile the generation process of a single batch')
     args = parser.parse_args()
     main(args)

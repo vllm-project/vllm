@@ -54,8 +54,9 @@ class Sampler(nn.Module):
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
         assert len(repetition_penalties) == logits.shape[0]
-        logits = _apply_penalties(logits, sampling_metadata, presence_penalties,
-                                  frequency_penalties, repetition_penalties)
+        logits = _apply_penalties(logits, sampling_metadata,
+                                  presence_penalties, frequency_penalties,
+                                  repetition_penalties)
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(sampling_metadata)
@@ -114,7 +115,8 @@ def _prune_hidden_states(
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
     hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-    return hidden_states.index_select(0, sampling_metadata.selected_token_indices)
+    return hidden_states.index_select(0,
+                                      sampling_metadata.selected_token_indices)
 
 
 def _get_penalties(
@@ -144,7 +146,7 @@ def _get_penalties(
 
 
 def _get_prompt_and_output_tokens(
-        sampling_metadata: SamplingMetadata
+    sampling_metadata: SamplingMetadata,
 ) -> Tuple[List[List[int]], List[List[int]]]:
     prompt_tokens: List[List[int]] = []
     output_tokens: List[List[int]] = []
@@ -190,8 +192,10 @@ def _get_bin_counts_and_mask(
     return bin_counts, mask
 
 
-def _apply_logits_processors(logits: torch.Tensor,
-                             sampling_metadata: SamplingMetadata) -> torch.Tensor:
+def _apply_logits_processors(
+    logits: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+) -> torch.Tensor:
     logits_row_idx = 0
     found_logits_processors = False
     for seq_ids, sampling_params in sampling_metadata.seq_groups:
@@ -505,7 +509,8 @@ def _sample(
         sample_results_dict.update(zip(seq_group_ids, sample_results))
 
     sample_results = [
-        sample_results_dict[i] for i in range(len(sampling_metadata.seq_groups))
+        sample_results_dict[i]
+        for i in range(len(sampling_metadata.seq_groups))
     ]
     return sample_results
 

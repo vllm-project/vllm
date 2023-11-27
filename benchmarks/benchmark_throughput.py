@@ -273,9 +273,9 @@ if __name__ == "__main__":
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
-    parser.add_argument(
-        "--enforce-eager", action="store_true", help="enforce eager execution"
-    )
+    parser.add_argument("--enforce-eager",
+                        action="store_true",
+                        help="enforce eager execution")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
