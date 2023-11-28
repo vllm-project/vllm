@@ -65,6 +65,7 @@ Documentation
    serving/distributed_serving
    serving/run_on_sky
    serving/deploying_with_triton
+   serving/deploying_with_docker
 
 .. toctree::
    :maxdepth: 1
@@ -72,3 +73,10 @@ Documentation
 
    models/supported_models
    models/adding_model
+   models/engine_args
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Quantization
+
+   quantization/auto_awq

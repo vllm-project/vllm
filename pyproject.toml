@@ -3,7 +3,31 @@ requires = [
     "ninja",
     "packaging",
     "setuptools",
-    "torch >= 2.0.0",
+    "torch >= 2.1.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    # "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    # "I",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # line too long, handled by black formatting
+    "E501",
+]

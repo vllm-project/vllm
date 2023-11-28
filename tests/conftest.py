@@ -8,7 +8,6 @@ from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 _TEST_PROMPTS = [
-    # pylint: disable=line-too-long
     "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
     "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
     "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
@@ -106,6 +105,39 @@ class HfRunner:
                 ]
             outputs[i] = (output_ids, output_str)
         return outputs
+
+    def generate_greedy_logprobs(
+        self,
+        prompts: List[str],
+        max_tokens: int,
+    ) -> List[List[torch.Tensor]]:
+        all_logprobs = []
+        for prompt in prompts:
+            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+            output = self.model.generate(
+                input_ids.cuda(),
+                use_cache=True,
+                do_sample=False,
+                max_new_tokens=max_tokens,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+            )
+            seq_logprobs = []
+            for hidden_states in output.hidden_states:
+                last_hidden_states = hidden_states[-1][0]
+                logits = torch.matmul(
+                    last_hidden_states,
+                    self.model.get_output_embeddings().weight.t(),
+                )
+                if self.model.get_output_embeddings().bias is not None:
+                    logits += self.model.get_output_embeddings(
+                    ).bias.unsqueeze(0)
+                logprobs = torch.nn.functional.log_softmax(logits,
+                                                           dim=-1,
+                                                           dtype=torch.float32)
+                seq_logprobs.append(logprobs)
+            all_logprobs.append(seq_logprobs)
+        return all_logprobs
 
 
 @pytest.fixture

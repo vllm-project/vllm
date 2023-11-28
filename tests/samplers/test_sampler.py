@@ -1,9 +1,8 @@
-# pylint: disable=protected-access
-import pytest
 import random
 from typing import Tuple
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from vllm.model_executor.layers.sampler import Sampler
@@ -20,10 +19,10 @@ class MockLogitsSampler(Sampler):
 
     def forward(self, *args, **kwargs):
         with patch("vllm.model_executor.layers.sampler._prune_hidden_states",
-                   lambda x, y: x):
-            with patch("vllm.model_executor.layers.sampler._get_logits",
+                   lambda x, y: x), patch(
+                       "vllm.model_executor.layers.sampler._get_logits",
                        lambda *args, **kwargs: self.fake_logits):
-                return super().forward(*args, **kwargs)
+            return super().forward(*args, **kwargs)
 
 
 def _prepare_test(
@@ -69,7 +68,7 @@ def test_sampler_all_greedy(seed: int):
                              input_metadata=input_metadata)
     expected = torch.argmax(fake_logits, dim=-1)
     for i, sequence_output in enumerate(sampler_output):
-        for nth_output in sequence_output:
+        for nth_output in sequence_output.samples:
             assert nth_output.output_token == expected[i].item()
 
 
@@ -101,7 +100,7 @@ def test_sampler_all_random(seed: int):
                              hidden_states=input_tensor,
                              input_metadata=input_metadata)
     for i, sequence_output in enumerate(sampler_output):
-        for nth_output in sequence_output:
+        for nth_output in sequence_output.samples:
             assert nth_output.output_token == i
 
 
@@ -181,5 +180,39 @@ def test_sampler_mixed(seed: int):
     for i, sequence_output in enumerate(sampler_output):
         if seq_group_metadata_list[i].sampling_params.use_beam_search:
             continue
-        for nth_output in sequence_output:
+        for nth_output in sequence_output.samples:
             assert nth_output.output_token in expected_tokens
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_logits_processors(seed: int):
+    set_random_seed(seed)
+    batch_size = random.randint(1, 256)
+    input_tensor, _, sampler, worker = _prepare_test(batch_size)
+
+    # This sample logits processor gives infinite score to the i-th token,
+    # where i is the length of the input sequence.
+    # We therefore expect the output token sequence to be [0, 1, 2, ...]
+    def pick_ith(token_ids, logits):
+        logits[len(token_ids)] = float("inf")
+        return logits
+
+    seq_group_metadata_list = []
+    for i in range(batch_size):
+        seq_group_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=f"test_{i}",
+                is_prompt=True,
+                seq_data={0: SequenceData([1, 2, 3])},
+                sampling_params=SamplingParams(temperature=0,
+                                               logits_processors=[pick_ith]),
+                block_tables={0: [1]},
+            ))
+
+    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    sampler_output = sampler(embedding=None,
+                             hidden_states=input_tensor,
+                             input_metadata=input_metadata)
+    for _, sequence_output in enumerate(sampler_output):
+        for idx, nth_output in enumerate(sequence_output.samples):
+            assert nth_output.output_token == idx

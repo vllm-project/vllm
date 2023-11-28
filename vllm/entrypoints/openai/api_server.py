@@ -13,7 +13,7 @@ import uvicorn
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 from packaging import version
 
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -55,7 +55,7 @@ def create_error_response(status_code: HTTPStatus,
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request, exc):  # pylint: disable=unused-argument
+async def validation_exception_handler(_, exc):
     return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
 
@@ -125,10 +125,8 @@ async def check_length(
     assert (not (prompt is None and prompt_ids is None)
             and not (prompt is not None and prompt_ids is not None)
             ), "Either prompt or prompt_ids should be provided."
-    if prompt_ids is not None:
-        input_ids = prompt_ids
-    else:
-        input_ids = tokenizer(prompt).input_ids
+    input_ids = prompt_ids if prompt_ids is not None else tokenizer(
+        prompt).input_ids
     token_num = len(input_ids)
 
     if request.max_tokens is None:
@@ -146,6 +144,12 @@ async def check_length(
         return input_ids, None
 
 
+@app.get("/health")
+async def health() -> Response:
+    """Health check."""
+    return Response(status_code=200)
+
+
 @app.get("/v1/models")
 async def show_available_models():
     """Show available models. Right now we only have one model."""
@@ -157,16 +161,26 @@ async def show_available_models():
     return ModelList(data=model_cards)
 
 
-def create_logprobs(token_ids: List[int],
-                    id_logprobs: List[Dict[int, float]],
-                    initial_text_offset: int = 0) -> LogProbs:
+def create_logprobs(
+    token_ids: List[int],
+    top_logprobs: Optional[List[Optional[Dict[int, float]]]] = None,
+    num_output_top_logprobs: Optional[int] = None,
+    initial_text_offset: int = 0,
+) -> LogProbs:
     """Create OpenAI-style logprobs."""
     logprobs = LogProbs()
     last_token_len = 0
-    for token_id, id_logprob in zip(token_ids, id_logprobs):
+    if num_output_top_logprobs:
+        logprobs.top_logprobs = []
+    for i, token_id in enumerate(token_ids):
+        step_top_logprobs = top_logprobs[i]
+        if step_top_logprobs is not None:
+            token_logprob = step_top_logprobs[token_id]
+        else:
+            token_logprob = None
         token = tokenizer.convert_ids_to_tokens(token_id)
         logprobs.tokens.append(token)
-        logprobs.token_logprobs.append(id_logprob[token_id])
+        logprobs.token_logprobs.append(token_logprob)
         if len(logprobs.text_offset) == 0:
             logprobs.text_offset.append(initial_text_offset)
         else:
@@ -174,10 +188,11 @@ def create_logprobs(token_ids: List[int],
                                         last_token_len)
         last_token_len = len(token)
 
-        logprobs.top_logprobs.append({
-            tokenizer.convert_ids_to_tokens(i): p
-            for i, p in id_logprob.items()
-        })
+        if num_output_top_logprobs:
+            logprobs.top_logprobs.append({
+                tokenizer.convert_ids_to_tokens(i): p
+                for i, p in step_top_logprobs.items()
+            } if step_top_logprobs else None)
     return logprobs
 
 
@@ -213,6 +228,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     request_id = f"cmpl-{random_uuid()}"
     created_time = int(time.monotonic())
     try:
+        spaces_between_special_tokens = request.spaces_between_special_tokens
         sampling_params = SamplingParams(
             n=request.n,
             presence_penalty=request.presence_penalty,
@@ -227,6 +243,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             ignore_eos=request.ignore_eos,
             use_beam_search=request.use_beam_search,
             skip_special_tokens=request.skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -238,6 +255,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         index: int,
         text: str,
         finish_reason: Optional[str] = None,
+        usage: Optional[UsageInfo] = None,
     ) -> str:
         choice_data = ChatCompletionResponseStreamChoice(
             index=index,
@@ -250,7 +268,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
             model=model_name,
             choices=[choice_data],
         )
-        response_json = response.json(ensure_ascii=False)
+        if usage is not None:
+            response.usage = usage
+        # exclude unset to leave details out of each sse
+        response_json = response.json(exclude_unset=True, ensure_ascii=False)
 
         return response_json
 
@@ -276,17 +297,25 @@ async def create_chat_completion(request: ChatCompletionRequest,
                 i = output.index
                 delta_text = output.text[len(previous_texts[i]):]
                 previous_texts[i] = output.text
-                previous_num_tokens[i] = len(output.token_ids)
+                completion_tokens = len(output.token_ids)
+                previous_num_tokens[i] = completion_tokens
                 response_json = create_stream_response_json(
                     index=i,
                     text=delta_text,
                 )
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
+                    prompt_tokens = len(res.prompt_token_ids)
+                    final_usage = UsageInfo(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=prompt_tokens + completion_tokens,
+                    )
                     response_json = create_stream_response_json(
                         index=i,
                         text="",
                         finish_reason=output.finish_reason,
+                        usage=final_usage,
                     )
                     yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"
@@ -354,8 +383,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     for the API specification. This API mimics the OpenAI Completion API.
 
     NOTE: Currently we do not support the following features:
-        - echo (since the vLLM engine does not currently support
-          getting the logprobs of prompt tokens)
         - suffix (the language models we currently support do not support
           suffix)
         - logit_bias (to be supported by vLLM engine)
@@ -366,11 +393,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     if error_check_ret is not None:
         return error_check_ret
 
-    if request.echo:
-        # We do not support echo since the vLLM engine does not
-        # currently support getting the logprobs of prompt tokens.
-        return create_error_response(HTTPStatus.BAD_REQUEST,
-                                     "echo is not currently supported")
+    # OpenAI API supports echoing the prompt when max_tokens is 0.
+    echo_without_generation = request.echo and request.max_tokens == 0
 
     if request.suffix is not None:
         # The language models we currently support do not support suffix.
@@ -414,6 +438,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
     created_time = int(time.monotonic())
     try:
+        spaces_between_special_tokens = request.spaces_between_special_tokens
         sampling_params = SamplingParams(
             n=request.n,
             best_of=request.best_of,
@@ -425,10 +450,13 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             stop=request.stop,
             stop_token_ids=request.stop_token_ids,
             ignore_eos=request.ignore_eos,
-            max_tokens=request.max_tokens,
+            max_tokens=request.max_tokens
+            if not echo_without_generation else 1,
             logprobs=request.logprobs,
             use_beam_search=request.use_beam_search,
+            prompt_logprobs=request.logprobs if request.echo else None,
             skip_special_tokens=request.skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -453,6 +481,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         text: str,
         logprobs: Optional[LogProbs] = None,
         finish_reason: Optional[str] = None,
+        usage: Optional[UsageInfo] = None,
     ) -> str:
         choice_data = CompletionResponseStreamChoice(
             index=index,
@@ -466,41 +495,69 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             model=model_name,
             choices=[choice_data],
         )
-        response_json = response.json(ensure_ascii=False)
+        if usage is not None:
+            response.usage = usage
+        response_json = response.json(exclude_unset=True, ensure_ascii=False)
 
         return response_json
 
     async def completion_stream_generator() -> AsyncGenerator[str, None]:
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
+        has_echoed = [False] * request.n
         async for res in result_generator:
             res: RequestOutput
             for output in res.outputs:
                 i = output.index
                 delta_text = output.text[len(previous_texts[i]):]
+                token_ids = output.token_ids[previous_num_tokens[i]:]
+                top_logprobs = output.logprobs[previous_num_tokens[i]:]
+                offsets = len(previous_texts[i])
+                if request.echo and not has_echoed[i]:
+                    if not echo_without_generation:
+                        delta_text = res.prompt + delta_text
+                        token_ids = res.prompt_token_ids + token_ids
+                        top_logprobs = res.prompt_logprobs + top_logprobs
+                    else:
+                        delta_text = res.prompt
+                        token_ids = res.prompt_token_ids
+                        top_logprobs = res.prompt_logprobs
+                    has_echoed[i] = True
                 if request.logprobs is not None:
                     logprobs = create_logprobs(
-                        output.token_ids[previous_num_tokens[i]:],
-                        output.logprobs[previous_num_tokens[i]:],
-                        len(previous_texts[i]))
+                        token_ids=token_ids,
+                        top_logprobs=top_logprobs,
+                        num_output_top_logprobs=request.logprobs,
+                        initial_text_offset=offsets,
+                    )
                 else:
                     logprobs = None
                 previous_texts[i] = output.text
                 previous_num_tokens[i] = len(output.token_ids)
+                finish_reason = output.finish_reason
                 response_json = create_stream_response_json(
                     index=i,
                     text=delta_text,
                     logprobs=logprobs,
+                    finish_reason=finish_reason,
                 )
                 yield f"data: {response_json}\n\n"
                 if output.finish_reason is not None:
                     logprobs = (LogProbs()
                                 if request.logprobs is not None else None)
+                    prompt_tokens = len(res.prompt_token_ids)
+                    completion_tokens = len(output.token_ids)
+                    final_usage = UsageInfo(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=prompt_tokens + completion_tokens,
+                    )
                     response_json = create_stream_response_json(
                         index=i,
                         text="",
                         logprobs=logprobs,
                         finish_reason=output.finish_reason,
+                        usage=final_usage,
                     )
                     yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"
@@ -521,14 +578,36 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         final_res = res
     assert final_res is not None
     choices = []
+    prompt_token_ids = final_res.prompt_token_ids
+    prompt_logprobs = final_res.prompt_logprobs
+    prompt_text = final_res.prompt
     for output in final_res.outputs:
         if request.logprobs is not None:
-            logprobs = create_logprobs(output.token_ids, output.logprobs)
+            if not echo_without_generation:
+                token_ids = output.token_ids
+                top_logprobs = output.logprobs
+                if request.echo:
+                    token_ids = prompt_token_ids + token_ids
+                    top_logprobs = prompt_logprobs + top_logprobs
+            else:
+                token_ids = prompt_token_ids
+                top_logprobs = prompt_logprobs
+            logprobs = create_logprobs(
+                token_ids=token_ids,
+                top_logprobs=top_logprobs,
+                num_output_top_logprobs=request.logprobs,
+            )
         else:
             logprobs = None
+        if not echo_without_generation:
+            output_text = output.text
+            if request.echo:
+                output_text = prompt_text + output_text
+        else:
+            output_text = prompt_text
         choice_data = CompletionResponseChoice(
             index=output.index,
-            text=output.text,
+            text=output_text,
             logprobs=logprobs,
             finish_reason=output.finish_reason,
         )
@@ -568,10 +647,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
-    parser.add_argument("--host",
-                        type=str,
-                        default="localhost",
-                        help="host name")
+    parser.add_argument("--host", type=str, default=None, help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument("--allow-credentials",
                         action="store_true",
@@ -619,9 +695,10 @@ if __name__ == "__main__":
     max_model_len = engine_model_config.max_model_len
 
     # A separate tokenizer to map token IDs to strings.
-    tokenizer = get_tokenizer(engine_args.tokenizer,
-                              tokenizer_mode=engine_args.tokenizer_mode,
-                              trust_remote_code=engine_args.trust_remote_code)
+    tokenizer = get_tokenizer(
+        engine_model_config.tokenizer,
+        tokenizer_mode=engine_model_config.tokenizer_mode,
+        trust_remote_code=engine_model_config.trust_remote_code)
 
     uvicorn.run(app,
                 host=args.host,

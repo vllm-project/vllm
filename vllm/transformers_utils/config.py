@@ -2,30 +2,23 @@ from typing import Optional
 
 from transformers import AutoConfig, PretrainedConfig
 
-from vllm.transformers_utils.configs import *  # pylint: disable=wildcard-import
+from vllm.transformers_utils.configs import *
 
 _CONFIG_REGISTRY = {
-    "mpt": MPTConfig,
-    "baichuan": BaiChuanConfig,
     "aquila": AquilaConfig,
+    "baichuan": BaiChuanConfig,
+    "chatglm": ChatGLMConfig,
+    "mpt": MPTConfig,
     "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
+    "yi": YiConfig,
 }
 
 
 def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None) -> PretrainedConfig:
-    # NOTE: Because the Mistral model in HF hub does not have
-    # `configuration_mistral.py`, we cannot use `AutoConfig` to load the
-    # config. Instead, we use `MistralConfig` directly.
-    # NOTE: This is a hack. This does not work for local models.
-    # FIXME: Remove this once the Mistral model is available in the stable
-    # version of HF transformers.
-    if "mistral" in model.lower():
-        return MistralConfig.from_pretrained(model, revision=revision)
-
     try:
         config = AutoConfig.from_pretrained(
             model, trust_remote_code=trust_remote_code, revision=revision)

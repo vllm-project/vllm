@@ -27,38 +27,28 @@ from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (PagedAttention,
                                                   PagedAttentionWithALiBi,
                                                   PagedAttentionWithRoPE)
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (convert_pyslice_to_tensor,
-                                              hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import (VocabParallelEmbedding,
-                                                       ColumnParallelLinear,
-                                                       RowParallelLinear)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 FalconConfig = Union[HF_FalconConfig, RWConfig]
-
-
-# NOTE(Hesslow): Unfortunately we did not fuse matmul and bias during
-# training, this means that there's one additional quantization to bfloat16
-# between the operations. In order not to degrade the quality of our HF-port,
-# we keep these characteristics in the final model.
-class FalconLinear(nn.Linear):
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        hidden_states = x @ self.weight.T
-        if self.bias is None:
-            return hidden_states
-        return hidden_states + self.bias
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -86,7 +76,11 @@ def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
 
 class FalconAttention(nn.Module):
 
-    def __init__(self, config: FalconConfig):
+    def __init__(
+        self,
+        config: FalconConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
 
         self.hidden_size = config.hidden_size
@@ -103,41 +97,29 @@ class FalconAttention(nn.Module):
 
         if self.new_decoder_architecture:
             self.total_num_kv_heads = config.num_kv_heads
-            assert self.total_num_heads % tp_size == 0
-            self.num_kv_heads = self.total_num_kv_heads // tp_size
-            self.query_key_value = ColumnParallelLinear(
-                self.hidden_size,
-                (self.total_num_heads + 2 * self.total_num_kv_heads) *
-                self.head_dim,
-                bias=config.bias,
-                gather_output=False,
-                skip_bias_add=True,
-            )
         elif self.multi_query:
             self.total_num_kv_heads = 1
-            self.num_kv_heads = 1
-            self.query = ColumnParallelLinear(
-                self.hidden_size,
-                self.total_num_heads * self.head_dim,
-                bias=config.bias,
-                gather_output=False,
-                skip_bias_add=True,
-            )
-            self.key_value = FalconLinear(self.hidden_size,
-                                          2 * self.head_dim,
-                                          bias=config.bias)
         else:
             self.total_num_kv_heads = self.total_num_heads
-            self.num_kv_heads = self.num_heads
-            self.query_key_value = ColumnParallelLinear(
-                self.hidden_size,
-                (self.total_num_heads + 2 * self.total_num_kv_heads) *
-                self.head_dim,
-                bias=config.bias,
-                gather_output=False,
-                skip_bias_add=True,
-            )
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
 
+        self.query_key_value = QKVParallelLinear(
+            self.hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=config.bias,
+            skip_bias_add=True,
+            linear_method=linear_method,
+        )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
@@ -149,8 +131,8 @@ class FalconAttention(nn.Module):
             self.hidden_size,
             self.hidden_size,
             bias=config.bias,
-            input_is_parallel=True,
             skip_bias_add=True,
+            linear_method=linear_method,
             reduce_results=self.reduce_row_parallel_results)
 
         self.use_rotary = config.rotary
@@ -196,18 +178,10 @@ class FalconAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
-        if not self.new_decoder_architecture and self.multi_query:
-            q, bias = self.query(hidden_states)
-            if bias is not None:
-                q += bias
-            kv = self.key_value(hidden_states)
-            k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
-        else:
-            qkv, bias = self.query_key_value(hidden_states)
-            if bias is not None:
-                qkv += bias
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
-                                dim=-1)
+        qkv, bias = self.query_key_value(hidden_states)
+        if bias is not None:
+            qkv += bias
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
         if self.use_rotary:
             attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
@@ -221,25 +195,30 @@ class FalconAttention(nn.Module):
 
 class FalconMLP(nn.Module):
 
-    def __init__(self, config: FalconConfig):
+    def __init__(
+        self,
+        config: FalconConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         hidden_size = config.hidden_size
 
         self.dense_h_to_4h = ColumnParallelLinear(hidden_size,
                                                   4 * hidden_size,
                                                   bias=config.bias,
-                                                  gather_output=False,
-                                                  skip_bias_add=True)
-        self.act = nn.GELU()
+                                                  skip_bias_add=True,
+                                                  linear_method=linear_method)
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
         self.dense_4h_to_h = RowParallelLinear(
             4 * hidden_size,
             hidden_size,
             bias=config.bias,
-            input_is_parallel=True,
             skip_bias_add=True,
-            reduce_results=self.reduce_row_parallel_results)
+            reduce_results=self.reduce_row_parallel_results,
+            linear_method=linear_method)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # NOTE(zhuohan): Following huggingface, we do not fuse bias add here.
@@ -253,12 +232,16 @@ class FalconMLP(nn.Module):
 
 class FalconDecoderLayer(nn.Module):
 
-    def __init__(self, config: FalconConfig):
+    def __init__(
+        self,
+        config: FalconConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.self_attention = FalconAttention(config)
-        self.mlp = FalconMLP(config)
+        self.self_attention = FalconAttention(config, linear_method)
+        self.mlp = FalconMLP(config, linear_method)
         self.config = config
 
         if config.new_decoder_architecture:
@@ -334,7 +317,11 @@ class FalconDecoderLayer(nn.Module):
 
 class FalconModel(nn.Module):
 
-    def __init__(self, config: FalconConfig):
+    def __init__(
+        self,
+        config: FalconConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -349,7 +336,8 @@ class FalconModel(nn.Module):
 
         # Transformer blocks
         self.h = nn.ModuleList([
-            FalconDecoderLayer(config) for _ in range(config.num_hidden_layers)
+            FalconDecoderLayer(config, linear_method)
+            for _ in range(config.num_hidden_layers)
         ])
 
         # Final Layer Norm
@@ -365,10 +353,7 @@ class FalconModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.word_embeddings(input_ids)
         for i in range(len(self.h)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(
                 positions,
@@ -383,15 +368,18 @@ class FalconModel(nn.Module):
 
 class FalconForCausalLM(nn.Module):
 
-    def __init__(self, config: FalconConfig):
+    def __init__(
+        self,
+        config: FalconConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
-        self.transformer = FalconModel(config)
-        self.lm_head = ColumnParallelLinear(
-            config.hidden_size,
+        self.linear_method = linear_method
+        self.transformer = FalconModel(config, linear_method)
+        self.lm_head = ParallelLMHead(
             config.vocab_size,
-            bias=False,
-            gather_output=False,
+            config.hidden_size,
         )
         self.sampler = Sampler(config.vocab_size)
 
@@ -415,89 +403,44 @@ class FalconForCausalLM(nn.Module):
 
         return next_tokens
 
-    _column_parallel_weights = [
-        "word_embeddings.weight", "lm_head.weight", "dense_h_to_4h.weight",
-        "dense_h_to_4h.bias"
-    ]
-    _row_parallel_weights = ["dense.weight", "dense_4h_to_h.weight"]
-
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        tp_size = (get_tensor_model_parallel_world_size())
-        tp_rank = get_tensor_model_parallel_rank()
-
-        hidden_size = self.config.hidden_size
         total_num_heads = self.config.num_attention_heads
-        num_heads = total_num_heads // tp_size
-        head_size = hidden_size // total_num_heads
-        head_start = tp_rank * num_heads
-        head_end = (tp_rank + 1) * num_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
-            num_kv_heads = total_num_kv_heads // tp_size
-            separated_q_kv = False
-            kv_head_start = tp_rank * num_kv_heads
-            kv_head_end = (tp_rank + 1) * num_kv_heads
         elif self.config.multi_query:
             total_num_kv_heads = 1
-            num_kv_heads = 1
-            separated_q_kv = True
-            kv_head_start = 0
-            kv_head_end = 1
         else:
             total_num_kv_heads = total_num_heads
-            num_kv_heads = total_num_kv_heads // tp_size
-            separated_q_kv = False
-            kv_head_start = tp_rank * num_kv_heads
-            kv_head_end = (tp_rank + 1) * num_kv_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
-        state_dict = self.state_dict()
-
+        params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
+            param = params_dict[name]
             if "query_key_value" in name:
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                loaded_weight_size = loaded_weight.size()
+                output_dim = getattr(param, "output_dim", None)
+                loaded_weight_shape = loaded_weight.shape
                 loaded_weight = loaded_weight.view(
-                    total_num_kv_heads, num_query_heads_per_kv_head + 2,
-                    head_size, *loaded_weight_size[1:])
+                    loaded_weight_shape[:output_dim] +
+                    (total_num_kv_heads, num_query_heads_per_kv_head + 2, -1) +
+                    loaded_weight_shape[output_dim + 1:])
+                wq = loaded_weight.narrow(
+                    output_dim + 1, 0, num_query_heads_per_kv_head).reshape(
+                        *loaded_weight_shape[:output_dim], -1,
+                        *loaded_weight_shape[output_dim + 1:])
+                wk = loaded_weight.narrow(
+                    output_dim + 1, num_query_heads_per_kv_head,
+                    1).reshape(*loaded_weight_shape[:output_dim], -1,
+                               *loaded_weight_shape[output_dim + 1:])
+                wv = loaded_weight.narrow(
+                    output_dim + 1, num_query_heads_per_kv_head + 1,
+                    1).reshape(*loaded_weight_shape[:output_dim], -1,
+                               *loaded_weight_shape[output_dim + 1:])
+                loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
 
-                wq = loaded_weight[:, :-2].reshape(-1, *loaded_weight_size[1:])
-                wk = loaded_weight[:, [-2]].reshape(-1,
-                                                    *loaded_weight_size[1:])
-                wv = loaded_weight[:, [-1]].reshape(-1,
-                                                    *loaded_weight_size[1:])
-
-                wq = wq[head_size * head_start:head_size * head_end]
-                wk = wk[head_size * kv_head_start:head_size * kv_head_end]
-                wv = wv[head_size * kv_head_start:head_size * kv_head_end]
-
-                if separated_q_kv:
-                    loaded_weight_q = wq
-                    loaded_weight_kv = torch.cat([wk, wv], dim=0)
-                    q_weight_name = name.replace("query_key_value", "query")
-                    kv_weight_name = name.replace("query_key_value",
-                                                  "key_value")
-                    load_tensor_parallel_weights(state_dict[q_weight_name],
-                                                 loaded_weight_q,
-                                                 q_weight_name,
-                                                 self._column_parallel_weights,
-                                                 self._row_parallel_weights,
-                                                 tp_rank)
-                    load_tensor_parallel_weights(state_dict[kv_weight_name],
-                                                 loaded_weight_kv,
-                                                 kv_weight_name,
-                                                 self._column_parallel_weights,
-                                                 self._row_parallel_weights,
-                                                 tp_rank)
-                    continue
-                else:
-                    loaded_weight = torch.cat([wq, wk, wv], dim=0)
-
-            param = state_dict[name]
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         self._column_parallel_weights,
-                                         self._row_parallel_weights, tp_rank)
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)

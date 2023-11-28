@@ -7,14 +7,15 @@ from collections import defaultdict
 from typing import Any, Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download
-from safetensors.torch import load_file, save_file, safe_open
 import numpy as np
+from safetensors.torch import load_file, save_file, safe_open
 import torch
+from transformers import PretrainedConfig
 from tqdm.auto import tqdm
 
 from vllm.logger import init_logger
-from vllm.model_executor.quantization_utils import get_quant_class
-from vllm.model_executor.quantization_utils.base import QuantizationConfig
+from vllm.model_executor.layers.quantization import (get_quantization_config,
+                                                     QuantizationConfig)
 
 logger = init_logger(__name__)
 
@@ -84,8 +85,15 @@ def convert_bin_to_safetensor_file(
 def get_quant_config(
     quantization: str,
     model_name_or_path: str,
+    hf_config: PretrainedConfig,
     cache_dir: Optional[str] = None,
 ) -> QuantizationConfig:
+    quant_cls = get_quantization_config(quantization)
+    # Read the quantization config from the HF model config, if available.
+    hf_quant_config = getattr(hf_config, "quantization_config", None)
+    if hf_quant_config is not None:
+        return quant_cls.from_config(hf_quant_config)
+
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
@@ -98,7 +106,6 @@ def get_quant_config(
         hf_folder = model_name_or_path
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
-    quant_cls = get_quant_class(quantization)
     quant_config_files = [
         f for f in config_files if any(
             f.endswith(x) for x in quant_cls.get_config_filenames())
@@ -124,11 +131,9 @@ def prepare_hf_model_weights(
 ) -> Tuple[str, List[str], bool]:
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
-    if use_safetensors:
-        allow_patterns = ["*.safetensors"]
-    else:
-        # Some quantized models use .pt files for storing the weights.
-        allow_patterns = ["*.bin", "*.pt"]
+    # Some quantized models use .pt files for storing the weights.
+    allow_patterns = ["*.safetensors"
+                      ] if use_safetensors else ["*.bin", "*.pt"]
     if not is_local:
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
@@ -144,8 +149,18 @@ def prepare_hf_model_weights(
     for pattern in allow_patterns:
         hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
     if not use_safetensors:
+        # Exclude files that are not needed for inference.
+        # https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
+        blacklist = [
+            "training_args.bin",
+            "optimizer.bin",
+            "optimizer.pt",
+            "scheduler.pt",
+            "scaler.pt",
+        ]
         hf_weights_files = [
-            x for x in hf_weights_files if not x.endswith("training_args.bin")
+            f for f in hf_weights_files
+            if not any(f.endswith(x) for x in blacklist)
         ]
 
     if len(hf_weights_files) == 0 and use_safetensors and fall_back_to_pt:
@@ -225,8 +240,8 @@ def hf_model_weights_iterator(
     elif use_safetensors:
         for st_file in hf_weights_files:
             with safe_open(st_file, framework="pt") as f:
-                for name in f.keys():
-                    param = f.get_slice(name)
+                for name in f.keys():  # noqa: SIM118
+                    param = f.get_tensor(name)
                     yield name, param
     else:
         for bin_file in hf_weights_files:
@@ -252,46 +267,10 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     return x
 
 
-def load_padded_tensor_parallel_vocab(
-    param: torch.Tensor,
-    loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
-    tensor_model_parallel_rank: int,
-) -> None:
-    shard_size = param.shape[0]
-    start_idx = tensor_model_parallel_rank * shard_size
-    end_idx = (tensor_model_parallel_rank + 1) * shard_size
-    loaded_weight = loaded_weight[start_idx:end_idx]
-    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-    param[:loaded_weight.shape[0]].copy_(loaded_weight)
-
-
-def load_tensor_parallel_weights(
-    param: torch.Tensor,
-    loaded_weight: Any,  # `torch.Tensor` or `PySafeSlice`
-    param_name: str,
-    column_parallel_weight_names: List[str],
-    row_parallel_weight_names: List[str],
-    tensor_model_parallel_rank: int,
-) -> None:
-    for p in column_parallel_weight_names:
-        if p in param_name:
-            shard_size = param.shape[0]
-            start_idx = tensor_model_parallel_rank * shard_size
-            end_idx = (tensor_model_parallel_rank + 1) * shard_size
-            loaded_weight = loaded_weight[start_idx:end_idx]
-            break
-    for p in row_parallel_weight_names:
-        if p in param_name:
-            shard_size = param.shape[1]
-            start_idx = tensor_model_parallel_rank * shard_size
-            end_idx = (tensor_model_parallel_rank + 1) * shard_size
-            loaded_weight = loaded_weight[:, start_idx:end_idx]
-            break
-
-    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-    assert param.shape == loaded_weight.shape, (
-        f"{param_name} shape mismatch between model and checkpoint: "
-        f"{param.shape} != {loaded_weight.shape}")
+def default_weight_loader(param: torch.Tensor,
+                          loaded_weight: torch.Tensor) -> None:
+    """Default weight loader."""
+    assert param.size() == loaded_weight.size()
     param.data.copy_(loaded_weight)
 
 
