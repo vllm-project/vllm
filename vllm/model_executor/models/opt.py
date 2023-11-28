@@ -331,6 +331,9 @@ class OPTForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "lm_head.weight" in name:
                 continue
+            if name.startswith("decoder."):
+                name = "model." + name
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
