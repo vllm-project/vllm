@@ -88,20 +88,19 @@ def get_model(model_config: ModelConfig,
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        # TODO(yard1): Clean this up (lora_config)
-        try:
-            model = model_class(model_config.hf_config, linear_method,
-                                lora_config)
-        except TypeError:
-            model = model_class(model_config.hf_config, linear_method)
+        with torch.device("cuda"):
+            # TODO(yard1): Clean this up (lora_config)
+            try:
+                model = model_class(model_config.hf_config, linear_method,
+                                    lora_config)
+            except TypeError:
+                model = model_class(model_config.hf_config, linear_method)
         if model_config.load_format == "dummy":
-            model = model.cuda()
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
         else:
             # Load the weights from the cached or downloaded files.
             model.load_weights(model_config.model, model_config.download_dir,
-                               model_config.load_format, model_config.revision)
-            model = model.cuda()
+                            model_config.load_format, model_config.revision)
     return model.eval()
