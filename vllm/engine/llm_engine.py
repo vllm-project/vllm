@@ -162,7 +162,7 @@ class LLMEngine:
                 continue
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=1,
+                num_gpus=self.cache_config.gpu_memory_utilization,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
