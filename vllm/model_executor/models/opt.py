@@ -16,11 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only OPT model compatible with HuggingFace weights.
-
-The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of the input.
-"""
+"""Inference-only OPT model compatible with HuggingFace weights."""
 from typing import List, Optional, Tuple
 
 import torch
@@ -335,6 +331,9 @@ class OPTForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "lm_head.weight" in name:
                 continue
+            if name.startswith("decoder."):
+                name = "model." + name
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
