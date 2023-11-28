@@ -352,7 +352,7 @@ class SequenceGroupMetadata:
         self.block_tables = block_tables
 
 
-class SequenceOutputs:
+class SequenceOutput:
     """The model output associated with a sequence.
 
     Args:
@@ -374,40 +374,40 @@ class SequenceOutputs:
         self.logprobs = logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
+        return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
                 f"output_token={self.output_token}, "
                 f"logprobs={self.logprobs})")
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, SequenceOutputs):
+        if not isinstance(other, SequenceOutput):
             raise NotImplementedError()
         return (self.parent_seq_id == other.parent_seq_id
                 and self.output_token == other.output_token
                 and self.logprobs == other.logprobs)
 
 
-class SequenceGroupOutputs:
-    """The model outputs associated with a sequence group."""
+class SequenceGroupOutput:
+    """The model output associated with a sequence group."""
 
     def __init__(
         self,
-        samples: List[SequenceOutputs],
+        samples: List[SequenceOutput],
         prompt_logprobs: Optional[PromptLogprobs],
     ) -> None:
         self.samples = samples
         self.prompt_logprobs = prompt_logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceGroupOutputs(samples={self.samples}, "
+        return (f"SequenceGroupOutput(samples={self.samples}, "
                 f"prompt_logprobs={self.prompt_logprobs})")
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, SequenceGroupOutputs):
+        if not isinstance(other, SequenceGroupOutput):
             raise NotImplementedError()
         return (self.samples == other.samples
                 and self.prompt_logprobs == other.prompt_logprobs)
 
 
-# For each sequence group, we generate a list of SequenceOutputs object,
+# For each sequence group, we generate a list of SequenceOutput object,
 # each of which contains one possible candidate for the next token.
-SamplerOutput = List[SequenceGroupOutputs]
+SamplerOutput = List[SequenceGroupOutput]

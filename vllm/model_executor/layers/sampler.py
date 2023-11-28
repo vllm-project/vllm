@@ -9,7 +9,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
-                           SequenceData, SequenceGroupOutputs, SequenceOutputs)
+                           SequenceData, SequenceGroupOutput, SequenceOutput)
 
 _SAMPLING_EPS = 1e-5
 
@@ -641,7 +641,7 @@ def _build_sampler_output(
                                                       next_token_ids,
                                                       group_sample_logprobs):
             seq_outputs.append(
-                SequenceOutputs(seq_ids[parent_id], next_token_id, logprobs))
+                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
-            SequenceGroupOutputs(seq_outputs, group_prompt_logprobs))
+            SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
     return sampler_output
