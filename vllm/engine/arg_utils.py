@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, LoRAConfig)
 
 
 @dataclass
@@ -33,6 +33,11 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+    enable_lora: bool = False
+    max_lora_rank: int = 8
+    lora_extra_vocab_size: int = 256
+    lora_dtype = 'bfloat16'
+    lora_max_cpu_loras: int = -1
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -182,6 +187,30 @@ class EngineArgs:
                             choices=['awq', 'squeezellm', None],
                             default=None,
                             help='Method used to quantize the weights')
+        # LoRA related configs
+        parser.add_argument('--enable-lora',
+                            action='store_true',
+                            help='enable lora adapters')
+        parser.add_argument('--max-lora-rank',
+                            type=int,
+                            default=16,
+                            help='max LoRA rank')
+        parser.add_argument('--lora-extra-vocab-size',
+                            type=int,
+                            default=256,
+                            help='LoRA extra vocab size')
+        parser.add_argument('--lora-dtype',
+                            type=str,
+                            default=EngineArgs.dtype,
+                            choices=['auto', 'float16', 'bfloat16', 'float32'],
+                            help='data type for lora')
+        parser.add_argument(
+            '--lora-max-cpu-loras',
+            type=int,
+            default=-1,
+            help=('Maximum number of loras to store in CPU memory. '
+                  'Must be >= than max_num_seqs. '
+                  'Defaults to max_num_seqs.'))
         return parser
 
     @classmethod
@@ -194,7 +223,8 @@ class EngineArgs:
 
     def create_engine_configs(
         self,
-    ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
+    ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
+               Optional[LoRAConfig]]:
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
@@ -212,7 +242,13 @@ class EngineArgs:
                                            self.max_num_seqs,
                                            model_config.max_model_len,
                                            self.max_paddings)
-        return model_config, cache_config, parallel_config, scheduler_config
+        lora_config = LoRAConfig(
+            max_lora_rank=self.max_lora_rank,
+            lora_extra_vocab_size=self.lora_extra_vocab_size,
+            lora_dtype=self.lora_dtype,
+            max_cpu_loras=self.lora_max_cpu_loras if self.lora_max_cpu_loras >
+            0 else None) if self.enable_lora else None
+        return model_config, cache_config, parallel_config, scheduler_config, lora_config
 
 
 @dataclass

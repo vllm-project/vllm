@@ -3,8 +3,9 @@ import time
 from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
+from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, LoRAConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
@@ -15,7 +16,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupOutputs,
                            SequenceOutputs, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               get_tokenizer)
+                                               MultiLoRATokenizer)
 from vllm.utils import Counter
 
 if ray:
@@ -65,6 +66,7 @@ class LLMEngine:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        lora_config: Optional[LoRAConfig],
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
@@ -90,17 +92,13 @@ class LLMEngine:
         self.cache_config = cache_config
         assert self.cache_config.sliding_window == getattr(
             self.model_config.hf_config, "sliding_window", None)
+        self.lora_config = lora_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
         self._verify_args()
 
-        self.tokenizer = get_tokenizer(
-            model_config.tokenizer,
-            tokenizer_mode=model_config.tokenizer_mode,
-            trust_remote_code=model_config.trust_remote_code,
-            tokenizer_revision=model_config.tokenizer_revision,
-            revision=model_config.revision)
+        self._init_tokenizer()
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -137,6 +135,7 @@ class LLMEngine:
             self.scheduler_config,
             0,
             distributed_init_method,
+            lora_config=self.lora_config,
         )
         self.workers.append(worker)
         self._run_workers(
@@ -149,6 +148,18 @@ class LLMEngine:
             max_concurrent_workers=self.parallel_config.
             max_parallel_loading_workers,
         )
+
+    def _init_tokenizer(self, **kwargs):
+        init_kwargs = dict(
+            enable_lora=bool(self.lora_config),
+            max_num_seqs=self.scheduler_config.max_num_seqs,
+            max_input_length=None,
+            tokenizer_mode=self.model_config.tokenizer_mode,
+            trust_remote_code=self.model_config.trust_remote_code,
+            revision=self.model_config.tokenizer_revision)
+        init_kwargs.update(kwargs)
+        self.tokenizer: MultiLoRATokenizer = MultiLoRATokenizer(
+            self.model_config.tokenizer, **init_kwargs)
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -183,6 +194,7 @@ class LLMEngine:
                               scheduler_config,
                               None,
                               None,
+                              lora_config=self.lora_config,
                           ))
         self._run_workers(
             "init_model",
@@ -198,6 +210,10 @@ class LLMEngine:
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
+        if self.lora_config:
+            self.lora_config.verify_with_model_config(self.model_config)
+            self.lora_config.verify_with_scheduler_config(
+                self.scheduler_config)
 
     def _init_cache(self) -> None:
         """Profiles the memory usage and initializes the KV cache."""
@@ -246,6 +262,20 @@ class LLMEngine:
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
+    def encode_request(
+        self,
+        request_id: str,  # pylint: disable=unused-argument
+        prompt: Optional[str],
+        prompt_token_ids: Optional[List[int]] = None,
+        lora_request: Optional[LoRARequest] = None,
+    ):
+        if prompt_token_ids is None:
+            assert prompt is not None
+            prompt_token_ids = self.tokenizer.encode(request_id=request_id,
+                                                     prompt=prompt,
+                                                     lora_request=lora_request)
+        return prompt_token_ids
+
     def add_request(
         self,
         request_id: str,
@@ -253,6 +283,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -270,20 +301,26 @@ class LLMEngine:
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
         """
+        if lora_request is not None and not self.lora_config:
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
         if arrival_time is None:
             arrival_time = time.monotonic()
-        if prompt_token_ids is None:
-            assert prompt is not None
-            prompt_token_ids = self.tokenizer.encode(prompt)
+        prompt_token_ids = self.encode_request(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            lora_request=lora_request)
 
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
-        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
+        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
+                       lora_request)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time)
+                                  arrival_time, lora_request)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
@@ -648,7 +685,7 @@ class LLMEngine:
         """Decodes the new token for a sequence."""
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
-             self.tokenizer,
+             self.tokenizer.get_lora_tokenizer(seq.lora_request),
              all_input_ids=seq.get_token_ids(),
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
@@ -689,10 +726,28 @@ class LLMEngine:
             return
 
         # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == self.tokenizer.eos_token_id):
+        if ((not sampling_params.ignore_eos) and seq.get_last_token_id()
+                == self.tokenizer.get_lora_tokenizer(
+                    seq.lora_request).eos_token_id):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
+        return self._run_workers(
+            "add_lora",
+            lora_request=lora_request,
+        )
+
+    def remove_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self._run_workers(
+            "remove_lora",
+            lora_id=lora_id,
+        )
+
+    def list_loras(self) -> List[int]:
+        return self._run_workers("list_loras")
 
     def _run_workers_in_batch(
         self,

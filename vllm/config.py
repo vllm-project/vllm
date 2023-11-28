@@ -1,4 +1,5 @@
 from typing import Optional, Union
+from dataclasses import dataclass
 import os
 
 import torch
@@ -348,6 +349,36 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+
+
+@dataclass
+class LoRAConfig:
+    max_lora_rank: int
+    max_cpu_loras: Optional[int] = None
+    lora_dtype: Optional[torch.dtype] = None
+    lora_extra_vocab_size: int = 256
+    max_loras: Optional[int] = None
+
+    def verify_with_model_config(self, model_config: ModelConfig):
+        if self.lora_dtype in (None, "auto"):
+            self.lora_dtype = model_config.dtype
+        elif isinstance(self.lora_dtype, str):
+            self.lora_dtype = getattr(torch, self.lora_dtype)
+
+    def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
+        if scheduler_config.max_num_batched_tokens > 65528:
+            raise ValueError(
+                "Due to limitations of the custom LoRA CUDA kernel, "
+                "max_num_batched_tokens must be <= 65528 when "
+                "LoRA is enabled.")
+
+        self.max_loras = scheduler_config.max_num_seqs
+        if self.max_cpu_loras is None:
+            self.max_cpu_loras = scheduler_config.max_num_seqs
+        elif self.max_cpu_loras < scheduler_config.max_num_seqs:
+            raise ValueError(
+                f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
+                f"max_num_seqs ({scheduler_config.max_num_seqs})")
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

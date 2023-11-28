@@ -1,13 +1,16 @@
+import contextlib
 import io
 import os
 import re
 import subprocess
-from typing import List, Set
 import warnings
+from pathlib import Path
+from typing import List, Set
 
 from packaging.version import parse, Version
 import setuptools
 import torch
+import torch.utils.cpp_extension as torch_cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
@@ -29,6 +32,11 @@ NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 if CUDA_HOME is None:
     raise RuntimeError(
         "Cannot find CUDA_HOME. CUDA must be available to build the package.")
+
+
+def glob(pattern: str):
+    root = Path(__name__).parent
+    return [str(p) for p in root.glob(pattern)]
 
 
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
@@ -129,19 +137,59 @@ if nvcc_cuda_version < Version("11.8"):
         raise RuntimeError(
             "CUDA 11.8 or higher is required for compute capability 9.0.")
 
+# Use NVCC threads to parallelize the build.
+if nvcc_cuda_version >= Version("11.2"):
+    num_threads = min(os.cpu_count(), 8)
+    NVCC_FLAGS += ["--threads", str(num_threads)]
+
+NVCC_FLAGS_PUNICA = NVCC_FLAGS.copy()
+
 # Add target compute capabilities to NVCC flags.
 for capability in compute_capabilities:
     num = capability[0] + capability[2]
     NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=sm_{num}"]
     if capability.endswith("+PTX"):
         NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=compute_{num}"]
+    if int(capability[0]) >= 8:
+        NVCC_FLAGS_PUNICA += ["-gencode", f"arch=compute_{num},code=sm_{num}"]
+        if capability.endswith("+PTX"):
+            NVCC_FLAGS_PUNICA += [
+                "-gencode", f"arch=compute_{num},code=compute_{num}"
+            ]
 
-# Use NVCC threads to parallelize the build.
-if nvcc_cuda_version >= Version("11.2"):
-    num_threads = min(os.cpu_count(), 8)
-    NVCC_FLAGS += ["--threads", str(num_threads)]
+# changes for punica kernels
+NVCC_FLAGS += torch_cpp_ext.COMMON_NVCC_FLAGS
+REMOVE_NVCC_FLAGS = [
+    '-D__CUDA_NO_HALF_OPERATORS__',
+    '-D__CUDA_NO_HALF_CONVERSIONS__',
+    '-D__CUDA_NO_BFLOAT16_CONVERSIONS__',
+    '-D__CUDA_NO_HALF2_OPERATORS__',
+]
+for flag in REMOVE_NVCC_FLAGS:
+    with contextlib.suppress(ValueError):
+        torch_cpp_ext.COMMON_NVCC_FLAGS.remove(flag)
 
 ext_modules = []
+
+install_punica = bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "1")))
+device_count = torch.cuda.device_count()
+for i in range(device_count):
+    major, minor = torch.cuda.get_device_capability(i)
+    if major < 8:
+        install_punica = False
+        break
+if install_punica:
+    ext_modules.append(
+        CUDAExtension(
+            name="vllm._punica_C",
+            sources=["csrc/punica/punica_ops.cc"] +
+            glob("csrc/punica/bgmv/*.cu"),
+            extra_compile_args={
+                "cxx": CXX_FLAGS,
+                "nvcc": NVCC_FLAGS_PUNICA,
+            },
+        ))
+
 vllm_extension = CUDAExtension(
     name="vllm._C",
     sources=[
