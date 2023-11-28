@@ -1,3 +1,7 @@
+//avoid multiple redefinition 
+#ifndef OPS_H
+#define OPS_H
+
 #include <torch/extension.h>
 
 void paged_attention_v1(
@@ -73,3 +77,5 @@ void squeezellm_gemm(
   torch::Tensor mat,
   torch::Tensor mul,
   torch::Tensor lookup_table);
+
+#endif // OPS_H
