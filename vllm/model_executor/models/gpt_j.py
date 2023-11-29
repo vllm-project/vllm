@@ -79,7 +79,7 @@ class GPTJAttention(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         self.rotary_emb = get_rope(
-            self.head_dim,
+            self.head_size,
             rotary_dim=config.rotary_dim,
             max_position=max_position_embeddings,
             base=rope_theta,

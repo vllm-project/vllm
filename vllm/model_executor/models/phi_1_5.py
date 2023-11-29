@@ -121,7 +121,7 @@ class PhiAttention(nn.Module):
         rope_theta = 10000
         max_position_embeddings = getattr(config, "n_positions", 2048)
         self.rotary_emb = get_rope(
-            self.head_dim,
+            self.head_size,
             rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
