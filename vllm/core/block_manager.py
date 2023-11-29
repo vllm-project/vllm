@@ -6,7 +6,6 @@ from vllm.block import PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
-
 # Mapping: logical block number -> physical block.
 BlockTable = List[PhysicalTokenBlock]
 
