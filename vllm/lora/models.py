@@ -503,16 +503,16 @@ class LoRAModelManager:
                         input_dim,
                         output_dim,
                         rank,
-                        module.base_layer.weight.dtype,
+                        module.lora_a_stacked.dtype,
                         "cpu",
                         embeddings_tensor_dim=embeddings_tensor_dim)
                 else:
                     lora = _create_dummy_lora(
                         module_name,
-                        module.base_layer.weight.shape[1],
-                        module.base_layer.weight.shape[0],
+                        module.lora_a_stacked.shape[-1],
+                        module.lora_b_stacked.shape[-2],
                         rank,
-                        module.base_layer.weight.dtype,
+                        module.lora_a_stacked.dtype,
                         "cpu",
                     )
                 lora.optimize()
@@ -520,13 +520,13 @@ class LoRAModelManager:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
                 subloras = []
-                for r in replacements:
+                for i, r in enumerate(replacements):
                     lora = _create_dummy_lora(
                         module_name + "." + r,
-                        module.base_layer.weight.shape[1],
-                        module.base_layer.weight.shape[0] // len(replacements),
+                        module.lora_a_stacked[i].shape[-1],
+                        module.lora_b_stacked[i].shape[-2],
                         rank,
-                        module.base_layer.weight.dtype,
+                        module.lora_a_stacked[i].dtype,
                         "cpu",
                     )
                     lora.optimize()
