@@ -160,11 +160,10 @@ class ModelRunner:
                                     dtype=torch.int,
                                     device="cuda")
         max_block_table_len = max([len(t) for t in block_tables])
-        block_tables = _make_tensor_with_pad(
-            block_tables,
-            max_len=max_block_table_len,
-            pad=0,
-            dtype=torch.int)
+        block_tables = _make_tensor_with_pad(block_tables,
+                                             max_len=max_block_table_len,
+                                             pad=0,
+                                             dtype=torch.int)
 
         input_metadata = InputMetadata(
             prompt_lens=[],
