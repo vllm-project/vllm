@@ -111,7 +111,7 @@ class LLMEngine:
         self._init_cache()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config)
+        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
 
         # Logging.
         self.last_logging_time = 0.0

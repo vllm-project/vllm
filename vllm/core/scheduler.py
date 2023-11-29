@@ -2,7 +2,7 @@ import enum
 import time
 from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
 
-from vllm.config import CacheConfig, SchedulerConfig
+from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.block_manager import AllocStatus, BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.lora.request import LoRARequest
@@ -73,11 +73,11 @@ class Scheduler:
         self,
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
-        lora_enabled: bool = False,
+        lora_config: Optional[LoRAConfig],
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
-        self.lora_enabled = lora_enabled
+        self.lora_config = lora_config
 
         self.prompt_limit = min(self.scheduler_config.max_model_len,
                                 self.scheduler_config.max_num_batched_tokens)
@@ -98,6 +98,10 @@ class Scheduler:
         self.running: List[SequenceGroup] = []
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
+
+    @property
+    def lora_enabled(self) -> bool:
+        return bool(self.lora_config)
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
