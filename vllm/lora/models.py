@@ -458,14 +458,14 @@ class LoRAModelManager:
 
             new_module = replace_submodule(
                 self.model, module_name,
-                from_layer(module, self.capacity, self.lora_config,
+                from_layer(module, self._lora_slots, self.lora_config,
                            self.model.config))
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
                 sampler_module = self.model.get_submodule("sampler")
                 new_module = replace_submodule(
                     self.model, "sampler",
-                    from_layer_sampler(sampler_module, module, self.capacity,
+                    from_layer_sampler(sampler_module, module, self._lora_slots,
                                        self.lora_config, self.model.config))
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
