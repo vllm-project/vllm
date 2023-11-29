@@ -7,7 +7,15 @@ from vllm.sequence import SequenceData
 
 
 class SamplingMetadata:
-    """Metadata for sampling."""
+    """Metadata for input sequences. Used in sampler.
+
+    Args:
+        seq_groups: List of (seq_ids, sampling_params).
+        seq_data: Seq_id -> SequenceData.
+        prompt_lens: Lengths of prompts.
+        selected_token_indices: Token indices selected for sampling.
+        categorized_sample_indices: SamplingType -> token indicies to sample.
+    """
 
     def __init__(
         self,
