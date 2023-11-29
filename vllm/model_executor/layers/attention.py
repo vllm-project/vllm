@@ -152,11 +152,6 @@ class PagedAttention(nn.Module):
         return output.view(batch_size, seq_len, hidden_size)
 
 
-# FIXME: Temporary hack to avoid import errors.
-PagedAttentionWithRoPE = PagedAttention
-PagedAttentionWithALiBi = PagedAttention
-
-
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     batch_size: int,
