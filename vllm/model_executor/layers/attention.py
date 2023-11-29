@@ -72,9 +72,16 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
+            key_to_cache = key
+            value_to_cache = value
+            if input_metadata.to_cache is not None:
+                key_to_cache = key_to_cache[input_metadata.to_cache]
+                value_to_cache = value_to_cache[input_metadata.to_cache]
+                slot_mapping = slot_mapping[input_metadata.to_cache]
+
             cache_ops.reshape_and_cache(
-                key,
-                value,
+                key_to_cache,
+                value_to_cache,
                 key_cache,
                 value_cache,
                 slot_mapping,
