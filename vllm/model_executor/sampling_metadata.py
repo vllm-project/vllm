@@ -27,7 +27,7 @@ class SamplingMetadata:
 
     def __repr__(self) -> str:
         return (
-            f"SamplingMetadata("
+            "SamplingMetadata("
             f"seq_groups={self.seq_groups}, "
             f"seq_data={self.seq_data}, "
             f"prompt_lens={self.prompt_lens}, "
