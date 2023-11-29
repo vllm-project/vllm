@@ -44,10 +44,12 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 36864) \
     f(in_T, out_T, W_T, narrow, 49152) \
 
+// Keep this in sync with vllm/config::LoRAConfig
 #define FOR_BGMV_WIDE_NARROW(f, in_T, out_T, W_T) \
-    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 8) \
+    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 8)  \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 16) \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 32) \
-    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 64)
+    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 64) \
+    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 128)
 
 // clang-format on
