@@ -3,7 +3,7 @@ requires = [
     "ninja",
     "packaging",
     "setuptools",
-    "torch >= 2.1.0",
+    # "torch >= 2.1.0", # commented out to accommodate ROCm
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
