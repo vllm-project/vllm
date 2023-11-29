@@ -465,8 +465,9 @@ class LoRAModelManager:
                 sampler_module = self.model.get_submodule("sampler")
                 new_module = replace_submodule(
                     self.model, "sampler",
-                    from_layer_sampler(sampler_module, module, self._lora_slots,
-                                       self.lora_config, self.model.config))
+                    from_layer_sampler(sampler_module, module,
+                                       self._lora_slots, self.lora_config,
+                                       self.model.config))
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
             new_module.set_mapping(self.base_indices, self.sampler_indices,
