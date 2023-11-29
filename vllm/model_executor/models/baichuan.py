@@ -175,14 +175,11 @@ class BaiChuanAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.W_pack(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
+        if self.postion_embedding != "ALIBI":
+            q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        if self.postion_embedding == "ALIBI":
-            attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
-                                    cache_event)
-        else:
-            attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                    input_metadata, cache_event)
-
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         output, _ = self.o_proj(attn_output)
         return output
 
