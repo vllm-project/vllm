@@ -24,11 +24,12 @@ from transformers import GPTNeoXConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
@@ -77,13 +78,13 @@ class GPTNeoXAttention(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        self.attn = PagedAttentionWithRoPE(
-            self.num_heads,
+        self.rotary_emb = get_rope(
             self.head_size,
-            scaling,
-            rotary_dim,
+            rotary_dim=rotary_dim,
+            max_position=max_position_embeddings,
             base=rope_theta,
-            max_position=max_position_embeddings)
+        )
+        self.attn = PagedAttention(self.num_heads, self.head_size, scaling)
 
     def forward(
         self,
@@ -95,9 +96,10 @@ class GPTNeoXAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
+        q, k = self.rotary_emb(position_ids, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(position_ids, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         output, _ = self.dense(attn_output)
         return output
 

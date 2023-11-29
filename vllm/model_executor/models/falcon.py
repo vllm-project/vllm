@@ -28,13 +28,12 @@ from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import (PagedAttention,
-                                                  PagedAttentionWithALiBi,
-                                                  PagedAttentionWithRoPE)
+from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
@@ -144,14 +143,16 @@ class FalconAttention(nn.Module):
             rope_theta = getattr(config, "rope_theta", 10000)
             max_position_embeddings = getattr(config,
                                               "max_position_embeddings", 8192)
-            self.attn = PagedAttentionWithRoPE(
-                self.num_heads,
+            self.rotary_emb = get_rope(
                 self.head_dim,
-                self.inv_norm_factor,
-                base=rope_theta,
-                max_position=max_position_embeddings,
                 rotary_dim=self.head_dim,
-                num_kv_heads=self.num_kv_heads)
+                max_position=max_position_embeddings,
+                base=rope_theta,
+            )
+            self.attn = PagedAttention(self.num_heads,
+                                       self.head_dim,
+                                       self.inv_norm_factor,
+                                       num_kv_heads=self.num_kv_heads)
         elif self.use_alibi:
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
@@ -159,11 +160,11 @@ class FalconAttention(nn.Module):
             alibi_slopes = (_get_alibi_slopes(self.total_num_heads) *
                             self.inv_norm_factor)
             alibi_slopes = alibi_slopes[head_start:head_end].tolist()
-            self.attn = PagedAttentionWithALiBi(self.num_heads,
-                                                self.head_dim,
-                                                self.inv_norm_factor,
-                                                alibi_slopes,
-                                                num_kv_heads=self.num_kv_heads)
+            self.attn = PagedAttention(self.num_heads,
+                                       self.head_dim,
+                                       self.inv_norm_factor,
+                                       num_kv_heads=self.num_kv_heads,
+                                       alibi_slopes=alibi_slopes)
         else:
             self.attn = PagedAttention(self.num_heads,
                                        self.head_dim,
@@ -182,13 +183,11 @@ class FalconAttention(nn.Module):
         if bias is not None:
             qkv += bias
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        k_cache, v_cache = kv_cache
         if self.use_rotary:
-            attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                    input_metadata, cache_event)
-        else:
-            attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
-                                    cache_event)
+            q, k = self.rotary_emb(positions, q, k)
+        k_cache, v_cache = kv_cache
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         attn_output, bias = self.dense(attn_output)
         return attn_output, bias
 
