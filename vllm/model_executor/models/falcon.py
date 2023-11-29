@@ -183,9 +183,9 @@ class FalconAttention(nn.Module):
         if bias is not None:
             qkv += bias
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        k_cache, v_cache = kv_cache
         if self.use_rotary:
             q, k = self.rotary_emb(positions, q, k)
+        k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
                                 cache_event)
         attn_output, bias = self.dense(attn_output)
