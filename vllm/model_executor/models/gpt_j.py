@@ -85,10 +85,7 @@ class GPTJAttention(nn.Module):
             base=rope_theta,
             is_neox_style=False,
         )
-        self.attn = PagedAttention(
-            self.num_heads,
-            self.head_size,
-            scaling)
+        self.attn = PagedAttention(self.num_heads, self.head_size, scaling)
 
     def forward(
         self,
@@ -102,8 +99,8 @@ class GPTJAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
 

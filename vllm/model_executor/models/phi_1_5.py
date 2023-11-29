@@ -126,10 +126,7 @@ class PhiAttention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
         )
-        self.attn = PagedAttention(
-            self.num_heads,
-            self.head_size,
-            scaling)
+        self.attn = PagedAttention(self.num_heads, self.head_size, scaling)
 
     def forward(
         self,
@@ -143,8 +140,8 @@ class PhiAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         output, _ = self.out_proj(attn_output)
         return output
 

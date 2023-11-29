@@ -99,10 +99,7 @@ class InternLMAttention(nn.Module):
             max_position=self.max_position_embeddings,
             base=self.rope_theta,
         )
-        self.attn = PagedAttention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling)
+        self.attn = PagedAttention(self.num_heads, self.head_dim, self.scaling)
 
     def forward(
         self,
@@ -116,8 +113,8 @@ class InternLMAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         output, _ = self.o_proj(attn_output)
         return output
 
