@@ -27,7 +27,8 @@ class PagedAttention(nn.Module):
         operations are issued by the cache engine before executing the forward
         pass of the model, and they are executed asynchronously.
     2. Reshape and store the input key and value tensors in the KV cache.
-    3. Perform attention using either xformers or the PagedAttention custom op.
+    3. Perform (multi-head/multi-query/grouped-query) attention using either
+        xformers or the PagedAttention custom op.
     4. Return the output tensor.
     """
 
@@ -134,7 +135,9 @@ class PagedAttention(nn.Module):
                                                     self.num_queries_per_kv,
                                                     value.shape[-1])
 
-            # Set attention bias if not provided. FIXME: This is a hack.
+            # Set attention bias if not provided. This typically happens at the
+            # very attention layer of every iteration.
+            # FIXME(woosuk): This is a hack.
             if input_metadata.attn_bias is None:
                 if self.alibi_slopes is None:
                     attn_bias = BlockDiagonalCausalMask.from_seqlens(
@@ -147,7 +150,8 @@ class PagedAttention(nn.Module):
                     input_metadata.attn_bias = _make_alibi_bias(
                         self.alibi_slopes, batch_size, seq_len, query.dtype)
 
-            # TODO(woosuk): Too much views. Can we do better?
+            # TODO(woosuk): Too many view operations. Let's try to reduce them
+            # in the future for code readability.
             if self.alibi_slopes is None:
                 query = query.unsqueeze(0)
                 key = key.unsqueeze(0)
