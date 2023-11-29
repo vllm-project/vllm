@@ -118,15 +118,13 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
             out_float = torch.zeros(out_shape,
                                     device="cuda",
                                     dtype=torch.float)
-            ops.squeezellm_gemm(reshaped_x, qweight, out_float,
-                                             lookup_table)
+            ops.squeezellm_gemm(reshaped_x, qweight, out_float, lookup_table)
             out = out_float.to(dtype=torch.float16)
             # do something specific for HIP
         elif torch.cuda.is_available() and torch.version.cuda:
             # NOTE: The output tensor should be zero-initialized.
             out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
-            ops.squeezellm_gemm(reshaped_x, qweight, out,
-                                             lookup_table)
+            ops.squeezellm_gemm(reshaped_x, qweight, out, lookup_table)
 
         if bias is not None:
             out = out + bias

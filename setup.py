@@ -201,7 +201,7 @@ elif torch.cuda.is_available() and torch.version.hip:
 
 ext_modules = []
 
-vllm_extension_sources=[
+vllm_extension_sources = [
     "csrc/cache_kernels.cu",
     "csrc/attention/attention_kernels.cu",
     "csrc/pos_encoding_kernels.cu",
@@ -212,10 +212,9 @@ vllm_extension_sources=[
     "csrc/pybind.cpp",
 ]
 
-
 if torch.cuda.is_available() and torch.version.cuda:
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
-    
+
 vllm_extension = CUDAExtension(
     name="vllm._C",
     sources=vllm_extension_sources,
