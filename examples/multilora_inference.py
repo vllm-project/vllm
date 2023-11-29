@@ -15,10 +15,11 @@ from vllm.lora.request import LoRARequest
 def create_test_prompts(lora_path: str) -> List[Tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters.
     
-    2 requests for base model, 2 requests for the LoRA.
-
-    In this example, we only use one LoRA adapter. However, we could
-    specify multiple adapters and use them in the same way.
+    2 requests for base model, 4 requests for the LoRA. We define 2
+    different LoRA adapters (using the same model for demo purposes).
+    Since we also set `max_loras=1`, the expectation is that the requests
+    with the second LoRA adapter will be ran after all requests with the
+    first adapter have finished.
     """
     return [
         ("A robot may not injure a human being",
@@ -88,9 +89,18 @@ def process_requests(engine: LLMEngine,
 
 def initialize_engine() -> LLMEngine:
     """Initialize the LLMEngine."""
+    # max_loras: controls the number of LoRAs that can be used in the same
+    #   batch. Larger numbers will cause higher memory usage, as each LoRA
+    #   slot requires its own preallocated tensor.
+    # max_lora_rank: controls the maximum supported rank of all LoRAs. Larger
+    #   numbers will cause higher memory usage. If you know that all LoRAs will
+    #   use the same rank, it is recommended to set this as low as possible.
+    # max_cpu_loras: controls the size of the CPU LoRA cache.
     engine_args = EngineArgs(model="meta-llama/Llama-2-7b-hf",
                              enable_lora=True,
                              max_loras=1,
+                             max_lora_rank=8,
+                             max_cpu_loras=2,
                              max_num_seqs=256)
     return LLMEngine.from_engine_args(engine_args)
 
