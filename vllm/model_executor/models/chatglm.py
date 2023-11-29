@@ -76,8 +76,9 @@ class GLMAttention(nn.Module):
             linear_method=linear_method,
         )
 
-        max_positions = getattr(config, "seq_length", 8192)
+        # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
         rope_ratio = getattr(config, "rope_ratio", 1.0)
+        max_positions = getattr(config, "seq_length", 8192)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim // 2,
