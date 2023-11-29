@@ -76,11 +76,14 @@ class GLMAttention(nn.Module):
             linear_method=linear_method,
         )
 
+        max_positions = getattr(config, "seq_length", 8192)
         rope_ratio = getattr(config, "rope_ratio", 1.0)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim // 2,
+            max_position=max_positions,
             base=10000 * rope_ratio,
+            is_neox_style=False,
         )
         self.attn = PagedAttention(
             self.num_heads,
@@ -99,10 +102,9 @@ class GLMAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(position_ids, q, k)
         key_cache, value_cache = kv_cache
-
         context_layer = self.attn(
-            position_ids,
             q,
             k,
             v,
@@ -111,9 +113,7 @@ class GLMAttention(nn.Module):
             input_metadata,
             cache_event,
         )
-
         attn_output, _ = self.dense(context_layer)
-
         return attn_output
 
 
