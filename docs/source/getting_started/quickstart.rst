@@ -137,7 +137,7 @@ This server can be queried in the same format as OpenAI API. For example, list t
     $ curl http://localhost:8000/v1/models
 
 Using OpenAI Completions API with vLLM
--------------------------------
+--------------------------------------
 
 Query the model with input prompts:
 
