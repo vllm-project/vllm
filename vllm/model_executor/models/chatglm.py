@@ -10,12 +10,13 @@ from torch.nn import LayerNorm
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
@@ -75,13 +76,17 @@ class GLMAttention(nn.Module):
             linear_method=linear_method,
         )
 
-        self.attn = PagedAttentionWithRoPE(
+        rope_ratio = getattr(config, "rope_ratio", 1.0)
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim // 2,
+            base=10000 * rope_ratio,
+        )
+        self.attn = PagedAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
-            rotary_dim=self.head_dim // 2,
             num_kv_heads=self.num_kv_heads,
-            is_neox_style=False,
         )
 
     def forward(
