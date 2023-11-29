@@ -150,8 +150,10 @@ class BaiChuanAttention(nn.Module):
             alibi_slopes = alibi_slopes[head_start:head_end].tolist()
 
             scaling = self.head_dim**-0.5
-            self.attn = PagedAttention(self.num_heads, self.head_dim,
-                                                scaling, alibi_slopes=alibi_slopes)
+            self.attn = PagedAttention(self.num_heads,
+                                       self.head_dim,
+                                       scaling,
+                                       alibi_slopes=alibi_slopes)
         else:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -160,10 +162,8 @@ class BaiChuanAttention(nn.Module):
                 base=self.rope_theta,
             )
             self.scaling = self.head_dim**-0.5
-            self.attn = PagedAttention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling)
+            self.attn = PagedAttention(self.num_heads, self.head_dim,
+                                       self.scaling)
 
     def forward(
         self,
