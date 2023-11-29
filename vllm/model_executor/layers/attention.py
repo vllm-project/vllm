@@ -17,6 +17,19 @@ _PARTITION_SIZE = 512
 
 
 class PagedAttention(nn.Module):
+    """MHA/MQA/GQA layer with PagedAttention.
+
+    This class takes query, key, and value tensors as input. The input tensors
+    can either contain prompt tokens or generation tokens.
+    The class does the following:
+
+    1. Wait for the cache operations (e.g., swap, copy) to finish. The cache
+        operations are issued by the cache engine before executing the forward
+        pass of the model, and they are executed asynchronously.
+    2. Reshape and store the input key and value tensors in the KV cache.
+    3. Perform attention using either xformers or the PagedAttention custom op.
+    4. Return the output tensor.
+    """
 
     def __init__(
         self,
@@ -57,6 +70,21 @@ class PagedAttention(nn.Module):
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
+        """PagedAttention forward pass.
+
+        Args:
+            query: shape = [batch_size, seq_len, num_heads * head_size]
+            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
+            value: shape = [batch_size, num_kv_heads * head_size]
+            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
+                block_size, x]
+            value_cache: shape = [num_blocks, num_kv_heads, head_size,
+                block_size]
+            input_metadata: metadata for the inputs.
+            cache_event: event to wait for the cache operations to finish.
+        Returns:
+            shape = [batch_size, seq_len, num_heads * head_size]
+        """
         batch_size, seq_len, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -91,8 +119,10 @@ class PagedAttention(nn.Module):
         if is_prompt:
             # Prompt run.
             if self.num_kv_heads != self.num_heads:
-                # For MQA/GQA, project the key and value tensors to the desired
-                # number of heads.
+                # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
+                # project the key and value tensors to the desired number of
+                # heads.
+                # TODO(woosuk): Use MQA/GQA kernels for higher performance.
                 query = query.view(query.shape[0], self.num_kv_heads,
                                    self.num_queries_per_kv, query.shape[-1])
                 key = key[:, :,
