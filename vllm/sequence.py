@@ -137,6 +137,10 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
 
+    @property
+    def lora_int_id(self) -> int:
+        return self.lora_request.lora_int_id if self.lora_request else 0
+
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
             block_number=len(self.logical_token_blocks),
@@ -261,6 +265,10 @@ class SequenceGroup:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).data.prompt_token_ids
+
+    @property
+    def lora_int_id(self) -> int:
+        return self.lora_request.lora_int_id if self.lora_request else 0
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining

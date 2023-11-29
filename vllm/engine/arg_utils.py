@@ -34,6 +34,7 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enable_lora: bool = False
+    max_loras: int = 1
     max_lora_rank: int = 16
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
@@ -191,6 +192,10 @@ class EngineArgs:
         parser.add_argument('--enable-lora',
                             action='store_true',
                             help='enable lora adapters')
+        parser.add_argument('--max-loras',
+                            type=int,
+                            default=EngineArgs.max_loras,
+                            help='max number of LoRAs in a single batch')
         parser.add_argument('--max-lora-rank',
                             type=int,
                             default=EngineArgs.max_lora_rank,
@@ -244,6 +249,7 @@ class EngineArgs:
                                            self.max_paddings)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
+            max_loras=self.max_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.lora_max_cpu_loras if self.lora_max_cpu_loras >

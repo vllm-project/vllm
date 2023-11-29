@@ -354,10 +354,10 @@ class SchedulerConfig:
 @dataclass
 class LoRAConfig:
     max_lora_rank: int
+    max_loras: int
     max_cpu_loras: Optional[int] = None
     lora_dtype: Optional[torch.dtype] = None
     lora_extra_vocab_size: int = 256
-    max_loras: Optional[int] = None
 
     def __post_init__(self):
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
@@ -366,6 +366,14 @@ class LoRAConfig:
             raise ValueError(
                 f"max_lora_rank ({self.max_lora_rank}) must be one of "
                 f"{possible_max_ranks}.")
+        if self.max_loras < 1:
+            raise ValueError(f"max_loras ({self.max_loras}) must be >= 1.")
+        if self.max_cpu_loras is None:
+            self.max_cpu_loras = self.max_loras
+        elif self.max_cpu_loras < self.max_loras:
+            raise ValueError(
+                f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
+                f"max_num_seqs ({self.max_loras})")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
@@ -379,14 +387,6 @@ class LoRAConfig:
                 "Due to limitations of the custom LoRA CUDA kernel, "
                 "max_num_batched_tokens must be <= 65528 when "
                 "LoRA is enabled.")
-
-        self.max_loras = scheduler_config.max_num_seqs
-        if self.max_cpu_loras is None:
-            self.max_cpu_loras = scheduler_config.max_num_seqs
-        elif self.max_cpu_loras < scheduler_config.max_num_seqs:
-            raise ValueError(
-                f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
-                f"max_num_seqs ({scheduler_config.max_num_seqs})")
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

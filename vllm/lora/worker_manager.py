@@ -137,7 +137,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
             lora_config=self.lora_config,
             lora_manager_cls=self._lora_manager_cls,
         )
-        self._lora_manager = lora_manager
+        self._lora_manager: LoRAModelManager = lora_manager
         return lora_manager.model
 
     def apply_loras(self, lora_requests: List[LoRARequest],
@@ -155,7 +155,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
             raise RuntimeError(
                 f"Number of requested LoRAs ({len(loras_map)}) is greater "
                 "than the number of GPU LoRA slots "
-                f"({self._lora_manager.max_num_seqs}).")
+                f"({self._lora_manager.lora_slots}).")
 
         new_loras = set(loras_map)
         loras_to_add = new_loras - loras_that_exist
@@ -235,7 +235,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora_config=self.lora_config,
             max_num_batched_tokens=self.max_num_batched_tokens,
         )
-        self._lora_manager = lora_manager
+        self._lora_manager: LRUCacheLoRAModelManager = lora_manager
         return lora_manager.model
 
     def _apply_loras(self, lora_requests: List[LoRARequest]) -> None:
@@ -247,7 +247,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             raise RuntimeError(
                 f"Number of requested LoRAs ({len(loras_map)}) is greater "
                 "than the number of GPU LoRA slots "
-                f"({self._lora_manager.max_num_seqs}).")
+                f"({self._lora_manager.lora_slots}).")
         for lora in loras_map.values():
             self.add_lora(lora)
 

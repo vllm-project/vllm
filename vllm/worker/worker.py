@@ -123,8 +123,9 @@ class Worker:
         # consumption create dummy lora request copies from the lora request
         # passed in, which contains a lora from the lora warmup path.
         dummy_lora_requests = []
+        dummy_lora_requests_per_seq = []
         if self.lora_config:
-            for idx in range(max_num_seqs):
+            for idx in range(self.lora_config.max_loras):
                 lora_id = idx + 1
                 dummy_lora_request = LoRARequest(
                     lora_id=f"warmup_{lora_id}",
@@ -134,6 +135,10 @@ class Worker:
                 self.lora_manager.add_dummy_lora(dummy_lora_request,
                                                  rank=LORA_WARMUP_RANK)
                 dummy_lora_requests.append(dummy_lora_request)
+            dummy_lora_requests_per_seq = [
+                dummy_lora_requests[idx % len(dummy_lora_requests)]
+                for idx in range(max_num_seqs)
+            ]
 
         seqs = []
         for group_id in range(max_num_seqs):
@@ -146,8 +151,8 @@ class Worker:
                 seq_data={group_id: seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                lora_request=dummy_lora_requests[group_id]
-                if dummy_lora_requests else None,
+                lora_request=dummy_lora_requests_per_seq[group_id]
+                if dummy_lora_requests_per_seq else None,
             )
             seqs.append(seq)
 
@@ -159,7 +164,7 @@ class Worker:
                 prepared_lora_requests,
             ) = self._prepare_inputs(seqs)
 
-        if dummy_lora_requests:
+        if self.lora_config:
             self.apply_loras(prepared_lora_requests, lora_mapping)
 
         # Execute the model.

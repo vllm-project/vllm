@@ -314,9 +314,9 @@ class LoRAModelManager:
         """
         self.lora_config = lora_config
         self.max_num_seqs = max_num_seqs
-        assert self.capacity >= self.max_num_seqs
+        assert self.capacity >= self.lora_slots
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
-        self.lora_id_to_index: List[Optional[int]] = [None] * self._lora_slots
+        self.lora_id_to_index: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.base_indices = torch.empty(self.max_num_batched_tokens,
                                         dtype=torch.long,
@@ -353,8 +353,8 @@ class LoRAModelManager:
         return self.lora_config.max_cpu_loras
 
     @property
-    def _lora_slots(self) -> int:
-        return self.max_num_seqs
+    def lora_slots(self) -> int:
+        return self.lora_config.max_loras
 
     def __len__(self) -> int:
         return len(self._registered_loras)
@@ -421,7 +421,7 @@ class LoRAModelManager:
         (base_indices, sampler_indices, sampler_indices_padded,
          embeddings_indices,
          indices_len) = convert_mapping(mapping, self.lora_id_to_index,
-                                        self._lora_slots + 1, self.vocab_size,
+                                        self.lora_slots + 1, self.vocab_size,
                                         self.lora_config.lora_extra_vocab_size)
         self.base_indices[:base_indices.shape[0]].copy_(base_indices)
         self.sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
@@ -448,7 +448,7 @@ class LoRAModelManager:
     def remove_all_loras(self) -> bool:
         """Remove all LoRAModels from the manager."""
         self._registered_loras.clear()
-        self.lora_id_to_index = [None] * self._lora_slots
+        self.lora_id_to_index = [None] * self.lora_slots
         self._active_loras.clear()
 
     def _create_lora_modules(self):
@@ -458,16 +458,15 @@ class LoRAModelManager:
 
             new_module = replace_submodule(
                 self.model, module_name,
-                from_layer(module, self._lora_slots, self.lora_config,
+                from_layer(module, self.lora_slots, self.lora_config,
                            self.model.config))
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
                 sampler_module = self.model.get_submodule("sampler")
                 new_module = replace_submodule(
                     self.model, "sampler",
-                    from_layer_sampler(sampler_module, module,
-                                       self._lora_slots, self.lora_config,
-                                       self.model.config))
+                    from_layer_sampler(sampler_module, module, self.lora_slots,
+                                       self.lora_config, self.model.config))
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
             new_module.set_mapping(self.base_indices, self.sampler_indices,
@@ -604,7 +603,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         self._registered_loras: LoRALRUCache = LoRALRUCache(
             self.capacity, self.deactivate_lora)
         self._active_loras: LoRALRUCache = LoRALRUCache(
-            self.max_num_seqs, self._deactivate_lora)
+            self.lora_slots, self._deactivate_lora)
 
     def list_loras(self) -> Dict[int, LoRAModel]:
         """List all registered LoRAModels."""
@@ -629,7 +628,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         lora_id: int,
     ) -> bool:
         if lora_id not in self._active_loras and len(
-                self._active_loras) >= self.max_num_seqs:
+                self._active_loras) >= self.lora_slots:
             self._active_loras.remove_oldest()
         result = super().activate_lora(lora_id)
         # We always touch to update the LRU cache order
