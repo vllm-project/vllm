@@ -75,12 +75,17 @@ class GLMAttention(nn.Module):
             linear_method=linear_method,
         )
 
+        # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
+        rope_ratio = getattr(config, "rope_ratio", 1.0)
+        max_positions = getattr(config, "seq_length", 8192)
         self.attn = PagedAttentionWithRoPE(
             self.num_heads,
             self.head_dim,
             self.scaling,
             rotary_dim=self.head_dim // 2,
             num_kv_heads=self.num_kv_heads,
+            max_position=max_positions,
+            base=10000 * rope_ratio,
             is_neox_style=False,
         )
 
