@@ -1,11 +1,14 @@
 #include <torch/extension.h>
 
-torch::Tensor awq_gemm(
-  torch::Tensor _in_feats,
-  torch::Tensor _kernel,
-  torch::Tensor _scaling_factors,
-  torch::Tensor _zeros,
-  int split_k_iters);
+
+#ifndef USE_ROCM
+  torch::Tensor awq_gemm(
+    torch::Tensor _in_feats,
+    torch::Tensor _kernel,
+    torch::Tensor _scaling_factors,
+    torch::Tensor _zeros,
+    int split_k_iters);
+#endif
 
 void squeezellm_gemm(
   torch::Tensor vec,
@@ -14,6 +17,8 @@ void squeezellm_gemm(
   torch::Tensor lookup_table);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+#ifndef USE_ROCM
   m.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
+#endif
   m.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
 }

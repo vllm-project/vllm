@@ -1,13 +1,15 @@
 from typing import Type
-
-from vllm.model_executor.layers.quantization.awq import AWQConfig
+import torch
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 _QUANTIZATION_CONFIG_REGISTRY = {
-    "awq": AWQConfig,
     "squeezellm": SqueezeLLMConfig,
 }
+
+if torch.cuda.is_available() and torch.version.cuda:
+    from vllm.model_executor.layers.quantization.awq import AWQConfig
+    _QUANTIZATION_CONFIG_REGISTRY["awq"] = AWQConfig
 
 
 def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:

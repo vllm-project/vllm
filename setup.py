@@ -16,30 +16,64 @@ MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
-ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030","gfx1100"}
-SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
+ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030", "gfx1100"}
+# SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 # Compiler flags.
 CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
 # TODO(woosuk): Should we use -O3?
 NVCC_FLAGS = ["-O2", "-std=c++17"]
 
-if torch.version.hip:
-    if ROCM_HOME is not None:
-        NVCC_FLAGS += [f"-DUSE_ROCM"]
+if torch.cuda.is_available() and torch.version.hip and ROCM_HOME is not None:
+    NVCC_FLAGS += ["-DUSE_ROCM"]
 
-if not torch.version.hip:
-    if CUDA_HOME is None:
-        raise RuntimeError(
-            "Cannot find CUDA_HOME. CUDA must be available to build the package.")
+if torch.cuda.is_available() and torch.version.cuda and CUDA_HOME is None:
+    raise RuntimeError(
+        "Cannot find CUDA_HOME. CUDA must be available to build the package.")
 
 ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
-if CUDA_HOME is None:
-    raise RuntimeError(
-        "Cannot find CUDA_HOME. CUDA must be available to build the package.")
+
+def get_amdgpu_offload_arch():
+    error_message = ""
+    command = "/opt/rocm/llvm/bin/amdgpu-offload-arch"
+    try:
+        output = subprocess.check_output([command])
+        return output.decode('utf-8').strip()
+    except subprocess.CalledProcessError as e:
+        error_message = f"Error: {e}"
+    except FileNotFoundError:
+        # If the command is not found, print an error message
+        error_message = f"The command {command} was not found."
+
+    if error_message:
+        raise RuntimeError(error_message)
+
+    return None
+
+
+def get_hipcc_rocm_version():
+    # Run the hipcc --version command
+    result = subprocess.run(['hipcc', '--version'],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True)
+
+    # Check if the command was executed successfully
+    if result.returncode != 0:
+        print("Error running 'hipcc --version'")
+        return None
+
+    # Extract the version using a regular expression
+    match = re.search(r'HIP version: (\S+)', result.stdout)
+    if match:
+        # Return the version string
+        return match.group(1)
+    else:
+        print("Could not find HIP version in the output")
+        return None
 
 
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
@@ -72,7 +106,9 @@ def get_torch_arch_list() -> Set[str]:
         return set()
 
     # Filter out the invalid architectures and print a warning.
-    valid_archs = SUPPORTED_ARCHS.union({s + "+PTX" for s in NVIDIA_SUPPORTED_ARCHS})
+    valid_archs = NVIDIA_SUPPORTED_ARCHS.union(
+        {s + "+PTX"
+         for s in NVIDIA_SUPPORTED_ARCHS})
     arch_list = torch_arch_list.intersection(valid_archs)
     # If none of the specified architectures are valid, raise an error.
     if not arch_list:
@@ -93,24 +129,24 @@ def get_torch_arch_list() -> Set[str]:
 
 # First, check the TORCH_CUDA_ARCH_LIST environment variable.
 compute_capabilities = get_torch_arch_list()
-if not torch.version.hip:
-    if not compute_capabilities:
-        # If TORCH_CUDA_ARCH_LIST is not defined or empty, target all available
-        # GPUs on the current machine.
-        device_count = torch.cuda.device_count()
-        for i in range(device_count):
-            major, minor = torch.cuda.get_device_capability(i)
-            if major < 7:
-                raise RuntimeError(
-                    "GPUs with compute capability below 7.0 are not supported.")
-            compute_capabilities.add(f"{major}.{minor}")
+if torch.cuda.is_available(
+) and torch.version.cuda and not compute_capabilities:
+    # If TORCH_CUDA_ARCH_LIST is not defined or empty, target all available
+    # GPUs on the current machine.
+    device_count = torch.cuda.device_count()
+    for i in range(device_count):
+        major, minor = torch.cuda.get_device_capability(i)
+        if major < 7:
+            raise RuntimeError(
+                "GPUs with compute capability below 7.0 are not supported.")
+        compute_capabilities.add(f"{major}.{minor}")
 
-if not torch.version.hip:
+if torch.cuda.is_available() and torch.version.cuda:
     nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
     if not compute_capabilities:
         # If no GPU is specified nor available, add all supported architectures
         # based on the NVCC CUDA version.
-        compute_capabilities = SUPPORTED_ARCHS.copy()
+        compute_capabilities = NVIDIA_SUPPORTED_ARCHS.copy()
         if nvcc_cuda_version < Version("11.1"):
             compute_capabilities.remove("8.6")
         if nvcc_cuda_version < Version("11.8"):
@@ -118,7 +154,8 @@ if not torch.version.hip:
             compute_capabilities.remove("9.0")
     # Validate the NVCC CUDA version.
     if nvcc_cuda_version < Version("11.0"):
-        raise RuntimeError("CUDA 11.0 or higher is required to build the package.")
+        raise RuntimeError(
+            "CUDA 11.0 or higher is required to build the package.")
     if (nvcc_cuda_version < Version("11.1")
             and any(cc.startswith("8.6") for cc in compute_capabilities)):
         raise RuntimeError(
@@ -135,7 +172,7 @@ if not torch.version.hip:
                 "Targeting compute capability 8.0 instead.",
                 stacklevel=2)
             compute_capabilities = set(cc for cc in compute_capabilities
-                                    if not cc.startswith("8.9"))
+                                       if not cc.startswith("8.9"))
             compute_capabilities.add("8.0+PTX")
         if any(cc.startswith("9.0") for cc in compute_capabilities):
             raise RuntimeError(
@@ -146,12 +183,21 @@ if not torch.version.hip:
         num = capability[0] + capability[2]
         NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=sm_{num}"]
         if capability.endswith("+PTX"):
-            NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=compute_{num}"]
+            NVCC_FLAGS += [
+                "-gencode", f"arch=compute_{num},code=compute_{num}"
+            ]
 
     # Use NVCC threads to parallelize the build.
     if nvcc_cuda_version >= Version("11.2"):
         num_threads = min(os.cpu_count(), 8)
         NVCC_FLAGS += ["--threads", str(num_threads)]
+
+elif torch.cuda.is_available() and torch.version.hip:
+    amd_arch = get_amdgpu_offload_arch()
+    if amd_arch not in ROCM_SUPPORTED_ARCHS:
+        raise RuntimeError(
+            f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
+            f"amdgpu_arch_found: {amd_arch}")
 
 ext_modules = []
 
@@ -211,7 +257,7 @@ activation_extension = CUDAExtension(
 ext_modules.append(activation_extension)
 
 # Quantization kernels.
-if not torch.version.hip:
+if torch.cuda.is_available() and torch.version.cuda:
     quantization_extension = CUDAExtension(
         name="vllm.quantization_ops",
         sources=[
@@ -224,7 +270,7 @@ if not torch.version.hip:
             "nvcc": NVCC_FLAGS,
         },
     )
-else:
+elif torch.cuda.is_available() and torch.version.hip:
     quantization_extension = CUDAExtension(
         name="vllm.quantization_ops",
         sources=[
@@ -269,10 +315,20 @@ def find_version(filepath: str) -> str:
 
 def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "__init__.py"))
-    # cuda_version = str(nvcc_cuda_version)
-    # if cuda_version != MAIN_CUDA_VERSION:
-    #     cuda_version_str = cuda_version.replace(".", "")[:3]
-    #     version += f"+cu{cuda_version_str}"
+
+    if torch.cuda.is_available() and torch.version.cuda:
+        cuda_version = str(nvcc_cuda_version)
+        if cuda_version != MAIN_CUDA_VERSION:
+            cuda_version_str = cuda_version.replace(".", "")[:3]
+            version += f"+cu{cuda_version_str}"
+
+    elif torch.cuda.is_available() and torch.version.hip:
+        # Get the HIP version
+        hipcc_version = get_hipcc_rocm_version()
+        if hipcc_version != MAIN_CUDA_VERSION:
+            rocm_version_str = hipcc_version.replace(".", "")[:3]
+            version += f"+rocm{rocm_version_str}"
+
     return version
 
 
@@ -287,8 +343,14 @@ def read_readme() -> str:
 
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
-    with open(get_path("requirements.txt")) as f:
-        requirements = f.read().strip().split("\n")
+    if torch.cuda.is_available() and torch.version.hip:
+        with open(get_path("requirements-rocm.txt")) as f:
+            requirements = f.read().strip().split("\n")
+    elif torch.cuda.is_available() and torch.version.cuda:
+        with open(get_path("requirements.txt")) as f:
+            requirements = f.read().strip().split("\n")
+    print("requirements: ", requirements)
+    # exit()
     return requirements
 
 
