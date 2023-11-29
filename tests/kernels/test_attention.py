@@ -492,7 +492,7 @@ def test_single_query_cached_kv_attention_quantized(
         context_lens,
         block_size,
         max_context_len,
-        None,  # ALiBi slopes.
+        alibi_slopes,
         True,  # use quant
         k_scale,
         k_zp,
