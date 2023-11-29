@@ -87,8 +87,7 @@ class PagedAttention(nn.Module):
                 slot_mapping,
             )
 
-        is_prompt = len(input_metadata.prompt_lens) > 0
-        if is_prompt:
+        if input_metadata.is_prompt:
             # Prompt run.
             if self.num_kv_heads != self.num_heads:
                 # For MQA/GQA, project the key and value tensors to the desired
