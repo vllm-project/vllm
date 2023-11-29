@@ -7,6 +7,10 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
 
+# Mapping: logical block number -> physical block.
+BlockTable = List[PhysicalTokenBlock]
+
+
 class BlockAllocator:
     """Manages free physical token blocks for a device.
 
@@ -26,7 +30,7 @@ class BlockAllocator:
         self.num_blocks = num_blocks
 
         # Initialize the free blocks.
-        self.free_blocks: List[PhysicalTokenBlock] = []
+        self.free_blocks: BlockTable = []
         for i in range(num_blocks):
             block = PhysicalTokenBlock(device=device,
                                        block_number=i,
@@ -49,10 +53,6 @@ class BlockAllocator:
 
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
-
-
-# Mapping: logical block number -> physical block.
-BlockTable = List[PhysicalTokenBlock]
 
 
 class AllocStatus(enum.Enum):
