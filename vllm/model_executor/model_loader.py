@@ -89,11 +89,10 @@ def get_model(model_config: ModelConfig,
         # Create a model instance.
         # The weights will be initialized as empty tensors.
         with torch.device("cuda"):
-            # TODO(yard1): Clean this up (lora_config)
-            try:
+            if getattr(model_class, "supports_lora", True):
                 model = model_class(model_config.hf_config, linear_method,
                                     lora_config)
-            except TypeError:
+            else:
                 model = model_class(model_config.hf_config, linear_method)
         if model_config.load_format == "dummy":
             # NOTE(woosuk): For accurate performance evaluation, we assign

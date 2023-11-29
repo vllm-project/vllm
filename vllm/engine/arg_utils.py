@@ -34,9 +34,9 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enable_lora: bool = False
-    max_lora_rank: int = 8
+    max_lora_rank: int = 16
     lora_extra_vocab_size: int = 256
-    lora_dtype = 'bfloat16'
+    lora_dtype = 'auto'
     lora_max_cpu_loras: int = -1
 
     def __post_init__(self):
@@ -193,21 +193,21 @@ class EngineArgs:
                             help='enable lora adapters')
         parser.add_argument('--max-lora-rank',
                             type=int,
-                            default=16,
+                            default=EngineArgs.max_lora_rank,
                             help='max LoRA rank')
         parser.add_argument('--lora-extra-vocab-size',
                             type=int,
-                            default=256,
+                            default=EngineArgs.lora_extra_vocab_size,
                             help='LoRA extra vocab size')
         parser.add_argument('--lora-dtype',
                             type=str,
-                            default=EngineArgs.dtype,
+                            default=EngineArgs.lora_dtype,
                             choices=['auto', 'float16', 'bfloat16', 'float32'],
                             help='data type for lora')
         parser.add_argument(
             '--lora-max-cpu-loras',
             type=int,
-            default=-1,
+            default=EngineArgs.lora_max_cpu_loras,
             help=('Maximum number of loras to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))

@@ -369,11 +369,13 @@ class LLMEngine:
 
         current_worst_score = (current_worst_seq.get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id))
+            eos_token_id=self.tokenizer.get_lora_tokenizer(
+                current_worst_seq.lora_request).eos_token_id))
         if early_stopping is False:
             highest_attainable_score = (best_running_seq.get_beam_search_score(
                 length_penalty=length_penalty,
-                eos_token_id=self.tokenizer.eos_token_id))
+                eos_token_id=self.tokenizer.get_lora_tokenizer(
+                    best_running_seq.lora_request).eos_token_id))
         else:
             assert early_stopping == "never"
             if length_penalty > 0.0:
@@ -387,7 +389,8 @@ class LLMEngine:
                 highest_attainable_score = (
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
-                        eos_token_id=self.tokenizer.eos_token_id,
+                        eos_token_id=self.tokenizer.get_lora_tokenizer(
+                            best_running_seq.lora_request).eos_token_id,
                         seq_len=max_possible_length))
             else:
                 # Otherwise, beam search will prefer shorter sequences. The
@@ -396,7 +399,8 @@ class LLMEngine:
                 highest_attainable_score = (
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
-                        eos_token_id=self.tokenizer.eos_token_id))
+                        eos_token_id=self.tokenizer.get_lora_tokenizer(
+                            best_running_seq.lora_request).eos_token_id))
         return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
@@ -487,7 +491,8 @@ class LLMEngine:
         # Sort the finished sequences by their scores.
         all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id),
+            eos_token_id=self.tokenizer.get_lora_tokenizer(x[0].lora_request
+                                                           ).eos_token_id),
                                reverse=True)
         for seq, parent, is_new in all_finished_seqs[:beam_width]:
             if is_new:
@@ -515,7 +520,8 @@ class LLMEngine:
         # Sort the running sequences by their scores.
         running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id),
+            eos_token_id=self.tokenizer.get_lora_tokenizer(x[0].lora_request
+                                                           ).eos_token_id),
                                 reverse=True)
 
         # Check if we can stop the beam search.

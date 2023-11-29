@@ -257,7 +257,9 @@ class Worker:
                 # during generation.
                 lora_requests.add(seq_group_metadata.lora_request)
             lora_index_mapping.append([lora_id] * prompt_len)
-            lora_prompt_mapping.append(lora_id)
+            lora_prompt_mapping.extend(
+                [lora_id] *
+                (prompt_len if sampling_params.prompt_logprobs else 1))
 
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt

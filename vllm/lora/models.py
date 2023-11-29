@@ -321,10 +321,10 @@ class LoRAModelManager:
         self.base_indices = torch.empty(self.max_num_batched_tokens,
                                         dtype=torch.long,
                                         device="cuda")
-        self.sampler_indices = torch.empty(self.max_num_seqs,
+        self.sampler_indices = torch.empty(self.max_num_batched_tokens,
                                            dtype=torch.long,
                                            device="cuda")
-        self.sampler_indices_padded = torch.empty(self.max_num_seqs,
+        self.sampler_indices_padded = torch.empty(self.max_num_batched_tokens,
                                                   dtype=torch.long,
                                                   device="cuda")
         self.embeddings_indices = torch.empty(2,
