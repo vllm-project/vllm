@@ -9,6 +9,7 @@ gauge_avg_prompt_throughput = Gauge("vllm:avg_prompt_throughput_toks_per_s",
 gauge_avg_generation_throughput = Gauge(
     "vllm:avg_generation_throughput_toks_per_s",
     "Average generation throughput in tokens/s.")
+
 gauge_scheduler_running = Gauge(
     "vllm:num_requests_running",
     "Number of requests that is currently running for inference.")
@@ -16,6 +17,7 @@ gauge_scheduler_swapped = Gauge("vllm:num_requests_swapped",
                                 "Number requests swapped to CPU.")
 gauge_scheduler_waiting = Gauge("vllm:num_requests_waiting",
                                 "Number of requests waiting to be processed.")
+
 gauge_gpu_cache_usage = Gauge(
     "vllm:gpu_cache_usage_perc",
     "GPU KV-cache usage. 1 means 100 percent usage.")
@@ -26,8 +28,10 @@ gauge_cpu_cache_usage = Gauge(
 
 labels = {}
 
+
 def add_global_metrics_labels(**kwargs):
     labels.update(kwargs)
+
 
 def record_metrics(
     avg_prompt_throughput,

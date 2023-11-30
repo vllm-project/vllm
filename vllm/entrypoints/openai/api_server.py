@@ -637,9 +637,7 @@ if __name__ == "__main__":
                               trust_remote_code=engine_args.trust_remote_code)
 
     # Register labels for metrics
-    add_global_metrics_labels(
-        model_name=engine_args.model,
-    )
+    add_global_metrics_labels(model_name=engine_args.model, )
 
     uvicorn.run(app,
                 host=args.host,
