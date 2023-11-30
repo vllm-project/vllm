@@ -39,7 +39,7 @@ def main(args: argparse.Namespace):
         if profile:
             with torch.profiler.profile(activities=[
                     torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA
+                    torch.profiler.ProfilerActivity.CUDA,
             ]) as p:
                 llm.generate(prompt_token_ids=dummy_prompt_token_ids,
                              sampling_params=sampling_params,
