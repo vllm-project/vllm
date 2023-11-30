@@ -18,6 +18,7 @@ from packaging import version
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.metrics import add_global_metrics_labels
 from vllm.entrypoints.openai.protocol import (
     CompletionRequest, CompletionResponse, CompletionResponseChoice,
     CompletionResponseStreamChoice, CompletionStreamResponse,
@@ -39,12 +40,8 @@ try:
 except ImportError:
     _fastchat_available = False
 
-try:
-    from aioprometheus import MetricsMiddleware
-    from aioprometheus.asgi.starlette import metrics
-    _prometheus_available = True
-except ImportError:
-    _prometheus_available = False
+from aioprometheus import MetricsMiddleware
+from aioprometheus.asgi.starlette import metrics
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -53,9 +50,8 @@ served_model = None
 app = fastapi.FastAPI()
 engine = None
 
-if _prometheus_available:
-    app.add_middleware(MetricsMiddleware)
-    app.add_route("/metrics", metrics)
+app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
+app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 
 
 def create_error_response(status_code: HTTPStatus,
@@ -639,6 +635,11 @@ if __name__ == "__main__":
     tokenizer = get_tokenizer(engine_args.tokenizer,
                               tokenizer_mode=engine_args.tokenizer_mode,
                               trust_remote_code=engine_args.trust_remote_code)
+
+    # Register labels for metrics
+    add_global_metrics_labels(
+        model_name=engine_args.model,
+    )
 
     uvicorn.run(app,
                 host=args.host,
