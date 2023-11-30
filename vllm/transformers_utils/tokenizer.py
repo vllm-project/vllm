@@ -108,6 +108,7 @@ def _convert_tokens_to_string_with_added_encoders(
 # under Apache 2.0 license
 def detokenize_incrementally(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    prompt_len: int,
     new_token_ids: List[int],
     prev_tokens: Optional[List[str]],
     prefix_offset: int = 0,
@@ -123,13 +124,13 @@ def detokenize_incrementally(
         # 5 is an arbitrary value that should work for all
         # tokenizers (bigger = more conservative).
         # Subtract 1 extra to account for the generated token.
-        prefix_offset = max(len(output_tokens) - 6, 0)
+        prefix_offset = max(prompt_len - 5, 0)
         # If the first new token is a special token, we can't skip 1 extra token
         first_new_token_id = new_token_ids[0]
         if skip_special_tokens and first_new_token_id in tokenizer.all_special_ids:
-            read_offset = max(len(output_tokens), 0)
+            read_offset = max(prompt_len - 1, 0)
         else:
-            read_offset = max(len(output_tokens) - 1, 0)
+            read_offset = max(prompt_len, 0)
     else:
         # Put new_token_id in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(

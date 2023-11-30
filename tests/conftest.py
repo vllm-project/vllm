@@ -153,6 +153,8 @@ class VllmRunner:
         model_name: str,
         tokenizer_name: Optional[str] = None,
         dtype: str = "half",
+        draft_model: str = None,
+        propose_cnt: int = 1,
     ) -> None:
         self.model = LLM(
             model=model_name,
@@ -160,6 +162,8 @@ class VllmRunner:
             trust_remote_code=True,
             dtype=dtype,
             swap_space=0,
+            draft_model=draft_model,
+            propose_cnt=propose_cnt,
         )
 
     def generate(
@@ -188,7 +192,7 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
     ) -> List[Tuple[List[int], str]]:
-        greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+        greedy_params = SamplingParams(temperature=0.001, max_tokens=max_tokens, prompt_logprobs=1)
         outputs = self.generate(prompts, greedy_params)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]

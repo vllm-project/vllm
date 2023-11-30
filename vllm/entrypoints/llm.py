@@ -69,7 +69,7 @@ class LLM:
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         seed: int = 0,
-        gpu_memory_utilization: float = 0.9,
+        gpu_memory_utilization: float = 0.8,
         swap_space: int = 4,
         **kwargs,
     ) -> None:

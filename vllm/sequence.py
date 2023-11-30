@@ -136,6 +136,7 @@ class Sequence:
         self.block_size = block_size
 
         self.data = SequenceData(prompt_token_ids)
+        self.step_gen_token_ids: List[int] = []
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
