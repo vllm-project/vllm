@@ -151,7 +151,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
             lora_request.lora_int_id: lora_request
             for lora_request in lora_requests if lora_request
         }
-        if len(loras_map) > self._lora_manager.max_num_seqs:
+        if len(loras_map) > self._lora_manager.lora_slots:
             raise RuntimeError(
                 f"Number of requested LoRAs ({len(loras_map)}) is greater "
                 "than the number of GPU LoRA slots "
@@ -243,7 +243,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora_request.lora_int_id: lora_request
             for lora_request in lora_requests if lora_request
         }
-        if len(loras_map) > self._lora_manager.max_num_seqs:
+        if len(loras_map) > self._lora_manager.lora_slots:
             raise RuntimeError(
                 f"Number of requested LoRAs ({len(loras_map)}) is greater "
                 "than the number of GPU LoRA slots "
