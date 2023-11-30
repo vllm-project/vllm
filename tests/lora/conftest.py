@@ -127,7 +127,7 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
         return get_model_old(model_config,
                              LoRAConfig(max_loras=4, max_lora_rank=8))
 
-    with patch("vllm.worker.worker.get_model", get_model_patched):
+    with patch("vllm.worker.model_runner.get_model", get_model_patched):
         engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
     yield engine.llm_engine
     del engine
@@ -137,4 +137,4 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
 @pytest.fixture
 def llama_2_7b_model_extra_embeddings(
         llama_2_7b_engine_extra_embeddings) -> nn.Module:
-    yield llama_2_7b_engine_extra_embeddings.workers[0].model
+    yield llama_2_7b_engine_extra_embeddings.workers[0].model_runner.model

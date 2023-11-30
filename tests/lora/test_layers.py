@@ -170,10 +170,10 @@ def create_random_inputs(
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 def test_embeddings(dist_init, num_loras) -> None:
 
-    lora_config = LoRAConfig(max_loras=8,
+    max_loras = 8
+    lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
-    max_loras = 8
 
     def create_random_embedding_layer():
         embedding = VocabParallelEmbedding(512, 256)
@@ -260,10 +260,10 @@ def test_embeddings(dist_init, num_loras) -> None:
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 def test_embeddings_with_new_embeddings(dist_init, num_loras) -> None:
 
-    lora_config = LoRAConfig(max_loras=8,
+    max_loras = 8
+    lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
-    max_loras = 8
 
     def create_random_embedding_layer():
         embedding = VocabParallelEmbedding(512, 256)
@@ -389,8 +389,10 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras) -> None:
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 def test_lm_head_sampler(dist_init, num_loras) -> None:
 
-    lora_config = LoRAConfig(max_lora_rank=8, lora_dtype=torch.float16)
     max_loras = 8
+    lora_config = LoRAConfig(max_loras=max_loras,
+                             max_lora_rank=8,
+                             lora_dtype=torch.float16)
 
     def create_random_sampler_layer():
         linear = ParallelLMHead(32000 + lora_config.lora_extra_vocab_size,
@@ -499,10 +501,10 @@ def test_lm_head_sampler(dist_init, num_loras) -> None:
 @pytest.mark.parametrize("orientation", ["row", "column"])
 def test_linear_parallel(dist_init, num_loras, orientation) -> None:
 
-    lora_config = LoRAConfig(max_loras=8,
+    max_loras = 8
+    lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
-    max_loras = 8
 
     def create_random_linear_parallel_layer():
         if orientation == "row":
@@ -595,10 +597,11 @@ def test_linear_parallel(dist_init, num_loras, orientation) -> None:
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("repeats", [2, 3])
 def test_column_parallel_packed(dist_init, num_loras, repeats) -> None:
-    lora_config = LoRAConfig(max_loras=8,
+
+    max_loras = 8
+    lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
-    max_loras = 8
 
     def create_column_parallel_packed_layer():
         if repeats == 2:

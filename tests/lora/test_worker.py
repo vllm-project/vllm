@@ -4,7 +4,7 @@ import tempfile
 from unittest.mock import patch
 
 from vllm.lora.models import LoRAMapping
-from vllm.lora.utils import LoRARequest
+from vllm.lora.request import LoRARequest
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, LoRAConfig
 from vllm.worker.worker import Worker
 
@@ -30,7 +30,7 @@ def test_worker_apply_lora(sql_lora_files):
     worker.init_model()
     worker.load_model()
 
-    worker.apply_loras([], LoRAMapping([], []))
+    worker.model_runner.apply_loras([], LoRAMapping([], []))
     assert worker.list_loras() == set()
 
     n_loras = 32
@@ -38,7 +38,7 @@ def test_worker_apply_lora(sql_lora_files):
         LoRARequest(str(i + 1), i + 1, sql_lora_files) for i in range(n_loras)
     ]
 
-    worker.apply_loras(lora_requests, LoRAMapping([], []))
+    worker.model_runner.apply_loras(lora_requests, LoRAMapping([], []))
     assert worker.list_loras() == {
         lora_request.lora_int_id
         for lora_request in lora_requests
@@ -50,7 +50,8 @@ def test_worker_apply_lora(sql_lora_files):
                                             k=random.randint(1, n_loras))
         random.shuffle(iter_lora_requests)
         iter_lora_requests = iter_lora_requests[:-random.randint(0, n_loras)]
-        worker.apply_loras(iter_lora_requests, LoRAMapping([], []))
+        worker.model_runner.apply_loras(iter_lora_requests, LoRAMapping([],
+                                                                        []))
         assert worker.list_loras().issuperset(
             {lora_request.lora_int_id
              for lora_request in iter_lora_requests})

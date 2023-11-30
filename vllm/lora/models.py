@@ -16,7 +16,7 @@ from vllm.utils import LRUCache
 
 from vllm.lora.layers import LoRALayer, LoRAMapping, from_layer, from_layer_sampler
 from vllm.lora.lora import LoRA
-from vllm.lora.utils import (parse_fine_tuned_lora_name, replace_submodule)
+from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
 
 logger = logging.getLogger(__name__)
 

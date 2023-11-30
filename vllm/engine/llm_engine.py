@@ -8,13 +8,13 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, LoRAConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
+from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupOutputs,
-                           SequenceOutputs, SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupOutput,
+                           SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                MultiLoRATokenizer)
 from vllm.utils import Counter
@@ -90,8 +90,6 @@ class LLMEngine:
 
         self.model_config = model_config
         self.cache_config = cache_config
-        assert self.cache_config.sliding_window == getattr(
-            self.model_config.hf_config, "sliding_window", None)
         self.lora_config = lora_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
@@ -173,12 +171,12 @@ class LLMEngine:
                 continue
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=1,
+                num_gpus=self.cache_config.gpu_memory_utilization,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
                 **ray_remote_kwargs,
-            )(RayWorker).remote(self.model_config.trust_remote_code)
+            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
@@ -404,7 +402,7 @@ class LLMEngine:
         return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutputs) -> None:
+                                        outputs: SequenceGroupOutput) -> None:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
@@ -425,7 +423,7 @@ class LLMEngine:
 
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
-            child_samples: List[SequenceOutputs] = parent_child_dict[
+            child_samples: List[SequenceOutput] = parent_child_dict[
                 parent.seq_id]
             if len(child_samples) == 0:
                 # This parent sequence has no children samples. Remove

@@ -8,21 +8,14 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, LoRAConfig)
-from vllm.model_executor import get_model, InputMetadata, set_random_seed
+from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
-from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
+from vllm.worker.model_runner import ModelRunner
 from vllm.utils import get_gpu_memory
 from vllm.lora.request import LoRARequest
-from vllm.lora.worker_manager import (
-    DisabledWorkerLoRAManager,
-    LRUCacheWorkerLoRAManager,
-)
-from vllm.lora.layers import LoRAMapping
-
-LORA_WARMUP_RANK = 8
 
 
 class Worker:
@@ -49,11 +42,11 @@ class Worker:
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
 
+        self.model_runner = ModelRunner(model_config, parallel_config,
+                                        scheduler_config, lora_config)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None
-        self.block_size = None
-        self.sliding_window = None
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
@@ -81,21 +74,7 @@ class Worker:
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self.model = get_model(self.model_config, self.lora_config)
-
-        vocab_size = self.model.config.vocab_size
-
-        if self.lora_config:
-            self.lora_manager = LRUCacheWorkerLoRAManager(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens, vocab_size,
-                self.lora_config, self.device)
-            self.model = self.lora_manager.create_lora_adapter(self.model)
-        else:
-            self.lora_manager = DisabledWorkerLoRAManager(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens, vocab_size,
-                self.lora_config, self.device)
+        self.model_runner.load_model()
 
     @torch.inference_mode()
     def profile_num_available_blocks(
@@ -109,73 +88,9 @@ class Worker:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        # Profile memory usage with max_num_sequences sequences and the total
-        # number of tokens equal to max_num_batched_tokens.
-
-        # Enable top-k sampling to reflect the accurate memory usage.
-        vocab_size = self.model.config.vocab_size
-        sampling_params = SamplingParams(top_p=0.99, top_k=vocab_size - 1)
-        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
-        max_num_seqs = self.scheduler_config.max_num_seqs
-
-        # This represents the maximum number of different requests
-        # that will have unique loras, an therefore the max amount of memory
-        # consumption create dummy lora request copies from the lora request
-        # passed in, which contains a lora from the lora warmup path.
-        dummy_lora_requests = []
-        dummy_lora_requests_per_seq = []
-        if self.lora_config:
-            for idx in range(self.lora_config.max_loras):
-                lora_id = idx + 1
-                dummy_lora_request = LoRARequest(
-                    lora_id=f"warmup_{lora_id}",
-                    lora_int_id=lora_id,
-                    lora_local_path="/not/a/real/path",
-                )
-                self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                 rank=LORA_WARMUP_RANK)
-                dummy_lora_requests.append(dummy_lora_request)
-            dummy_lora_requests_per_seq = [
-                dummy_lora_requests[idx % len(dummy_lora_requests)]
-                for idx in range(max_num_seqs)
-            ]
-
-        seqs = []
-        for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data = SequenceData([0] * seq_len)
-            seq = SequenceGroupMetadata(
-                request_id=str(group_id),
-                is_prompt=True,
-                seq_data={group_id: seq_data},
-                sampling_params=sampling_params,
-                block_tables=None,
-                lora_request=dummy_lora_requests_per_seq[group_id]
-                if dummy_lora_requests_per_seq else None,
-            )
-            seqs.append(seq)
-
-            (
-                input_tokens,
-                input_positions,
-                input_metadata,
-                lora_mapping,
-                prepared_lora_requests,
-            ) = self._prepare_inputs(seqs)
-
-        if self.lora_config:
-            self.apply_loras(prepared_lora_requests, lora_mapping)
-
-        # Execute the model.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        self.model(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=[(None, None)] * num_layers,
-            input_metadata=input_metadata,
-            cache_events=None,
-        )
+        # Execute a forward pass with dummy inputs to profile the memory usage
+        # of the model.
+        self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -190,7 +105,7 @@ class Worker:
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
-        self.lora_manager.remove_all_loras()
+        self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -201,234 +116,11 @@ class Worker:
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
-        self.block_size = cache_config.block_size
-        self.sliding_window = cache_config.sliding_window
-
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
-
-    def _prepare_inputs(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, LoRAMapping,
-               Set[LoRARequest]]:
-        seq_groups: List[Tuple[List[int], SamplingParams]] = []
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
-        selected_token_indices: List[int] = []
-        selected_token_start_idx = 0
-        categorized_sample_indices = {t: [] for t in SamplingType}
-        categorized_sample_indices_start_idx = 0
-        lora_requests: Set[LoRARequest] = set()
-        lora_index_mapping: List[int] = []
-        lora_prompt_mapping: List[int] = []
-
-        # Add prompt tokens.
-        prompt_lens: List[int] = []
-        for seq_group_metadata in seq_group_metadata_list:
-            if not seq_group_metadata.is_prompt:
-                continue
-
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            sampling_params = seq_group_metadata.sampling_params
-            seq_groups.append((seq_ids, sampling_params))
-            lora_id = seq_group_metadata.lora_int_id
-
-            # Use any sequence in the group.
-            seq_id = seq_ids[0]
-
-            seq_data = seq_group_metadata.seq_data[seq_id]
-            prompt_tokens = seq_data.get_token_ids()
-            prompt_len = len(prompt_tokens)
-            prompt_lens.append(prompt_len)
-
-            if sampling_params.prompt_logprobs is not None:
-                # NOTE: prompt token positions do not need sample, skip
-                categorized_sample_indices_start_idx += prompt_len - 1
-
-            categorized_sample_indices[sampling_params.sampling_type].append(
-                categorized_sample_indices_start_idx)
-            categorized_sample_indices_start_idx += 1
-
-            if lora_id > 0:
-                # if we are preparing inputs for the warmup step, we want the
-                # lora computation to take up the maximum possible amount of
-                # memory that way we can get a tighter upper bound on the
-                # amount of memory we can use and therefore not oom. If
-                # for_warmup is true, we add the lora lora mapping that is used
-                # during generation.
-                lora_requests.add(seq_group_metadata.lora_request)
-            lora_index_mapping.append([lora_id] * prompt_len)
-            lora_prompt_mapping.extend(
-                [lora_id] *
-                (prompt_len if sampling_params.prompt_logprobs else 1))
-
-            input_tokens.append(prompt_tokens)
-            # NOTE(woosuk): Here we assume that the first token in the prompt
-            # is always the first token in the sequence.
-            input_positions.append(list(range(prompt_len)))
-
-            if seq_group_metadata.block_tables is None:
-                # During memory profiling, the block tables are not initialized
-                # yet. In this case, we just use a dummy slot mapping.
-                slot_mapping.append([0] * prompt_len)
-                continue
-
-            # Compute the slot mapping.
-            slot_mapping.append([])
-            block_table = seq_group_metadata.block_tables[seq_id]
-            for i in range(prompt_len):
-                block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping[-1].append(slot)
-
-        # Add generation tokens.
-        max_context_len = 0
-        max_num_blocks_per_seq = 0
-        context_lens: List[int] = []
-        generation_block_tables: List[List[int]] = []
-        max_seq_len = max(prompt_lens) if prompt_lens else 1
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            if seq_group_metadata.is_prompt:
-                # We need to do this in this loop as we need to know max_seq_len
-                assert len(
-                    seq_ids) == 1, "Prompt input should have only one seq."
-                sampling_params = seq_group_metadata.sampling_params
-                assert len(prompt_lens) == len(seq_group_metadata_list)
-                prompt_len = prompt_lens[i]
-                if sampling_params.prompt_logprobs is not None:
-                    selected_token_indices.extend(
-                        range(selected_token_start_idx,
-                              selected_token_start_idx + prompt_len - 1))
-                selected_token_indices.append(selected_token_start_idx +
-                                              prompt_len - 1)
-                selected_token_start_idx += max_seq_len
-                continue
-
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            sampling_params = seq_group_metadata.sampling_params
-            seq_groups.append((seq_ids, sampling_params))
-            lora_id = seq_group_metadata.lora_int_id
-
-            num_seqs = len(seq_ids)
-            selected_token_indices.extend(
-                range(selected_token_start_idx,
-                      selected_token_start_idx + num_seqs))
-            selected_token_start_idx += num_seqs
-
-            categorized_sample_indices[sampling_params.sampling_type].extend(
-                range(categorized_sample_indices_start_idx,
-                      categorized_sample_indices_start_idx + num_seqs))
-            categorized_sample_indices_start_idx += num_seqs
-
-            for seq_id in seq_ids:
-                seq_data = seq_group_metadata.seq_data[seq_id]
-                generation_token = seq_data.get_last_token_id()
-                input_tokens.append([generation_token])
-
-                context_len = seq_data.get_len()
-                position = context_len - 1
-                if self.sliding_window is not None:
-                    context_len = min(context_len, self.sliding_window)
-                input_positions.append([position])
-                lora_index_mapping.append([lora_id])
-
-                block_table = seq_group_metadata.block_tables[seq_id]
-
-                max_context_len = max(max_context_len, context_len)
-                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
-                                             len(block_table))
-                context_lens.append(context_len)
-
-                block_number = block_table[position // self.block_size]
-                block_offset = position % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append([slot])
-
-                if self.sliding_window is not None:
-                    sliding_window_blocks = (self.sliding_window //
-                                             self.block_size)
-                    block_table = block_table[-sliding_window_blocks:]
-                generation_block_tables.append(block_table)
-
-                # Update LoRA mapping.
-                if lora_id > 0:
-                    lora_requests.add(seq_group_metadata.lora_request)
-                lora_prompt_mapping.append(lora_id)
-
-        padded_input_tokens = [
-            _pad_to_max(tokens, max_seq_len, pad=0) for tokens in input_tokens
-        ]
-        padded_input_positions = [
-            _pad_to_max(positions, max_seq_len, pad=0)
-            for positions in input_positions
-        ]
-        padded_lora_input_mapping = [
-            _pad_to_max(mapping, max_seq_len, pad=0)
-            for mapping in lora_index_mapping
-        ]
-        padded_slot_mapping = [
-            _pad_to_max(mapping, max_seq_len, pad=-1)
-            for mapping in slot_mapping
-        ]
-        padded_block_tables = [
-            _pad_to_max(block_table, max_num_blocks_per_seq, pad=0)
-            for block_table in generation_block_tables
-        ]
-
-        # Convert to tensors.
-        tokens_tensor = torch.tensor(padded_input_tokens,
-                                     dtype=torch.long,
-                                     device="cuda")
-        positions_tensor = torch.tensor(padded_input_positions,
-                                        dtype=torch.long,
-                                        device="cuda")
-        slot_mapping_tensor = torch.tensor(padded_slot_mapping,
-                                           dtype=torch.long,
-                                           device="cuda")
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device="cuda")
-        selected_token_indices = torch.tensor(selected_token_indices,
-                                              dtype=torch.long,
-                                              device="cuda")
-        categorized_sample_indices = {
-            t: torch.tensor(seq_ids, dtype=torch.int, device="cuda")
-            for t, seq_ids in categorized_sample_indices.items()
-        }
-        block_tables_tensor = torch.tensor(padded_block_tables,
-                                           dtype=torch.int,
-                                           device="cuda")
-
-        seq_data: Dict[int, SequenceData] = {}
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_data.update(seq_group_metadata.seq_data)
-
-        flat_padded_lora_input_mapping = [
-            item for sublist in padded_lora_input_mapping for item in sublist
-        ]
-        lora_mapping = LoRAMapping(
-            flat_padded_lora_input_mapping,
-            lora_prompt_mapping,
-        )
-
-        input_metadata = InputMetadata(
-            seq_groups=seq_groups,
-            seq_data=seq_data,
-            prompt_lens=prompt_lens,
-            slot_mapping=slot_mapping_tensor,
-            context_lens=context_lens_tensor,
-            max_context_len=max_context_len,
-            block_tables=block_tables_tensor,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=categorized_sample_indices,
-            sliding_window=self.sliding_window,
-        )
-        return tokens_tensor, positions_tensor, input_metadata, lora_mapping, lora_requests
+        self.model_runner.set_block_size(self.cache_engine.block_size)
 
     @torch.inference_mode()
     def execute_model(
@@ -459,44 +151,18 @@ class Worker:
                     event.wait()
             return {}
 
-        # Prepare input tensors.
-        (
-            input_tokens,
-            input_positions,
-            input_metadata,
-            lora_mapping,
-            lora_requests,
-        ) = self._prepare_inputs(seq_group_metadata_list)
-
-        if self.lora_config:
-            lora_requests = [
-                seq_group_metadata.lora_request
-                for seq_group_metadata in seq_group_metadata_list
-            ]
-            self.apply_loras(lora_requests, lora_mapping)
-
-        # Execute the model.
-        output = self.model(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=self.gpu_cache,
-            input_metadata=input_metadata,
-            cache_events=cache_events,
-        )
+        output = self.model_runner.execute_model(seq_group_metadata_list,
+                                                 self.gpu_cache, cache_events)
         return output
 
-    def apply_loras(self, lora_requests: List[LoRARequest],
-                    lora_mapping: LoRAMapping) -> None:
-        self.lora_manager.apply_loras(lora_requests, lora_mapping)
-
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.lora_manager.add_lora(lora_request)
+        return self.model_runner.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.lora_manager.remove_lora(lora_id)
+        return self.model_runner.remove_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
-        return self.lora_manager.list_loras()
+        return self.model_runner.list_loras()
 
 
 def _init_distributed_environment(
@@ -528,14 +194,6 @@ def _init_distributed_environment(
     torch.distributed.all_reduce(torch.zeros(1).cuda())
     initialize_model_parallel(parallel_config.tensor_parallel_size,
                               parallel_config.pipeline_parallel_size)
-
-
-def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
-    return x + [pad] * ((-len(x)) % multiple_of)
-
-
-def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
-    return x + [pad] * (max_len - len(x))
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
