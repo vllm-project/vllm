@@ -142,6 +142,8 @@ class Worker:
 
         cache_events = self.cache_events if issued_cache_op else None
 
+        # Wait for cache operations to finish.
+        # TODO(woosuk): Profile swapping overhead and optimize if needed.
         if cache_events is not None:
             for event in cache_events:
                 event.wait()
