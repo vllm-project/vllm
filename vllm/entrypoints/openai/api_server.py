@@ -40,6 +40,48 @@ engine = None
 response_role = None
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="vLLM OpenAI-Compatible RESTful API server.")
+    parser.add_argument("--host", type=str, default=None, help="host name")
+    parser.add_argument("--port", type=int, default=8000, help="port number")
+    parser.add_argument("--allow-credentials",
+                        action="store_true",
+                        help="allow credentials")
+    parser.add_argument("--allowed-origins",
+                        type=json.loads,
+                        default=["*"],
+                        help="allowed origins")
+    parser.add_argument("--allowed-methods",
+                        type=json.loads,
+                        default=["*"],
+                        help="allowed methods")
+    parser.add_argument("--allowed-headers",
+                        type=json.loads,
+                        default=["*"],
+                        help="allowed headers")
+    parser.add_argument("--served-model-name",
+                        type=str,
+                        default=None,
+                        help="The model name used in the API. If not "
+                        "specified, the model name will be the same as "
+                        "the huggingface name.")
+    parser.add_argument("--chat-template",
+                        type=str,
+                        default=None,
+                        help="The file path to the chat template, "
+                        "or the template in single-line form "
+                        "for the specified model")
+    parser.add_argument("--response-role",
+                        type=str,
+                        default="assistant",
+                        help="The role name to return if "
+                        "`request.add_generation_prompt=true`.")
+
+    parser = AsyncEngineArgs.add_cli_args(parser)
+    return parser.parse_args()
+
+
 def create_error_response(status_code: HTTPStatus,
                           message: str) -> JSONResponse:
     return JSONResponse(ErrorResponse(message=message,
@@ -47,15 +89,15 @@ def create_error_response(status_code: HTTPStatus,
                         status_code=status_code.value)
 
 
-def load_chat_template():
+def load_chat_template(_args):
     try:
-        with open(args.chat_template, "r") as f:
+        with open(_args.chat_template, "r") as f:
             content = f.read()
             return content
     except OSError:
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly
-        return codecs.decode(args.chat_template, "unicode_escape")
+        return codecs.decode(_args.chat_template, "unicode_escape")
 
 
 @app.exception_handler(RequestValidationError)
@@ -73,12 +115,12 @@ async def check_model(request) -> Optional[JSONResponse]:
     return ret
 
 
-async def get_gen_prompt(request) -> str:
+async def get_gen_prompt(_tokenizer, _request) -> str:
     try:
-        return tokenizer.apply_chat_template(
-            conversation=request.messages,
+        return _tokenizer.apply_chat_template(
+            conversation=_request.messages,
             tokenize=False,
-            add_generation_prompt=request.add_generation_prompt)
+            add_generation_prompt=_request.add_generation_prompt)
     except Exception as e:
         raise RuntimeError(f"Error generating prompt: {str(e)}") from e
 
@@ -186,7 +228,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                      "logit_bias is not currently supported")
 
     try:
-        prompt = await get_gen_prompt(request)
+        prompt = await get_gen_prompt(tokenizer, request)
     except RuntimeError as e:
         logger.error(f"Error in generating prompt from request: {str(e)}")
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -643,45 +685,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server.")
-    parser.add_argument("--host", type=str, default=None, help="host name")
-    parser.add_argument("--port", type=int, default=8000, help="port number")
-    parser.add_argument("--allow-credentials",
-                        action="store_true",
-                        help="allow credentials")
-    parser.add_argument("--allowed-origins",
-                        type=json.loads,
-                        default=["*"],
-                        help="allowed origins")
-    parser.add_argument("--allowed-methods",
-                        type=json.loads,
-                        default=["*"],
-                        help="allowed methods")
-    parser.add_argument("--allowed-headers",
-                        type=json.loads,
-                        default=["*"],
-                        help="allowed headers")
-    parser.add_argument("--served-model-name",
-                        type=str,
-                        default=None,
-                        help="The model name used in the API. If not "
-                        "specified, the model name will be the same as "
-                        "the huggingface name.")
-    parser.add_argument("--chat-template",
-                        type=str,
-                        default=None,
-                        help="The file path to the chat template, "
-                        "or the template in single-line form "
-                        "for the specified model")
-    parser.add_argument("--response-role",
-                        type=str,
-                        default="assistant",
-                        help="The role name to return if "
-                        "`request.add_generation_prompt=true`.")
 
-    parser = AsyncEngineArgs.add_cli_args(parser)
-    args = parser.parse_args()
+    args = parse_args()
 
     app.add_middleware(
         CORSMiddleware,
@@ -713,7 +718,7 @@ if __name__ == "__main__":
 
     chat_template = None
     if args.chat_template is not None:
-        chat_template = load_chat_template()
+        chat_template = load_chat_template(args)
     if chat_template is not None:
         tokenizer.chat_template = chat_template
     if tokenizer.chat_template is not None:
