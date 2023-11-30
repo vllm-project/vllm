@@ -268,9 +268,8 @@ if __name__ == "__main__":
         '--max-model-len',
         type=int,
         default=None,
-        help=
-        'Maximum length of a sequence (including prompt and output). If None, will be derived from the model.'
-    )
+        help='Maximum length of a sequence (including prompt and output). '
+        'If None, will be derived from the model.')
     parser.add_argument(
         '--dtype',
         type=str,
