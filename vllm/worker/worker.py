@@ -113,7 +113,6 @@ class Worker:
                                         self.parallel_config)
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
-        # FIXME(woosuk): This is a bit hacky.
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
     def warm_up_model(self) -> None:

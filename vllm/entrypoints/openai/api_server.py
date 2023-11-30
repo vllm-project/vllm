@@ -207,7 +207,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
         - function_call (Users should implement this by themselves)
         - logit_bias (to be supported by vLLM engine)
     """
-    logger.info(f"Received chat completion request: {request}")
 
     error_check_ret = await check_model(request)
     if error_check_ret is not None:
@@ -386,7 +385,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
           suffix)
         - logit_bias (to be supported by vLLM engine)
     """
-    logger.info(f"Received completion request: {request}")
 
     error_check_ret = await check_model(request)
     if error_check_ret is not None:

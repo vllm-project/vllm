@@ -19,7 +19,6 @@ def main(args: argparse.Namespace):
         tokenizer=args.tokenizer,
         quantization=args.quantization,
         tensor_parallel_size=args.tensor_parallel_size,
-        max_num_seqs=args.batch_size,
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
@@ -38,8 +37,10 @@ def main(args: argparse.Namespace):
 
     def run_to_completion(profile: bool = False):
         if profile:
-            with torch.profiler.profile(
-                    activities=[torch.profiler.ProfilerActivity.CUDA]) as p:
+            with torch.profiler.profile(activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+            ]) as p:
                 llm.generate(prompt_token_ids=dummy_prompt_token_ids,
                              sampling_params=sampling_params,
                              use_tqdm=False)
