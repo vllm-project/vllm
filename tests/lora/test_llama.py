@@ -43,6 +43,7 @@ def test_llama_lora(sql_lora_files, tp_size):
     llm = vllm.LLM(MODEL_PATH,
                    enable_lora=True,
                    max_num_seqs=16,
+                   max_loras=4,
                    tensor_parallel_size=tp_size,
                    worker_use_ray=True)
 
@@ -85,6 +86,7 @@ def test_llama_tensor_parallel_equality(sql_lora_files):
     llm_tp1 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
                        max_num_seqs=16,
+                       max_loras=4,
                        tensor_parallel_size=1,
                        worker_use_ray=True)
     output_tp1 = do_sample(llm_tp1, sql_lora_files, lora_id=1)
@@ -95,6 +97,7 @@ def test_llama_tensor_parallel_equality(sql_lora_files):
     llm_tp2 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
                        max_num_seqs=16,
+                       max_loras=4,
                        tensor_parallel_size=2,
                        worker_use_ray=True)
     output_tp2 = do_sample(llm_tp2, sql_lora_files, lora_id=1)
@@ -107,6 +110,7 @@ def test_llama_tensor_parallel_equality(sql_lora_files):
     llm_tp4 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
                        max_num_seqs=16,
+                       max_loras=4,
                        tensor_parallel_size=4,
                        worker_use_ray=True)
     output_tp4 = do_sample(llm_tp4, sql_lora_files, lora_id=1)

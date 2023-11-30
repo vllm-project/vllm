@@ -124,7 +124,8 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     get_model_old = get_model
 
     def get_model_patched(model_config, lora_config=None):
-        return get_model_old(model_config, LoRAConfig(max_lora_rank=8))
+        return get_model_old(model_config,
+                             LoRAConfig(max_loras=4, max_lora_rank=8))
 
     with patch("vllm.worker.worker.get_model", get_model_patched):
         engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
