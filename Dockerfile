@@ -18,6 +18,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # image to build pytorch extensions
 FROM dev AS build
 
+# install build dependencies
+COPY requirements-build.txt requirements-build.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements-build.txt
+
 # copy input files
 COPY csrc csrc
 COPY setup.py setup.py
