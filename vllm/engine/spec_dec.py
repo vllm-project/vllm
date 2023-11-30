@@ -183,7 +183,7 @@ class SpecDecWorker(Worker):
             accepted_token_ids = self._accept_tokens(cur_seq, seq_group_output)
 
             # all proposed tokens are accepted
-            if len(accepted_token_ids) == len(cur_seq.data.draft_token_probs):
+            if accepted_token_ids == cur_seq.data.get_draft_token_ids():
                 if isinstance(sample.output_token, int):
                     last_token = sample.output_token
                 else:
