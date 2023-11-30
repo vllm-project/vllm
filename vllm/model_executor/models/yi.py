@@ -29,17 +29,19 @@ from vllm.transformers_utils.configs.yi import YiConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -126,15 +128,17 @@ class YiAttention(nn.Module):
             bias=False,
             linear_method=linear_method,
         )
-        self.attn = PagedAttentionWithRoPE(
-            self.num_heads,
+        self.rotary_emb = get_rope(
             self.head_dim,
-            self.scaling,
-            base=self.rope_theta,
-            max_position=self.max_position_embeddings,
             rotary_dim=self.head_dim,
-            num_kv_heads=self.num_kv_heads,
-            rope_scaling=rope_scaling)
+            max_position=max_position_embeddings,
+            base=self.rope_theta,
+            rope_scaling=rope_scaling,
+        )
+        self.attn = PagedAttention(self.num_heads,
+                                   self.head_dim,
+                                   self.scaling,
+                                   num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -146,9 +150,10 @@ class YiAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -280,11 +285,18 @@ class YiForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)
+        return hidden_states
+
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> SamplerOutput:
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata)
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(self,

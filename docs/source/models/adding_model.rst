@@ -18,7 +18,7 @@ This document provides a high-level guide on integrating a `HuggingFace Transfor
 0. Fork the vLLM repository
 --------------------------------
 
-Start by forking our `GitHub <https://github.com/vllm-project/vllm/>`_ repository and then :ref:`build it from source <build_from_source>`.
+Start by forking our `GitHub`_ repository and then :ref:`build it from source <build_from_source>`.
 This gives you the ability to modify the codebase and test your model.
 
 
