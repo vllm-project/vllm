@@ -1,4 +1,5 @@
 [build-system]
+# Should be mirrored in requirements-build.txt
 requires = [
     "ninja",
     "packaging",
