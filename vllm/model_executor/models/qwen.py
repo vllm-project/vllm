@@ -117,6 +117,7 @@ class QWenAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        input_true_seq_len: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
@@ -125,7 +126,7 @@ class QWenAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
 
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
+        attn_output = self.attn(positions, input_true_seq_len, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
 
         output, _ = self.c_proj(attn_output)
@@ -154,6 +155,7 @@ class QWenBlock(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        input_true_seq_len: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
@@ -164,6 +166,7 @@ class QWenBlock(nn.Module):
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
+            input_true_seq_len=input_true_seq_len,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             cache_event=cache_event,
@@ -198,6 +201,7 @@ class QWenModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        input_true_seq_len: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
@@ -212,6 +216,7 @@ class QWenModel(nn.Module):
             hidden_states = layer(
                 positions,
                 hidden_states,
+                input_true_seq_len,
                 kv_caches[i],
                 input_metadata,
                 cache_event,
@@ -239,11 +244,12 @@ class QWenLMHeadModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        input_true_seq_len: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
+        hidden_states = self.transformer(input_ids, positions, input_true_seq_len, kv_caches,
                                          input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)

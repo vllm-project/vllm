@@ -383,6 +383,8 @@ class AsyncLLMEngine:
                     "error that caused the background loop to stop "
                     "(AsyncEngineDeadError).")
 
+        sampling_params.prompt_token_length = len(prompt_token_ids)
+
         stream = self._request_tracker.add_request(
             request_id,
             prompt=prompt,

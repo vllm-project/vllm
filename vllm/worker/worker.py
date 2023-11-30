@@ -94,6 +94,10 @@ class Worker:
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
             seq_data = SequenceData([0] * seq_len)
+
+            sampling_params = SamplingParams(top_p=0.99, top_k=vocab_size - 1)
+            sampling_params.prompt_token_length = seq_len
+
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -103,7 +107,7 @@ class Worker:
             )
             seqs.append(seq)
 
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, input_positions, input_metadata, input_true_seq_len = self._prepare_inputs(
             seqs)
 
         # Execute the model.
@@ -114,6 +118,7 @@ class Worker:
             kv_caches=[(None, None)] * num_layers,
             input_metadata=input_metadata,
             cache_events=None,
+            input_true_seq_len=input_true_seq_len,
         )
 
         # Calculate the number of blocks that can be allocated with the
@@ -159,6 +164,8 @@ class Worker:
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
 
+        input_true_seq_len: List[int] = []
+
         # Add prompt tokens.
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
@@ -168,6 +175,8 @@ class Worker:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
+
+            input_true_seq_len.append(sampling_params.prompt_token_length)
 
             # Use any sequence in the group.
             seq_id = seq_ids[0]
@@ -211,12 +220,14 @@ class Worker:
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
         max_seq_len = max(prompt_lens) if prompt_lens else 1
-        for seq_group_metadata in seq_group_metadata_list:
+        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             if seq_group_metadata.is_prompt:
                 # We need to do this in this loop as we need to know max_seq_len
                 assert len(
                     seq_ids) == 1, "Prompt input should have only one seq."
                 sampling_params = seq_group_metadata.sampling_params
+                assert len(prompt_lens) == len(seq_group_metadata_list)
+                prompt_len = prompt_lens[i]
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
                         range(selected_token_start_idx,
@@ -251,6 +262,8 @@ class Worker:
                 if self.sliding_window is not None:
                     context_len = min(context_len, self.sliding_window)
                 input_positions.append([position])
+
+                input_true_seq_len.append(sampling_params.prompt_token_length)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
 
@@ -293,6 +306,11 @@ class Worker:
         positions_tensor = torch.tensor(padded_input_positions,
                                         dtype=torch.long,
                                         device="cuda")
+
+        input_true_seq_len_tensor = torch.tensor(input_true_seq_len,
+                                           dtype=torch.long,
+                                           device="cuda")
+
         slot_mapping_tensor = torch.tensor(padded_slot_mapping,
                                            dtype=torch.long,
                                            device="cuda")
@@ -326,7 +344,7 @@ class Worker:
             categorized_sample_indices=categorized_sample_indices,
             sliding_window=self.sliding_window,
         )
-        return tokens_tensor, positions_tensor, input_metadata
+        return tokens_tensor, positions_tensor, input_metadata, input_true_seq_len_tensor
 
     @torch.inference_mode()
     def execute_model(
@@ -361,7 +379,7 @@ class Worker:
             return {}
 
         # Prepare input tensors.
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, input_positions, input_metadata, input_true_seq_len = self._prepare_inputs(
             seq_group_metadata_list)
 
         # Execute the model.
@@ -371,6 +389,7 @@ class Worker:
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
             cache_events=cache_events,
+            input_true_seq_len=input_true_seq_len,
         )
         return output
 

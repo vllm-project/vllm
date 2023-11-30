@@ -320,9 +320,11 @@ class PagedAttentionWithRoPE(PagedAttention):
                          num_kv_heads,
                          sliding_window=sliding_window)
         if rope_scaling is None:
-            self.rotary_emb = RotaryEmbedding(head_size, rotary_dim,
-                                              max_position, base,
-                                              is_neox_style)
+            #self.rotary_emb = RotaryEmbedding(head_size, rotary_dim,
+            #                                  max_position, base,
+            #                                  is_neox_style)
+            self.rotary_emb = DynamicNTKScalingRotaryEmbedding(head_size, rotary_dim,
+                                  max_position, base, is_neox_style, 2)
         else:
             scaling_type = rope_scaling["type"]
             scaling_factor = rope_scaling["factor"]
@@ -340,6 +342,7 @@ class PagedAttentionWithRoPE(PagedAttention):
     def forward(
         self,
         positions: torch.Tensor,
+        input_true_seq_len: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
@@ -368,7 +371,7 @@ class PagedAttentionWithRoPE(PagedAttention):
 
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
-        query, key = self.rotary_emb(positions, query, key)
+        query, key = self.rotary_emb(positions, input_true_seq_len, query, key)
         return super().forward(
             query,
             key,

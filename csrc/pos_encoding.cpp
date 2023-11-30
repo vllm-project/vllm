@@ -2,6 +2,7 @@
 
 void rotary_embedding(
   torch::Tensor& positions,
+  torch::Tensor& input_true_seq_len,
   torch::Tensor& query,
   torch::Tensor& key,
   int head_size,
