@@ -19,7 +19,6 @@ def main(args: argparse.Namespace):
         tokenizer=args.tokenizer,
         quantization=args.quantization,
         tensor_parallel_size=args.tensor_parallel_size,
-        max_num_seqs=args.batch_size,
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
     )
