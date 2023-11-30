@@ -32,6 +32,9 @@ class ModelRunner:
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
 
+    def set_block_size(self, block_size: int) -> None:
+        self.block_size = block_size
+
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
