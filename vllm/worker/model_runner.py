@@ -72,7 +72,7 @@ class ModelRunner:
             block_table = seq_group_metadata.block_tables[seq_id]
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
             # where start_idx is max(0, prompt_len - sliding_window).
-            # For example, if the prompt len is 10, sliding window is 8, and 
+            # For example, if the prompt len is 10, sliding window is 8, and
             # block size is 4, the first two tokens are masked and the slot
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
