@@ -149,6 +149,7 @@ class SamplingParams:
                 # Zero temperature means greedy sampling.
                 self.top_p = 1.0
                 self.top_k = -1
+                self.min_p = 0.0
                 self._verify_greedy_sampling()
 
     def _verify_args(self) -> None:
