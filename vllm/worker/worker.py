@@ -116,6 +116,10 @@ class Worker:
         # FIXME(woosuk): This is a bit hacky.
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
+    def warm_up_model(self) -> None:
+        if not self.model_config.enforce_eager:
+            self.model_runner.capture_model(self.gpu_cache)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -138,15 +142,15 @@ class Worker:
 
         cache_events = self.cache_events if issued_cache_op else None
 
+        if cache_events is not None:
+            for event in cache_events:
+                event.wait()
         # If there is no input, we don't need to execute the model.
         if not seq_group_metadata_list:
-            if cache_events is not None:
-                for event in cache_events:
-                    event.wait()
             return {}
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache, cache_events)
+                                                 self.gpu_cache)
         return output
 
 
