@@ -84,7 +84,7 @@ def process_requests(engine: LLMEngine,
 
         for request_output in request_outputs:
             if request_output.finished:
-                print(request_output.lora_request)
+                print(request_output)
 
 
 def initialize_engine() -> LLMEngine:

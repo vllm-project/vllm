@@ -38,7 +38,7 @@ class EngineArgs:
     max_lora_rank: int = 16
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
-    lora_max_cpu_loras: int = -1
+    max_cpu_loras: int = -1
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -208,12 +208,12 @@ class EngineArgs:
                             type=str,
                             default=EngineArgs.lora_dtype,
                             choices=['auto', 'float16', 'bfloat16', 'float32'],
-                            help='data type for lora')
+                            help='data type for LoRA')
         parser.add_argument(
-            '--lora-max-cpu-loras',
+            '--max-cpu-loras',
             type=int,
-            default=EngineArgs.lora_max_cpu_loras,
-            help=('Maximum number of loras to store in CPU memory. '
+            default=EngineArgs.max_cpu_loras,
+            help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
         return parser
@@ -253,8 +253,8 @@ class EngineArgs:
             max_loras=self.max_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             lora_dtype=self.lora_dtype,
-            max_cpu_loras=self.lora_max_cpu_loras if self.lora_max_cpu_loras >
-            0 else None) if self.enable_lora else None
+            max_cpu_loras=self.max_cpu_loras
+            if self.max_cpu_loras > 0 else None) if self.enable_lora else None
         return model_config, cache_config, parallel_config, scheduler_config, lora_config
 
 
