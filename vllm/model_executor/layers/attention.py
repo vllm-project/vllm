@@ -101,23 +101,15 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            key_to_cache = key
-            value_to_cache = value
-            if input_metadata.to_cache is not None:
-                key_to_cache = key_to_cache[input_metadata.to_cache]
-                value_to_cache = value_to_cache[input_metadata.to_cache]
-                slot_mapping = slot_mapping[input_metadata.to_cache]
-
             cache_ops.reshape_and_cache(
-                key_to_cache,
-                value_to_cache,
+                key,
+                value,
                 key_cache,
                 value_cache,
                 slot_mapping,
             )
 
-        is_prompt = len(input_metadata.prompt_lens) > 0
-        if is_prompt:
+        if input_metadata.is_prompt:
             # Prompt run.
             if self.num_kv_heads != self.num_heads:
                 # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
