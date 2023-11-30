@@ -597,9 +597,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     return response
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server.")
+def make_parser(parser=None):
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            description="vLLM OpenAI-Compatible RESTful API server.")
     parser.add_argument("--host", type=str, default=None, help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument("--allow-credentials",
@@ -625,7 +626,9 @@ if __name__ == "__main__":
                         "the huggingface name.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
-    args = parser.parse_args()
+
+def run_server(args):
+    global app, engine, served_model, max_model_len, tokenizer
 
     app.add_middleware(
         CORSMiddleware,
@@ -658,3 +661,7 @@ if __name__ == "__main__":
                 port=args.port,
                 log_level="info",
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
+
+if __name__ == "__main__":
+    args = make_parser().parse_args()
+    run_server(args)

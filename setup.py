@@ -294,4 +294,9 @@ setuptools.setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
     package_data={"vllm": ["py.typed"]},
+    entry_points={
+        "console_scripts": [
+            "vllm=vllm.scripts:main",
+        ],
+    },
 )
