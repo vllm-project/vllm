@@ -165,7 +165,7 @@ class PagedAttention(nn.Module):
         else:
             # Decoding run.
             if input_metadata.draft_lens is not None:
-                output = _paged_attention(
+                output = _multi_query_paged_attention(
                     query,
                     key_cache,
                     value_cache,
@@ -295,16 +295,14 @@ def _paged_attention(
     return output
 
 def _multi_query_paged_attention(
-    output: torch.Tensor,
     query: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     input_metadata: InputMetadata,
-    max_num_query: int,
     head_mapping: torch.Tensor,
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
-) -> None:
+) -> torch.Tensor:
     """PagedAttention for the generation tokens assuming multiple draft tokens.
     Assumes that the key and value have already been cached.
 
@@ -318,9 +316,13 @@ def _multi_query_paged_attention(
         input_metadata: metadata for paged attention.
         alibi_slopes: shape = [num_heads]
     """
+    output = torch.empty_like(query)
+    max_num_query = max(input_metadata.draft_lens)
+
     block_size = value_cache.shape[3]
     num_seqs = input_metadata.context_lens.shape[0]
     assert num_seqs * max_num_query == query.shape[0]
+
 
     # duplicate block tables
     block_tables = torch.repeat_interleave(input_metadata.block_tables,
@@ -354,3 +356,5 @@ def _multi_query_paged_attention(
         input_metadata.max_context_len,
         alibi_slopes,
     )
+
+    return output

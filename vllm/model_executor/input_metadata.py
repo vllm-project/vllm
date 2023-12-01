@@ -29,6 +29,7 @@ class InputMetadata:
         self.slot_mapping = slot_mapping
         self.context_lens = context_lens
         self.block_tables = block_tables
+        self.draft_lens = draft_lens
 
         self.is_prompt = len(prompt_lens) > 0
         # Set during the execution of the first attention op.

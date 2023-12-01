@@ -378,16 +378,11 @@ def test_multi_query_cached_kv_attention(
 
     # need input_metadata to pass in block_tables, slot_mapping
     input_metadata = InputMetadata(
-        seq_groups=[([i], SamplingParams()) for i in range(num_seqs)],
-        seq_data={k: SequenceData([])
-                  for k in range(num_seqs)},
         prompt_lens=[],
         slot_mapping=slot_mapping_tensor,
         context_lens=context_lens_tensor,
         max_context_len=max_context_len,
         block_tables=block_tables_tensor,
-        selected_token_indices=None,
-        categorized_sample_indices=None,
         draft_lens=query_lens)
 
     attn = PagedAttention(num_heads, head_size, scale)
@@ -408,6 +403,7 @@ def test_multi_query_cached_kv_attention(
         query_lens,
         scale,
     )
+    __import__('pdb').set_trace()
 
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
@@ -508,3 +504,4 @@ def test_multi_query_kv_attention(
         dtype,
     )
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+    
