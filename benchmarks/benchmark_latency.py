@@ -1,6 +1,7 @@
 """Benchmark the latency of processing a single batch of requests."""
 import argparse
 import time
+from typing import Optional
 
 import numpy as np
 import torch
@@ -34,12 +35,15 @@ def main(args: argparse.Namespace):
     print(sampling_params)
     dummy_prompt_token_ids = [[0] * args.input_len] * args.batch_size
 
-    def run_to_completion(profile: bool = False):
-        if profile:
-            with torch.profiler.profile(activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-            ]) as p:
+    def run_to_completion(profile_dir: Optional[str] = None):
+        if profile_dir:
+            with torch.profiler.profile(
+                    activities=[
+                        torch.profiler.ProfilerActivity.CPU,
+                        torch.profiler.ProfilerActivity.CUDA,
+                    ],
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                        profile_dir)) as p:
                 llm.generate(prompt_token_ids=dummy_prompt_token_ids,
                              sampling_params=sampling_params,
                              use_tqdm=False)
@@ -54,11 +58,11 @@ def main(args: argparse.Namespace):
             return latency
 
     print("Warming up...")
-    run_to_completion(profile=False)
+    run_to_completion(profile_dir=None)
 
     if args.profile:
         print("Profiling...")
-        run_to_completion(profile=True)
+        run_to_completion(profile_dir=args.profile)
         return
 
     # Benchmark.
@@ -105,7 +109,9 @@ if __name__ == '__main__':
         'for BF16 models.')
     parser.add_argument(
         '--profile',
-        action='store_true',
-        help='profile the generation process of a single batch')
+        type=str,
+        default=None,
+        help=('path to save the pytorch profiler output. If unspecifed, '
+              'no profiling is done.'))
     args = parser.parse_args()
     main(args)
