@@ -7,7 +7,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
+from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -88,8 +88,6 @@ class LLMEngine:
 
         self.model_config = model_config
         self.cache_config = cache_config
-        assert self.cache_config.sliding_window == getattr(
-            self.model_config.hf_config, "sliding_window", None)
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
@@ -162,12 +160,12 @@ class LLMEngine:
                 continue
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=1,
+                num_gpus=self.cache_config.gpu_memory_utilization,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
                 **ray_remote_kwargs,
-            )(RayWorker).remote(self.model_config.trust_remote_code)
+            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
