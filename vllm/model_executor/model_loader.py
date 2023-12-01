@@ -97,6 +97,8 @@ def get_model(model_config: ModelConfig, parallel_config: ParallelConfig,
         kv_quant_params_list = []
         if model_config.quant_kv_cache:
             for i in range(num_layers):
+                # FIXME (Zhang Ying): rank = 0
+                rank = 0
                 path = model_config.kv_quant_params_path + \
                        f"/layers.{i}.past_kv_scale.{rank}.weight"
                 kv_quant_params = list(np.fromfile(path, dtype=np.float32))

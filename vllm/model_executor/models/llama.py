@@ -385,14 +385,14 @@ class LlamaForCausalLM(nn.Module):
     _row_parallel_layers = ["o_proj", "down_proj"]
     # name map, you may need to modify it according to your situation
     _int8_scale_params = {
-        "self_attn.q_proj.dequant_scale": ["self_attn.attn.dequant_scale"],
-        "self_attn.k_proj.dequant_scale": ["self_attn.attn.dequant_scale"],
-        "self_attn.v_proj.dequant_scale": ["self_attn.attn.dequant_scale"],
+        "self_attn.q_proj.dequant_scale": "self_attn.attn.dequant_scale",
+        "self_attn.k_proj.dequant_scale": "self_attn.attn.dequant_scale",
+        "self_attn.v_proj.dequant_scale": "self_attn.attn.dequant_scale",
         "self_attn.o_proj.dequant_scale":
-        ["post_attention_layernorm.dequant_scale", "self_attn.o_proj.dequant_scale"],
-        "mlp.gate_proj.dequant_scale": ["mlp.act_fn.dequant_scale"],
-        "mlp.up_proj.dequant_scale": ["mlp.act_fn.dequant_scale"],
-        "mlp.down_proj.dequant_scale": ["dequant_add_residual.dequant_scale", "mlp.down_proj.dequant_scale"]
+        "post_attention_layernorm.dequant_scale",
+        "mlp.gate_proj.dequant_scale": "mlp.act_fn.dequant_scale",
+        "mlp.up_proj.dequant_scale": "mlp.act_fn.dequant_scale",
+        "mlp.down_proj.dequant_scale": "dequant_add_residual.dequant_scale"
     }
 
     def load_weights(self,
@@ -442,6 +442,11 @@ class LlamaForCausalLM(nn.Module):
         ]
         state_dict = self.state_dict()
 
+        if tp_size > 1:
+            self._int8_scale_params.pop("self_attn.o_proj.dequant_scale")
+            self._int8_scale_params.pop("mlp.down_proj.dequant_scale")
+            
+
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
@@ -464,9 +469,9 @@ class LlamaForCausalLM(nn.Module):
                 for weight_name, _ in self._int8_scale_params.items():
                     if weight_name not in name:
                         continue
-                    for target_name in self._int8_scale_params[weight_name]:
-                        param = state_dict[name.replace(weight_name, target_name)]
-                        param.copy_(loaded_weight)
+                    param = state_dict[name.replace(
+                        weight_name, self._int8_scale_params[weight_name])]
+                    param.copy_(loaded_weight)
                     is_fusion_weight = True
                 if is_fusion_weight:
                     continue
