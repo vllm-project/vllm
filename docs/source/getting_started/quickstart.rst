@@ -107,6 +107,7 @@ OpenAI-Compatible Server
 ------------------------
 
 vLLM can be deployed as a server that mimics the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
+By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the above command) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_, `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_, and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
 
 Start the server:
 
@@ -122,13 +123,22 @@ Use model from www.modelscope.cn
     $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.openai.api_server \
     $     --model="qwen/Qwen-7B-Chat" --revision="v1.1.8" --trust-remote-code
 
-By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the above command) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_ and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
+By default, the server uses a predefined chat template stored in the tokenizer. You can override this template by using the ``--chat-template`` argument:
+
+.. code-block:: console
+
+   $ python -m vllm.entrypoints.openai.api_server \
+   $     --model facebook/opt-125m \
+   $     --chat-template ./examples/template_chatml.json
 
 This server can be queried in the same format as OpenAI API. For example, list the models:
 
 .. code-block:: console
 
     $ curl http://localhost:8000/v1/models
+
+Using OpenAI Completions API with vLLM
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Query the model with input prompts:
 
@@ -156,3 +166,45 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
     print("Completion result:", completion)
 
 For a more detailed client example, refer to `examples/openai_completion_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py>`_.
+
+Using OpenAI Chat API with vLLM
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The vLLM server is designed to support the OpenAI Chat API, allowing you to engage in dynamic conversations with the model. The chat interface is a more interactive way to communicate with the model, allowing back-and-forth exchanges that can be stored in the chat history. This is useful for tasks that require context or more detailed explanations.
+
+Querying the model using OpenAI Chat API:
+
+You can use the `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_ endpoint to communicate with the model in a chat-like interface:
+
+.. code-block:: console
+
+    $ curl http://localhost:8000/v1/chat/completions \
+    $     -H "Content-Type: application/json" \
+    $     -d '{
+    $         "model": "facebook/opt-125m",
+    $         "messages": [
+    $             {"role": "system", "content": "You are a helpful assistant."},
+    $             {"role": "user", "content": "Who won the world series in 2020?"}
+    $         ]
+    $     }'
+
+Python Client Example:
+
+Using the `openai` python package, you can also communicate with the model in a chat-like manner:
+
+.. code-block:: python
+
+    import openai
+    # Set OpenAI's API key and API base to use vLLM's API server.
+    openai.api_key = "EMPTY"
+    openai.api_base = "http://localhost:8000/v1"
+    chat_response = openai.ChatCompletion.create(
+        model="facebook/opt-125m",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Tell me a joke."},
+        ]
+    )
+    print("Chat response:", chat_response)
+
+For more in-depth examples and advanced features of the chat API, you can refer to the official OpenAI documentation.

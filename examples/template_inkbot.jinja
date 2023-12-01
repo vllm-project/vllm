@@ -1,0 +1,30 @@
+<#meta#>
+- Date: {{ (messages|selectattr('role', 'equalto', 'meta-current_date')|list|last).content|trim if (messages|selectattr('role', 'equalto', 'meta-current_date')|list) else '' }}
+- Task: {{ (messages|selectattr('role', 'equalto', 'meta-task_name')|list|last).content|trim if (messages|selectattr('role', 'equalto', 'meta-task_name')|list) else '' }}
+<#system#>
+{{ (messages|selectattr('role', 'equalto', 'system')|list|last).content|trim if (messages|selectattr('role', 'equalto', 'system')|list) else '' }}
+<#chat#>
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+<#user#>
+{{ message['content']|trim -}}
+{% if not loop.last %}
+
+{% endif %}
+{% elif message['role'] == 'assistant' %}
+<#bot#>
+{{ message['content']|trim -}}
+{% if not loop.last %}
+
+{% endif %}
+{% elif message['role'] == 'user_context' %}
+<#user_context#>
+{{ message['content']|trim -}}
+{% if not loop.last %}
+
+{% endif %}
+{% endif %}
+{% endfor %}
+{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}
+<#bot#>
+{% endif %}
