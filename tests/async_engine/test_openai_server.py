@@ -46,9 +46,11 @@ TEST_MESSAGES = [
 ]
 client = TestClient(app)
 
+
 @dataclass
 class MockTokenizer:
     chat_template = None
+
 
 def test_load_chat_template():
     # Testing chatml template
@@ -104,9 +106,9 @@ async def test_get_gen_prompt(model, template, add_generation_prompt,
 
     # Call the function and get the result
     result = tokenizer.apply_chat_template(
-            conversation=mock_request.messages,
-            tokenize=False,
-            add_generation_prompt=mock_request.add_generation_prompt)
+        conversation=mock_request.messages,
+        tokenize=False,
+        add_generation_prompt=mock_request.add_generation_prompt)
 
     # Test assertion
     assert result == expected_output, f"The generated prompt does not match the expected output for model {model} and template {template}"

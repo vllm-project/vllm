@@ -100,7 +100,8 @@ def load_chat_template(args, tokenizer):
             chat_template = codecs.decode(args.chat_template, "unicode_escape")
 
         tokenizer.chat_template = chat_template
-        logger.info(f"Using supplied chat template:\n{tokenizer.chat_template}")
+        logger.info(
+            f"Using supplied chat template:\n{tokenizer.chat_template}")
     elif tokenizer.chat_template is not None:
         logger.info(f"Using default chat template:\n{tokenizer.chat_template}")
     else:
@@ -297,11 +298,12 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         index=i,
                         delta=DeltaMessage(content=last_msg_content),
                         finish_reason=None)
-                    chunk = ChatCompletionStreamResponse(id=request_id,
-                                                         object=chunk_object_type,
-                                                         created=created_time,
-                                                         choices=[choice_data],
-                                                         model=model_name)
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        object=chunk_object_type,
+                        created=created_time,
+                        choices=[choice_data],
+                        model=model_name)
                     data = chunk.json(exclude_unset=True, ensure_ascii=False)
                     yield f"data: {data}\n\n"
 
@@ -327,11 +329,12 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         index=i,
                         delta=DeltaMessage(content=delta_text),
                         finish_reason=None)
-                    chunk = ChatCompletionStreamResponse(id=request_id,
-                                                         object=chunk_object_type,
-                                                         created=created_time,
-                                                         choices=[choice_data],
-                                                         model=model_name)
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        object=chunk_object_type,
+                        created=created_time,
+                        choices=[choice_data],
+                        model=model_name)
                     data = chunk.json(exclude_unset=True, ensure_ascii=False)
                     yield f"data: {data}\n\n"
                 else:
@@ -344,11 +347,12 @@ async def create_chat_completion(request: ChatCompletionRequest,
                     )
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i, delta=[], finish_reason=output.finish_reason)
-                    chunk = ChatCompletionStreamResponse(id=request_id,
-                                                         object=chunk_object_type,
-                                                         created=created_time,
-                                                         choices=[choice_data],
-                                                         model=model_name)
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        object=chunk_object_type,
+                        created=created_time,
+                        choices=[choice_data],
+                        model=model_name)
                     if final_usage is not None:
                         chunk.usage = final_usage
                     data = chunk.json(exclude_unset=True,
