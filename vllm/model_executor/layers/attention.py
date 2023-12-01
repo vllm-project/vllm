@@ -160,6 +160,8 @@ class PagedAttention(nn.Module):
                 attn_bias=input_metadata.attn_bias,
                 p=0.0,
                 scale=self.scale,
+                op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+                (torch.cuda.is_available() and torch.version.hip) else None,
             )
             output = out.view_as(query)
         else:
