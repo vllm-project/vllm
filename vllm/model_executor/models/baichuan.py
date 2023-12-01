@@ -341,6 +341,17 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
+            if name == "lm_head.weight":
+                # Unlike Baichuan, Baichuan2 normalizes the head weights. Refer to:
+                # https://huggingface.co/baichuan-inc/Baichuan2-7B-Chat/blob/84603cde5ebffb6084e476cfaeceaf0b8b91fe54/modeling_baichuan.py#L508
+                # Distinguish between Baichuan and Baichuan2 by checking the
+                # vocab size. This is suggested by
+                # https://github.com/vllm-project/vllm/pull/1022#discussion_r1325652704
+                is_baichuan2 = self.config.vocab_size == 125696
+                if is_baichuan2:
+                    loaded_weight = torch.nn.functional.normalize(
+                        loaded_weight)
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue

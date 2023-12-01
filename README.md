@@ -47,7 +47,7 @@ vLLM is flexible and easy to use with:
 vLLM seamlessly supports many Hugging Face models, including the following architectures:
 
 - Aquila & Aquila2 (`BAAI/AquilaChat2-7B`, `BAAI/AquilaChat2-34B`, `BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc.)
-- Baichuan (`baichuan-inc/Baichuan-7B`, `baichuan-inc/Baichuan-13B-Chat`, etc.)
+- Baichuan & Baichuan2 (`baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.)
 - BLOOM (`bigscience/bloom`, `bigscience/bloomz`, etc.)
 - ChatGLM (`THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.)
 - Falcon (`tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc.)

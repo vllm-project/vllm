@@ -19,7 +19,7 @@ Alongside each architecture, we include some popular models that use it.
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
-    - :code:`baichuan-inc/Baichuan-7B`, :code:`baichuan-inc/Baichuan-13B-Chat`, etc.
+    - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
   * - :code:`ChatGLMModel`
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
