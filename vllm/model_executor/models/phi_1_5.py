@@ -310,6 +310,8 @@ class PhiForCausalLM(nn.Module):
                 continue
 
             # pylint: disable=E1136
+            if name not in params_dict:
+                continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
