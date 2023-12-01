@@ -85,7 +85,7 @@ template <typename scalar_t, typename input_type, bool IS_NEOX,
       const int head_idx = i / embed_dim;
       const int token_head = token_idx * key_stride + head_idx * head_size;
       const int rot_offset = i % embed_dim;
-      if (use_dequant) {
+      if constexpr (use_dequant) {
         const int token_out_head =
             token_idx * key_out_stride + head_idx * head_size;
         apply_rotary_embedding<scalar_t, input_type, IS_NEOX, use_dequant>(
