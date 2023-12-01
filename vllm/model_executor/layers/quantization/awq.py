@@ -151,7 +151,16 @@ class AWQLinearMethod(LinearMethodBase):
         pack_factor = self.quant_config.pack_factor
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
-        out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, pack_factor)
+
+        # Selecting the right kernel based on input size, using logic from:
+        # https://github.com/mit-han-lab/llm-awq/blob/19a5a2c9db47f69a2851c83fea90f81ed49269ab/tinychat/modules/fused_mlp.py#L36-L77 # noqa: E501
+        group_size = self.quant_config.group_size
+        if x.shape[0] <= 8:
+            out = ops.awq_gemv(reshaped_x, qweight, scales, qzeros, group_size)
+        else:
+            out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, group_size,
+                               pack_factor)
+
         if bias is not None:
             out = out + bias
         return out.reshape(out_shape)

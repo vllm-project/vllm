@@ -61,11 +61,19 @@ void gelu_fast(
   torch::Tensor& out,
   torch::Tensor& input);
 
+torch::Tensor awq_gemv(
+  torch::Tensor _in_feats,
+  torch::Tensor _kernel,
+  torch::Tensor _scaling_factors,
+  torch::Tensor _zeros,
+  int group_size);
+
 torch::Tensor awq_gemm(
   torch::Tensor _in_feats,
   torch::Tensor _kernel,
   torch::Tensor _scaling_factors,
   torch::Tensor _zeros,
+  int group_size,
   int split_k_iters);
 
 void squeezellm_gemm(

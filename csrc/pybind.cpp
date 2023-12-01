@@ -50,6 +50,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Quantization ops
   ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
+  ops.def("awq_gemv", &awq_gemv, "Quantized GEMV for AWQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
 
   // Cache ops

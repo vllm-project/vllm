@@ -151,6 +151,7 @@ vllm_extension = CUDAExtension(
         "csrc/activation_kernels.cu",
         "csrc/layernorm_kernels.cu",
         "csrc/quantization/awq/gemm_kernels.cu",
+        "csrc/quantization/awq/gemv_kernels.cu",
         "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
         "csrc/cuda_utils_kernels.cu",
         "csrc/pybind.cpp",
