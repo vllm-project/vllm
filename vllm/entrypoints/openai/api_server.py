@@ -89,15 +89,22 @@ def create_error_response(status_code: HTTPStatus,
                         status_code=status_code.value)
 
 
-def load_chat_template(_args):
-    try:
-        with open(_args.chat_template, "r") as f:
-            content = f.read()
-            return content
-    except OSError:
-        # If opening a file fails, set chat template to be args to
-        # ensure we decode so our escape are interpreted correctly
-        return codecs.decode(_args.chat_template, "unicode_escape")
+def load_chat_template(args, tokenizer):
+    if args.chat_template is not None:
+        try:
+            with open(args.chat_template, "r") as f:
+                chat_template = f.read()
+        except OSError:
+            # If opening a file fails, set chat template to be args to
+            # ensure we decode so our escape are interpreted correctly
+            chat_template = codecs.decode(args.chat_template, "unicode_escape")
+
+        tokenizer.chat_template = chat_template
+        logger.info(f"Using supplied chat template:\n{tokenizer.chat_template}")
+    elif tokenizer.chat_template is not None:
+        logger.info(f"Using default chat template:\n{tokenizer.chat_template}")
+    else:
+        logger.warning("No chat template provided. Chat API will not work.")
 
 
 @app.exception_handler(RequestValidationError)
@@ -113,16 +120,6 @@ async def check_model(request) -> Optional[JSONResponse]:
         f"The model `{request.model}` does not exist.",
     )
     return ret
-
-
-async def get_gen_prompt(_tokenizer, _request) -> str:
-    try:
-        return _tokenizer.apply_chat_template(
-            conversation=_request.messages,
-            tokenize=False,
-            add_generation_prompt=_request.add_generation_prompt)
-    except Exception as e:
-        raise RuntimeError(f"Error generating prompt: {str(e)}") from e
 
 
 async def check_length(
@@ -216,8 +213,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
         - function_call (Users should implement this by themselves)
         - logit_bias (to be supported by vLLM engine)
     """
-    logger.info(f"Received chat completion request: {request}")
-
     error_check_ret = await check_model(request)
     if error_check_ret is not None:
         return error_check_ret
@@ -228,9 +223,12 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                      "logit_bias is not currently supported")
 
     try:
-        prompt = await get_gen_prompt(tokenizer, request)
-    except RuntimeError as e:
-        logger.error(f"Error in generating prompt from request: {str(e)}")
+        prompt = tokenizer.apply_chat_template(
+            conversation=request.messages,
+            tokenize=False,
+            add_generation_prompt=request.add_generation_prompt)
+    except Exception as e:
+        logger.error(f"Error in applying chat template from request: {str(e)}")
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
     token_ids, error_check_ret = await check_length(request, prompt=prompt)
@@ -240,7 +238,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     model_name = request.model
     request_id = f"cmpl-{random_uuid()}"
     created_time = int(time.monotonic())
-    obj_str = "chat.completion.chunk"
+    chunk_object_type = "chat.completion.chunk"
     try:
         spaces_between_special_tokens = request.spaces_between_special_tokens
         sampling_params = SamplingParams(
@@ -278,7 +276,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             choice_data = ChatCompletionResponseStreamChoice(
                 index=i, delta=DeltaMessage(role=role), finish_reason=None)
             chunk = ChatCompletionStreamResponse(id=request_id,
-                                                 object=obj_str,
+                                                 object=chunk_object_type,
                                                  created=created_time,
                                                  choices=[choice_data],
                                                  model=model_name)
@@ -300,7 +298,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         delta=DeltaMessage(content=last_msg_content),
                         finish_reason=None)
                     chunk = ChatCompletionStreamResponse(id=request_id,
-                                                         object=obj_str,
+                                                         object=chunk_object_type,
                                                          created=created_time,
                                                          choices=[choice_data],
                                                          model=model_name)
@@ -315,8 +313,12 @@ async def create_chat_completion(request: ChatCompletionRequest,
             res: RequestOutput
             for output in res.outputs:
                 i = output.index
-                # Send token-by-token response for each request.n
-                if output.finish_reason is None and not finish_reason_sent[i]:
+
+                if finish_reason_sent[i]:
+                    continue
+
+                if output.finish_reason is None:
+                    # Send token-by-token response for each request.n
                     delta_text = output.text[len(previous_texts[i]):]
                     previous_texts[i] = output.text
                     completion_tokens = len(output.token_ids)
@@ -326,15 +328,14 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         delta=DeltaMessage(content=delta_text),
                         finish_reason=None)
                     chunk = ChatCompletionStreamResponse(id=request_id,
-                                                         object=obj_str,
+                                                         object=chunk_object_type,
                                                          created=created_time,
                                                          choices=[choice_data],
                                                          model=model_name)
                     data = chunk.json(exclude_unset=True, ensure_ascii=False)
                     yield f"data: {data}\n\n"
-                # Send the finish response for each request.n only once
-                if output.finish_reason is not None and not finish_reason_sent[
-                        i]:
+                else:
+                    # Send the finish response for each request.n only once
                     prompt_tokens = len(res.prompt_token_ids)
                     final_usage = UsageInfo(
                         prompt_tokens=prompt_tokens,
@@ -344,7 +345,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i, delta=[], finish_reason=output.finish_reason)
                     chunk = ChatCompletionStreamResponse(id=request_id,
-                                                         object=obj_str,
+                                                         object=chunk_object_type,
                                                          created=created_time,
                                                          choices=[choice_data],
                                                          model=model_name)
@@ -368,6 +369,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                              "Client disconnected")
             final_res = res
         assert final_res is not None
+
         choices = []
         role = get_role()
         for output in final_res.outputs:
@@ -685,7 +687,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 if __name__ == "__main__":
-
     args = parse_args()
 
     app.add_middleware(
@@ -715,14 +716,7 @@ if __name__ == "__main__":
         engine_model_config.tokenizer,
         tokenizer_mode=engine_model_config.tokenizer_mode,
         trust_remote_code=engine_model_config.trust_remote_code)
-
-    chat_template = None
-    if args.chat_template is not None:
-        chat_template = load_chat_template(args)
-    if chat_template is not None:
-        tokenizer.chat_template = chat_template
-    if tokenizer.chat_template is not None:
-        logger.info(f"Using chat template:\n{tokenizer.chat_template}")
+    load_chat_template(args, tokenizer)
 
     uvicorn.run(app,
                 host=args.host,

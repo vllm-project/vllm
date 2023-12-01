@@ -124,11 +124,12 @@ Use model from www.modelscope.cn
     $     --model="qwen/Qwen-7B-Chat" --revision="v1.1.8" --trust-remote-code
 
 By default, the server uses a predefined chat template stored in the tokenizer. You can override this template by using the ``--chat-template`` argument:
+
 .. code-block:: console
 
    $ python -m vllm.entrypoints.openai.api_server \
-       --model facebook/opt-125m \
-       --chat-template ./examples/template_chatml.json
+   $     --model facebook/opt-125m \
+   $     --chat-template ./examples/template_chatml.json
 
 This server can be queried in the same format as OpenAI API. For example, list the models:
 
@@ -137,7 +138,7 @@ This server can be queried in the same format as OpenAI API. For example, list t
     $ curl http://localhost:8000/v1/models
 
 Using OpenAI Completions API with vLLM
---------------------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Query the model with input prompts:
 
@@ -167,7 +168,7 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
 For a more detailed client example, refer to `examples/openai_completion_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py>`_.
 
 Using OpenAI Chat API with vLLM
--------------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The vLLM server is designed to support the OpenAI Chat API, allowing you to engage in dynamic conversations with the model. The chat interface is a more interactive way to communicate with the model, allowing back-and-forth exchanges that can be stored in the chat history. This is useful for tasks that require context or more detailed explanations.
 
