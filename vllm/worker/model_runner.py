@@ -25,7 +25,8 @@ class ModelRunner:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
 
-        self.sliding_window = model_config.get_sliding_window()
+        self.sliding_window = model_config.get_sliding_window(
+        ) if model_config else None
         self.model = None
         self.block_size = None  # Set after initial profiling.
 

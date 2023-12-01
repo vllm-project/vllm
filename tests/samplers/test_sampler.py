@@ -52,6 +52,7 @@ def test_sampler_all_greedy(seed: int):
     input_tensor, fake_logits, sampler, worker = _prepare_test(batch_size)
 
     seq_group_metadata_list = []
+    prompt_lens = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -61,11 +62,13 @@ def test_sampler_all_greedy(seed: int):
                 sampling_params=SamplingParams(temperature=0, ),
                 block_tables={0: [1]},
             ))
+        prompt_lens.append(3)
 
-    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    sampling_metadata = worker.model_runner._prepare_sample(
+        seq_group_metadata_list, prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
-                             input_metadata=input_metadata)
+                             sampling_metadata=sampling_metadata)
     expected = torch.argmax(fake_logits, dim=-1)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -82,6 +85,7 @@ def test_sampler_all_random(seed: int):
         fake_logits[i, i] = 1e2
 
     seq_group_metadata_list = []
+    prompt_lens = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -94,11 +98,13 @@ def test_sampler_all_random(seed: int):
                 ),
                 block_tables={0: [1]},
             ))
+        prompt_lens.append(3)
 
-    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    sampling_metadata = worker.model_runner._prepare_sample(
+        seq_group_metadata_list, prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
-                             input_metadata=input_metadata)
+                             sampling_metadata=sampling_metadata)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token == i
@@ -111,6 +117,7 @@ def test_sampler_all_beam(seed: int):
     input_tensor, _, sampler, worker = _prepare_test(batch_size)
 
     seq_group_metadata_list = []
+    prompt_lens = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -124,11 +131,13 @@ def test_sampler_all_beam(seed: int):
                 ),
                 block_tables={0: [1]},
             ))
+        prompt_lens.append(3)
 
-    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    sampling_metadata = worker.model_runner._prepare_sample(
+        seq_group_metadata_list, prompt_lens)
     sampler(embedding=None,
             hidden_states=input_tensor,
-            input_metadata=input_metadata)
+            sampling_metadata=sampling_metadata)
     # no assertion here as I am not sure how to determine whether
     # the outputs are expected - in other words, this just tests
     # whether there are no exceptions in the sampler
@@ -143,6 +152,7 @@ def test_sampler_mixed(seed: int):
 
     seq_group_metadata_list = []
     expected_tokens = []
+    prompt_lens = []
     for i in range(batch_size):
         n = 1
         sampling_type = random.randint(0, 2)
@@ -172,11 +182,13 @@ def test_sampler_mixed(seed: int):
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
             ))
+        prompt_lens.append(3)
 
-    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    sampling_metadata = worker.model_runner._prepare_sample(
+        seq_group_metadata_list, prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
-                             input_metadata=input_metadata)
+                             sampling_metadata=sampling_metadata)
     for i, sequence_output in enumerate(sampler_output):
         if seq_group_metadata_list[i].sampling_params.use_beam_search:
             continue
@@ -198,6 +210,7 @@ def test_sampler_logits_processors(seed: int):
         return logits
 
     seq_group_metadata_list = []
+    prompt_lens = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -208,11 +221,13 @@ def test_sampler_logits_processors(seed: int):
                                                logits_processors=[pick_ith]),
                 block_tables={0: [1]},
             ))
+        prompt_lens.append(3)
 
-    _, _, input_metadata = worker._prepare_inputs(seq_group_metadata_list)
+    sampling_metadata = worker.model_runner._prepare_sample(
+        seq_group_metadata_list, prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
-                             input_metadata=input_metadata)
+                             sampling_metadata=sampling_metadata)
     for _, sequence_output in enumerate(sampler_output):
         for idx, nth_output in enumerate(sequence_output.samples):
             assert nth_output.output_token == idx
