@@ -1,3 +1,4 @@
+# pylint: skip-file
 # Adapted from
 # https://huggingface.co/baichuan-inc/Baichuan2-13B-Chat/blob/8f6e343d545c503b91429582231d1d354dac2740/tokenization_baichuan.py
 # This includes a fix suggested in
