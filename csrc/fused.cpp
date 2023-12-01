@@ -16,6 +16,10 @@ void invoke_dequant(torch::Tensor &out,   // [..., hidden_size]
                     torch::Tensor &input, // [..., hidden_size]
                     float scale);
 
+void invoke_dequant(torch::Tensor &out,   // [..., hidden_size]
+                    torch::Tensor &input, // [..., hidden_size]
+                    torch::Tensor &scale);
+
 void invoke_quant(torch::Tensor &out,   // [..., hidden_size]
                   torch::Tensor &input, // [..., hidden_size]
                   float scale);
@@ -33,7 +37,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::overload_cast<torch::Tensor &, torch::Tensor &, torch::Tensor &,
                           torch::Tensor &>(&invoke_dequant_add_residual),
         "Add the dequanted result and residual.");
-  m.def("invoke_dequant", &invoke_dequant, "Dequant.");
+  m.def("invoke_dequant", py::overload_cast<torch::Tensor &, torch::Tensor &, float>(&invoke_dequant), "Dequant.");
+  m.def("invoke_dequant", py::overload_cast<torch::Tensor &, torch::Tensor &, torch::Tensor &>(&invoke_dequant), "Dequant.");
   m.def(
       "invoke_quant",
       py::overload_cast<torch::Tensor &, torch::Tensor &, float>(&invoke_quant),

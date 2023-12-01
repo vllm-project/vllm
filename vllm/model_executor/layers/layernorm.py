@@ -27,6 +27,25 @@ class RMSNorm(nn.Module):
         layernorm_ops.rms_norm(out, x, self.weight.data, self.variance_epsilon,
                                self.use_quant)
         return out
+    
+class AddResidualI8RMSNormQuant(nn.Module):
+    """Root mean square normalization.
+
+    Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
+    Refer to https://arxiv.org/abs/1910.07467
+    """
+
+    def __init__(self,
+                 hidden_size: int,
+                 eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, residual: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x, dtype=torch.int8)
+        layernorm_ops.invoke_add_residual_rms_norm_quant(out, x, residual, self.weight.data, self.variance_epsilon)
+        return residual, out
 
 
 class DequantAddResidualI8RMSNormQuant(nn.Module):
@@ -36,7 +55,7 @@ class DequantAddResidualI8RMSNormQuant(nn.Module):
     Refer to https://arxiv.org/abs/1910.07467
     """
 
-    # TODO(Zhang Ying): use_per_token_quant
+    # TODO(Zhang Ying): use_per_token_dequant
     def __init__(self,
                  hidden_size: int,
                  dequant_scale: float = 1.0,
