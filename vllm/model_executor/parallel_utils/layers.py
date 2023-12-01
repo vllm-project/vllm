@@ -24,6 +24,7 @@ from vllm.model_executor.parallel_utils.utils import (
     VocabUtility,
     split_tensor_along_last_dim,
 )
+from vllm import fused_kernels
 
 
 class VocabParallelEmbedding(torch.nn.Module):
@@ -221,6 +222,7 @@ class RowParallelLinear(torch.nn.Module):
         params_dtype: Optional[torch.dtype] = None,
         reduce_results: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
+        dequant_scale: float = 1.0
     ):
         super().__init__()
         # Keep input parameters
@@ -236,6 +238,13 @@ class RowParallelLinear(torch.nn.Module):
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.skip_bias_add = skip_bias_add
         self.quant_config = quant_config
+        self.register_buffer(
+            "dequant_scale",
+            torch.tensor(dequant_scale,
+                         dtype=torch.float32,
+                         requires_grad=False))
+        self.use_int8 = quant_config is not None and quant_config.get_name(
+        ) == "smoothquant"
 
         self.create_weights(params_dtype)
 
@@ -264,8 +273,19 @@ class RowParallelLinear(torch.nn.Module):
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight)
+    
+    def _apply(self, fn):
+        super()._apply(fn)
+        self.dequant_scale = self.dequant_scale.cpu()
+        return self
 
-    def forward(self, input_):
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self.dequant_scale = self.dequant_scale.to(*args, **kwargs)
+        self.dequant_scale = self.dequant_scale.to(torch.float32)
+        return self
+
+    def forward(self, input_, scale=None):
         """Forward of RowParallelLinear
 
         Args:
@@ -289,6 +309,12 @@ class RowParallelLinear(torch.nn.Module):
 
         # Matrix multiply.
         output_parallel = self.apply_weights(input_parallel)
+        if self.use_int8 and self.tp_size > 1:
+        # FIXME (Zhang Ying): handle dtype 
+            out = torch.empty_like(output_parallel, dtype=torch.float16)
+            scale = self.dequant_scale.item() * scale
+            fused_kernels.invoke_dequant(out, output_parallel, scale)
+            output_parallel = out
         if self.reduce_results and self.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:

@@ -28,15 +28,20 @@ __global__ void dequant_add_residual_kernel(const int32_t *__restrict__ input,
   }
 }
 
-template <typename T>
+template <typename T, typename scale_type, bool use_per_token_dequant>
 __global__ void dequant_kernel(const int32_t *__restrict__ input,
-                               T *__restrict__ output, const float scale, int m,
+                               T *__restrict__ output, const scale_type scale, int m,
                                int hidden_size, int input_stride, int out_stride) {
   const int tid = threadIdx.x;
   const int token_idx = blockIdx.x;
   for (int i = tid; i < hidden_size; i += blockDim.x) {
-    output[token_idx * out_stride + i] =
+    if constexpr (use_per_token_dequant) {
+      output[token_idx * out_stride + i] =
+          (T)(((float)input[token_idx * input_stride + i]) * scale[token_idx]);
+    } else {
+      output[token_idx * out_stride + i] =
         (T)(((float)input[token_idx * input_stride + i]) * scale);
+    }
   }
 }
 
@@ -131,8 +136,26 @@ void invoke_dequant(torch::Tensor &out,   // [..., hidden_size]
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(out.scalar_type(), "dequant_kernel", [&] {
-    vllm::dequant_kernel<scalar_t><<<grid, block, 0, stream>>>(
+    vllm::dequant_kernel<scalar_t, float, false><<<grid, block, 0, stream>>>(
         input.data_ptr<int32_t>(), out.data_ptr<scalar_t>(), scale, num_tokens, hidden_size,
+        input_stride, out_stride);
+  });
+}
+
+void invoke_dequant(torch::Tensor &out,   // [..., hidden_size]
+                    torch::Tensor &input, // [..., hidden_size]
+                    torch::Tensor &scale) {
+  int hidden_size = input.size(-1);
+  int num_tokens = input.numel() / hidden_size;
+  dim3 grid(num_tokens);
+  dim3 block(std::min(hidden_size, 1024));
+  int input_stride = input.stride(-2);
+  int out_stride = out.stride(-2);
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  VLLM_DISPATCH_FLOATING_TYPES(out.scalar_type(), "dequant_kernel", [&] {
+    vllm::dequant_kernel<scalar_t, float *, true><<<grid, block, 0, stream>>>(
+        input.data_ptr<int32_t>(), out.data_ptr<scalar_t>(), scale.data_ptr<float>(), num_tokens, hidden_size,
         input_stride, out_stride);
   });
 }
