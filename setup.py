@@ -24,10 +24,10 @@ CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
 # TODO(woosuk): Should we use -O3?
 NVCC_FLAGS = ["-O2", "-std=c++17"]
 
-if torch.cuda.is_available() and torch.version.hip and ROCM_HOME is not None:
+if torch.version.hip and ROCM_HOME is not None:
     NVCC_FLAGS += ["-DUSE_ROCM"]
 
-if torch.cuda.is_available() and torch.version.cuda and CUDA_HOME is None:
+if torch.version.cuda and CUDA_HOME is None:
     raise RuntimeError(
         "Cannot find CUDA_HOME. CUDA must be available to build the package.")
 
@@ -129,8 +129,7 @@ def get_torch_arch_list() -> Set[str]:
 
 # First, check the TORCH_CUDA_ARCH_LIST environment variable.
 compute_capabilities = get_torch_arch_list()
-if torch.cuda.is_available(
-) and torch.version.cuda and not compute_capabilities:
+if torch.version.cuda and not compute_capabilities:
     # If TORCH_CUDA_ARCH_LIST is not defined or empty, target all available
     # GPUs on the current machine.
     device_count = torch.cuda.device_count()
@@ -141,7 +140,7 @@ if torch.cuda.is_available(
                 "GPUs with compute capability below 7.0 are not supported.")
         compute_capabilities.add(f"{major}.{minor}")
 
-if torch.cuda.is_available() and torch.version.cuda:
+if torch.version.cuda:
     nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
     if not compute_capabilities:
         # If no GPU is specified nor available, add all supported architectures
@@ -192,7 +191,7 @@ if torch.cuda.is_available() and torch.version.cuda:
         num_threads = min(os.cpu_count(), 8)
         NVCC_FLAGS += ["--threads", str(num_threads)]
 
-elif torch.cuda.is_available() and torch.version.hip:
+elif torch.version.hip:
     amd_arch = get_amdgpu_offload_arch()
     if amd_arch not in ROCM_SUPPORTED_ARCHS:
         raise RuntimeError(
@@ -212,7 +211,7 @@ vllm_extension_sources = [
     "csrc/pybind.cpp",
 ]
 
-if torch.cuda.is_available() and torch.version.cuda:
+if torch.version.cuda:
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
 
 vllm_extension = CUDAExtension(
@@ -246,18 +245,18 @@ def find_version(filepath: str) -> str:
 def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "__init__.py"))
 
-    if torch.cuda.is_available() and torch.version.cuda:
-        cuda_version = str(nvcc_cuda_version)
-        if cuda_version != MAIN_CUDA_VERSION:
-            cuda_version_str = cuda_version.replace(".", "")[:3]
-            version += f"+cu{cuda_version_str}"
-
-    elif torch.cuda.is_available() and torch.version.hip:
+    if torch.version.hip:
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
         if hipcc_version != MAIN_CUDA_VERSION:
             rocm_version_str = hipcc_version.replace(".", "")[:3]
             version += f"+rocm{rocm_version_str}"
+    else:
+        cuda_version = str(nvcc_cuda_version)
+        if cuda_version != MAIN_CUDA_VERSION:
+            cuda_version_str = cuda_version.replace(".", "")[:3]
+            version += f"+cu{cuda_version_str}"
+
 
     return version
 
@@ -273,10 +272,10 @@ def read_readme() -> str:
 
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
-    if torch.cuda.is_available() and torch.version.hip:
+    if torch.version.hip:
         with open(get_path("requirements-rocm.txt")) as f:
             requirements = f.read().strip().split("\n")
-    elif torch.cuda.is_available() and torch.version.cuda:
+    else:
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
     print("requirements: ", requirements)

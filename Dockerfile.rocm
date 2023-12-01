@@ -25,7 +25,7 @@ VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}
 
 RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers
+RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
 ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
@@ -39,26 +39,21 @@ RUN mkdir libs \
     && git clone https://github.com/ROCmSoftwarePlatform/flash-attention.git \
     && cd flash-attention \
     && git submodule update --init \
-    && sed -i -e "s/--offload-arch=native/--offload-arch=$(/opt/rocm/llvm/bin/amdgpu-offload-arch)/g" setup.py \
+    && export GPU_ARCHS=$(/opt/rocm/llvm/bin/amdgpu-offload-arch) \
+    # && sed -i -e "s/--offload-arch=native/--offload-arch=$(/opt/rocm/llvm/bin/amdgpu-offload-arch)/g" setup.py \
     && patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch \
     && python3 setup.py install \
     && cd ..
 
 COPY ./ /app/vllm-rocm/
 
-# RUN cd /app \
-#     && cd vllm-rocm \
-#     && git checkout v0.2.1.post1-rocm \
-#     && python3 setup.py install \
-#     && cd ..
+RUN cd /app \
+    && cd vllm-rocm \
+    && git checkout vllm-cuda-rocm \
+    && python3 setup.py install \
+    && cd ..
 
-# RUN cd /app \
-#     && mkdir dataset \
-#     && cd ..
-
-# COPY ./benchmark_throughput.sh /app/benchmark_throughput.sh
-
-RUN python3 -m pip install --upgrade pip
+# RUN python3 -m pip install --upgrade pip
 # RUN python3 -m pip install --no-cache-dir ray[all]
 
 CMD ["/bin/bash"]
