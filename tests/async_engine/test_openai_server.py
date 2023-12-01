@@ -1,6 +1,9 @@
-import pytest
 from argparse import Namespace
+from dataclasses import dataclass
+
+import pytest
 from fastapi.testclient import TestClient
+
 from vllm.entrypoints.openai.api_server import *
 
 # Define models, templates, and their corresponding expected outputs
@@ -43,14 +46,20 @@ TEST_MESSAGES = [
 ]
 client = TestClient(app)
 
+@dataclass
+class MockTokenizer:
+    chat_template = None
 
 def test_load_chat_template():
     # Testing chatml template
     template = "../../examples/template_chatml.jinja"
     mock_args = Namespace(chat_template=template)
+    tokenizer = MockTokenizer()
 
     # Call the function with the mocked args
-    template_content = load_chat_template(mock_args)
+    load_chat_template(mock_args, tokenizer)
+
+    template_content = tokenizer.chat_template
 
     # Test assertions
     assert template_content is not None
@@ -63,9 +72,11 @@ def test_no_load_chat_template():
     # Testing chatml template
     template = "../../examples/does_not_exist"
     mock_args = Namespace(chat_template=template)
+    tokenizer = MockTokenizer()
 
     # Call the function with the mocked args
-    template_content = load_chat_template(mock_args)
+    load_chat_template(mock_args, tokenizer=tokenizer)
+    template_content = tokenizer.chat_template
 
     # Test assertions
     assert template_content is not None
@@ -83,11 +94,7 @@ async def test_get_gen_prompt(model, template, add_generation_prompt,
     tokenizer = get_tokenizer(tokenizer_name=model)
 
     mock_args = Namespace(chat_template=template)
-    chat_template = None
-    if mock_args.chat_template is not None:
-        chat_template = load_chat_template(mock_args)
-    if chat_template is not None:
-        tokenizer.chat_template = chat_template
+    load_chat_template(mock_args, tokenizer)
 
     # Create a mock request object using keyword arguments
     mock_request = ChatCompletionRequest(
@@ -96,7 +103,10 @@ async def test_get_gen_prompt(model, template, add_generation_prompt,
         add_generation_prompt=add_generation_prompt)
 
     # Call the function and get the result
-    result = await get_gen_prompt(tokenizer, mock_request)
+    result = tokenizer.apply_chat_template(
+            conversation=mock_request.messages,
+            tokenize=False,
+            add_generation_prompt=mock_request.add_generation_prompt)
 
     # Test assertion
     assert result == expected_output, f"The generated prompt does not match the expected output for model {model} and template {template}"
