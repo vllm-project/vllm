@@ -30,16 +30,17 @@ from transformers import BloomConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttentionWithALiBi
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.quantized_linear import ParallelLinear
-from vllm.model_executor.quantization_utils import QuantizationConfig
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights,
-                                              convert_pyslice_to_tensor,
-                                              get_parallel_weight)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -75,7 +76,7 @@ class BloomAttention(nn.Module):
     def __init__(
         self,
         config: BloomConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -87,19 +88,18 @@ class BloomAttention(nn.Module):
         assert self.total_num_heads % tp_world_size == 0
         self.num_heads = self.total_num_heads // tp_world_size
 
-        self.query_key_value = ParallelLinear.column(
+        self.query_key_value = QKVParallelLinear(
             self.hidden_size,
-            3 * self.hidden_size,
+            self.head_dim,
+            self.total_num_heads,
             bias=True,
-            gather_output=False,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
-        self.dense = ParallelLinear.row(
+        self.dense = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
-            input_is_parallel=True,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
 
         # Create the alibi slopes and slice them.
@@ -136,45 +136,46 @@ class BloomMLP(nn.Module):
     def __init__(
         self,
         config: BloomConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
-        self.dense_h_to_4h = ParallelLinear.column(
+        self.dense_h_to_4h = ColumnParallelLinear(
             hidden_size,
             4 * hidden_size,
-            gather_output=False,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
-        self.act = get_act_fn("gelu")
-        self.dense_4h_to_h = ParallelLinear.row(
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.gelu_impl = get_act_fn("gelu", quant_config, 4 * hidden_size)
+        self.dense_4h_to_h = RowParallelLinear(
             4 * hidden_size,
             hidden_size,
-            input_is_parallel=True,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.dense_h_to_4h(x)
-        x = self.act(x)
+        x = self.gelu_impl(x)
         x, _ = self.dense_4h_to_h(x)
         return x
 
 
 class BloomBlock(nn.Module):
 
-    def __init__(self,
-                 config: BloomConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: BloomConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         hidden_size = config.hidden_size
 
         self.input_layernorm = nn.LayerNorm(hidden_size,
                                             eps=config.layer_norm_epsilon)
-        self.self_attention = BloomAttention(config, quant_config)
+        self.self_attention = BloomAttention(config, linear_method)
         self.post_attention_layernorm = nn.LayerNorm(
             hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = BloomMLP(config, quant_config)
+        self.mlp = BloomMLP(config, linear_method)
         self.apply_residual_connection_post_layernorm = (
             config.apply_residual_connection_post_layernorm)
 
@@ -219,9 +220,11 @@ class BloomBlock(nn.Module):
 
 class BloomModel(nn.Module):
 
-    def __init__(self,
-                 config: BloomConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: BloomConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.embed_dim = config.hidden_size
 
@@ -235,7 +238,7 @@ class BloomModel(nn.Module):
 
         # Transformer blocks
         self.h = nn.ModuleList([
-            BloomBlock(config, quant_config)
+            BloomBlock(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
 
@@ -271,15 +274,15 @@ class BloomModel(nn.Module):
 
 class BloomForCausalLM(nn.Module):
 
-    def __init__(self,
-                 config: BloomConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: BloomConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        self.transformer = BloomModel(config, quant_config)
-        # TODO(zhuohan): create a new weight after implementing pipeline
-        #                parallelism
+        self.linear_method = linear_method
+        self.transformer = BloomModel(config, linear_method)
         self.lm_head_weight = self.transformer.word_embeddings.weight
         self.sampler = Sampler(config.vocab_size)
 
@@ -297,67 +300,36 @@ class BloomForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    column_parallel_layers = ["dense_h_to_4h"]
-    row_parallel_layers = ["dense", "dense_4h_to_h"]
-    parallel_vocab_layers = ["word_embeddings", "lm_head"]
-
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        column_parallel_weights, row_parallel_weights = get_parallel_weight(
-            self)
-        column_weight_suffixes = (
-            self.quant_config.get_col_parallel_tensor_names()
-        ) if self.quant_config is not None else ["weight", "bias"]
-
-        tp_world_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        state_dict = self.state_dict()
-
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            is_transposed = False
-            if self.quant_config is not None:
-                is_transposed = self.quant_config.is_transposed(name)
-            if is_transposed:
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                loaded_weight = loaded_weight.T
-
             if name == "lm_head.weight":
-                # If lm_head is provided, use it instead.
-                param = self.lm_head_weight
-            else:
-                if not name.startswith("transformer."):
-                    name = "transformer." + name
-                if name not in state_dict:
-                    continue
-                param = state_dict[name]
-                if is_transposed:
-                    param = param.T
+                continue
+            if not name.startswith("transformer."):
+                name = "transformer." + name
+            param = params_dict[name]
 
-            if "query_key_value" in name and any(
-                    name.endswith(suffix)
-                    for suffix in column_weight_suffixes):
-                # NOTE(woosuk): BLOOM's fused QKV has the shape of
-                # [num_heads * 3 * head_size, hidden_size], while the
-                # required shape is [3 * num_heads * head_size, hidden_size].
+            if "query_key_value" in name:
+                # NOTE: BLOOM's fused QKV's output_dim has the shape of
+                # (num_heads * 3 * head_size), while the
+                # required shape is (3 * num_heads * head_size).
                 # Thus, we need weight conversion.
-                shard_size = param.shape[0]
-                start = shard_size * tp_rank
-                end = shard_size * (tp_rank + 1)
+                output_dim = getattr(param, "output_dim", None)
+                num_heads = self.config.num_attention_heads
+                if output_dim is not None:
+                    loaded_weight_shape = loaded_weight.shape
+                    loaded_weight = loaded_weight.view(
+                        loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
+                        loaded_weight_shape[output_dim + 1:])
+                    loaded_weight = loaded_weight.transpose(
+                        output_dim, output_dim + 1)
+                    loaded_weight = loaded_weight.reshape(loaded_weight_shape)
 
-                loaded_weight = loaded_weight[start:end]
-
-                num_heads = self.config.num_attention_heads // tp_world_size
-                weight_shape = loaded_weight.shape
-
-                loaded_weight = loaded_weight.view(num_heads, 3, -1,
-                                                   *weight_shape[1:])
-                loaded_weight = loaded_weight.transpose(0, 1)
-                loaded_weight = loaded_weight.reshape(-1, *weight_shape[1:])
-
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         column_parallel_weights,
-                                         row_parallel_weights, tp_rank)
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)

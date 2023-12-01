@@ -5,22 +5,23 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import MptConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttentionWithALiBi
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.quantized_linear import ParallelLinear
-from vllm.model_executor.quantization_utils import QuantizationConfig
-from vllm.model_executor.weight_utils import (convert_pyslice_to_tensor,
-                                              hf_model_weights_iterator,
-                                              load_tensor_parallel_weights,
-                                              get_parallel_weight)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.transformers_utils.configs.mpt import MPTConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -38,36 +39,38 @@ def _get_alibi_slopes(
     return slopes
 
 
-class MptAttention(nn.Module):
+class MPTAttention(nn.Module):
 
-    def __init__(self,
-                 config: MptConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: MPTConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
-        self.clip_qkv = config.attn_config.clip_qkv
-        self.qk_ln = config.attn_config.qk_ln
-        self.alibi_bias_max = config.attn_config.alibi_bias_max
-        assert not config.attn_config.prefix_lm
-        assert config.attn_config.alibi
+        self.clip_qkv = config.attn_config["clip_qkv"]
+        self.qk_ln = config.attn_config["qk_ln"]
+        self.alibi_bias_max = config.attn_config["alibi_bias_max"]
+        assert not config.attn_config["prefix_lm"]
+        assert config.attn_config["alibi"]
 
-        self.qkv_proj = ParallelLinear.column(
+        # pylint: disable=invalid-name
+        self.Wqkv = QKVParallelLinear(
             self.d_model,
-            3 * self.d_model,
+            self.d_model // self.total_num_heads,
+            self.total_num_heads,
             bias=not config.no_bias,
-            gather_output=False,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         if self.qk_ln:
             self.q_ln = nn.LayerNorm(self.d_model)
             self.k_ln = nn.LayerNorm(self.d_model)
-        self.out_proj = ParallelLinear.row(
+        self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
             bias=not config.no_bias,
-            input_is_parallel=True,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -96,7 +99,7 @@ class MptAttention(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         del position_ids  # unused.
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
@@ -110,26 +113,31 @@ class MptAttention(nn.Module):
         return output
 
 
-class MptMLP(nn.Module):
+class MPTMLP(nn.Module):
 
-    def __init__(self,
-                 config: MptConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: MPTConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         hidden_size = config.d_model
         expansion_ratio = config.expansion_ratio
         intermediate_size = expansion_ratio * hidden_size
-        self.up_proj = ParallelLinear.column(hidden_size,
-                                             intermediate_size,
-                                             bias=not config.no_bias,
-                                             gather_output=False,
-                                             quant_config=quant_config)
-        self.act = get_act_fn("gelu")
-        self.down_proj = ParallelLinear.row(intermediate_size,
-                                            hidden_size,
-                                            bias=not config.no_bias,
-                                            input_is_parallel=True,
-                                            quant_config=quant_config)
+        self.up_proj = ColumnParallelLinear(
+            hidden_size,
+            intermediate_size,
+            bias=not config.no_bias,
+            linear_method=linear_method,
+        )
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.act = get_act_fn("gelu", quant_config, intermediate_size)
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=not config.no_bias,
+            linear_method=linear_method,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.up_proj(x)
@@ -138,17 +146,19 @@ class MptMLP(nn.Module):
         return x
 
 
-class MptBlock(nn.Module):
+class MPTBlock(nn.Module):
 
-    def __init__(self,
-                 config: MptConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: MPTConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         hidden_size = config.d_model
         self.norm_1 = nn.LayerNorm(hidden_size)
-        self.attn = MptAttention(config, quant_config)
+        self.attn = MPTAttention(config, linear_method)
         self.norm_2 = nn.LayerNorm(hidden_size)
-        self.ffn = MptMLP(config, quant_config)
+        self.ffn = MPTMLP(config, linear_method)
 
     def forward(
         self,
@@ -173,11 +183,13 @@ class MptBlock(nn.Module):
         return hidden_states
 
 
-class MptModel(nn.Module):
+class MPTModel(nn.Module):
 
-    def __init__(self,
-                 config: MptConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: MPTConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         assert config.embedding_fraction == 1.0
         assert config.norm_type == "low_precision_layernorm"
@@ -187,7 +199,7 @@ class MptModel(nn.Module):
             config.d_model,
         )
         self.blocks = nn.ModuleList(
-            [MptBlock(config, quant_config) for _ in range(config.n_layers)])
+            [MPTBlock(config, linear_method) for _ in range(config.n_layers)])
         self.norm_f = nn.LayerNorm(config.d_model)
         if config.no_bias:
             for module in self.modules():
@@ -222,19 +234,19 @@ class MptModel(nn.Module):
         return hidden_states
 
 
-class MptForCausalLM(nn.Module):
+class MPTForCausalLM(nn.Module):
 
-    def __init__(self,
-                 config: MptConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: MPTConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
         assert config.tie_word_embeddings
+        self.linear_method = linear_method
 
-        self.transformer = MptModel(config, quant_config)
-        # TODO(zhuohan): create a new weight after implementing pipeline
-        #                parallelism
+        self.transformer = MPTModel(config, linear_method)
         self.lm_head_weight = self.transformer.wte.weight
         self.sampler = Sampler(config.vocab_size)
 
@@ -252,55 +264,17 @@ class MptForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    column_parallel_layers = ["up_proj"]
-    row_parallel_layers = ["out_proj", "down_proj"]
-    parallel_vocab_layers = ["wte"]
-
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        column_parallel_weights, row_parallel_weights = get_parallel_weight(
-            self)
-        column_weight_suffixes = (
-            self.quant_config.get_col_parallel_tensor_names()
-        ) if self.quant_config is not None else ["weight", "bias"]
-        tp_world_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        state_dict = self.state_dict()
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            is_transposed = False
-            if self.quant_config is not None:
-                is_transposed = self.quant_config.is_transposed(name)
-            if is_transposed:
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                loaded_weight = loaded_weight.T
-
-            if "Wqkv" in name and any(
-                    name.endswith(suffix)
-                    for suffix in column_weight_suffixes):
-                # NOTE(woosuk): MPT's fused QKV has the shape of
-                # [3 * num_heads * head_size, hidden_size].
-                # When tensor model parallelism is used, we need to shard
-                # the weight along the hidden dimension.
-                total_num_heads = self.config.num_attention_heads
-                num_heads = total_num_heads // tp_world_size
-                head_start = tp_rank * num_heads
-                head_end = (tp_rank + 1) * num_heads
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                weight_shape = loaded_weight.shape
-                loaded_weight = loaded_weight.view(3, total_num_heads, -1,
-                                                   *weight_shape[1:])
-                loaded_weight = loaded_weight[:, head_start:head_end]
-                loaded_weight = loaded_weight.reshape(-1, *weight_shape[1:])
-                name = name.replace("Wqkv", "qkv_proj")
-            if name not in state_dict:
+            if name not in params_dict:
                 continue
-            param = state_dict[name]
-            if is_transposed:
-                param = param.T
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         column_parallel_weights,
-                                         row_parallel_weights, tp_rank)
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)

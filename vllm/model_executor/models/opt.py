@@ -30,16 +30,18 @@ from transformers import OPTConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.quantized_linear import ParallelLinear, Linear
-from vllm.model_executor.quantization_utils import QuantizationConfig
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights,
-                                              convert_pyslice_to_tensor,
-                                              get_parallel_weight)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
+    get_tensor_model_parallel_world_size)
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -65,7 +67,7 @@ class OPTAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
@@ -77,16 +79,19 @@ class OPTAttention(nn.Module):
         self.head_dim = embed_dim // total_num_heads
         self.scaling = self.head_dim**-0.5
 
-        self.qkv_proj = ParallelLinear.column(embed_dim,
-                                              3 * embed_dim,
-                                              bias=bias,
-                                              gather_output=False,
-                                              quant_config=quant_config)
-        self.out_proj = ParallelLinear.row(embed_dim,
-                                           embed_dim,
-                                           bias=bias,
-                                           input_is_parallel=True,
-                                           quant_config=quant_config)
+        self.qkv_proj = QKVParallelLinear(
+            embed_dim,
+            self.head_dim,
+            total_num_heads,
+            bias=bias,
+            linear_method=linear_method,
+        )
+        self.out_proj = RowParallelLinear(
+            embed_dim,
+            embed_dim,
+            bias=bias,
+            linear_method=linear_method,
+        )
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    scale=self.scaling)
@@ -109,9 +114,11 @@ class OPTAttention(nn.Module):
 
 class OPTDecoderLayer(nn.Module):
 
-    def __init__(self,
-                 config: OPTConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: OPTConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -119,24 +126,28 @@ class OPTDecoderLayer(nn.Module):
             embed_dim=self.embed_dim,
             num_heads=config.num_attention_heads,
             bias=config.enable_bias,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         self.do_layer_norm_before = config.do_layer_norm_before
-        self.activation_fn = get_act_fn(config.activation_function)
+        quant_config = getattr(linear_method, "quant_config", None)
+        self.activation_fn = get_act_fn(config.activation_function,
+                                        quant_config, config.ffn_dim)
 
         self.self_attn_layer_norm = nn.LayerNorm(
             self.embed_dim,
             elementwise_affine=config.layer_norm_elementwise_affine)
-        self.fc1 = ParallelLinear.column(self.embed_dim,
-                                         config.ffn_dim,
-                                         bias=config.enable_bias,
-                                         gather_output=False,
-                                         quant_config=quant_config)
-        self.fc2 = ParallelLinear.row(config.ffn_dim,
-                                      self.embed_dim,
-                                      bias=config.enable_bias,
-                                      input_is_parallel=True,
-                                      quant_config=quant_config)
+        self.fc1 = ColumnParallelLinear(
+            self.embed_dim,
+            config.ffn_dim,
+            bias=config.enable_bias,
+            linear_method=linear_method,
+        )
+        self.fc2 = RowParallelLinear(
+            config.ffn_dim,
+            self.embed_dim,
+            bias=config.enable_bias,
+            linear_method=linear_method,
+        )
         self.final_layer_norm = nn.LayerNorm(
             self.embed_dim,
             elementwise_affine=config.layer_norm_elementwise_affine)
@@ -179,9 +190,11 @@ class OPTDecoderLayer(nn.Module):
 
 class OPTDecoder(nn.Module):
 
-    def __init__(self,
-                 config: OPTConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: OPTConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -198,18 +211,18 @@ class OPTDecoder(nn.Module):
 
         # Project out & in will be replicated if they exist.
         if config.word_embed_proj_dim != config.hidden_size:
-            self.project_out = Linear.linear(config.hidden_size,
-                                             config.word_embed_proj_dim,
-                                             bias=False,
-                                             quant_config=quant_config)
+            self.project_out = ReplicatedLinear(config.hidden_size,
+                                                config.word_embed_proj_dim,
+                                                bias=False,
+                                                linear_method=linear_method)
         else:
             self.project_out = None
 
         if config.word_embed_proj_dim != config.hidden_size:
-            self.project_in = Linear.linear(config.word_embed_proj_dim,
-                                            config.hidden_size,
-                                            bias=False,
-                                            quant_config=quant_config)
+            self.project_in = ReplicatedLinear(config.word_embed_proj_dim,
+                                               config.hidden_size,
+                                               bias=False,
+                                               linear_method=linear_method)
         else:
             self.project_in = None
 
@@ -225,7 +238,7 @@ class OPTDecoder(nn.Module):
             self.final_layer_norm = None
 
         self.layers = nn.ModuleList([
-            OPTDecoderLayer(config, quant_config)
+            OPTDecoderLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
 
@@ -240,7 +253,7 @@ class OPTDecoder(nn.Module):
         inputs_embeds = self.embed_tokens(input_ids)
         pos_embeds = self.embed_positions(positions)
         if self.project_in is not None:
-            inputs_embeds = self.project_in(inputs_embeds)
+            inputs_embeds, _ = self.project_in(inputs_embeds)
         hidden_states = inputs_embeds + pos_embeds
 
         for i in range(len(self.layers)):
@@ -255,17 +268,19 @@ class OPTDecoder(nn.Module):
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
         if self.project_out is not None:
-            hidden_states = self.project_out(hidden_states)
+            hidden_states, _ = self.project_out(hidden_states)
         return hidden_states
 
 
 class OPTModel(nn.Module):
 
-    def __init__(self,
-                 config: OPTConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: OPTConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
-        self.decoder = OPTDecoder(config, quant_config)
+        self.decoder = OPTDecoder(config, linear_method)
 
     def forward(
         self,
@@ -281,13 +296,15 @@ class OPTModel(nn.Module):
 
 class OPTForCausalLM(nn.Module):
 
-    def __init__(self, config, quant_config=None):
+    def __init__(
+        self,
+        config,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        self.model = OPTModel(config, quant_config)
-        # TODO(zhuohan): create a new weight after implementing pipeline
-        #                parallelism
+        self.linear_method = linear_method
+        self.model = OPTModel(config, linear_method)
         self.lm_head_weight = self.model.decoder.embed_tokens.weight
         self.sampler = Sampler(config.vocab_size)
 
@@ -305,76 +322,36 @@ class OPTForCausalLM(nn.Module):
                                    input_metadata)
         return next_tokens
 
-    column_parallel_layers = ["fc1"]
-    row_parallel_layers = ["out_proj", "fc2"]
-    parallel_vocab_layers = ["embed_tokens"]
-
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        column_parallel_weights, row_parallel_weights = get_parallel_weight(
-            self)
-        column_weight_suffixes = (
-            self.quant_config.get_col_parallel_tensor_names()
-        ) if self.quant_config is not None else ["weight", "bias"]
-
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        state_dict = self.state_dict()
-
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "lm_head.weight" in name:
                 continue
-
-            is_transposed = False
-            if self.quant_config is not None:
-                is_transposed = self.quant_config.is_transposed(name)
-            if is_transposed:
-                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                loaded_weight = loaded_weight.T
-
-            if name.startswith("decoder."):
-                name = "model." + name
-
-            is_attention_weight = False
-            for stride_id, att_weight_name in enumerate(
-                ["q_proj", "k_proj", "v_proj"]):
-                if att_weight_name not in name:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
                     continue
-                name = name.replace(att_weight_name, "qkv_proj")
-                if name not in state_dict:
-                    break
-                param = state_dict[name]
-                if is_transposed:
-                    param = param.T
-                if any(
-                        name.endswith(suffix)
-                        for suffix in column_weight_suffixes):
-                    shard_size = param.shape[0] // 3
-                    loaded_weight = loaded_weight[
-                        shard_size * tensor_model_parallel_rank:shard_size *
-                        (tensor_model_parallel_rank + 1)]
-                    param_slice = param.data[shard_size *
-                                             stride_id:shard_size *
-                                             (stride_id + 1)]
-                else:
-                    loaded_weight = convert_pyslice_to_tensor(loaded_weight)
-                    param_slice = param.data
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_attention_weight = True
+                name = name.replace(weight_name, param_name)
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
                 break
-            if is_attention_weight:
-                continue
-
-            if name not in state_dict:
-                continue
-            param = state_dict[name]
-            if is_transposed:
-                param = param.T
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         column_parallel_weights,
-                                         row_parallel_weights,
-                                         tensor_model_parallel_rank)
+            else:
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
