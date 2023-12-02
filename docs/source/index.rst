@@ -66,6 +66,7 @@ Documentation
    serving/run_on_sky
    serving/deploying_with_triton
    serving/deploying_with_docker
+   serving/serving_with_langchain
    serving/metrics
 
 .. toctree::
@@ -74,6 +75,7 @@ Documentation
 
    models/supported_models
    models/adding_model
+   models/engine_args
 
 .. toctree::
    :maxdepth: 1

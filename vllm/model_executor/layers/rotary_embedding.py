@@ -27,7 +27,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm import pos_encoding_ops
+from vllm._C import ops
 
 
 class RotaryEmbedding(nn.Module):
@@ -87,11 +87,10 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # pos_encoding_ops.rotary_embedding() is an in-place operation that
+        # ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
-        pos_encoding_ops.rotary_embedding(positions, query, key,
-                                          self.head_size, self.cos_sin_cache,
-                                          self.is_neox_style)
+        ops.rotary_embedding(positions, query, key, self.head_size,
+                             self.cos_sin_cache, self.is_neox_style)
         return query, key
 
 
@@ -273,14 +272,22 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         return cache
 
 
+_ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}
+
+
 def get_rope(
     head_size: int,
     rotary_dim: int,
     max_position: int,
     base: int,
-    is_neox_style: bool,
-    rope_scaling: Optional[Dict[str, Any]],
+    is_neox_style: bool = True,
+    rope_scaling: Optional[Dict[str, Any]] = None,
 ) -> RotaryEmbedding:
+    key = (head_size, rotary_dim, max_position, base, is_neox_style,
+           tuple(rope_scaling.items()) if rope_scaling is not None else None)
+    if key in _ROPE_DICT:
+        return _ROPE_DICT[key]
+
     if rope_scaling is None:
         rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
                                      is_neox_style)
@@ -313,4 +320,5 @@ def get_rope(
                                                     **extra_kwargs)
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
+    _ROPE_DICT[key] = rotary_emb
     return rotary_emb
