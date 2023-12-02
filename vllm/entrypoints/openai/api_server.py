@@ -85,6 +85,7 @@ def parse_args():
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
 
+
 app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
 app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 
