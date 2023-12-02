@@ -4,6 +4,8 @@ from typing import Optional, Tuple, TYPE_CHECKING
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 
+import torch
+
 logger = init_logger(__name__)
 
 try:
@@ -73,9 +75,12 @@ def initialize_cluster(
                 "Ray is not installed. Please install Ray to use distributed "
                 "serving.")
         # Connect to a ray cluster.
-        ray.init(address=ray_address,
-                 ignore_reinit_error=True,
-                 num_gpus=parallel_config.world_size)
+        if torch.version.hip:
+            ray.init(address=ray_address,
+                    ignore_reinit_error=True,
+                    num_gpus=parallel_config.world_size)
+        else:
+            ray.init(address=ray_address, ignore_reinit_error=True)
 
     if not parallel_config.worker_use_ray:
         # Initialize cluster locally.
