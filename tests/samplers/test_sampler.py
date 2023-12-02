@@ -48,7 +48,8 @@ RANDOM_SEEDS = list(range(128))
 def test_sampler_all_greedy(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
+        batch_size)
 
     seq_group_metadata_list = []
     prompt_lens = []
@@ -63,8 +64,8 @@ def test_sampler_all_greedy(seed: int):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens)
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              sampling_metadata=sampling_metadata)
@@ -78,7 +79,8 @@ def test_sampler_all_greedy(seed: int):
 def test_sampler_all_random(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
+        batch_size)
 
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
@@ -99,8 +101,8 @@ def test_sampler_all_random(seed: int):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens)
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              sampling_metadata=sampling_metadata)
@@ -132,8 +134,8 @@ def test_sampler_all_beam(seed: int):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens)
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler(embedding=None,
             hidden_states=input_tensor,
             sampling_metadata=sampling_metadata)
@@ -147,7 +149,8 @@ def test_sampler_all_beam(seed: int):
 def test_sampler_mixed(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
+        batch_size)
 
     seq_group_metadata_list = []
     expected_tokens = []
@@ -183,8 +186,8 @@ def test_sampler_mixed(seed: int):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens)
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              sampling_metadata=sampling_metadata)
@@ -222,8 +225,8 @@ def test_sampler_logits_processors(seed: int):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens)
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              sampling_metadata=sampling_metadata)
