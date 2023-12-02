@@ -147,11 +147,17 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
 
 .. code-block:: python
 
-    import openai
+    from openai import OpenAI
+
     # Modify OpenAI's API key and API base to use vLLM's API server.
-    openai.api_key = "EMPTY"
-    openai.api_base = "http://localhost:8000/v1"
-    completion = openai.Completion.create(model="facebook/opt-125m",
+    openai_api_key = "EMPTY"
+    openai_api_base = "http://localhost:8000/v1"
+
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
+    completion = client.completions.create(model="facebook/opt-125m",
                                           prompt="San Francisco is a")
     print("Completion result:", completion)
 
