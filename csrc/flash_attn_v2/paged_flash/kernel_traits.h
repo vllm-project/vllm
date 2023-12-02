@@ -10,6 +10,8 @@
 #include "cutlass/cutlass.h"
 #include "cutlass/layout/layout.h"
 
+namespace flash {
+
 using namespace cute;
 
 template <int kHeadDim_,
@@ -169,3 +171,5 @@ struct Flash_fwd_kernel_traits : public Base {
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+} // namespace flash

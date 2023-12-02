@@ -26,9 +26,17 @@ ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
+# TODO(skrider) should we include cutlass for all extensions or be more granular?
+cutlass_include_path = f"{ROOT_DIR}/csrc/flash_attn_v2/third_party/cutlass/include"
+if not os.path.exists(cutlass_include_path):
+    raise RuntimeError(f"Cannot find {cutlass_include_path}. Did you run git submodule update?")
+NVCC_FLAGS += [f"-I{cutlass_include_path}"]
+
 if CUDA_HOME is None:
     raise RuntimeError(
         "Cannot find CUDA_HOME. CUDA must be available to build the package.")
+
+
 
 
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
@@ -153,6 +161,7 @@ vllm_extension = CUDAExtension(
         "csrc/quantization/awq/gemm_kernels.cu",
         "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
         "csrc/cuda_utils_kernels.cu",
+        "csrc/flash_attn_v2/paged_flash/flash_api.cu",
         "csrc/pybind.cpp",
     ],
     extra_compile_args={

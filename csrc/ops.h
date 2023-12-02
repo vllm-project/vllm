@@ -29,6 +29,20 @@ void paged_attention_v2(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes);
 
+void paged_flash_attention(
+  torch::Tensor& out,
+  torch::Tensor& query,
+  torch::Tensor& key_cache,
+  torch::Tensor& value_cache,
+  torch::Tensor& head_mapping,
+  float scale,
+  torch::Tensor& block_tables,
+  torch::Tensor& context_lens,
+  int block_size,
+  int max_context_len,
+  int max_num_query,
+  const c10::optional<torch::Tensor>& alibi_slopes);
+
 void rms_norm(
   torch::Tensor& out,
   torch::Tensor& input,

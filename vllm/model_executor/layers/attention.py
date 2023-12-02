@@ -343,7 +343,8 @@ def _multi_query_paged_attention(
     # TODO(stephen) add grid stride over sequences to kernel to increase cache locality,
     # in effect enabling pseudo matrix blocking
     # TODO(stephen) exit from block early if seq_len is -1
-    ops.paged_attention_v1(
+    __import__('pdb').set_trace()
+    ops.paged_flash_attention(
         output,
         query,
         key_cache,
@@ -354,6 +355,7 @@ def _multi_query_paged_attention(
         context_lens,
         block_size,
         input_metadata.max_context_len,
+        max_num_query,
         alibi_slopes,
     )
 
