@@ -174,16 +174,44 @@ class GPTQLinearMethod(LinearMethodBase):
                       weights: Dict[str, torch.Tensor],
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        #q4 = weights["q4"]
         qweight = weights["qweight"]
+        height, width = weights["qweight"].shape
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         if weights["use_exllama"]:
+            if "q4" not in weights:
+                if not self.quant_config.desc_act:
+                    none_tensor = torch.empty((1, 1), device="meta")
+                    weights["q4"] = quantization_ops.make_q_matrix(
+                        weights["qweight"],
+                        none_tensor,
+                        none_tensor,
+                        weights["qzeros"],
+                        weights["scales"],
+                        none_tensor,
+                    )
+                else:
+                    weights["q_perm"] = torch.empty(
+                        (height * self.quant_config.pack_factor, ),
+                        dtype=torch.short,
+                        device=weights["qweight"].device)
+                    weights["q_invperm"] = torch.empty_like(weights["q_perm"])
+                    weights["q4"] = quantization_ops.make_q_matrix(
+                        weights["qweight"],
+                        weights["q_perm"],
+                        weights["q_invperm"],
+                        weights["qzeros"],
+                        weights["scales"],
+                        weights["g_idx"].cpu(),
+                    )
+            temp_dq = torch.empty((height * self.quant_config.pack_factor, width),
+                                  dtype=torch.float16,
+                                  device=x.device)
             output = torch.empty((reshaped_x.shape[0], qweight.shape[-1]),
                                  dtype=torch.float16,
                                  device=x.device)
             quantization_ops.gemm_half_q_half(reshaped_x, weights["q4"], output,
-                                              False)
+                                              temp_dq, False)
         else:
             output = torch.zeros((reshaped_x.shape[0], qweight.shape[-1]),
                                  dtype=torch.float32,
@@ -196,46 +224,3 @@ class GPTQLinearMethod(LinearMethodBase):
         if bias is not None:
             output = output + bias
         return output.reshape(out_shape)
-
-    def temp_dq_size(self, input_size, output_size):
-        return input_size * output_size * 2 + 128
-
-    def temp_fwd_size(self, output_size, max_tokens):
-        return output_size * max_tokens * 4 + 128
-
-    def scratch_space_fixed(self, input_size, output_size, max_tokens):
-        return self.temp_dq_size(input_size, output_size) + self.temp_fwd_size(
-            output_size, max_tokens)
-
-    def post_init(self, linear_weights, temp_dq):
-        if not linear_weights["use_exllama"]:
-            return
-        none_tensor = torch.empty((1, 1), device="meta")
-        height, width = linear_weights["qweight"].shape
-        temp_dq = temp_dq.get_scratch_slice(
-            self.temp_dq_size(height * self.quant_config.pack_factor, width))
-        if not self.quant_config.desc_act:
-            linear_weights["q4"] = quantization_ops.make_q_matrix(
-                linear_weights["qweight"],
-                none_tensor,
-                none_tensor,
-                linear_weights["qzeros"],
-                linear_weights["scales"],
-                none_tensor,
-                temp_dq,
-            )
-        else:
-            linear_weights["q_perm"] = torch.empty(
-                (height * self.quant_config.pack_factor, ),
-                dtype=torch.short,
-                device=linear_weights["qweight"].device)
-            linear_weights["q_invperm"] = torch.empty_like(linear_weights["q_perm"])
-            linear_weights["q4"] = quantization_ops.make_q_matrix(
-                linear_weights["qweight"],
-                linear_weights["q_perm"],
-                linear_weights["q_invperm"],
-                linear_weights["qzeros"],
-                linear_weights["scales"],
-                linear_weights["g_idx"].cpu(),
-                temp_dq,
-            )

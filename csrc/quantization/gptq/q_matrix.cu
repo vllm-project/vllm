@@ -41,15 +41,12 @@ QMatrix::QMatrix
 
     uint32_t* _gptq_qzeros,
     half* _gptq_scales,
-    uint32_t* _gptq_g_idx,
-
-    half* _temp_dq
+    uint32_t* _gptq_g_idx
 ) :
     device(_device),
     height(_height),
     width(_width),
-    groups(_groups),
-    temp_dq(_temp_dq)
+    groups(_groups)
 {
     cudaSetDevice(device);
 

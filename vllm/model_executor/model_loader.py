@@ -10,7 +10,6 @@ from vllm.config import ModelConfig
 from vllm.model_executor.models import *  # pylint: disable=wildcard-import
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
-from vllm.model_executor.layers.quantization.utils import quant_post_init
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
@@ -59,7 +58,7 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def get_model(model_config: ModelConfig, max_tokens: int) -> nn.Module:
+def get_model(model_config: ModelConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
 
     # Get the (maybe quantized) linear method.
@@ -99,6 +98,4 @@ def get_model(model_config: ModelConfig, max_tokens: int) -> nn.Module:
             model.load_weights(model_config.model, model_config.download_dir,
                                model_config.load_format, model_config.revision)
             model = model.cuda()
-        if model_config.quantization is not None:
-            quant_post_init(model, max_tokens)
     return model.eval()

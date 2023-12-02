@@ -98,8 +98,6 @@ void gemm_half_q_half_cuda
     {
 
         // Reconstruct FP16 matrix, then cuBLAS
-
-        if (!temp_dq) temp_dq = b->temp_dq;
         b->reconstruct(temp_dq);
 
         //cublasSetMathMode(cublas_handle, CUBLAS_TENSOR_OP_MATH);

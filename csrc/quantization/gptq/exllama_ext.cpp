@@ -26,8 +26,7 @@ uintptr_t make_q_matrix
     torch::Tensor q_invperm,
     torch::Tensor gptq_qzeros,
     torch::Tensor gptq_scales,
-    torch::Tensor gptq_g_idx,
-    torch::Tensor temp_dq
+    torch::Tensor gptq_g_idx
 )
 {
     TORCH_CHECK_DTYPE(q_weight, kInt);
@@ -49,8 +48,6 @@ uintptr_t make_q_matrix
     groups = gptq_qzeros.size(0);
     height = q_weight.size(0) * 8;
 
-    TORCH_CHECK(temp_dq.size(0) >= width * height, "Insufficient size of temp_dq buffer")
-
     QMatrix* m = new QMatrix
     (
         device,
@@ -62,8 +59,7 @@ uintptr_t make_q_matrix
         q_invperm.device().is_meta() ? NULL : (uint16_t*) q_invperm.data_ptr(),
         gptq_qzeros.device().is_meta() ? NULL : (uint32_t*) gptq_qzeros.data_ptr(),
         gptq_scales.device().is_meta() ? NULL : (half*) gptq_scales.data_ptr(),
-        gptq_g_idx.device().is_meta() ? NULL : (uint32_t*) gptq_g_idx.data_ptr(),
-        (half*) temp_dq.data_ptr()
+        gptq_g_idx.device().is_meta() ? NULL : (uint32_t*) gptq_g_idx.data_ptr()
     );
 
     return reinterpret_cast<uintptr_t> (m);
@@ -74,6 +70,7 @@ void gemm_half_q_half
     torch::Tensor a,
     uintptr_t b,
     torch::Tensor c,
+    torch::Tensor temp_dq,
     bool force_cuda
 )
 {
@@ -97,7 +94,7 @@ void gemm_half_q_half
         c.size(1), // n
         a.size(1), // k
         true,
-        NULL,
+        (half*) temp_dq.data_ptr(),
         force_cuda
     );
 }

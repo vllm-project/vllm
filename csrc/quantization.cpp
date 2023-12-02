@@ -14,16 +14,14 @@ uintptr_t make_q_matrix(
     torch::Tensor q_invperm,
     torch::Tensor gptq_qzeros,
     torch::Tensor gptq_scales,
-    torch::Tensor gptq_g_idx,
-    torch::Tensor temp_dq
-);
+    torch::Tensor gptq_g_idx);
 
 void gemm_half_q_half(
     torch::Tensor a,
     uintptr_t b,
     torch::Tensor c,
-    bool force_cuda
-);
+    torch::Tensor temp_dq,
+    bool force_cuda);
 
 void gptq_descact_matmul(
   torch::Tensor vec,
