@@ -44,26 +44,23 @@ Build a docker image from `Dockerfile.rocm`, and launch a docker container.
 If you plan to install vLLM-ROCm on a local machine or start from a fresh docker image (e.g. pytorch+rocm5.7), you can follow the steps below:
 
 0. Install prerequisites (skip if you are already in an environment/docker with the following installed):
-    - `ROCm <https://rocm.docs.amd.com/en/latest/deploy/linux/index.html>`_ and
-    - `Pytorch <https://pytorch.org/>`_
 
-1. Install flash attention for ROCm
+- `ROCm <https://rocm.docs.amd.com/en/latest/deploy/linux/index.html>`_
+- `Pytorch <https://pytorch.org/>`_
 
-    If you are using Pytorch-2.0.1+rocm5.7.
+1. Install `flash attention for ROCm <https://github.com/ROCmSoftwarePlatform/flash-attention/tree/flash_attention_for_rocm>`_
 
-    Install flash-attention-2 (v2.0.4) following the instruction from `ROCmSoftwarePlatform/flash-attention <https://github.com/ROCmSoftwarePlatform/flash-attention/tree/flash_attention_for_rocm>`_
+    Install ROCm's flash attention (v2.0.4) following the instructions from `ROCmSoftwarePlatform/flash-attention <https://github.com/ROCmSoftwarePlatform/flash-attention/tree/flash_attention_for_rocm#amd-gpurocm-support>`_
 
+    Note: If you are using rocm5.7 with pytorch 2.1.0 onwards, you don't need to apply the `hipify_python.patch`. You can build the ROCm flash attention directly.
 
-    If you are using Pytorch-2.1.x+rocm5.7 or Pytorch-2.2.x+rocm5.7, you don't need to apply the `hipify_python.patch`.
-    You can directly build the flash-attention-2.
+.. code-block:: console
 
-    .. code-block:: console
+    $ bash patch_torch211_flash_attn2.rocm.sh
 
-        $ bash patch_torch211_flash_attn2.rocm.sh
-
-    .. note::
-        - ROCm's Flash-attention-2 (v2.0.4) does not support sliding windows attention.
-        - You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
+.. note::
+    - ROCm's Flash-attention-2 (v2.0.4) does not support sliding windows attention.
+    - You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
 
 2. Setup xformers==0.0.22.post7 without dependencies, and apply patches to adapt for ROCm flash attention
 
@@ -75,6 +72,7 @@ If you plan to install vLLM-ROCm on a local machine or start from a fresh docker
 3. Build vllm.
 
     .. code-block:: console
+
         $ cd vllm
         $ pip install -U -r requirements-rocm.txt
         $ python setup.py install # This may take 5-10 minutes.
