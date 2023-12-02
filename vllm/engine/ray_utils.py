@@ -77,8 +77,8 @@ def initialize_cluster(
         # Connect to a ray cluster.
         if torch.version.hip:
             ray.init(address=ray_address,
-                    ignore_reinit_error=True,
-                    num_gpus=parallel_config.world_size)
+                     ignore_reinit_error=True,
+                     num_gpus=parallel_config.world_size)
         else:
             ray.init(address=ray_address, ignore_reinit_error=True)
 

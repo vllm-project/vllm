@@ -257,7 +257,6 @@ def get_vllm_version() -> str:
             cuda_version_str = cuda_version.replace(".", "")[:3]
             version += f"+cu{cuda_version_str}"
 
-
     return version
 
 
