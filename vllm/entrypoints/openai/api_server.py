@@ -731,7 +731,7 @@ if __name__ == "__main__":
     load_chat_template(args, tokenizer)
 
     # Register labels for metrics
-    add_global_metrics_labels(model_name=engine_args.model, )
+    add_global_metrics_labels(model_name=engine_args.model)
 
     uvicorn.run(app,
                 host=args.host,

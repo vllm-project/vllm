@@ -34,13 +34,13 @@ def add_global_metrics_labels(**kwargs):
 
 
 def record_metrics(
-    avg_prompt_throughput,
-    avg_generation_throughput,
-    scheduler_running,
-    scheduler_swapped,
-    scheduler_waiting,
-    gpu_cache_usage,
-    cpu_cache_usage,
+    avg_prompt_throughput: float,
+    avg_generation_throughput: float,
+    scheduler_running: int,
+    scheduler_swapped: int,
+    scheduler_waiting: int,
+    gpu_cache_usage: float,
+    cpu_cache_usage: float,
 ):
     gauge_avg_prompt_throughput.set(labels, avg_prompt_throughput)
     gauge_avg_generation_throughput.set(labels, avg_generation_throughput)
