@@ -131,11 +131,9 @@ def prepare_hf_model_weights(
 ) -> Tuple[str, List[str], bool]:
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
-    if use_safetensors:
-        allow_patterns = ["*.safetensors"]
-    else:
-        # Some quantized models use .pt files for storing the weights.
-        allow_patterns = ["*.bin", "*.pt"]
+    # Some quantized models use .pt files for storing the weights.
+    allow_patterns = ["*.safetensors"
+                      ] if use_safetensors else ["*.bin", "*.pt"]
     if not is_local:
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
@@ -242,7 +240,7 @@ def hf_model_weights_iterator(
     elif use_safetensors:
         for st_file in hf_weights_files:
             with safe_open(st_file, framework="pt") as f:
-                for name in f.keys():
+                for name in f.keys():  # noqa: SIM118
                     param = f.get_tensor(name)
                     yield name, param
     else:
@@ -292,28 +290,3 @@ def initialize_dummy_weights(
         if torch.is_floating_point(param):
             param.data.uniform_(low, high)
 
-
-def get_parallel_weight(model: torch.nn.Module):
-    if model.quant_config is None:
-        column_weight_suffixes = ["weight", "bias"]
-        row_weight_suffixes = ["weight"]
-    else:
-        column_weight_suffixes = (
-            model.quant_config.get_col_parallel_tensor_names())
-        row_weight_suffixes = (
-            model.quant_config.get_row_parallel_tensor_names())
-
-    column_parallel_weights: List[str] = []
-    for layer in model.column_parallel_layers:
-        for suffix in column_weight_suffixes:
-            column_parallel_weights.append(f"{layer}.{suffix}")
-    row_parallel_weights: List[str] = []
-    for layer in model.row_parallel_layers:
-        for suffix in row_weight_suffixes:
-            row_parallel_weights.append(f"{layer}.{suffix}")
-
-    if hasattr(model, "parallel_vocab_layers"):
-        for layer in model.parallel_vocab_layers:
-            for suffix in ["weight", "bias"]:
-                column_parallel_weights.append(f"{layer}.{suffix}")
-    return column_parallel_weights, row_parallel_weights

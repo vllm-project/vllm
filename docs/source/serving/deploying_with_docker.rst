@@ -7,14 +7,22 @@ vLLM offers official docker image for deployment.
 The image can be used to run OpenAI compatible server.
 The image is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai/tags>`_.
 
-... code-block:: console
+.. code-block:: console
 
     $ docker run --runtime nvidia --gpus all \
         -v ~/.cache/huggingface:/root/.cache/huggingface \
-        -p 8000:8000 \
         --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
+        -p 8000:8000 \
+        --ipc=host \
         vllm/vllm-openai:latest \
         --model mistralai/Mistral-7B-v0.1
+
+
+.. note::
+
+        You can either use the ``ipc=host`` flag or ``--shm-size`` flag to allow the
+        container to access the host's shared memory. vLLM uses PyTorch, which uses shared
+        memory to share data between processes under the hood, particularly for tensor parallel inference.
 
 
 You can build and run vLLM from source via the provided dockerfile. To build vLLM:

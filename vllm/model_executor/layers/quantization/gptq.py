@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm import quantization_ops
+from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -182,7 +182,7 @@ class GPTQLinearMethod(LinearMethodBase):
             if "q4" not in weights:
                 if not self.quant_config.desc_act:
                     none_tensor = torch.empty((1, 1), device="meta")
-                    weights["q4"] = quantization_ops.make_q_matrix(
+                    weights["q4"] = ops.make_q_matrix(
                         weights["qweight"],
                         none_tensor,
                         none_tensor,
@@ -196,7 +196,7 @@ class GPTQLinearMethod(LinearMethodBase):
                         dtype=torch.short,
                         device=weights["qweight"].device)
                     weights["q_invperm"] = torch.empty_like(weights["q_perm"])
-                    weights["q4"] = quantization_ops.make_q_matrix(
+                    weights["q4"] = ops.make_q_matrix(
                         weights["qweight"],
                         weights["q_perm"],
                         weights["q_invperm"],
@@ -210,16 +210,16 @@ class GPTQLinearMethod(LinearMethodBase):
             output = torch.empty((reshaped_x.shape[0], qweight.shape[-1]),
                                  dtype=torch.float16,
                                  device=x.device)
-            quantization_ops.gemm_half_q_half(reshaped_x, weights["q4"], output,
-                                              temp_dq, False)
+            ops.gemm_half_q_half(reshaped_x, weights["q4"], output,
+                                 temp_dq, False)
         else:
             output = torch.zeros((reshaped_x.shape[0], qweight.shape[-1]),
                                  dtype=torch.float32,
                                  device=x.device)
-            quantization_ops.gptq_descact_matmul(reshaped_x.float(),
-                                                 weights["qweight"], output,
-                                                 weights["scales"].float(),
-                                                 weights["qzeros"], weights["g_idx"])
+            ops.gptq_descact_matmul(reshaped_x.float(),
+                                    weights["qweight"], output,
+                                    weights["scales"].float(),
+                                    weights["qzeros"], weights["g_idx"])
             output = output.half()
         if bias is not None:
             output = output + bias
