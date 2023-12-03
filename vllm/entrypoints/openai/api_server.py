@@ -9,6 +9,8 @@ import time
 from http import HTTPStatus
 from typing import AsyncGenerator, Dict, List, Optional, Tuple, Union
 
+from aioprometheus import MetricsMiddleware
+from aioprometheus.asgi.starlette import metrics
 import fastapi
 import uvicorn
 from fastapi import Request
@@ -31,9 +33,6 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import random_uuid
-
-from aioprometheus import MetricsMiddleware
-from aioprometheus.asgi.starlette import metrics
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
