@@ -27,11 +27,10 @@ class Sampler(nn.Module):
     parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
     """
 
-    _copy_stream: Optional[torch.cuda.Stream] = None
-
     def __init__(self, vocab_size: int) -> None:
         super().__init__()
         self.vocab_size = vocab_size
+        self._copy_stream: torch.cuda.Stream = torch.cuda.Stream()
 
     def forward(
         self,
@@ -54,16 +53,12 @@ class Sampler(nn.Module):
 
         # Prepare sampling tensors in another stream to overlap
         # CPU<->GPU data transfer with GPU computation in forward pass.
-        if Sampler._copy_stream is None:
-            # Initialize stream here once to make sure it uses the
-            # correct device.
-            Sampler._copy_stream = torch.cuda.Stream()
-        with torch.cuda.stream(Sampler._copy_stream):
+        with torch.cuda.stream(self._copy_stream):
             (sampling_tensors, do_penalties, do_top_p_top_k,
              do_min_p) = SamplingTensors.from_sampling_metadata(
                  sampling_metadata, vocab_size, logits.device, logits.dtype)
 
-        torch.cuda.current_stream().wait_stream(Sampler._copy_stream)
+        torch.cuda.current_stream().wait_stream(self._copy_stream)
 
         # Apply presence and frequency penalties.
         if do_penalties:
@@ -217,15 +212,16 @@ def _apply_top_p_top_k(
     # Apply top-p.
     probs_sort = logits_sort.softmax(dim=-1)
     probs_sum = probs_sort.cumsum(dim=-1).sub_(probs_sort)
+    top_p_mask = probs_sum > p.unsqueeze_(dim=1)
 
     # Apply top-k.
     # Create a mask for the top-k elements.
     top_k_mask = torch.arange(logits_idx.shape[-1], device=logits_idx.device)
     top_k_mask = top_k_mask.expand(logits_idx.shape[0], -1)
+    top_k_mask = top_k_mask >= k.unsqueeze_(dim=1)
 
     # Final mask.
-    mask = (probs_sum > p.unsqueeze_(dim=1)) | (top_k_mask >=
-                                                k.unsqueeze_(dim=1))
+    mask = (top_p_mask | top_k_mask)
     logits_sort.masked_fill_(mask, -float("inf"))
 
     # Re-sort the probabilities.

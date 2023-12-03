@@ -5,6 +5,7 @@ import torch
 
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData
+from vllm.utils import in_wsl
 
 _SAMPLING_EPS = 1e-5
 
@@ -104,6 +105,7 @@ class SamplingTensors:
                 do_penalties = True
             if (i < sampling_metadata.num_prompts
                     and sampling_params.prompt_logprobs is not None):
+                # For tokens in the prompt that we only need to get their logprobs
                 prompt_len = sampling_metadata.prompt_lens[i]
                 temperatures += [temperature] * (prompt_len - 1)
                 top_ps += [top_p] * (prompt_len - 1)
@@ -142,6 +144,7 @@ class SamplingTensors:
                    output_tokens: List[List[int]], vocab_size: int,
                    device: torch.device,
                    dtype: torch.dtype) -> "SamplingTensors":
+        pin_memory = not in_wsl()
         prompt_max_len = max(len(tokens) for tokens in prompt_tokens)
         prompt_padded_tokens = [
             tokens + [vocab_size] * (prompt_max_len - len(tokens))
@@ -162,24 +165,28 @@ class SamplingTensors:
             ],
             device="cpu",
             dtype=dtype,
-        ).pin_memory()
+            pin_memory=pin_memory,
+        )
         int_tensor = torch.tensor(
             [
                 top_ks,
             ],
             device="cpu",
             dtype=torch.int,
-        ).pin_memory()
+            pin_memory=pin_memory,
+        )
         prompt_tensor = torch.tensor(
             prompt_padded_tokens,
             device="cpu",
             dtype=torch.long,
-        ).pin_memory()
+            pin_memory=pin_memory,
+        )
         output_tensor = torch.tensor(
             output_padded_tokens,
             device="cpu",
             dtype=torch.long,
-        ).pin_memory()
+            pin_memory=pin_memory,
+        )
 
         # Because the memory is pinned, we can do non-blocking
         # transfer to device.
