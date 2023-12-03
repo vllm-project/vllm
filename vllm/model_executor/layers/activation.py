@@ -1,4 +1,5 @@
 """Custom activation functions."""
+import math
 from typing import Optional
 
 import torch
@@ -38,6 +39,12 @@ class SiluAndMul(nn.Module):
 
 class NewGELU(nn.Module):
 
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        c = math.sqrt(2.0 / math.pi)
+        return 0.5 * x * (1.0 + torch.tanh(c *
+                                           (x + 0.044715 * torch.pow(x, 3.0))))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
         ops.gelu_new(out, x)
@@ -45,6 +52,11 @@ class NewGELU(nn.Module):
 
 
 class FastGELU(nn.Module):
+
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 *
+                                           (1.0 + 0.044715 * x * x)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
