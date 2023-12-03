@@ -284,9 +284,10 @@ def get_rope(
     rope_scaling: Optional[Dict[str, Any]] = None,
 ) -> RotaryEmbedding:
     key = (head_size, rotary_dim, max_position, base, is_neox_style,
-           rope_scaling)
+           tuple(rope_scaling.items()) if rope_scaling is not None else None)
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
+
     if rope_scaling is None:
         rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
                                      is_neox_style)
