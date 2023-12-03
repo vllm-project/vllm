@@ -75,6 +75,8 @@ class ChatCompletionRequest(BaseModel):
     spaces_between_special_tokens: Optional[bool] = True
     add_generation_prompt: Optional[bool] = True
     echo: Optional[bool] = False
+    repetition_penalty: Optional[float] = 1.0
+    min_p: Optional[float] = 0.0
 
 
 class CompletionRequest(BaseModel):
@@ -102,6 +104,8 @@ class CompletionRequest(BaseModel):
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
+    repetition_penalty: Optional[float] = 1.0
+    min_p: Optional[float] = 0.0
 
 
 class LogProbs(BaseModel):
