@@ -57,14 +57,12 @@ class ChatCompletionRequest(BaseModel):
     messages: Union[str, List[Dict[str, str]]]
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
-    min_p: Optional[float] = 0.0
     n: Optional[int] = 1
     max_tokens: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
-    repetition_penalty: Optional[float] = 1.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
     # Additional parameters supported by vLLM
@@ -75,6 +73,8 @@ class ChatCompletionRequest(BaseModel):
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
+    repetition_penalty: Optional[float] = 1.0
+    min_p: Optional[float] = 0.0
 
 
 class CompletionRequest(BaseModel):
@@ -85,7 +85,6 @@ class CompletionRequest(BaseModel):
     max_tokens: Optional[int] = 16
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
-    min_p: Optional[float] = 0.0
     n: Optional[int] = 1
     stream: Optional[bool] = False
     logprobs: Optional[int] = None
@@ -93,7 +92,6 @@ class CompletionRequest(BaseModel):
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
-    repetition_penalty: Optional[float] = 1.0
     best_of: Optional[int] = None
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
@@ -104,6 +102,8 @@ class CompletionRequest(BaseModel):
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
+    repetition_penalty: Optional[float] = 1.0
+    min_p: Optional[float] = 0.0
 
 
 class LogProbs(BaseModel):
