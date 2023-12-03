@@ -1,6 +1,5 @@
 import pytest
 import torch
-import torch.nn.functional as F
 
 from vllm.model_executor.layers.activation import FastGELU, NewGELU, SiluAndMul
 
