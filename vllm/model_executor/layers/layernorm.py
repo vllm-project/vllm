@@ -38,10 +38,10 @@ class RMSNorm(nn.Module):
         variance = x.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.variance_epsilon)
         x = x.to(orig_dtype) * self.weight
-        if residual is not None:
-            return x, residual
-        else:
+        if residual is None:
             return x
+        else:
+            return x, residual
 
     def forward(
         self,
