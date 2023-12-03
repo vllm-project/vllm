@@ -1,8 +1,10 @@
 """Custom activation functions."""
+import math
 from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from vllm._C import ops
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -22,6 +24,11 @@ class SiluAndMul(nn.Module):
         return: (batch_size, seq_len, d) or (num_tokens, d)
     """
 
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        d = x.shape[-1] // 2
+        return F.silu(x[..., :d]) * x[..., d:]
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
@@ -32,6 +39,12 @@ class SiluAndMul(nn.Module):
 
 class NewGELU(nn.Module):
 
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        c = math.sqrt(2.0 / math.pi)
+        return 0.5 * x * (1.0 + torch.tanh(c *
+                                           (x + 0.044715 * torch.pow(x, 3.0))))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
         ops.gelu_new(out, x)
@@ -39,6 +52,11 @@ class NewGELU(nn.Module):
 
 
 class FastGELU(nn.Module):
+
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 *
+                                           (1.0 + 0.044715 * x * x)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
