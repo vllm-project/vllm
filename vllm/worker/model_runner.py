@@ -34,7 +34,10 @@ class ModelRunner:
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
 
-        self.sliding_window = model_config.get_sliding_window()
+        # model_config can be None in tests/samplers/test_sampler.py.
+        # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
+        self.sliding_window = (model_config.get_sliding_window()
+                               if model_config is not None else None)
         self.device = torch.device(torch.cuda.current_device())
         self.model = None
         self.block_size = None  # Set after initial profiling.

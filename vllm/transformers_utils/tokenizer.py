@@ -6,6 +6,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.utils import make_async, LRUCache
+from vllm.transformers_utils.tokenizers import *
 
 logger = init_logger(__name__)
 
@@ -61,6 +62,18 @@ def get_tokenizer(
                 "library, consider setting `trust_remote_code=True` in LLM "
                 "or using the `--trust-remote-code` flag in the CLI.")
             raise RuntimeError(err_msg) from e
+        else:
+            raise e
+    except AttributeError as e:
+        if "BaichuanTokenizer" in str(e):
+            # This is for the error "'BaichuanTokenizer' object has no
+            # attribute 'sp_model'".
+            tokenizer = BaichuanTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                tokenizer_revision=tokenizer_revision,
+                **kwargs)
         else:
             raise e
 
