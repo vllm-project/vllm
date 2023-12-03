@@ -184,14 +184,26 @@ def _init_distributed_environment(
                               parallel_config.pipeline_parallel_size)
 
 
-def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
-    # Check if the GPU supports the dtype.
+def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype) -> torch.dtype:
+    """Check if the GPU supports the specified data type.
+    
+    Args:
+        torch_dtype: The data type to check support for on the GPU.
+        
+    Returns:
+        The data type supported by the GPU. Falls back to float16 if bfloat16
+        is not supported.
+    """
     if torch_dtype == torch.bfloat16:
         compute_capability = torch.cuda.get_device_capability()
         if compute_capability[0] < 8:
             gpu_name = torch.cuda.get_device_name()
+            # Using old-style % formatting for logging is recommended for
+            # performance reasons. The variables are passed as arguments.
             log.warning(
                 "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}. Dropping to float16")
+                "of at least 8.0. Your %s GPU has compute capability %d.%d. "
+                "Dropping to float16", gpu_name, compute_capability[0], compute_capability[1]
+            )
             torch_dtype = torch.float16
+    return torch_dtype
