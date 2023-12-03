@@ -67,6 +67,7 @@ Documentation
    serving/deploying_with_triton
    serving/deploying_with_docker
    serving/serving_with_langchain
+   serving/metrics
 
 .. toctree::
    :maxdepth: 1

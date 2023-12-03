@@ -12,3 +12,4 @@ xformers >= 0.0.22.post7  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
 pydantic == 1.10.13  # Required for OpenAI server.
+aioprometheus[starlette]
