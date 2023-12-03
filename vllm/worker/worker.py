@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed
+import logging
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -15,6 +16,9 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.utils import get_gpu_memory
 
+# Configure basic logging
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+log = logging.getLogger(__name__)
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -186,7 +190,8 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
         compute_capability = torch.cuda.get_device_capability()
         if compute_capability[0] < 8:
             gpu_name = torch.cuda.get_device_name()
-            raise ValueError(
+            log.warning(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}.")
+                f"{compute_capability[0]}.{compute_capability[1]}. Dropping to float16")
+            torch_dtype = torch.float16
