@@ -14,6 +14,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     DynamicNTKScalingRotaryEmbedding, LinearScalingRotaryEmbedding,
     RotaryEmbedding, YaRNScalingRotaryEmbedding)
 from vllm.model_executor.layers.kv_mqa import context_attention_fwd
+from vllm.config import FLAGS
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -326,11 +327,16 @@ class PagedAttention(nn.Module):
                 slot_mapping,
             )
 
-        if input_metadata.kv_mqa:
+
+        if input_metadata.num_generation_tokens == 0:
+            return output.view(batch_size, seq_len,
+                           self.num_heads * self.head_size)
+            
+        if FLAGS.ENABLE_SD:
             self.multi_query_cached_kv_attention(output, query, 
                                                  key, value, key_cache, 
                                                  value_cache, input_metadata)
-        elif input_metadata.num_generation_tokens > 0:
+        else:
             # Decoding run.
             assert input_metadata.num_prompt_tokens == 0
             assert key_cache is not None and value_cache is not None, (

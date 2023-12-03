@@ -12,6 +12,8 @@ logger = init_logger(__name__)
 _GB = 1 << 30
 
 
+class FLAGS:
+    ENABLE_SD = False
 class ModelConfig:
     """Configuration for the model.
 

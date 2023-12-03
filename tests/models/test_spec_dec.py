@@ -3,6 +3,7 @@
 Run `pytest tests/models/test_spec_dec.py --forked`.
 """
 from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
+from vllm.config import FLAGS
 import pytest
 
 MODELS = [
@@ -29,6 +30,7 @@ def test_models(
     del spec_vllm_model
     destroy_model_parallel()
     
+    FLAGS.ENABLE_SD = False
     vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model

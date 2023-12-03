@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from vllm.config import FLAGS
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather)
@@ -42,7 +43,8 @@ class Sampler(nn.Module):
     ) -> SamplerOutput:
         # this checks if we use multi_query_cached_kv_attention correctly
         assert not torch.isnan(hidden_states).any()
-        if input_metadata.kv_mqa:
+        prompt_run = input_metadata.num_generation_tokens == 0
+        if FLAGS.ENABLE_SD and not prompt_run:
             return self._sd_forward(embedding, hidden_states, input_metadata, embedding_bias)
         else:
             return self._forward(embedding, hidden_states, input_metadata, embedding_bias)

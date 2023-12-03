@@ -4,7 +4,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpecDecConfig)
+                         SchedulerConfig, SpecDecConfig, FLAGS)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
@@ -127,7 +127,8 @@ class LLMEngine:
         self.spec_dec_worker: SpecDecWorker = None
         if spec_dec_config:
             self.spec_dec_worker = SpecDecWorker(spec_dec_config, self.scheduler)
-
+            FLAGS.ENABLE_SD = True
+            
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker

@@ -6,7 +6,7 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, FLAGS)
 from vllm.model_executor import get_model, InputMetadata, set_random_seed
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
@@ -216,7 +216,6 @@ class Worker:
         context_lens: List[int] = []
         generation_block_tables: List[List[int]] = []
         max_seq_len = max(prompt_lens) if prompt_lens else 1
-        kv_mqa = False
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             if seq_group_metadata.is_prompt:
                 # We need to do this in this loop as we need to know max_seq_len
@@ -269,8 +268,7 @@ class Worker:
                 max_num_blocks_per_seq = max(max_num_blocks_per_seq,
                                                 len(block_table))
                 context_lens.append(context_len)
-                if draft_len > 0:
-                    kv_mqa = True
+                if FLAGS.ENABLE_SD:
                     prompt_lens.append(prompt_len)
                     verify_tokens = seq_data.get_verified_token_ids()
                     verify_len = len(verify_tokens)
@@ -286,8 +284,6 @@ class Worker:
                         slots.append(self._get_slot(block_table, position))
                     slot_mapping.append(slots)
                 else:
-                    # If there is no draft token, we just use the last token
-                    # as the generation token.
                     generation_token = seq_data.get_last_token_id()
                     input_tokens.append([generation_token])
 
@@ -363,7 +359,6 @@ class Worker:
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
             sliding_window=self.sliding_window,
-            kv_mqa=kv_mqa
         )
         return tokens_tensor, positions_tensor, input_metadata
 

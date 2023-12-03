@@ -34,7 +34,6 @@ class InputMetadata:
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Dict[SamplingType, torch.Tensor],
         sliding_window: Optional[int] = None,
-        kv_mqa: bool = False,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
@@ -69,18 +68,18 @@ class InputMetadata:
             self.to_cache = torch.tensor(to_cache,
                                          dtype=torch.int32,
                                          device=self.slot_mapping.device)
-
-        self.kv_mqa = kv_mqa
         
-        if self.kv_mqa:
-            self.num_prompts = 0
-            self.num_prompt_tokens = 0
-            # FIXME: This is a hack to make sure the number of generation tokens
-            self.num_generation_tokens = context_lens.shape[0]
-        else:
+        prompt_run = context_lens.shape[0] == 0
+        if prompt_run:
             self.num_prompts = len(prompt_lens)
             self.num_prompt_tokens = self.num_prompts * self.max_prompt_len
+            self.num_generation_tokens = 0
+        else:
+            self.num_prompts = 0
+            self.num_prompt_tokens = 0
+            # FIXME: This is not correct. But we only require num_generation_tokens > 0
             self.num_generation_tokens = context_lens.shape[0]
+
         if block_tables.numel() > 0:
             self.max_num_blocks_per_seq = block_tables.shape[1]
         else:
