@@ -28,12 +28,10 @@ def test_rms_norm(
 
     layer = RMSNorm(hidden_size).to(dtype).cuda()
     layer.weight.data.normal_(mean=1.0, std=0.1)
+    scale = 1 / (2 * hidden_size)
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
-    x /= 2 * hidden_size
-    if add_residual:
-        residual = torch.randn_like(x) / (2 * hidden_size)
-    else:
-        residual = None
+    x *= scale
+    residual = torch.randn_like(x) * scale if add_residual else None
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
