@@ -17,8 +17,10 @@ from vllm.worker.model_runner import ModelRunner
 from vllm.utils import get_gpu_memory
 
 # Configure basic logging
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
+
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -203,7 +205,7 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype) -> torch.dtype:
             log.warning(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 "of at least 8.0. Your %s GPU has compute capability %d.%d. "
-                "Dropping to float16", gpu_name, compute_capability[0], compute_capability[1]
-            )
+                "Dropping to float16", gpu_name, compute_capability[0],
+                compute_capability[1])
             torch_dtype = torch.float16
     return torch_dtype
