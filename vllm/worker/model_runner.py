@@ -1,6 +1,7 @@
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -16,6 +17,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 _PAD_SLOT_ID = -1
 # Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
+_MAX_CONTEXT_LEN_TO_CAPTURE = 16384
 
 
 class ModelRunner:
@@ -36,13 +38,22 @@ class ModelRunner:
                                if model_config is not None else None)
         self.model = None
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
+        self.max_context_len_to_capture = min(
+            self.model_config.max_model_len if self.model_config else 0,
+            _MAX_CONTEXT_LEN_TO_CAPTURE)
         self.block_size = None  # Set after initial profiling.
+        self.block_tables = None  # Set after initial profiling.
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
+        max_block_size_to_capture = (self.max_context_len_to_capture +
+                                     block_size - 1) // block_size
+        self.block_tables = np.empty(
+            (max(_BATCH_SIZES_TO_CAPTURE), max_block_size_to_capture),
+            dtype=np.int32)
 
     def _prepare_prompt(
         self,
@@ -117,13 +128,13 @@ class ModelRunner:
             max_context_len=None,
             context_lens=None,
             block_tables=None,
+            use_graph=False,
         )
         return input_tokens, input_positions, input_metadata
 
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        padded_batch_size: Optional[int],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
@@ -162,14 +173,22 @@ class ModelRunner:
                 block_tables.append(block_table)
 
         batch_size = len(input_tokens)
-        if padded_batch_size is not None:
-            assert batch_size <= padded_batch_size
-            for _ in range(padded_batch_size - batch_size):
+        max_context_len = max(context_lens)
+        use_captured_graph = (
+            batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+            and max_context_len <= self.max_context_len_to_capture)
+        if use_captured_graph:
+            # Pad the input tokens, positions, and slot mapping to match the
+            # batch size of the captured graph.
+            graph_batch_size = _get_graph_batch_size(batch_size)
+            assert graph_batch_size >= batch_size
+            for _ in range(graph_batch_size - batch_size):
                 input_tokens.append([])
                 input_positions.append([])
                 slot_mapping.append([])
                 context_lens.append(1)
                 block_tables.append([])
+            batch_size = graph_batch_size
 
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_len=1,
@@ -183,15 +202,24 @@ class ModelRunner:
                                              max_len=1,
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long)
-        max_context_len = max(context_lens)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device="cuda")
-        block_tables = _make_tensor_with_pad(
-            block_tables,
-            max_len=512,  # FIXME
-            pad=0,
-            dtype=torch.int)
+
+        # FIXME
+        if max_context_len <= self.max_context_len_to_capture:
+            input_block_tables = self.block_tables[:batch_size]
+            for i, block_table in enumerate(block_tables):
+                if block_table:
+                    input_block_tables[i, :len(block_table)] = block_table
+            block_tables = torch.from_numpy(input_block_tables).cuda()
+        else:
+            block_tables = _make_tensor_with_pad(
+                block_tables,
+                max_len=max_context_len,
+                pad=0,
+                dtype=torch.int,
+            )
 
         input_metadata = InputMetadata(
             prompt_lens=[],
@@ -199,6 +227,7 @@ class ModelRunner:
             max_context_len=max_context_len,
             context_lens=context_lens,
             block_tables=block_tables,
+            use_graph=use_captured_graph,
         )
         return input_tokens, input_positions, input_metadata
 
@@ -281,35 +310,28 @@ class ModelRunner:
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
-        batch_size = sum(
-            len(metadata.seq_data) for metadata in seq_group_metadata_list)
-        padded_batch_size = None
-        if not self.model_config.enforce_eager and not is_prompt:
-            padded_batch_size = _get_padded_batch_size(batch_size)
-
         # Prepare input tensors.
         if is_prompt:
             inputs = self._prepare_prompt(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
         else:
-            inputs = self._prepare_decode(seq_group_metadata_list,
-                                          padded_batch_size)
+            inputs = self._prepare_decode(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
         sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                  input_metadata.prompt_lens)
 
         # Execute the model.
-        use_captured_graph = padded_batch_size is not None
-        model_executable = (self.graph_runners[padded_batch_size]
-                            if use_captured_graph else self.model)
+        if input_metadata.use_graph:
+            graph_batch_size = input_tokens.shape[0]
+            model_executable = self.graph_runners[graph_batch_size]
+        else:
+            model_executable = self.model
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
-        if batch_size != padded_batch_size:
-            hidden_states = hidden_states[:batch_size]
 
         # Sample the next token.
         output = self.model.sample(
@@ -376,17 +398,14 @@ class ModelRunner:
             context_lens = torch.tensor([1] * batch_size,
                                         dtype=torch.int,
                                         device="cuda")
-            block_tables = _make_tensor_with_pad(
-                [[]] * batch_size,
-                max_len=512,  # FIXME
-                pad=0,
-                dtype=torch.int)
+            input_block_tables = self.block_tables[:batch_size]
             input_metadata = InputMetadata(
                 prompt_lens=[],
                 slot_mapping=slot_mapping,
-                max_context_len=8192, # FIXME
+                max_context_len=_MAX_CONTEXT_LEN_TO_CAPTURE,
                 context_lens=context_lens,
-                block_tables=block_tables,
+                block_tables=torch.from_numpy(input_block_tables).cuda(),
+                use_graph=True,
             )
 
             graph_runner = CUDAGraphRunner(self.model)
@@ -494,12 +513,10 @@ def _make_tensor_with_pad(
     return torch.tensor(padded_x, dtype=dtype, device="cuda")
 
 
-def _get_padded_batch_size(batch_size: int) -> Optional[int]:
+def _get_graph_batch_size(batch_size: int) -> int:
     if batch_size <= 2:
         return batch_size
     elif batch_size <= 4:
         return 4
-    elif batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]:
-        return (batch_size + 7) // 8 * 8
     else:
-        return None
+        return (batch_size + 7) // 8 * 8
