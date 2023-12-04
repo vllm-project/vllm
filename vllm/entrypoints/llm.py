@@ -96,7 +96,8 @@ class LLM:
         self.request_counter = Counter()
 
     def get_tokenizer(
-            self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+        self,
+    ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer
 
     def set_tokenizer(
@@ -134,18 +135,27 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             completions in the same order as the input prompts.
         """
-        if (prompts is None and prompt_token_ids is None
-                and prompt_embeds is None):
+        if (
+            prompts is None
+            and prompt_token_ids is None
+            and prompt_embeds is None
+        ):
             raise ValueError(
                 "Either prompts, prompt_token_ids or prompt_token_embeds "
-                "must be provided.")
+                "must be provided."
+            )
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
-        if prompts is not None and prompt_token_ids is not None:
-            if len(prompts) != len(prompt_token_ids):
-                raise ValueError("The lengths of prompts and prompt_token_ids "
-                                 "must be the same.")
+        if (
+            prompts is not None
+            and prompt_token_ids is not None
+            and len(prompts) != len(prompt_token_ids)
+        ):
+            raise ValueError(
+                "The lengths of prompts and prompt_token_ids "
+                "must be the same."
+            )
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
@@ -160,18 +170,13 @@ class LLM:
 
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
-            if prompt_token_ids is None:
-                token_ids = None
-            else:
-                token_ids = prompt_token_ids[i]
-            if prompt_embeds is None:
-                embeds = None
-            else:
-                embeds = prompt_embeds[i]
-            self._add_request(prompt,
-                              sampling_params,
-                              token_ids,
-                              prompt_embeds=embeds)
+            token_ids = (
+                None if prompt_token_ids is None else prompt_token_ids[i]
+            )
+            prompt_embeds = None if prompt_embeds is None else prompt_embeds[i]
+            self._add_request(
+                prompt, sampling_params, token_ids, prompt_embeds=prompt_embeds
+            )
         return self._run_engine(use_tqdm)
 
     def _add_request(

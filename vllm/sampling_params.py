@@ -42,9 +42,9 @@ class SamplingParams:
             model to use new tokens, while values < 0 encourage the model to
             repeat tokens.
         repetition_penalty: Float that penalizes new tokens based on whether
-            they appear in the generated text so far. Values > 1 encourage the
-            model to use new tokens, while values < 1 encourage the model to
-            repeat tokens.
+            they appear in the prompt and the generated text so far. Values > 1
+            encourage the model to use new tokens, while values < 1 encourage
+            the model to repeat tokens.
         temperature: Float that controls the randomness of the sampling. Lower
             values make the model more deterministic, while higher values make
             the model more random. Zero means greedy sampling.
@@ -52,6 +52,9 @@ class SamplingParams:
             to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
         top_k: Integer that controls the number of top tokens to consider. Set
             to -1 to consider all tokens.
+        min_p: Float that represents the minimum probability for a token to be
+            considered, relative to the probability of the most likely token.
+            Must be in [0, 1]. Set to 0 to disable this.
         use_beam_search: Whether to use beam search instead of sampling.
         length_penalty: Float that penalizes sequences based on their length.
             Used in beam search.
@@ -66,7 +69,7 @@ class SamplingParams:
             The returned output will not contain the stop strings.
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
-            the stop tokens are sepcial tokens.
+            the stop tokens are special tokens.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
@@ -94,6 +97,7 @@ class SamplingParams:
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,
+        min_p: int = 0.0,
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
@@ -115,6 +119,7 @@ class SamplingParams:
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
+        self.min_p = min_p
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
@@ -142,6 +147,9 @@ class SamplingParams:
             self._verify_non_beam_search()
             if self.temperature < _SAMPLING_EPS:
                 # Zero temperature means greedy sampling.
+                self.top_p = 1.0
+                self.top_k = -1
+                self.min_p = 0.0
                 self._verify_greedy_sampling()
 
     def _verify_args(self) -> None:
@@ -167,6 +175,9 @@ class SamplingParams:
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, "
                              f"got {self.top_k}.")
+        if not 0.0 <= self.min_p <= 1.0:
+            raise ValueError("min_p must be in [0, 1], got "
+                             f"{self.min_p}.")
         if self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
@@ -206,10 +217,6 @@ class SamplingParams:
         if self.best_of > 1:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
-        if self.top_p < 1.0 - _SAMPLING_EPS:
-            raise ValueError("top_p must be 1 when using greedy sampling.")
-        if self.top_k != -1:
-            raise ValueError("top_k must be -1 when using greedy sampling.")
 
     @cached_property
     def sampling_type(self) -> SamplingType:
@@ -228,10 +235,12 @@ class SamplingParams:
                 f"temperature={self.temperature}, "
                 f"top_p={self.top_p}, "
                 f"top_k={self.top_k}, "
+                f"min_p={self.min_p}, "
                 f"use_beam_search={self.use_beam_search}, "
                 f"length_penalty={self.length_penalty}, "
                 f"early_stopping={self.early_stopping}, "
                 f"stop={self.stop}, "
+                f"stop_token_ids={self.stop_token_ids}, "
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
                 f"logprobs={self.logprobs}, "
