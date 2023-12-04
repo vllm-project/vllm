@@ -38,6 +38,7 @@ RUN mkdir libs \
     && cd libs \
     && git clone https://github.com/ROCmSoftwarePlatform/flash-attention.git \
     && cd flash-attention \
+    && git checkout 3d2b6f5 \
     && git submodule update --init \
     && export GPU_ARCHS=$(/opt/rocm/llvm/bin/amdgpu-offload-arch) \
     && patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch \
@@ -46,8 +47,13 @@ RUN mkdir libs \
 
 COPY ./ /app/vllm
 
+RUN python3 -m pip install --upgrade pip
+RUN pip install xformers==0.0.22.post7 --no-deps
+
 RUN cd /app \
     && cd vllm \
+    && pip install -U -r requirements-rocm.txt \
+    && bash patch_xformers-0.0.22.post7.rocm.sh \
     && python3 setup.py install \
     && cd ..
 
