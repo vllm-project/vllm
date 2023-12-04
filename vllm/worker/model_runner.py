@@ -1,5 +1,5 @@
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import torch
@@ -190,21 +190,27 @@ class ModelRunner:
                 block_tables.append([])
             batch_size = graph_batch_size
 
+        # When using CUDA graph, we don't need to make the tensors on the GPU
+        # because they will be eventually copied to the designated GPU buffer.
+        device = "cpu" if use_captured_graph else "cuda"
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_len=1,
                                              pad=0,
-                                             dtype=torch.long)
+                                             dtype=torch.long,
+                                             device=device)
         input_positions = _make_tensor_with_pad(input_positions,
                                                 max_len=1,
                                                 pad=0,
-                                                dtype=torch.long)
+                                                dtype=torch.long,
+                                                device=device)
         slot_mapping = _make_tensor_with_pad(slot_mapping,
                                              max_len=1,
                                              pad=_PAD_SLOT_ID,
-                                             dtype=torch.long)
+                                             dtype=torch.long,
+                                             device=device)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
-                                    device="cuda")
+                                    device=device)
 
         # FIXME
         if max_context_len <= self.max_context_len_to_capture:
@@ -212,7 +218,7 @@ class ModelRunner:
             for i, block_table in enumerate(block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.from_numpy(input_block_tables).cuda()
+            block_tables = torch.from_numpy(input_block_tables).to(device)
         else:
             block_tables = _make_tensor_with_pad(
                 block_tables,
@@ -508,9 +514,10 @@ def _make_tensor_with_pad(
     max_len: int,
     pad: int,
     dtype: torch.dtype,
+    device: Union[str, torch.device] = "cuda",
 ) -> torch.Tensor:
     padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
-    return torch.tensor(padded_x, dtype=dtype, device="cuda")
+    return torch.tensor(padded_x, dtype=dtype, device=device)
 
 
 def _get_graph_batch_size(batch_size: int) -> int:
