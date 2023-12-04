@@ -12,7 +12,7 @@ import torch
 from torch import nn
 
 from vllm.config import LoRAConfig
-from vllm.utils import LRUCache
+from vllm.utils import LRUCache, in_wsl
 
 from vllm.lora.layers import LoRALayer, LoRAMapping, from_layer, from_layer_sampler
 from vllm.lora.lora import LoRA
@@ -138,16 +138,21 @@ def _create_dummy_lora(module_name: str,
                        dtype: torch.dtype,
                        device: torch.device,
                        embeddings_tensor_dim: Optional[int] = None) -> "LoRA":
-    lora_a = torch.zeros([input_dim, rank], dtype=dtype, device=device)
-    lora_b = torch.zeros([rank, output_dim], dtype=dtype, device=device)
+    pin_memory = str(device) == "cpu" and not in_wsl()
+    lora_a = torch.zeros([input_dim, rank],
+                         dtype=dtype,
+                         device=device,
+                         pin_memory=pin_memory)
+    lora_b = torch.zeros([rank, output_dim],
+                         dtype=dtype,
+                         device=device,
+                         pin_memory=pin_memory)
     embeddings_tensor = torch.rand(
-        10, embeddings_tensor_dim, dtype=dtype,
-        device=device) if embeddings_tensor_dim else None
-    if str(device) == "cpu":
-        lora_a = lora_a.pin_memory()
-        lora_b = lora_b.pin_memory()
-        if embeddings_tensor is not None:
-            embeddings_tensor = embeddings_tensor.pin_memory()
+        10,
+        embeddings_tensor_dim,
+        dtype=dtype,
+        device=device,
+        pin_memory=pin_memory) if embeddings_tensor_dim else None
     return LoRA(
         module_name,
         rank=rank,
@@ -191,6 +196,7 @@ class LoRAModel:
         target_embedding_padding: Optional[int] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
+        pin_memory = str(device) == "cpu" and not in_wsl()
         loras: Dict[str, LoRA] = {}
         for tensor_name, tensor in tensors.items():
             module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name)
@@ -204,7 +210,7 @@ class LoRAModel:
                         lora_embeddings_tensor = embeddings[
                             EMBEDDING_MODULES[embeddings_module]].to(
                                 device=device, dtype=dtype)
-                        if device == "cpu":
+                        if pin_memory:
                             lora_embeddings_tensor = (
                                 lora_embeddings_tensor.pin_memory())
                 loras[module_name] = LoRA(module_name, rank, lora_alpha, None,
@@ -212,7 +218,7 @@ class LoRAModel:
             if is_lora_a:
                 loras[module_name].lora_a = tensor.to(device=device,
                                                       dtype=dtype).t()
-                if device == "cpu":
+                if pin_memory:
                     loras[module_name].lora_a = loras[
                         module_name].lora_a.pin_memory()
             else:
@@ -226,7 +232,7 @@ class LoRAModel:
                     addition = target_embedding_padding - lora_b.shape[1]
                     loras[module_name].lora_b = torch.nn.functional.pad(
                         lora_b, (0, addition))
-                if device == "cpu":
+                if pin_memory:
                     loras[module_name].lora_b = loras[
                         module_name].lora_b.pin_memory()
 
