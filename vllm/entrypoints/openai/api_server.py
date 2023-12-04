@@ -9,6 +9,8 @@ import time
 from http import HTTPStatus
 from typing import AsyncGenerator, Dict, List, Optional, Tuple, Union
 
+from aioprometheus import MetricsMiddleware
+from aioprometheus.asgi.starlette import metrics
 import fastapi
 import uvicorn
 from fastapi import Request
@@ -18,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.metrics import add_global_metrics_labels
 from vllm.entrypoints.openai.protocol import (
     CompletionRequest, CompletionResponse, CompletionResponseChoice,
     CompletionResponseStreamChoice, CompletionStreamResponse,
@@ -80,6 +83,10 @@ def parse_args():
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
+
+
+app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
+app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 
 
 def create_error_response(status_code: HTTPStatus,
@@ -246,8 +253,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
             n=request.n,
             presence_penalty=request.presence_penalty,
             frequency_penalty=request.frequency_penalty,
+            repetition_penalty=request.repetition_penalty,
             temperature=request.temperature,
             top_p=request.top_p,
+            min_p=request.min_p,
             stop=request.stop,
             stop_token_ids=request.stop_token_ids,
             max_tokens=request.max_tokens,
@@ -490,9 +499,11 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             best_of=request.best_of,
             presence_penalty=request.presence_penalty,
             frequency_penalty=request.frequency_penalty,
+            repetition_penalty=request.repetition_penalty,
             temperature=request.temperature,
             top_p=request.top_p,
             top_k=request.top_k,
+            min_p=request.min_p,
             stop=request.stop,
             stop_token_ids=request.stop_token_ids,
             ignore_eos=request.ignore_eos,
@@ -721,6 +732,9 @@ if __name__ == "__main__":
         tokenizer_mode=engine_model_config.tokenizer_mode,
         trust_remote_code=engine_model_config.trust_remote_code)
     load_chat_template(args, tokenizer)
+
+    # Register labels for metrics
+    add_global_metrics_labels(model_name=engine_args.model)
 
     uvicorn.run(app,
                 host=args.host,
