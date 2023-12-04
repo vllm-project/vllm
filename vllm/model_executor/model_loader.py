@@ -40,7 +40,7 @@ _MODEL_REGISTRY = {
 
 # Models to be disabled in ROCm
 _ROCM_DISABLED_MODELS = [
-    # ROCm's flash attention does not support sliding window attention 
+    # ROCm's flash attention does not support sliding window attention
     # in models such as Mistral
     "MistralForCausalLM",
 ]
