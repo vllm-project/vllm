@@ -144,6 +144,8 @@ class SamplingTensors:
                    output_tokens: List[List[int]], vocab_size: int,
                    device: torch.device,
                    dtype: torch.dtype) -> "SamplingTensors":
+        # Note that the performance will be very bad without
+        # pinned memory.
         pin_memory = not in_wsl()
         prompt_max_len = max(len(tokens) for tokens in prompt_tokens)
         prompt_padded_tokens = [
@@ -156,21 +158,44 @@ class SamplingTensors:
             for tokens in output_tokens
         ]
 
-        # Use less bigger tensors instead of many small
-        # tensors to optimize copying performance.
-        float_tensor = torch.tensor(
-            [
-                temperatures, top_ps, min_ps, presence_penalties,
-                frequency_penalties, repetition_penalties
-            ],
+        temperatures_t = torch.tensor(
+            temperatures,
             device="cpu",
             dtype=dtype,
             pin_memory=pin_memory,
         )
-        int_tensor = torch.tensor(
-            [
-                top_ks,
-            ],
+        top_ps_t = torch.tensor(
+            top_ps,
+            device="cpu",
+            dtype=dtype,
+            pin_memory=pin_memory,
+        )
+        min_ps_t = torch.tensor(
+            min_ps,
+            device="cpu",
+            dtype=dtype,
+            pin_memory=pin_memory,
+        )
+        presence_penalties_t = torch.tensor(
+            presence_penalties,
+            device="cpu",
+            dtype=dtype,
+            pin_memory=pin_memory,
+        )
+        frequency_penalties_t = torch.tensor(
+            frequency_penalties,
+            device="cpu",
+            dtype=dtype,
+            pin_memory=pin_memory,
+        )
+        repetition_penalties_t = torch.tensor(
+            repetition_penalties,
+            device="cpu",
+            dtype=dtype,
+            pin_memory=pin_memory,
+        )
+        top_ks_t = torch.tensor(
+            top_ks,
             device="cpu",
             dtype=torch.int,
             pin_memory=pin_memory,
@@ -187,22 +212,19 @@ class SamplingTensors:
             dtype=torch.long,
             pin_memory=pin_memory,
         )
-
         # Because the memory is pinned, we can do non-blocking
         # transfer to device.
-        float_tensor_gpu = float_tensor.to(device=device, non_blocking=True)
-        int_tensor_gpu = int_tensor.to(device=device, non_blocking=True)
-        prompt_tensor_gpu = prompt_tensor.to(device=device, non_blocking=True)
-        output_tensor_gpu = output_tensor.to(device=device, non_blocking=True)
-
         return cls(
-            temperatures=float_tensor_gpu[0],
-            top_ps=float_tensor_gpu[1],
-            top_ks=int_tensor_gpu[0],
-            min_ps=float_tensor_gpu[2],
-            presence_penalties=float_tensor_gpu[3],
-            frequency_penalties=float_tensor_gpu[4],
-            repetition_penalties=float_tensor_gpu[5],
-            prompt_tokens=prompt_tensor_gpu,
-            output_tokens=output_tensor_gpu,
+            temperatures=temperatures_t.to(device=device, non_blocking=True),
+            top_ps=top_ps_t.to(device=device, non_blocking=True),
+            top_ks=top_ks_t.to(device=device, non_blocking=True),
+            min_ps=min_ps_t.to(device=device, non_blocking=True),
+            presence_penalties=presence_penalties_t.to(device=device,
+                                                       non_blocking=True),
+            frequency_penalties=frequency_penalties_t.to(device=device,
+                                                         non_blocking=True),
+            repetition_penalties=repetition_penalties_t.to(device=device,
+                                                           non_blocking=True),
+            prompt_tokens=prompt_tensor.to(device=device, non_blocking=True),
+            output_tokens=output_tensor.to(device=device, non_blocking=True),
         )
