@@ -38,6 +38,16 @@ _MODEL_REGISTRY = {
     "YiForCausalLM": YiForCausalLM,
 }
 
+# Models to be disabled in ROCm
+_ROCM_DISABLED_MODELS = [
+    # ROCm's flash attention does not support sliding window attention 
+    # in models such as Mistral
+    "MistralForCausalLM",
+]
+if torch.version.hip:
+    for rocm_model in _ROCM_DISABLED_MODELS:
+        del _MODEL_REGISTRY[rocm_model]
+
 
 @contextlib.contextmanager
 def _set_default_torch_dtype(dtype: torch.dtype):
@@ -53,6 +63,10 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
+        elif arch in _ROCM_DISABLED_MODELS:
+            raise ValueError(
+                f"Model architecture {arch} is not supported by ROCm for now. \n"
+                f"Supported architectures {list(_MODEL_REGISTRY.keys())}")
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
