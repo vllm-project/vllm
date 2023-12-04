@@ -495,8 +495,11 @@ def _make_tensor_with_pad(
 
 
 def _get_padded_batch_size(batch_size: int) -> Optional[int]:
-    # Do we need to optimize this?
-    for bucket in _BATCH_SIZES_TO_CAPTURE:
-        if batch_size <= bucket:
-            return bucket
-    return None
+    if batch_size <= 2:
+        return batch_size
+    elif batch_size <= 4:
+        return 4
+    elif batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]:
+        return (batch_size + 7) // 8 * 8
+    else:
+        return None
