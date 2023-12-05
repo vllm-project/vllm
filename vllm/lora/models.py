@@ -178,6 +178,11 @@ class LoRAModel:
         self.rank = rank
         self.loras: Dict[str, LoRA] = loras
 
+    @property
+    def extra_vocab_size(self) -> int:
+        return max(lora.extra_vocab_size
+                   for lora in self.loras.values()) if self.loras else 0
+
     def get_lora(self, module_name: str) -> Optional[LoRA]:
         """Get LoRA for a given module by name"""
         return self.loras.get(module_name, None)

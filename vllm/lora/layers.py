@@ -1,4 +1,5 @@
 # pylint: disable=unused-argument
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
@@ -283,12 +284,12 @@ class LoRAVocabParallelEmbedding(LoRALayer):
             if self.embeddings_slice is not None:
                 # TODO(yard1): Optimize this copy, we don't need to copy
                 # everything, just the modified part
-                self.embeddings_weights.copy_(
-                    self.embeddings_tensors.view(
-                        self.embeddings_tensors.shape[0] *
-                        self.embeddings_tensors.shape[1],
-                        self.embeddings_tensors.shape[2])
-                    [self.embeddings_slice[0]:self.embeddings_slice[1]])
+                embeddings = self.embeddings_tensors.view(
+                    self.embeddings_tensors.shape[0] *
+                    self.embeddings_tensors.shape[1],
+                    self.embeddings_tensors.shape[2]
+                )[self.embeddings_slice[0]:self.embeddings_slice[1]]
+                self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
 
     def set_mapping(
         self,
@@ -856,6 +857,11 @@ class LoRASampler(LoRALayer):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
+        # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
+        if 32000 < self.base_layer.vocab_size > 33024:
+            raise ValueError(
+                "When using LoRA, vocab size must be 32000 >= vocab_size <= 33024"
+            )
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -870,7 +876,10 @@ class LoRASampler(LoRALayer):
             (
                 max_loras,
                 1,
-                self.base_layer.vocab_size,
+                # Pad for kernel compatibility
+                math.ceil(self.base_layer.vocab_size /
+                          lora_config.lora_vocab_padding_size) *
+                lora_config.lora_vocab_padding_size,
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
@@ -933,8 +942,6 @@ class LoRASampler(LoRALayer):
         if embedding_bias is not None:
             logits += embedding_bias
         logits = tensor_model_parallel_all_gather(logits)
-        # Remove paddings in vocab (if any).
-        logits = logits[:, :self.base_layer.vocab_size]
 
         lora_logits = torch.empty(
             self.embeddings_tensors.shape[0] + 1,
@@ -948,8 +955,7 @@ class LoRASampler(LoRALayer):
                      out=lora_logits[:-1])
         lora_logits[-1] = float("-inf")
         lora_logits = lora_logits.mT
-
-        logits[:, self.base_layer.org_vocab_size:] = (lora_logits.reshape(
+        lora_logits = (lora_logits.reshape(
             lora_logits.shape[0] * lora_logits.shape[1],
             lora_logits.shape[2],
         ).index_select(0,
@@ -957,6 +963,10 @@ class LoRASampler(LoRALayer):
                            nan=float("-inf"),
                            posinf=float("inf"),
                            neginf=float("-inf")))
+        logits[:,
+               self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
+               lora_logits.shape[1]] = lora_logits
+
         _apply_lora(
             hidden_states,
             self.lora_a_stacked,
@@ -964,6 +974,10 @@ class LoRASampler(LoRALayer):
             self.indices[:self.indices_len[1]],
             logits,
         )
+
+        # Remove paddings in vocab (if any).
+        logits = logits[:, :self.base_layer.vocab_size]
+
         return logits
 
     def forward(self, *args, **kwargs):

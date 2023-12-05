@@ -13,8 +13,11 @@ from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.model_executor.utils import set_weight_attrs
 
+DEFAULT_VOCAB_PADDING_SIZE = 64
 
-def pad_vocab_size(vocab_size: int, pad_to: int = 64) -> int:
+
+def pad_vocab_size(vocab_size: int,
+                   pad_to: int = DEFAULT_VOCAB_PADDING_SIZE) -> int:
     """Pad the vocab size to the given value."""
     return ((vocab_size + pad_to - 1) // pad_to) * pad_to
 
@@ -44,19 +47,22 @@ class VocabParallelEmbedding(torch.nn.Module):
         embedding_dim: size of hidden state.
         params_dtype: type of the parameters.
         org_num_embeddings: original vocabulary size (without LoRA).
+        padding_size: padding size for the vocabulary.
     """
 
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
                  params_dtype: Optional[torch.dtype] = None,
-                 org_num_embeddings: Optional[int] = None):
+                 org_num_embeddings: Optional[int] = None,
+                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE):
         super().__init__()
 
         # Keep the input dimensions.
         self.num_embeddings = num_embeddings
         self.org_vocab_size = org_num_embeddings or num_embeddings
-        self.num_embeddings_padded = pad_vocab_size(num_embeddings)
+        self.num_embeddings_padded = pad_vocab_size(num_embeddings,
+                                                    padding_size)
         self.embedding_dim = embedding_dim
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -118,6 +124,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         bias: whether to use bias.
         params_dtype: type of the parameters.
         org_num_embeddings: original vocabulary size (without LoRA).
+        padding_size: padding size for the vocabulary.
     """
 
     def __init__(self,
@@ -125,9 +132,10 @@ class ParallelLMHead(VocabParallelEmbedding):
                  embedding_dim: int,
                  bias: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
-                 org_num_embeddings: Optional[int] = None):
+                 org_num_embeddings: Optional[int] = None,
+                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
-                         org_num_embeddings)
+                         org_num_embeddings, padding_size)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,

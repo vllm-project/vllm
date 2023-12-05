@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Optional, Union, ClassVar
 from dataclasses import dataclass
 import os
 
@@ -364,14 +364,21 @@ class LoRAConfig:
     max_cpu_loras: Optional[int] = None
     lora_dtype: Optional[torch.dtype] = None
     lora_extra_vocab_size: int = 256
+    # This is a constant.
+    lora_vocab_padding_size: ClassVar[int] = 256
 
     def __post_init__(self):
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
         possible_max_ranks = (8, 16, 32, 64)
+        possible_lora_extra_vocab_size = (0, 256, 512)
         if self.max_lora_rank not in possible_max_ranks:
             raise ValueError(
                 f"max_lora_rank ({self.max_lora_rank}) must be one of "
                 f"{possible_max_ranks}.")
+        if self.lora_extra_vocab_size not in possible_lora_extra_vocab_size:
+            raise ValueError(
+                f"lora_extra_vocab_size ({self.lora_extra_vocab_size}) "
+                f"must be one of {possible_lora_extra_vocab_size}.")
         if self.max_loras < 1:
             raise ValueError(f"max_loras ({self.max_loras}) must be >= 1.")
         if self.max_cpu_loras is None:

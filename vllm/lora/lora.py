@@ -70,6 +70,11 @@ class LoRA:
     def is_packed(self) -> bool:
         return False
 
+    @property
+    def extra_vocab_size(self) -> int:
+        return self.embeddings_tensor.shape[
+            0] if self.embeddings_tensor is not None else 0
+
 
 class PackedLoRA(LoRA):
     """LoRA used for packed layers (eg. qkv_proj)."""

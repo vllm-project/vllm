@@ -41,8 +41,12 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 28672) \
     f(in_T, out_T, W_T, narrow, 32000) \
     f(in_T, out_T, W_T, narrow, 32256) \
+    f(in_T, out_T, W_T, narrow, 32512) \
+    f(in_T, out_T, W_T, narrow, 32768) \
+    f(in_T, out_T, W_T, narrow, 33024) \
     f(in_T, out_T, W_T, narrow, 36864) \
     f(in_T, out_T, W_T, narrow, 49152) \
+// Keep above in sync with vllm/lora/layers::LoRASampler
 
 // Keep this in sync with vllm/config::LoRAConfig
 #define FOR_BGMV_WIDE_NARROW(f, in_T, out_T, W_T) \

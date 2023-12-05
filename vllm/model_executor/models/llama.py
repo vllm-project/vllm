@@ -291,9 +291,15 @@ class LlamaForCausalLM(nn.Module):
         unpadded_vocab_size = config.vocab_size
         if lora_config:
             unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.lm_head = ParallelLMHead(unpadded_vocab_size,
-                                      config.hidden_size,
-                                      org_num_embeddings=config.vocab_size)
+        self.lm_head = ParallelLMHead(
+            unpadded_vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            # We need bigger padding if using lora for kernel
+            # compatibility
+            padding_size=64
+            if not lora_config else lora_config.lora_vocab_padding_size,
+        )
         self.sampler = Sampler(unpadded_vocab_size, config.vocab_size)
 
     def forward(
