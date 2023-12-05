@@ -16,9 +16,7 @@
  * limitations under the License.
  */
 #pragma once
-
 #include "cuda_compat.h"
-
 namespace vllm {
 
 template<typename T>
