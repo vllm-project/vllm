@@ -3,8 +3,9 @@
 Installation with ROCm
 ============
 
-vLLM 0.2.x onwards supports model inferencing and serving on AMD GPUs with ROCm. At the moment AWQ quantization is not supported, but SqueezeLLM has been incorporated.
-The ROCm version is tested and verified on LLaMA-2 models.
+vLLM 0.2.x onwards supports model inferencing and serving on AMD GPUs with ROCm.
+At the moment AWQ quantization is not supported in ROCm, but SqueezeLLM quantization has been ported.
+Datatypes currently supported in ROCm are FP16 and BF16.
 
 Requirements
 ------------
