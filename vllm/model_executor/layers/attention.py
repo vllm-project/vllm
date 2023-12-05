@@ -141,6 +141,8 @@ class PagedAttention(nn.Module):
                 else:
                     input_metadata.attn_bias = _make_alibi_bias(
                         self.alibi_slopes, batch_size, seq_len, query.dtype)
+                if self.num_kv_heads != self.num_heads:
+                    input_metadata.attn_bias._bias = input_metadata.attn_bias._bias.unflatten(1, (self.num_kv_heads, self.num_queries_per_kv))
 
             # TODO(woosuk): Too many view operations. Let's try to reduce them
             # in the future for code readability.
