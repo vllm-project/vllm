@@ -92,6 +92,12 @@ def get_model(model_config: ModelConfig,
             if getattr(model_class, "supports_lora", True):
                 model = model_class(model_config.hf_config, linear_method,
                                     lora_config)
+            elif lora_config:
+                raise ValueError(
+                    f"Model {model_class.__name__} does not support LoRA, "
+                    "but LoRA is enabled. Support for this model may "
+                    "be added in the future. If this is important to you, "
+                    "please open an issue on github.")
             else:
                 model = model_class(model_config.hf_config, linear_method)
         if model_config.load_format == "dummy":
