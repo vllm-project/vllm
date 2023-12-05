@@ -377,7 +377,6 @@ class AsyncLLMEngine:
                     shortened_token_ids = shortened_token_ids[:self.
                                                               max_log_len]
             logger.info(f"Received request {request_id}: "
-                        f"prompt: {shortened_prompt!r}, "
                         f"sampling params: {sampling_params}, "
                         f"prompt token ids: {shortened_token_ids}.")
 
