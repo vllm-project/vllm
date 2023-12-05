@@ -32,7 +32,7 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-    kv_cache_dtype: str = 'float16'
+    kv_cache_dtype: str = None
     kv_quant_params_path: str = None
 
     def __post_init__(self):
