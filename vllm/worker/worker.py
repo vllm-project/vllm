@@ -190,6 +190,15 @@ def _init_distributed_environment(
             rank=rank,
             init_method=distributed_init_method,
         )
+
+    if cupy_utils.is_initialized():
+        cupy_world_size = cupy_utils.get_world_size()
+        if cupy_world_size != parallel_config.world_size:
+            raise RuntimeError(
+                "cupy.distributed is already initialized but the cupy world "
+                "size does not match parallel_config.world_size "
+                f"({cupy_world_size} vs. {parallel_config.world_size}).")
+    else:
         cupy_utils.init_process_group(
             world_size=parallel_config.world_size,
             rank=rank,
