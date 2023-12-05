@@ -8,6 +8,8 @@ import torch.nn as nn
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
+from vllm.model_executor.parallel_utils.parallel_state import (
+    with_custom_nccl_for_all_reduce)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 
@@ -450,23 +452,25 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        self.model(
-            input_ids,
-            positions,
-            kv_caches,
-            input_metadata,
-        )
-        torch.cuda.synchronize()
-
-        # Capture the graph.
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
-            hidden_states = self.model(
+        with with_custom_nccl_for_all_reduce():
+            self.model(
                 input_ids,
                 positions,
                 kv_caches,
                 input_metadata,
             )
+        torch.cuda.synchronize()
+
+        # Capture the graph.
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            with with_custom_nccl_for_all_reduce():
+                hidden_states = self.model(
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    input_metadata,
+                )
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
