@@ -10,7 +10,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.parallel_state import (
-    destroy_model_parallel, initialize_model_parallel, model_parallel_is_initialized)
+    destroy_model_parallel, initialize_model_parallel,
+    model_parallel_is_initialized)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
