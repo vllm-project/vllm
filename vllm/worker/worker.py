@@ -8,6 +8,7 @@ import torch.distributed
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -179,9 +180,14 @@ def _init_distributed_environment(
             rank=rank,
             init_method=distributed_init_method,
         )
+        cupy_utils.init_process_group(
+            world_size=parallel_config.world_size,
+            rank=rank,
+        )
 
     # A small all_reduce for warmup.
     torch.distributed.all_reduce(torch.zeros(1).cuda())
+    cupy_utils.all_reduce(torch.zeros(1).cuda())
     initialize_model_parallel(parallel_config.tensor_parallel_size,
                               parallel_config.pipeline_parallel_size)
 
