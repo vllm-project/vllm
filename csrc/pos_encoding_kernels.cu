@@ -1,7 +1,6 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#include "cuda_compat.h"
 #include "dispatch_utils.h"
 
 namespace vllm {
@@ -20,14 +19,14 @@ inline __device__ void apply_rotary_embedding(
     // GPT-NeoX style rotary embedding.
     x_index = rot_offset;
     y_index = embed_dim + rot_offset;
-    cos = VLLM_LDG(cos_ptr + x_index);
-    sin = VLLM_LDG(sin_ptr + x_index);
+    cos = __ldg(cos_ptr + x_index);
+    sin = __ldg(sin_ptr + x_index);
   } else {
     // GPT-J style rotary embedding.
     x_index = 2 * rot_offset;
     y_index = 2 * rot_offset + 1;
-    cos = VLLM_LDG(cos_ptr + x_index / 2);
-    sin = VLLM_LDG(sin_ptr + x_index / 2);
+    cos = __ldg(cos_ptr + x_index / 2);
+    sin = __ldg(sin_ptr + x_index / 2);
   }
 
   const scalar_t x = arr[x_index];

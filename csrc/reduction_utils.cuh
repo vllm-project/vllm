@@ -16,14 +16,14 @@
  * limitations under the License.
  */
 #pragma once
-#include "cuda_compat.h"
+
 namespace vllm {
 
 template<typename T>
 __inline__ __device__ T warpReduceSum(T val) {
 #pragma unroll
   for (int mask = 16; mask > 0; mask >>= 1)
-    val += VLLM_SHFL_XOR_SYNC(val, mask);
+    val += __shfl_xor_sync(0xffffffff, val, mask, 32);
   return val;
 }
 
