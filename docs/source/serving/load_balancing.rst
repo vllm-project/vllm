@@ -1,6 +1,6 @@
 .. _load_balancing:
 
-Load Balancing
+Load Balancing Across Multiple vLLM Endpoints
 ===============
 
 In scenarios where multiple GPUs or nodes are necessary to handle the model serving workload, it is advisable to initiate several vLLM server instances and distribute incoming requests amongst them using an HTTP load balancer.
