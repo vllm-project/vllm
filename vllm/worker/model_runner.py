@@ -17,7 +17,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 _PAD_SLOT_ID = -1
 # Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
-_MAX_CONTEXT_LEN_TO_CAPTURE = 16384
+_MAX_CONTEXT_LEN_TO_CAPTURE = 8192
 
 
 class ModelRunner:
@@ -51,7 +51,7 @@ class ModelRunner:
         self.block_size = block_size
         max_block_size_to_capture = (self.max_context_len_to_capture +
                                      block_size - 1) // block_size
-        self.block_tables = np.empty(
+        self.block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), max_block_size_to_capture),
             dtype=np.int32)
 
@@ -386,6 +386,7 @@ class ModelRunner:
                     "use '--enforce-eager' in the CLI.")
 
         start_time = time.perf_counter()
+        self.block_tables.fill(0)
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
         for batch_size in reversed(_BATCH_SIZES_TO_CAPTURE):
