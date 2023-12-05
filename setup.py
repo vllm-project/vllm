@@ -75,6 +75,10 @@ def get_hipcc_rocm_version():
         print("Could not find HIP version in the output")
         return None
 
+if not torch.version.hip:
+    if CUDA_HOME is None:
+        raise RuntimeError(
+            "Cannot find CUDA_HOME. CUDA must be available to build the package.")
 
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
     """Get the CUDA version from nvcc.
@@ -126,6 +130,19 @@ def get_torch_arch_list() -> Set[str]:
             stacklevel=2)
     return arch_list
 
+def get_cuda_compute_capabilities(nvcc_cuda_version):
+    # First, check the TORCH_CUDA_ARCH_LIST environment variable.
+    compute_capabilities = get_torch_arch_list()
+    if not compute_capabilities:
+        # If TORCH_CUDA_ARCH_LIST is not defined or empty, target all available
+        # GPUs on the current machine.
+        device_count = torch.cuda.device_count()
+        for i in range(device_count):
+            major, minor = torch.cuda.get_device_capability(i)
+            if major < 7:
+                raise RuntimeError(
+                    "GPUs with compute capability below 7.0 are not supported.")
+            compute_capabilities.add(f"{major}.{minor}")
 
 # First, check the TORCH_CUDA_ARCH_LIST environment variable.
 compute_capabilities = get_torch_arch_list()
