@@ -463,14 +463,13 @@ class CUDAGraphRunner:
 
         # Capture the graph.
         self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
-            with with_custom_nccl_for_all_reduce():
-                hidden_states = self.model(
-                    input_ids,
-                    positions,
-                    kv_caches,
-                    input_metadata,
-                )
+        with torch.cuda.graph(self.graph), with_custom_nccl_for_all_reduce():
+            hidden_states = self.model(
+                input_ids,
+                positions,
+                kv_caches,
+                input_metadata,
+            )
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
