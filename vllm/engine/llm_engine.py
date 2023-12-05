@@ -578,7 +578,8 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
 
-        if self.spec_dec_worker:
+        # only enable speculative decoding for generation run
+        if self.spec_dec_worker and (not scheduler_outputs.prompt_run):
             self.spec_dec_worker.set_draft_tokens(seq_group_metadata_list,
                                               scheduler_outputs)
 
@@ -591,7 +592,7 @@ class LLMEngine:
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
         
-        if self.spec_dec_worker:
+        if self.spec_dec_worker and (not scheduler_outputs.prompt_run):
             # accept will set accepted_token_ids and accepted_token_probs in output
             self.spec_dec_worker.accept(output, scheduler_outputs)
 

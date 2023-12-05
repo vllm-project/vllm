@@ -104,10 +104,10 @@ class Sampler(nn.Module):
         # Sample the next tokens.
         sample_results = _sample(probs, logprobs, input_metadata)
         # Get the logprobs query results.
-        prompt_logprobs, sample_logprobs, prompt_dis = _get_logprobs(
+        prompt_logprobs, sample_logprobs = _get_logprobs(
             probs, logprobs, input_metadata, sample_results)
         return _build_sampler_output(sample_results, input_metadata,
-                                     prompt_logprobs, sample_logprobs, prompt_dis)
+                                     prompt_logprobs, sample_logprobs)
 
     def _sd_forward(self,
         embedding: torch.Tensor,
@@ -168,7 +168,7 @@ def _build_spec_sampler_output(samples: torch.Tensor,
             token_probs.append({token_id: prob[j, :]})
         seq_outputs =[SequenceOutputs(seq_ids[0], sample_result, token_logprobs, token_probs)]
         sampler_output.append(
-            SequenceGroupOutputs(seq_outputs, None, None))
+            SequenceGroupOutputs(seq_outputs, None))
     return sampler_output
        
 def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
@@ -611,7 +611,6 @@ def _get_logprobs(
 
     # Gather results
     result_prompt_logprobs: List[Optional[PromptLogprobs]] = []
-    result_prompt_probdis = []
     result_sample_logprobs: List[SampleLogprobs] = []
     sample_idx = 0
     query_result_idx = 0
@@ -635,22 +634,16 @@ def _get_logprobs(
                     token_id:
                     batched_logprobs_query_result[query_result_idx].item()
                 }
-                prompt_probdiss_dict = {
-                    token_id: batched_probs_dis[query_result_idx]
-                }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
                         zip(top_token_ids[sample_idx, :num_logprobs].tolist(),
                             top_logprobs[sample_idx, :num_logprobs].tolist()))
                 group_prompt_logprobs.append(prompt_logprobs_dict)
-                group_prompt_prob_dis.append(prompt_probdiss_dict)
                 sample_idx += 1
                 query_result_idx += 1
             result_prompt_logprobs.append(group_prompt_logprobs)
-            result_prompt_probdis.append(group_prompt_prob_dis)
         else:
             result_prompt_logprobs.append(None)
-            result_prompt_probdis.append(None)
 
         # Sample logprobs
         num_logprobs = sampling_params.logprobs
@@ -674,7 +667,7 @@ def _get_logprobs(
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)
 
-    return result_prompt_logprobs, result_sample_logprobs, result_prompt_probdis
+    return result_prompt_logprobs, result_sample_logprobs
 
 
 def _build_sampler_output(
@@ -682,13 +675,12 @@ def _build_sampler_output(
     input_metadata: InputMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
-    prompt_probdis
 ) -> SamplerOutput:
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,
-         group_sample_logprobs, group_prompt_probdis) in zip(input_metadata.seq_groups,
+         group_sample_logprobs) in zip(input_metadata.seq_groups,
                                        sample_results, prompt_logprobs,
-                                       sample_logprobs, prompt_probdis):
+                                       sample_logprobs):
         seq_ids, _ = seq_group
         next_token_ids, parent_ids = sample_result
         seq_outputs = []
@@ -698,5 +690,5 @@ def _build_sampler_output(
             seq_outputs.append(
                 SequenceOutputs(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
-            SequenceGroupOutputs(seq_outputs, group_prompt_logprobs, group_prompt_probdis))
+            SequenceGroupOutputs(seq_outputs, group_prompt_logprobs))
     return sampler_output

@@ -120,12 +120,6 @@ class SpecDecWorker(Worker):
                                  token_id: int,
                                  pos: int,
                                  draft_len: int):
-        # prefill phase
-        if seq_group_output.prompt_probdis:
-            prompt_dis = seq_group_output.prompt_probdis
-            draft_dis = prompt_dis[-draft_len:]
-            return list(draft_dis[pos].values())[0].cuda()
-
         # generation phase
         sample_prob = seq_group_output.samples[0].probdis
         dis = list(sample_prob[pos].values())[0]

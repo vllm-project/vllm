@@ -439,11 +439,9 @@ class SequenceGroupOutputs:
         self,
         samples: List[SequenceOutputs],
         prompt_logprobs: Optional[PromptLogprobs],
-        prompt_probdis: Optional[List[Dict[int, torch.Tensor]]] = None 
     ) -> None:
         self.samples = samples
         self.prompt_logprobs = prompt_logprobs
-        self.prompt_probdis = prompt_probdis
 
     def __repr__(self) -> str:
         return (f"SequenceGroupOutputs(samples={self.samples}, "
