@@ -39,12 +39,14 @@ class ModelRunner:
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
         self.model = None
+        self.block_size = None  # Set after initial profiling.
+        self.block_tables = None  # Set after initial profiling.
+
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.max_context_len_to_capture = min(
             self.model_config.max_model_len if self.model_config else 0,
             _MAX_CONTEXT_LEN_TO_CAPTURE)
-        self.block_size = None  # Set after initial profiling.
-        self.block_tables = None  # Set after initial profiling.
+        self.graph_memory_pool = None  # Set during graph capture.
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
@@ -424,7 +426,9 @@ class ModelRunner:
                 input_positions,
                 kv_caches,
                 input_metadata,
+                memory_pool=self.graph_memory_pool,
             )
+            self.graph_memory_pool = graph_runner.graph.pool()
             self.graph_runners[batch_size] = graph_runner
 
         end_time = time.perf_counter()
@@ -447,6 +451,7 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        memory_pool,
     ) -> None:
         assert self.graph is None
         # Run the model once without capturing the graph.
@@ -463,7 +468,8 @@ class CUDAGraphRunner:
 
         # Capture the graph.
         self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph), with_custom_nccl_for_all_reduce():
+        with (torch.cuda.graph(self.graph, pool=memory_pool),
+              with_custom_nccl_for_all_reduce()):
             hidden_states = self.model(
                 input_ids,
                 positions,
