@@ -455,6 +455,7 @@ class CUDAGraphRunner:
             kv_caches,
             input_metadata,
         )
+        torch.cuda.synchronize()
 
         # Capture the graph.
         self.graph = torch.cuda.CUDAGraph()
@@ -465,6 +466,7 @@ class CUDAGraphRunner:
                 kv_caches,
                 input_metadata,
             )
+        torch.cuda.synchronize()
 
         # Save the input and output buffers.
         self.input_buffers = {
