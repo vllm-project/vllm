@@ -31,7 +31,10 @@ COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
 
 # max jobs used by Ninja to build extensions
-ENV MAX_JOBS=$max_jobs
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
 RUN python3 setup.py build_ext --inplace
 
 # image to run unit testing suite
