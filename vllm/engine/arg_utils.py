@@ -7,6 +7,7 @@ import torch
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
+from vllm.utils import is_hip
 
 
 @dataclass
@@ -89,7 +90,7 @@ class EngineArgs:
                             help='directory to download and load the weights, '
                             'default to the default cache dir of '
                             'huggingface')
-        if torch.cuda.is_available() and torch.version.hip:
+        if is_hip():
             # do something specific for HIP
             parser.add_argument(
                 '--load-format',
@@ -106,7 +107,7 @@ class EngineArgs:
                 help='data type for model weights and activations. '
                 'The default option is FP16 precision '
                 'Supports FP16 and BF16 ')
-        elif torch.cuda.is_available() and torch.version.cuda:
+        else:
             # do something specific for CUDA
             parser.add_argument(
                 '--load-format',
@@ -197,7 +198,7 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
-        if torch.cuda.is_available() and torch.version.hip:
+        if is_hip():
             # Quantization settings.
             parser.add_argument('--quantization',
                                 '-q',
@@ -206,7 +207,7 @@ class EngineArgs:
                                 default=None,
                                 help='Method used to quantize the weights')
 
-        elif torch.cuda.is_available() and torch.version.cuda:
+        else:
             # Quantization settings.
             parser.add_argument('--quantization',
                                 '-q',

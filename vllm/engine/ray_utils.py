@@ -3,6 +3,7 @@ from typing import Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
+from vllm.utils import is_hip
 
 import torch
 
@@ -75,7 +76,7 @@ def initialize_cluster(
                 "Ray is not installed. Please install Ray to use distributed "
                 "serving.")
         # Connect to a ray cluster.
-        if torch.version.hip:
+        if is_hip():
             ray.init(address=ray_address,
                      ignore_reinit_error=True,
                      num_gpus=parallel_config.world_size)

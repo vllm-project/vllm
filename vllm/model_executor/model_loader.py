@@ -10,6 +10,7 @@ from vllm.config import ModelConfig
 from vllm.model_executor.models import *
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+from vllm.utils import is_hip
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
@@ -44,7 +45,7 @@ _ROCM_DISABLED_MODELS = [
     # in models such as Mistral
     "MistralForCausalLM",
 ]
-if torch.version.hip:
+if is_hip():
     for rocm_model in _ROCM_DISABLED_MODELS:
         del _MODEL_REGISTRY[rocm_model]
 

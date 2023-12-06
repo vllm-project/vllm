@@ -2,10 +2,11 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn.parameter import Parameter
-if torch.cuda.is_available() and torch.version.hip:
+from vllm.utils import is_hip
+if is_hip():
     # do something specific for HIP
     print("Warning: vLLM does not support AWQ on ROCm.")
-elif torch.cuda.is_available() and torch.version.cuda:
+else:
     from vllm._C import ops
 
 from vllm.model_executor.layers.linear import (LinearMethodBase,

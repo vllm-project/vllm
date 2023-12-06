@@ -53,3 +53,7 @@ def random_uuid() -> str:
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
+
+
+def is_hip():
+    return torch.version.hip
