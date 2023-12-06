@@ -50,7 +50,7 @@ class Sampler(nn.Module):
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
 
-        # Apply min tokens 
+        # Apply min tokens
         logits = _apply_min_tokens(logits, sampling_metadata)
 
         # Apply presence and frequency penalties.
@@ -114,8 +114,11 @@ def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
     logits = logits[:, :vocab_size]
     return logits
 
-def _apply_min_tokens(logits: torch.Tensor,
-                          sampling_metadata: SamplingMetadata) -> torch.Tensor:
+
+def _apply_min_tokens(
+    logits: torch.Tensor,
+    sampling_metadata: SamplingMetadata
+    ) -> torch.Tensor:
     """min new tokens"""
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
@@ -134,6 +137,7 @@ def _apply_min_tokens(logits: torch.Tensor,
                         logits[i][stop_id] = -float("inf")
 
     return logits
+
 
 def _prune_hidden_states(
     hidden_states: torch.Tensor,
