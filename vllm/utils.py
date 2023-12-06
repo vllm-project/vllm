@@ -27,10 +27,14 @@ class Counter:
         self.counter = 0
 
 
+def is_hip():
+    return torch.version.hip
+
+
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
-    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97
+    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97 if (not is_hip()) else 74
     max_shared_mem = cuda_utils.get_device_attribute(
         cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
     return int(max_shared_mem)
@@ -53,7 +57,3 @@ def random_uuid() -> str:
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
-
-
-def is_hip():
-    return torch.version.hip
