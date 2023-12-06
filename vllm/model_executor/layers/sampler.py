@@ -115,10 +115,8 @@ def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
     return logits
 
 
-def _apply_min_tokens(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata
-    ) -> torch.Tensor:
+def _apply_min_tokens(logits: torch.Tensor,
+                      sampling_metadata: SamplingMetadata) -> torch.Tensor:
     """min new tokens"""
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
