@@ -542,48 +542,6 @@ __global__ void paged_attention_v2_reduce_kernel(
 
 } // namespace vllm
 
-// #ifndef USE_ROCM
-// #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                                  \
-//   cudaFuncSetAttribute(                                                                       \
-//     (void*)vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,            \
-//     cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                            \
-//   vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>                      \
-//   <<<grid, block, shared_mem_size, stream>>>(                                                 \
-//     out_ptr,                                                                                  \
-//     query_ptr,                                                                                \
-//     key_cache_ptr,                                                                            \
-//     value_cache_ptr,                                                                          \
-//     head_mapping_ptr,                                                                         \
-//     scale,                                                                                    \
-//     block_tables_ptr,                                                                         \
-//     context_lens_ptr,                                                                         \
-//     max_num_blocks_per_seq,                                                                   \
-//     alibi_slopes_ptr,                                                                         \
-//     q_stride,                                                                                 \
-//     kv_block_stride,                                                                          \
-//     kv_head_stride);
-// #else
-// #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                                  \
-//   hipFuncSetAttribute(                                                                       \
-//     (void*)vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,            \
-//     hipFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                            \
-//   vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>                      \
-//   <<<grid, block, shared_mem_size, stream>>>(                                                 \
-//     out_ptr,                                                                                  \
-//     query_ptr,                                                                                \
-//     key_cache_ptr,                                                                            \
-//     value_cache_ptr,                                                                          \
-//     head_mapping_ptr,                                                                         \
-//     scale,                                                                                    \
-//     block_tables_ptr,                                                                         \
-//     context_lens_ptr,                                                                         \
-//     max_num_blocks_per_seq,                                                                   \
-//     alibi_slopes_ptr,                                                                         \
-//     q_stride,                                                                                 \
-//     kv_block_stride,                                                                          \
-//     kv_head_stride);
-// #endif
-
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                                  \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                                       \
     ((void*)vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>),            \
