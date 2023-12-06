@@ -329,7 +329,7 @@ def _get_temperatures(input_metadata: InputMetadata) -> List[float]:
             # NOTE: Zero temperature means deterministic sampling
             # (i.e., greedy sampling or beam search).
             # Set the temperature to 1 to avoid division by zero.
-            temperature = _SAMPLING_EPS
+            temperature = 1.0
             
         for seq_id in seq_ids:
             if input_metadata.num_prompts == 0:

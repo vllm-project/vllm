@@ -83,6 +83,7 @@ class SpecDecWorker(Worker):
             attention_mask = torch.cat([attention_mask, torch.ones(
                 input_tensor.shape[0], 1, device='cuda')], dim=1)
             input_tensor = torch.multinomial(distribution, num_samples=1)
+            input_tensor = torch.argmax(distribution, dim=-1).reshape(-1, 1)
 
             draft_logits.append(next_token_logits)
             draft_distributions.append(distribution)
@@ -115,14 +116,14 @@ class SpecDecWorker(Worker):
             logger.info(f"Seq draft tokens: {seq_data.get_draft_token_ids()}")
             logger.info(f"All tokens: {seq_data.get_token_ids()}")
 
-    @staticmethod
-    def _extract_target_prob_dis(seq_group_output: SequenceGroupOutputs,
+    def _extract_target_prob_dis(self,
+                                 seq_group_output: SequenceGroupOutputs,
                                  token_id: int,
                                  pos: int,
                                  draft_len: int):
         # generation phase
         sample_prob = seq_group_output.samples[0].probdis
-        dis = list(sample_prob[pos].values())[0]
+        dis = self._sample_method(list(sample_prob[pos].values())[0])
         return dis.cuda()
 
     # Accept draft tokens based on draft probabilities and target probabilities
@@ -138,7 +139,7 @@ class SpecDecWorker(Worker):
         for i, token_prob in enumerate(seq.data.draft_token_probs):
             token_id = list(token_prob.keys())[0]
             draft_prob_dis = seq.get_draft_probdis(token_id, i)
-            target_prob_dis = SpecDecWorker._extract_target_prob_dis(
+            target_prob_dis = self._extract_target_prob_dis(
                 seq_group_output, token_id, i, len(seq.data.draft_token_probs))
             q, p = draft_prob_dis[token_id].item(
             ), target_prob_dis[token_id].item()
@@ -154,7 +155,8 @@ class SpecDecWorker(Worker):
                     target_prob_dis - draft_prob_dis, min=0)
                 logger.info((draft_prob_dis - target_prob_dis).max())
                 new_dis = new_dis / new_dis.sum(dim=-1, keepdim=True)
-                next_token = torch.multinomial(new_dis, num_samples=1)
+                # next_token = torch.multinomial(new_dis, num_samples=1)
+                next_token = torch.argmax(new_dis, dim=-1)
                 accepted_token_ids.append(next_token.item())
                 break
 
