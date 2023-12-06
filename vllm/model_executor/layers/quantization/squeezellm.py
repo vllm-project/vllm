@@ -116,11 +116,9 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         if is_hip():
-            out_float = torch.zeros(out_shape,
-                                    device="cuda",
-                                    dtype=torch.float)
-            ops.squeezellm_gemm(reshaped_x, qweight, out_float, lookup_table)
-            out = out_float.to(dtype=torch.float16)
+            out_f = torch.zeros(out_shape, device="cuda", dtype=torch.float)
+            ops.squeezellm_gemm(reshaped_x, qweight, out_f, lookup_table)
+            out = out_f.to(dtype=torch.float16)
         else:
             # NOTE: The output tensor should be zero-initialized.
             out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
