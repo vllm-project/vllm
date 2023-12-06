@@ -118,10 +118,6 @@ class MultiLoRATokenizer:
             self.lora_tokenizers = LRUCache(capacity=max_num_seqs)
         else:
             self.lora_tokenizers = None
-
-    def ping(self):
-        return True
-
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
