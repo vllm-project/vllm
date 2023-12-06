@@ -277,8 +277,6 @@ def get_requirements() -> List[str]:
     else:
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
-    print("requirements: ", requirements)
-    # exit()
     return requirements
 
 
