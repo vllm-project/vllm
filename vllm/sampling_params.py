@@ -105,6 +105,7 @@ class SamplingParams:
         stop_token_ids: Optional[List[int]] = None,
         ignore_eos: bool = False,
         max_tokens: int = 16,
+        min_tokens: int = 1,
         logprobs: Optional[int] = None,
         prompt_logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
@@ -135,6 +136,7 @@ class SamplingParams:
             self.stop_token_ids = list(stop_token_ids)
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
+        self.min_tokens = min_tokens
         self.logprobs = logprobs
         self.prompt_logprobs = prompt_logprobs
         self.skip_special_tokens = skip_special_tokens
@@ -181,6 +183,10 @@ class SamplingParams:
         if self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
+        if self.min_tokens < 1:
+            raise ValueError(
+                f"min_tokens must be at least 1, got {self.min_tokens}.")
+
         if self.logprobs is not None and self.logprobs < 0:
             raise ValueError(
                 f"logprobs must be non-negative, got {self.logprobs}.")
@@ -243,6 +249,7 @@ class SamplingParams:
                 f"stop_token_ids={self.stop_token_ids}, "
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
+                f"min_tokens={self.min_tokens}, "
                 f"logprobs={self.logprobs}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
                 f"skip_special_tokens={self.skip_special_tokens}, "

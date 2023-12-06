@@ -49,6 +49,10 @@ class Sampler(nn.Module):
 
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
+
+        # Apply min tokens 
+        logits = _apply_min_tokens(logits, sampling_metadata)
+
         # Apply presence and frequency penalties.
         presence_penalties, frequency_penalties, repetition_penalties = (
             _get_penalties(sampling_metadata))
@@ -110,6 +114,26 @@ def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
     logits = logits[:, :vocab_size]
     return logits
 
+def _apply_min_tokens(logits: torch.Tensor,
+                          sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    """min new tokens"""
+    for i, seq_group in enumerate(sampling_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+        # min_new_tokens = 6
+        if i < sampling_metadata.num_prompts:
+            # NOTE: prompt token positions do not need output tokens to
+            # compute penalties.
+            for stop_id in sampling_params.stop_token_ids:
+                logits[i][stop_id] = -float("inf")
+        else:
+            for seq_id in seq_ids:
+                seq_data = sampling_metadata.seq_data[seq_id]
+                new_tokens_length = len(seq_data.output_token_ids)
+                if new_tokens_length < sampling_params.min_tokens:
+                    for stop_id in sampling_params.stop_token_ids:
+                        logits[i][stop_id] = -float("inf")
+
+    return logits
 
 def _prune_hidden_states(
     hidden_states: torch.Tensor,
