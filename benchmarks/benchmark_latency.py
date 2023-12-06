@@ -1,6 +1,7 @@
 """Benchmark the latency of processing a single batch of requests."""
 import argparse
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -43,7 +44,7 @@ def main(args: argparse.Namespace):
                         torch.profiler.ProfilerActivity.CUDA,
                     ],
                     on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                        profile_dir)) as p:
+                        str(profile_dir))) as p:
                 llm.generate(prompt_token_ids=dummy_prompt_token_ids,
                              sampling_params=sampling_params,
                              use_tqdm=False)
@@ -61,8 +62,11 @@ def main(args: argparse.Namespace):
     run_to_completion(profile_dir=None)
 
     if args.profile:
-        print("Profiling...")
-        run_to_completion(profile_dir=args.profile)
+        profile_dir = args.profile_result_dir
+        if not profile_dir:
+            profile_dir = Path(".") / "vllm_benchmark_result" / f"latency_result_{time.time()}"
+        print(f"Profiling (results will be saved to '{profile_dir}')...")
+        run_to_completion(profile_dir=args.profile_result_dir)
         return
 
     # Benchmark.
@@ -109,9 +113,15 @@ if __name__ == '__main__':
         'for BF16 models.')
     parser.add_argument(
         '--profile',
+        action='store_true',
+        help='profile the generation process of a single batch')
+    parser.add_argument(
+        '--profile-result-dir',
         type=str,
         default=None,
-        help=('path to save the pytorch profiler output. If unspecifed, '
-              'no profiling is done.'))
+        help=(
+            'path to save the pytorch profiler output. Can be visualized '
+            'with ui.perfetto.dev or Tensorboard.'
+        ))
     args = parser.parse_args()
     main(args)
