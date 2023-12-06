@@ -16,6 +16,7 @@ from vllm.model_executor.models.phi_1_5 import PhiForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
 from vllm.model_executor.models.chatglm import ChatGLMForCausalLM
 from vllm.model_executor.models.yi import YiForCausalLM
+from vllm.model_executor.models.ilql import LlamaIlqlForCausalLM
 
 __all__ = [
     "AquilaForCausalLM",
@@ -36,4 +37,5 @@ __all__ = [
     "QWenLMHeadModel",
     "MistralForCausalLM",
     "YiForCausalLM",
+    "LlamaIlqlForCausalLM"
 ]

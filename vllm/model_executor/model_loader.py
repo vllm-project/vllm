@@ -37,6 +37,7 @@ _MODEL_REGISTRY = {
     "QWenLMHeadModel": QWenLMHeadModel,
     "RWForCausalLM": FalconForCausalLM,
     "YiForCausalLM": YiForCausalLM,
+    "LlamaIlqlForCausalLM": LlamaIlqlForCausalLM
 }
 
 
