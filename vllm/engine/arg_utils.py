@@ -3,11 +3,8 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import torch
-
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
-from vllm.utils import is_hip
 
 
 @dataclass
@@ -90,52 +87,32 @@ class EngineArgs:
                             help='directory to download and load the weights, '
                             'default to the default cache dir of '
                             'huggingface')
-        if is_hip():
-            # do something specific for HIP
-            parser.add_argument(
-                '--load-format',
-                type=str,
-                default='pt',
-                choices=['pt'],
-                help='The format of the model weights to load. '
-                '"pt" will load the weights in the pytorch bin format. ')
-            parser.add_argument(
-                '--dtype',
-                type=str,
-                default='half',
-                choices=['half', 'float16', 'bfloat16'],
-                help='data type for model weights and activations. '
-                'The default option is FP16 precision '
-                'Supports FP16 and BF16 ')
-        else:
-            # do something specific for CUDA
-            parser.add_argument(
-                '--load-format',
-                type=str,
-                default=EngineArgs.load_format,
-                choices=['auto', 'pt', 'safetensors', 'npcache', 'dummy'],
-                help='The format of the model weights to load. '
-                '"auto" will try to load the weights in the safetensors format '
-                'and fall back to the pytorch bin format if safetensors format '
-                'is not available. '
-                '"pt" will load the weights in the pytorch bin format. '
-                '"safetensors" will load the weights in the safetensors format. '
-                '"npcache" will load the weights in pytorch format and store '
-                'a numpy cache to speed up the loading. '
-                '"dummy" will initialize the weights with random values, '
-                'which is mainly for profiling.')
-            parser.add_argument(
-                '--dtype',
-                type=str,
-                default=EngineArgs.dtype,
-                choices=[
-                    'auto', 'half', 'float16', 'bfloat16', 'float', 'float32'
-                ],
-                help='data type for model weights and activations. '
-                'The "auto" option will use FP16 precision '
-                'for FP32 and FP16 models, and BF16 precision '
-                'for BF16 models.')
-
+        parser.add_argument(
+            '--load-format',
+            type=str,
+            default=EngineArgs.load_format,
+            choices=['auto', 'pt', 'safetensors', 'npcache', 'dummy'],
+            help='The format of the model weights to load. '
+            '"auto" will try to load the weights in the safetensors format '
+            'and fall back to the pytorch bin format if safetensors format '
+            'is not available. '
+            '"pt" will load the weights in the pytorch bin format. '
+            '"safetensors" will load the weights in the safetensors format. '
+            '"npcache" will load the weights in pytorch format and store '
+            'a numpy cache to speed up the loading. '
+            '"dummy" will initialize the weights with random values, '
+            'which is mainly for profiling.')
+        parser.add_argument(
+            '--dtype',
+            type=str,
+            default=EngineArgs.dtype,
+            choices=[
+                'auto', 'half', 'float16', 'bfloat16', 'float', 'float32'
+            ],
+            help='data type for model weights and activations. '
+            'The "auto" option will use FP16 precision '
+            'for FP32 and FP16 models, and BF16 precision '
+            'for BF16 models.')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=None,
@@ -198,23 +175,13 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
-        if is_hip():
-            # Quantization settings.
-            parser.add_argument('--quantization',
-                                '-q',
-                                type=str,
-                                choices=['squeezellm', None],
-                                default=None,
-                                help='Method used to quantize the weights')
-
-        else:
-            # Quantization settings.
-            parser.add_argument('--quantization',
-                                '-q',
-                                type=str,
-                                choices=['awq', 'squeezellm', None],
-                                default=None,
-                                help='Method used to quantize the weights')
+        # Quantization settings.
+        parser.add_argument('--quantization',
+                            '-q',
+                            type=str,
+                            choices=['awq', 'squeezellm', None],
+                            default=None,
+                            help='Method used to quantize the weights')
         return parser
 
     @classmethod

@@ -1,5 +1,4 @@
 from typing import Type
-import torch
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.utils import is_hip

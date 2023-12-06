@@ -5,8 +5,6 @@ from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import is_hip
 
-import torch
-
 logger = init_logger(__name__)
 
 try:
