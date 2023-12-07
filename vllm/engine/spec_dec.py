@@ -56,7 +56,7 @@ class SpecDecWorker(Worker):
 
     # TODO: we need to align draft and target model's sampler
     def _sample_method(self, logits):
-        temperature = 0.001
+        temperature = 0.0001
         return torch.softmax(logits / temperature, dim=-1)
 
     # propose draft tokens
@@ -118,9 +118,7 @@ class SpecDecWorker(Worker):
 
     def _extract_target_prob_dis(self,
                                  seq_group_output: SequenceGroupOutputs,
-                                 token_id: int,
-                                 pos: int,
-                                 draft_len: int):
+                                 pos: int):
         # generation phase
         sample_prob = seq_group_output.samples[0].probdis
         dis = self._sample_method(list(sample_prob[pos].values())[0])
@@ -139,8 +137,7 @@ class SpecDecWorker(Worker):
         for i, token_prob in enumerate(seq.data.draft_token_probs):
             token_id = list(token_prob.keys())[0]
             draft_prob_dis = seq.get_draft_probdis(token_id, i)
-            target_prob_dis = self._extract_target_prob_dis(
-                seq_group_output, token_id, i, len(seq.data.draft_token_probs))
+            target_prob_dis = self._extract_target_prob_dis(seq_group_output, i)
             q, p = draft_prob_dis[token_id].item(
             ), target_prob_dis[token_id].item()
             self.alphas.append(min(p, q))
@@ -153,10 +150,13 @@ class SpecDecWorker(Worker):
             else:  # reject and resample
                 new_dis = torch.clamp(
                     target_prob_dis - draft_prob_dis, min=0)
-                logger.info((draft_prob_dis - target_prob_dis).max())
                 new_dis = new_dis / new_dis.sum(dim=-1, keepdim=True)
                 # next_token = torch.multinomial(new_dis, num_samples=1)
                 next_token = torch.argmax(new_dis, dim=-1)
+                logger.warning((f"next_token token: {next_token},", 
+                                f"{torch.argmax(target_prob_dis, dim=-1)}",
+                                f"{torch.argmax(draft_prob_dis, dim=-1)}",
+                                ))
                 accepted_token_ids.append(next_token.item())
                 break
 
@@ -172,6 +172,7 @@ class SpecDecWorker(Worker):
             sample: SequenceOutputs = seq_group_output.samples[0]
             seq_id = list(seq_group.seqs_dict.keys())[0]
             cur_seq = seq_group.seqs_dict[seq_id]
+            logger.info(f"sample output: {sample.output_token}, {cur_seq.data.get_draft_token_ids()}")
             assert seq_id == sample.parent_seq_id, \
                 (f"seq_group: {seq_id} and",
                  f"seq_group_output: {sample.parent_seq_id} are not aligned")
