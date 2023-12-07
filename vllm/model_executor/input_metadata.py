@@ -21,6 +21,7 @@ class InputMetadata:
                  max_context_len: int,
                  block_tables: torch.Tensor,
                  start_loc: Optional[torch.Tensor] = None,
+                 sd_len_to_gen: Optional[int] = None,
                  sd_prompt_lens: Optional[List[int]] = None) -> None:
         self.prompt_lens = prompt_lens
         self.max_context_len = max_context_len
@@ -28,10 +29,8 @@ class InputMetadata:
         self.start_loc = start_loc
         self.context_lens = context_lens
         self.block_tables = block_tables
+        self.sd_len_to_gen = sd_len_to_gen
         self.sd_prompt_lens = sd_prompt_lens
-
-        if self.sd_prompt_lens:
-            self.sd_prompt_lens = torch.tensor(sd_prompt_lens, device='cuda')
 
         self.is_prompt = len(prompt_lens) > 0
         # Set during the execution of the first attention op.

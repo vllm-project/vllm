@@ -306,5 +306,5 @@ def _multi_query_cached_kv_attention(query: torch.Tensor, key: torch.Tensor,
         input_metadata.start_loc,
         input_metadata.context_lens,
         input_metadata.sd_prompt_lens,
-        input_metadata.max_context_len)
+        input_metadata.sd_len_to_gen)
     return output

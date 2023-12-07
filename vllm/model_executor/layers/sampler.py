@@ -41,7 +41,7 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
-        prompt_run = len(sampling_metadata.prompt_lens) > 0
+        prompt_run = sampling_metadata.num_prompts > 0
         if FLAGS.ENABLE_SD and (not prompt_run):
             return self._sd_forward(embedding, hidden_states,
                                     sampling_metadata, embedding_bias)
@@ -123,21 +123,14 @@ class Sampler(nn.Module):
         # It is a simiplified version of the original forward
         # and only supports argmax sampling
         batch_size = hidden_states.shape[0]
+        len_to_gen = hidden_states.shape[1]
         hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
 
         # Get the logits for the next tokens.
         logits = _get_logits(hidden_states, embedding, embedding_bias,
                              self.vocab_size)
 
-        ## Apply temperature scaling.
-        # temperatures = _get_temperatures(sampling_metadata)
-        # assert len(temperatures) == logits.shape[0]
-        # if any(t != 1.0 for t in temperatures):
-        #     t = torch.tensor(temperatures,
-        #                      dtype=logits.dtype,
-        #                      device=logits.device)
-        #     # Use in-place division to avoid creating a new tensor.
-        #     logits.div_(t.unsqueeze(dim=1))
+        # Do not apply templerature since we only support greedy sampling
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
@@ -146,16 +139,18 @@ class Sampler(nn.Module):
         # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
-        sample_results = torch.argmax(logprobs, dim=-1).cpu().reshape(batch_size, -1)
-
-        # prompt_logprobs, sample_logprobs = _get_logprobs(
-        #     probs, logprobs, sampling_metadata, sample_results)
+        # sample_results = torch.argmax(logprobs, dim=-1).cpu().reshape(batch_size, -1)
+        sample_results = _greedy_sample(sampling_metadata.seq_groups, logprobs, len_to_gen)
         prompt_logprobs, sample_logprobs = _get_logprobs(logprobs, 
                                                          sampling_metadata, 
                                                          sample_results)
+        
+        probdis = probs.reshape(batch_size, len_to_gen, -1)
+        # change probs to a list of lists
+        probdis = [list(tensor.unbind(0)) for tensor in probdis.unbind(0)]
         return _build_sampler_output(sample_results, sampling_metadata, 
                                      prompt_logprobs, sample_logprobs,
-                                     probs)
+                                     probdis)
 
 
 def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
@@ -425,8 +420,11 @@ def _apply_min_p(
 def _greedy_sample(
     selected_seq_groups: List[Tuple[List[int], SamplingParams]],
     logprobs: torch.Tensor,
+    len_to_gen: int = 1
 ) -> List[Tuple[List[int], List[int]]]:
     samples = torch.argmax(logprobs, dim=-1).cpu()
+    if len_to_gen > 1:
+        samples = samples.reshape(-1, len_to_gen)
     sample_idx = 0
     results = []
     for seq_group in selected_seq_groups:
@@ -435,10 +433,13 @@ def _greedy_sample(
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples[sample_idx].item()]
+        if len_to_gen > 1:
+            next_token_ids = samples[sample_idx].tolist()
+        else:
+            next_token_ids = [samples[sample_idx].item()]
         results.append((next_token_ids, parent_ids))
-        sample_idx += num_parent_seqs
-    assert sample_idx == logprobs.size(0)
+        sample_idx += num_parent_seqs 
+    # assert sample_idx == logprobs.size(0)
     return results
 
 
@@ -605,13 +606,13 @@ def _get_logprobs(
                 token_id for token_id in prompt_tokens[1:])
             sample_idx += prompt_len - 1
         batched_logprobs_query_seq_indices.extend(
-            [sample_idx + parent_id for parent_id in parent_ids])
+            [sample_idx + parent_id for parent_id in parent_ids] * len(next_token_ids))
         batched_logprobs_query_token_indices.extend(next_token_ids)
         if sampling_params.logprobs is not None:
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.logprobs)
         sample_idx += num_parent_seqs
-    assert sample_idx == logprobs.size(0)
+    # assert sample_idx == logprobs.size(0)
 
     # Batched query for logprobs of selected token
     batched_logprobs_query_result = logprobs[[
@@ -688,74 +689,12 @@ def _get_logprobs(
     return result_prompt_logprobs, result_sample_logprobs
 
 
-def _sd_get_logprobs(
-    probdis: torch.Tensor,
-    logprobs: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-    sample_results: List[Tuple[List[int], List[int]]],
-) -> Tuple[List[Optional[List[Optional[Dict[int, float]]]]], List[List[Dict[
-        int, float]]]]:
-    batched_logprobs_query_seq_indices: List[int] = []
-    batched_logprobs_query_token_indices: List[int] = []
-    sample_idx = 0
-    for i, (seq_group, sample_result) in enumerate(
-            zip(sampling_metadata.seq_groups, sample_results)):
-        seq_ids, sampling_params = seq_group
-        next_token_ids, parent_ids = sample_result
-        num_parent_seqs = len(seq_ids)
-        
-        assert len(num_parent_seqs) == 1
-        
-        batched_logprobs_query_seq_indices.extend(
-            [sample_idx + parent_id for parent_id in parent_ids])
-        batched_logprobs_query_token_indices.extend(next_token_ids)
-        
-        sample_idx += num_parent_seqs
-    
-    batched_logprobs_query_result = logprobs[[
-        batched_logprobs_query_seq_indices,
-        batched_logprobs_query_token_indices
-    ]].cpu()
-    
-    batched_probs_dis = probdis[[
-        batched_logprobs_query_seq_indices
-    ]].cpu()
-    
-    result_prompt_logprobs: List[Optional[PromptLogprobs]] = []
-    result_sample_logprobs: List[SampleLogprobs] = []
-    result_sample_probdis: List[torch.Tensor] = []
-    sample_idx = 0
-    query_result_idx = 0
-    for i, (seq_group, sample_result) in enumerate(
-            zip(sampling_metadata.seq_groups, sample_results)):
-        seq_ids, sampling_params = seq_group
-        next_token_ids, parent_ids = sample_result
-        
-        # no sd in the prompt phase
-        result_prompt_logprobs.append(None)
-        
-         # Sample logprobs
-        assert sampling_params.logprobs is None
-        group_sample_logprobs: SampleLogprobs = []
-        for next_token_id, parent_id in zip(next_token_ids, parent_ids):
-            sample_logprobs_dict = {
-                next_token_id:
-                batched_logprobs_query_result[query_result_idx].item()
-            }
-            query_result_idx += 1
-            group_sample_logprobs.append(sample_logprobs_dict)
-        result_sample_logprobs.append(group_sample_logprobs)
-        sample_idx += len(seq_ids)
-        
-    return result_prompt_logprobs, result_sample_logprobs
-
-
 def _build_sampler_output(
     sample_results: List[Tuple[List[int], List[int]]],
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
-    sample_probdis: Optional[List[torch.Tensor]] = None,
+    sample_probdis: List[List[torch.Tensor]] = None,
 ) -> SamplerOutput:
     if sample_probdis is None:
         sample_probdis = [[None]] * len(sample_logprobs)
@@ -768,12 +707,22 @@ def _build_sampler_output(
         seq_ids, _ = seq_group
         next_token_ids, parent_ids = sample_result
         seq_outputs = []
-        for parent_id, next_token_id, logprobs, probdis in zip(
-                parent_ids, next_token_ids, group_sample_logprobs,
-                group_sample_probdis):
+        
+        if FLAGS.ENABLE_SD and len(next_token_ids) > 1:
+            assert len(parent_ids) == 1
+            parent_id = parent_ids[0]
+            # FIXME: group_sample_logprobs incorrect
             seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs,
-                               probdis))
+                    SequenceOutput(seq_ids[parent_id], 
+                                   next_token_ids, group_sample_logprobs,
+                                   group_sample_probdis))
+        else:
+            for parent_id, next_token_id, logprobs, probdis in zip(
+                    parent_ids, next_token_ids, group_sample_logprobs,
+                    group_sample_probdis):
+                seq_outputs.append(
+                    SequenceOutput(seq_ids[parent_id], next_token_id, logprobs,
+                                probdis))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
     return sampler_output

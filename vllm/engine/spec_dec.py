@@ -127,8 +127,8 @@ class SpecDecWorker(Worker):
     def _extract_target_prob_dis(self, seq_group_output: SequenceGroupOutput,
                                  pos: int) -> torch.Tensor:
         # generation phase
-        sample_prob = seq_group_output.samples[0].probdis
-        dis = self._sample_method(list(sample_prob[pos].values())[0])
+        sample_probdis = seq_group_output.samples[0].probdis
+        dis = self._sample_method(sample_probdis[pos])
         return dis.cuda()
 
     # Accept draft tokens based on draft probabilities and target probabilities
@@ -162,11 +162,11 @@ class SpecDecWorker(Worker):
                 new_dis = new_dis / new_dis.sum(dim=-1, keepdim=True)
                 # next_token = torch.multinomial(new_dis, num_samples=1)
                 next_token = torch.argmax(new_dis, dim=-1)
-                logger.warning((
-                    f"next_token token: {next_token},",
-                    f"{torch.argmax(target_prob_dis, dim=-1)}",
-                    f"{torch.argmax(draft_prob_dis, dim=-1)}",
-                ))
+                # logger.warning((
+                #     f"next_token token: {next_token},",
+                #     f"{torch.argmax(target_prob_dis, dim=-1)}",
+                #     f"{torch.argmax(draft_prob_dis, dim=-1)}",
+                # ))
                 accepted_token_ids.append(next_token.item())
                 break
 
@@ -196,7 +196,7 @@ class SpecDecWorker(Worker):
                 if isinstance(sample.output_token, int):
                     last_token = sample.output_token
                 else:
-                    last_token = sample.output_token[-1].item()
+                    last_token = sample.output_token[-1]
                 accepted_token_ids.append(last_token)
             logger.info(
                 f"accept tokens: {accepted_token_ids}, {sample.output_token}")

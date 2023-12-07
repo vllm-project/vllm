@@ -157,7 +157,7 @@ class ModelRunner:
                         slots.append(self._get_slot(block_table, position))
                     slot_mapping.append(slots)
 
-                    sd_prompt_lens.append(seq_data.get_prompt_len() - 1)
+                    sd_prompt_lens.append(context_len - len_to_gen)
                 else:
                     generation_token = seq_data.get_last_token_id()
                     input_tokens.append([generation_token])
@@ -209,6 +209,7 @@ class ModelRunner:
                                             len_to_gen,
                                             dtype=torch.long,
                                             device='cuda')
+            sd_prompt_lens = torch.tensor(sd_prompt_lens, dtype=torch.long, device='cuda')
 
         input_metadata = InputMetadata(prompt_lens=[],
                                        slot_mapping=slot_mapping,
@@ -216,6 +217,7 @@ class ModelRunner:
                                        context_lens=context_lens,
                                        block_tables=block_tables,
                                        start_loc=start_loc_tensor,
+                                       sd_len_to_gen=len_to_gen,
                                        sd_prompt_lens=sd_prompt_lens)
         return input_tokens, input_positions, input_metadata
 
