@@ -7,6 +7,7 @@
 // half-tensor
 #include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDATensorMethods.cuh>
+#include <c10/cuda/CUDAGuard.h>
 
 #define BLOCKWIDTH 128
 #define BLOCKHEIGHT4 16
@@ -134,7 +135,7 @@ void squeezellm_gemm(
     (width + BLOCKWIDTH - 1) / BLOCKWIDTH
   );
   dim3 threads(BLOCKWIDTH);
-
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
   vllm::squeezellm::NUQ4MatMulKernel<<<blocks, threads>>>(
     (half2*) vec.data<at::Half>(),
     mat.data_ptr<int>(),
