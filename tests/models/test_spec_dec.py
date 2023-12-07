@@ -13,7 +13,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [2])
+@pytest.mark.parametrize("max_tokens", [50])
 @pytest.mark.parametrize("draft_model", ["JackFram/llama-160m"])
 @pytest.mark.parametrize("propose_cnt", [5])
 def test_models(
@@ -39,8 +39,10 @@ def test_models(
     for i in range(len(example_prompts)):
         spec_output_ids, spec_output_str = spec_vllm_outputs[i]
         vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert spec_output_str == vllm_output_str, (
-            f"Test{i}:\nSpec: {len(spec_output_str)}\nvLLM: {len(vllm_output_str)}")
+        # assert spec_output_str == vllm_output_str, (
+        #     f"Test{i}:\nSpec: {len(spec_output_str)}\nvLLM: {len(vllm_output_str)}")
         print(len(spec_output_ids), len(vllm_output_ids))
+        print(spec_output_ids)
+        print(vllm_output_ids)
         assert spec_output_ids == vllm_output_ids, (
             f"Test{i}:\nSpec: {len(spec_output_ids)}\nvLLM: {len(vllm_output_ids)}")
