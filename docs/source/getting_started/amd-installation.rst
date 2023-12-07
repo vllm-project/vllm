@@ -22,7 +22,7 @@ Requirements
 Build from source with docker
 -----------------
 
-You can also build and install vLLM from source:
+You can build and install vLLM from source:
 
 Build a docker image from `Dockerfile.rocm`, and launch a docker container.
 
@@ -42,7 +42,7 @@ Build a docker image from `Dockerfile.rocm`, and launch a docker container.
        vllm-rocm \
        bash
 
-If you plan to install vLLM-ROCm on a local machine or start from a fresh docker image (e.g. pytorch+rocm5.7), you can follow the steps below:
+Alternatively, if you plan to install vLLM-ROCm on a local machine or start from a fresh docker image (e.g. rocm/pytorch), you can follow the steps below:
 
 0. Install prerequisites (skip if you are already in an environment/docker with the following installed):
 
@@ -52,12 +52,6 @@ If you plan to install vLLM-ROCm on a local machine or start from a fresh docker
 1. Install `flash attention for ROCm <https://github.com/ROCmSoftwarePlatform/flash-attention/tree/flash_attention_for_rocm>`_
 
     Install ROCm's flash attention (v2.0.4) following the instructions from `ROCmSoftwarePlatform/flash-attention <https://github.com/ROCmSoftwarePlatform/flash-attention/tree/flash_attention_for_rocm#amd-gpurocm-support>`_
-
-    Note: If you are using rocm5.7 with pytorch 2.1.0 onwards, you don't need to apply the `hipify_python.patch`. You can build the ROCm flash attention directly.
-
-.. code-block:: console
-
-    $ bash patch_torch211_flash_attn2.rocm.sh
 
 .. note::
     - ROCm's Flash-attention-2 (v2.0.4) does not support sliding windows attention.
