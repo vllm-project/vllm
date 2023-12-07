@@ -209,7 +209,9 @@ class ModelRunner:
                                             len_to_gen,
                                             dtype=torch.long,
                                             device='cuda')
-            sd_prompt_lens = torch.tensor(sd_prompt_lens, dtype=torch.long, device='cuda')
+            sd_prompt_lens = torch.tensor(sd_prompt_lens,
+                                          dtype=torch.long,
+                                          device='cuda')
 
         input_metadata = InputMetadata(prompt_lens=[],
                                        slot_mapping=slot_mapping,

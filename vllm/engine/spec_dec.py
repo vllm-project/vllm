@@ -1,10 +1,8 @@
-import math
 from vllm.config import SpecDecConfig
-from vllm.model_executor import get_model
 from vllm.sequence import SequenceGroupMetadata
 from transformers import AutoModelForCausalLM
 import torch
-from typing import List, Dict
+from typing import List
 from vllm.sequence import SamplerOutput, SequenceOutput, Sequence, SequenceGroupOutput
 from vllm.core.scheduler import SchedulerOutputs, Scheduler
 from vllm.worker.worker import Worker
@@ -71,7 +69,7 @@ class SpecDecWorker(Worker):
         # recompute for now
         attention_mask = (input_tensor != PAD_TOKEN_ID)
         past_key_values = None
-        for i in range(self.propose_cnt):
+        for _ in range(self.propose_cnt):
             with torch.no_grad():
                 outputs = self.draft_model(input_tensor,
                                            past_key_values=past_key_values,
@@ -110,9 +108,10 @@ class SpecDecWorker(Worker):
                 # update seqs to allocate logical block
                 # update seq_metadata to align with seqs, seq_metadata will be used in the next step to prepare inputs
                 seqs[seq_id].append_token_id(
-                    draft_token, {
+                    draft_token,
+                    {
                         draft_token:
-                        -1 # We don't have the logprob yet, it should come from the target model
+                        -1  # We don't have the logprob yet, it should come from the target model
                     })
                 seq_group_metadata.seq_data[seq_id] = seqs[seq_id].data
             # allocate physical block

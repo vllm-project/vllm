@@ -1,11 +1,6 @@
 import torch
-import time
-import itertools
 import triton
 import triton.language as tl
-import math
-import torch.nn.functional as F
-import numpy as np
 
 
 def gc_torch():

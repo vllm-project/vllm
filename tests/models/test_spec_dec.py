@@ -43,7 +43,8 @@ def test_models(
         spec_output_ids, spec_output_str = spec_vllm_outputs[i]
         vllm_output_ids, vllm_output_str = vllm_outputs[i]
         assert spec_output_str == vllm_output_str, (
-            f"Test{i}:\nSpec: {len(spec_output_str)}\nvLLM: {len(vllm_output_str)}")
+            f"Test{i}:\nSpec: {len(spec_output_str)}\nvLLM: {len(vllm_output_str)}"
+        )
         assert spec_output_ids == vllm_output_ids, (
             f"Test{i}:\nSpec: {len(spec_output_ids)}\nvLLM: {len(vllm_output_ids)}"
         )
