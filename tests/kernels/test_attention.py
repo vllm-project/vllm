@@ -24,7 +24,7 @@ HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
 SEEDS = [0]
-DEVICES = [0]
+DEVICES = [i for i in range(torch.cuda.device_count())]
 
 
 def ref_masked_attention(
