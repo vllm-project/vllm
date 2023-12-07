@@ -1,15 +1,13 @@
 from typing import Type
+
+from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.utils import is_hip
 
 _QUANTIZATION_CONFIG_REGISTRY = {
+    "awq": AWQConfig,
     "squeezellm": SqueezeLLMConfig,
 }
-
-if not is_hip():
-    from vllm.model_executor.layers.quantization.awq import AWQConfig
-    _QUANTIZATION_CONFIG_REGISTRY["awq"] = AWQConfig
 
 
 def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
