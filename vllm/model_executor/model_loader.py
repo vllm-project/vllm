@@ -7,7 +7,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
-from vllm.model_executor.models import *  # pylint: disable=wildcard-import
+from vllm.model_executor.models import *
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
 
@@ -19,6 +19,7 @@ _MODEL_REGISTRY = {
     "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
     "BloomForCausalLM": BloomForCausalLM,
     "ChatGLMModel": ChatGLMForCausalLM,
+    "ChatGLMForConditionalGeneration": ChatGLMForCausalLM,
     "FalconForCausalLM": FalconForCausalLM,
     "GPT2LMHeadModel": GPT2LMHeadModel,
     "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
@@ -29,19 +30,14 @@ _MODEL_REGISTRY = {
     "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
     "MistralForCausalLM": MistralForCausalLM,
     # transformers's mpt class has lower case
-    "MptForCausalLM": MptForCausalLM,
-    "MPTForCausalLM": MptForCausalLM,
+    "MptForCausalLM": MPTForCausalLM,
+    "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
+    "PhiForCausalLM": PhiForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
     "RWForCausalLM": FalconForCausalLM,
     "YiForCausalLM": YiForCausalLM,
 }
-
-# FIXME(woosuk): Remove this once all models support quantization.
-_MODEL_CLASSES_SUPPORT_QUANTIZATION = [
-    LlamaForCausalLM,
-    MistralForCausalLM,
-]
 
 
 @contextlib.contextmanager
@@ -66,14 +62,12 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 def get_model(model_config: ModelConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
 
-    # Get the quantization config.
-    quant_config = None
+    # Get the (maybe quantized) linear method.
+    linear_method = None
     if model_config.quantization is not None:
-        if model_class not in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
-            raise ValueError(
-                f"Quantization is not supported for {model_class}.")
         quant_config = get_quant_config(model_config.quantization,
                                         model_config.model,
+                                        model_config.hf_config,
                                         model_config.download_dir)
         capability = torch.cuda.get_device_capability()
         capability = capability[0] * 10 + capability[1]
@@ -89,16 +83,14 @@ def get_model(model_config: ModelConfig) -> nn.Module:
                 f"{model_config.dtype} is not supported for quantization "
                 f"method {model_config.quantization}. Supported dtypes: "
                 f"{supported_dtypes}")
+        linear_method = quant_config.get_linear_method()
 
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        if model_class in _MODEL_CLASSES_SUPPORT_QUANTIZATION:
-            model = model_class(model_config.hf_config, quant_config)
-        else:
-            model = model_class(model_config.hf_config)
+        with torch.device("cuda"):
+            model = model_class(model_config.hf_config, linear_method)
         if model_config.load_format == "dummy":
-            model = model.cuda()
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
@@ -106,5 +98,4 @@ def get_model(model_config: ModelConfig) -> nn.Module:
             # Load the weights from the cached or downloaded files.
             model.load_weights(model_config.model, model_config.download_dir,
                                model_config.load_format, model_config.revision)
-            model = model.cuda()
     return model.eval()

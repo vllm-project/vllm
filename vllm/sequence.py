@@ -70,7 +70,7 @@ class SequenceData:
         # we use a list here because
         # we can generate the same token multiple times in different locations
         # for each entry in the list, it's a map of
-        # token_id -> probability distribution 
+        # token_id -> probability distribution
         self.draft_token_probs: List[Dict[int, torch.Tensor]] = []
         self.cumulative_logprob = 0.0
 
@@ -94,18 +94,18 @@ class SequenceData:
         if not self.output_token_ids:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
-    
+
     def get_draft_token_ids(self) -> List[int]:
         draft_tokens = [list(tp.keys())[0] for tp in self.draft_token_probs]
         return draft_tokens
-    
+
     def get_verified_token_ids(self) -> List[int]:
         draft_token_ids = self.get_draft_token_ids()
         assert self.output_token_ids[-len(draft_token_ids):] == draft_token_ids
         if len(draft_token_ids) == len(self.output_token_ids):
             return [self.prompt_token_ids[-1]] + draft_token_ids
         return self.output_token_ids[-len(draft_token_ids) - 1:]
-    
+
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
@@ -157,7 +157,7 @@ class Sequence:
             block_size=self.block_size,
         )
         self.logical_token_blocks.append(block)
-        
+
     def _delete_logical_block(self, block: LogicalTokenBlock) -> None:
         self.logical_token_blocks.remove(block)
 
@@ -252,14 +252,12 @@ class Sequence:
                 f"status={self.status.name}, "
                 f"num_blocks={len(self.logical_token_blocks)})")
 
-
-    def get_draft_probdis(self,
-                      token_id: int,
-                      pos: int) -> torch.Tensor:
+    def get_draft_probdis(self, token_id: int, pos: int) -> torch.Tensor:
         token_probdis = self.data.draft_token_probs[pos]
         assert token_id in token_probdis
         return token_probdis[token_id]
-    
+
+
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
@@ -392,7 +390,7 @@ class SequenceGroupMetadata:
         self.block_tables = block_tables
 
 
-class SequenceOutputs:
+class SequenceOutput:
     """The model output associated with a sequence.
 
     Args:
@@ -415,45 +413,45 @@ class SequenceOutputs:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
-        
+
         self.accepted_tokens = None
         self.probdis = probdis
 
     def __repr__(self) -> str:
-        return (f"SequenceOutputs(parent_seq_id={self.parent_seq_id}, "
+        return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
                 f"output_token={self.output_token}, "
                 f"logprobs={self.logprobs})")
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, SequenceOutputs):
+        if not isinstance(other, SequenceOutput):
             raise NotImplementedError()
         return (self.parent_seq_id == other.parent_seq_id
                 and self.output_token == other.output_token
                 and self.logprobs == other.logprobs)
 
 
-class SequenceGroupOutputs:
-    """The model outputs associated with a sequence group."""
+class SequenceGroupOutput:
+    """The model output associated with a sequence group."""
 
     def __init__(
         self,
-        samples: List[SequenceOutputs],
+        samples: List[SequenceOutput],
         prompt_logprobs: Optional[PromptLogprobs],
     ) -> None:
         self.samples = samples
         self.prompt_logprobs = prompt_logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceGroupOutputs(samples={self.samples}, "
+        return (f"SequenceGroupOutput(samples={self.samples}, "
                 f"prompt_logprobs={self.prompt_logprobs})")
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, SequenceGroupOutputs):
+        if not isinstance(other, SequenceGroupOutput):
             raise NotImplementedError()
         return (self.samples == other.samples
                 and self.prompt_logprobs == other.prompt_logprobs)
 
 
-# For each sequence group, we generate a list of SequenceOutputs object,
+# For each sequence group, we generate a list of SequenceOutput object,
 # each of which contains one possible candidate for the next token.
-SamplerOutput = List[SequenceGroupOutputs]
+SamplerOutput = List[SequenceGroupOutput]

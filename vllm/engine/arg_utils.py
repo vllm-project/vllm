@@ -22,6 +22,7 @@ class EngineArgs:
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.80
@@ -32,7 +33,7 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-    
+
     draft_model: Optional[str] = None
     propose_cnt: Optional[int] = None
 
@@ -44,6 +45,10 @@ class EngineArgs:
     def add_cli_args(
             parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Shared CLI arguments for vLLM engine."""
+
+        # NOTE: If you update any of the arguments below, please also
+        # make sure to update docs/source/models/engine_args.rst
+
         # Model arguments
         parser.add_argument(
             '--model',
@@ -131,6 +136,12 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='number of tensor parallel replicas')
+        parser.add_argument(
+            '--max-parallel-loading-workers',
+            type=int,
+            help='load model sequentially in multiple batches, '
+            'to avoid RAM OOM when using tensor '
+            'parallel and large models')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
@@ -174,17 +185,21 @@ class EngineArgs:
                             choices=['awq', 'squeezellm', None],
                             default=None,
                             help='Method used to quantize the weights')
-        
+
         # speculative decoding setting
-        parser.add_argument('--draft-model',
-                            type=str,
-                            default=None,
-                            help='name or path of the huggingface model to use as the draft model')
-        parser.add_argument('--propose-cnt',
-                            type=int,
-                            default=5,
-                            help='for speculative decoding, number of tokens to propose each step')
-        
+        parser.add_argument(
+            '--draft-model',
+            type=str,
+            default=None,
+            help=
+            'name or path of the huggingface model to use as the draft model')
+        parser.add_argument(
+            '--propose-cnt',
+            type=int,
+            default=5,
+            help=
+            'for speculative decoding, number of tokens to propose each step')
+
         return parser
 
     @classmethod
@@ -204,26 +219,31 @@ class EngineArgs:
                                    self.dtype, self.seed, self.revision,
                                    self.tokenizer_revision, self.max_model_len,
                                    self.quantization)
-        cache_config = CacheConfig(
-            self.block_size, self.gpu_memory_utilization, self.swap_space,
-            getattr(model_config.hf_config, 'sliding_window', None))
+        cache_config = CacheConfig(self.block_size,
+                                   self.gpu_memory_utilization,
+                                   self.swap_space,
+                                   model_config.get_sliding_window())
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
-                                         self.worker_use_ray)
+                                         self.worker_use_ray,
+                                         self.max_parallel_loading_workers)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
                                            self.max_paddings)
- 
+
         spec_dec_config: SpecDecConfig = None
         if self.draft_model:
             # assume the draft model and target model share the same tokenizer
             # for now, share the same seed as the target
             draft_model_config = ModelConfig(self.draft_model, self.tokenizer,
-                                             self.tokenizer_mode, self.trust_remote_code,
-                                             self.download_dir, self.load_format,
-                                             'auto', self.seed)
-            spec_dec_config = SpecDecConfig(draft_model_config, self.propose_cnt)
+                                             self.tokenizer_mode,
+                                             self.trust_remote_code,
+                                             self.download_dir,
+                                             self.load_format, 'auto',
+                                             self.seed)
+            spec_dec_config = SpecDecConfig(draft_model_config,
+                                            self.propose_cnt)
         return model_config, cache_config, parallel_config, scheduler_config, spec_dec_config
 
 

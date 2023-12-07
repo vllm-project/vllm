@@ -45,7 +45,7 @@ class LogicalTokenBlock:
     def get_last_token_id(self) -> int:
         assert self.num_tokens > 0
         return self.token_ids[self.num_tokens - 1]
-    
+
     # delete num tokens from the end in the same block
     def delete_last_tokens(self, num: int) -> None:
         assert num > 0

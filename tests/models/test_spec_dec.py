@@ -25,16 +25,19 @@ def test_models(
     draft_model: str,
     propose_cnt: int,
 ) -> None:
-    spec_vllm_model = vllm_runner(model, dtype=dtype, draft_model=draft_model, propose_cnt=propose_cnt)
-    spec_vllm_outputs = spec_vllm_model.generate_greedy(example_prompts, max_tokens)
+    spec_vllm_model = vllm_runner(model,
+                                  dtype=dtype,
+                                  draft_model=draft_model,
+                                  propose_cnt=propose_cnt)
+    spec_vllm_outputs = spec_vllm_model.generate_greedy(
+        example_prompts, max_tokens)
     del spec_vllm_model
     destroy_model_parallel()
-    
+
     FLAGS.ENABLE_SD = False
     vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
-    
 
     for i in range(len(example_prompts)):
         spec_output_ids, spec_output_str = spec_vllm_outputs[i]
@@ -45,4 +48,5 @@ def test_models(
         print(spec_output_ids)
         print(vllm_output_ids)
         assert spec_output_ids == vllm_output_ids, (
-            f"Test{i}:\nSpec: {len(spec_output_ids)}\nvLLM: {len(vllm_output_ids)}")
+            f"Test{i}:\nSpec: {len(spec_output_ids)}\nvLLM: {len(vllm_output_ids)}"
+        )

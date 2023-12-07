@@ -3,12 +3,12 @@ import time
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import CacheConfig, SchedulerConfig
-from vllm.core.block_manager import BlockSpaceManager
+from vllm.core.block_manager import AllocStatus, BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus,
-                           SequenceOutputs)
+                           SequenceOutput)
 
 logger = init_logger(__name__)
 
@@ -155,8 +155,18 @@ class Scheduler:
                     continue
 
                 # If the sequence group cannot be allocated, stop.
-                if not self.block_manager.can_allocate(seq_group):
+                can_allocate = self.block_manager.can_allocate(seq_group)
+                if can_allocate == AllocStatus.LATER:
                     break
+                elif can_allocate == AllocStatus.NEVER:
+                    logger.warning(
+                        f"Input prompt ({num_prompt_tokens} tokens) is too long"
+                        f" and exceeds the capacity of block_manager")
+                    for seq in seq_group.get_seqs():
+                        seq.status = SequenceStatus.FINISHED_IGNORED
+                    ignored_seq_groups.append(seq_group)
+                    self.waiting.pop(0)
+                    continue
 
                 # If the number of batched tokens exceeds the limit, stop.
                 new_seq_lens = seq_lens + [num_prompt_tokens]
@@ -187,7 +197,8 @@ class Scheduler:
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
-                    num_batched_tokens=len(seq_lens) * max(seq_lens),
+                    num_batched_tokens=len(seq_lens) *
+                    max(seq_lens) if seq_lens else 0,
                     blocks_to_swap_in=blocks_to_swap_in,
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
@@ -299,25 +310,27 @@ class Scheduler:
     def free_seq(self, seq: Sequence) -> None:
         self.block_manager.free(seq)
 
-    def free_invalid_kv(self, seq: Sequence, seq_out: SequenceOutputs):
+    def free_invalid_kv(self, seq: Sequence, seq_out: SequenceOutput):
         # if all the tokens are accepted
         # draft_token_ids: [A, B, C], accepted_tokens: [A, B, C, D], invalid_token_cnt = 3 + 1 - 4 = 0
         # if part of the tokens are accepted
         # draft_token_ids: [A, B, C], accepted_tokens: [A, B, D], invalid_token_cnt = 3 + 1 - 3 = 1
-        invalid_token_cnt = len(seq.data.get_draft_token_ids()) + 1 - len(seq_out.accepted_tokens)
+        invalid_token_cnt = len(seq.data.get_draft_token_ids()) + 1 - len(
+            seq_out.accepted_tokens)
         assert invalid_token_cnt >= 0
 
         if invalid_token_cnt == 0:
             return invalid_token_cnt
 
         # delete data
-        seq.data.output_token_ids = seq.data.output_token_ids[:-invalid_token_cnt]
+        seq.data.output_token_ids = seq.data.output_token_ids[:
+                                                              -invalid_token_cnt]
         # delete from logical table
         seq.delete_tailing_tokens(invalid_token_cnt)
         # delete from physical table
         self.block_manager.free_tailing_blocks(seq)
         return invalid_token_cnt
-    
+
     def free_finished_seq_groups(self) -> None:
         self.running = [
             seq_group for seq_group in self.running
@@ -370,7 +383,7 @@ class Scheduler:
         elif preemption_mode == PreemptionMode.SWAP:
             self._preempt_by_swap(seq_group, blocks_to_swap_out)
         else:
-            assert False, "Invalid preemption mode."
+            raise AssertionError("Invalid preemption mode.")
 
     def _preempt_by_recompute(
         self,

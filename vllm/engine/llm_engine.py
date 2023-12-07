@@ -7,13 +7,14 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpecDecConfig, FLAGS)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
+from vllm.engine.metrics import record_metrics
+from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupOutputs,
-                           SequenceOutputs, SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupOutput,
+                           SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
@@ -90,8 +91,6 @@ class LLMEngine:
 
         self.model_config = model_config
         self.cache_config = cache_config
-        assert self.cache_config.sliding_window == getattr(
-            self.model_config.hf_config, "sliding_window", None)
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
@@ -123,16 +122,17 @@ class LLMEngine:
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
-        
+
         self.spec_dec_worker: SpecDecWorker = None
         if spec_dec_config:
-            self.spec_dec_worker = SpecDecWorker(spec_dec_config, self.scheduler)
+            self.spec_dec_worker = SpecDecWorker(spec_dec_config,
+                                                 self.scheduler)
             FLAGS.ENABLE_SD = True
-            
+
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import Worker
 
         assert self.parallel_config.world_size == 1, (
             "Ray is required if parallel_config.world_size > 1.")
@@ -150,25 +150,35 @@ class LLMEngine:
             "init_model",
             get_all_outputs=True,
         )
+        self._run_workers(
+            "load_model",
+            get_all_outputs=True,
+            max_concurrent_workers=self.parallel_config.
+            max_parallel_loading_workers,
+        )
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import Worker
 
         self.workers: List[Worker] = []
         for bundle in placement_group.bundle_specs:
             if not bundle.get("GPU", 0):
                 continue
+            if self.parallel_config.tensor_parallel_size == 1:
+                num_gpus = self.cache_config.gpu_memory_utilization
+            else:
+                num_gpus = 1
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=1,
+                num_gpus=num_gpus,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
                 **ray_remote_kwargs,
-            )(RayWorker).remote(self.model_config.trust_remote_code)
+            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
@@ -188,6 +198,12 @@ class LLMEngine:
         self._run_workers(
             "init_model",
             get_all_outputs=True,
+        )
+        self._run_workers(
+            "load_model",
+            get_all_outputs=True,
+            max_concurrent_workers=self.parallel_config.
+            max_parallel_loading_workers,
         )
 
     def _verify_args(self) -> None:
@@ -358,7 +374,7 @@ class LLMEngine:
         return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutputs) -> None:
+                                        outputs: SequenceGroupOutput) -> None:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
@@ -379,7 +395,7 @@ class LLMEngine:
 
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
-            child_samples: List[SequenceOutputs] = parent_child_dict[
+            child_samples: List[SequenceOutput] = parent_child_dict[
                 parent.seq_id]
             if len(child_samples) == 0:
                 # This parent sequence has no children samples. Remove
@@ -412,7 +428,7 @@ class LLMEngine:
                 parent.step_gen_token_ids = last_child_sample.accepted_tokens
             else:
                 parent.append_token_id(last_child_sample.output_token,
-                                    last_child_sample.logprobs)
+                                       last_child_sample.logprobs)
                 parent.step_gen_token_ids = [last_child_sample.output_token]
             child_seqs.append((parent, parent))
 
@@ -581,7 +597,7 @@ class LLMEngine:
         # only enable speculative decoding for generation run
         if self.spec_dec_worker and (not scheduler_outputs.prompt_run):
             self.spec_dec_worker.set_draft_tokens(seq_group_metadata_list,
-                                              scheduler_outputs)
+                                                  scheduler_outputs)
 
         # Execute the model.
         output = self._run_workers(
@@ -591,12 +607,12 @@ class LLMEngine:
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
-        
+
         if self.spec_dec_worker and (not scheduler_outputs.prompt_run):
             # accept will set accepted_token_ids and accepted_token_probs in output
             self.spec_dec_worker.accept(output, scheduler_outputs)
 
-        return self._process_model_outputs(output, scheduler_outputs) + ignored
+        return self._process_model_outputs(output, scheduler_outputs)
 
     def _log_system_stats(
         self,
@@ -610,8 +626,8 @@ class LLMEngine:
         else:
             self.num_generation_tokens.append((now, num_batched_tokens))
 
-        elapsed_time = now - self.last_logging_time
-        if elapsed_time < _LOGGING_INTERVAL_SEC:
+        should_log = now - self.last_logging_time >= _LOGGING_INTERVAL_SEC
+        if not should_log:
             return
 
         # Discard the old stats.
@@ -650,6 +666,16 @@ class LLMEngine:
         else:
             cpu_cache_usage = 0.0
 
+        record_metrics(
+            avg_prompt_throughput=avg_prompt_throughput,
+            avg_generation_throughput=avg_generation_throughput,
+            scheduler_running=len(self.scheduler.running),
+            scheduler_swapped=len(self.scheduler.swapped),
+            scheduler_waiting=len(self.scheduler.waiting),
+            gpu_cache_usage=gpu_cache_usage,
+            cpu_cache_usage=cpu_cache_usage,
+        )
+
         logger.info("Avg prompt throughput: "
                     f"{avg_prompt_throughput:.1f} tokens/s, "
                     "Avg generation throughput: "
@@ -661,32 +687,38 @@ class LLMEngine:
                     f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         self.last_logging_time = now
 
-
-    def _truncate_step_gen_token_ids(self, seq: Sequence, truncate_len: int) -> None:
+    def _truncate_step_gen_token_ids(self, seq: Sequence,
+                                     truncate_len: int) -> None:
         if truncate_len > 0:
             seq.step_gen_token_ids = seq.step_gen_token_ids[:-truncate_len]
-        
-    def _truncate_sequence(self, 
-                      seq: Sequence, 
-                      sampling_params: SamplingParams) -> None:
-        
+
+    def _truncate_sequence(self, seq: Sequence,
+                           sampling_params: SamplingParams) -> None:
+
         output_token_ids = seq.get_output_token_ids()
         for stop_token_id in sampling_params.stop_token_ids:
             if stop_token_id in seq.get_token_ids():
                 # seq: [p1, p2, p3, A, B, C], stop_token: B, p1, p2, p3 are prompt tokens
                 # truncate_len = 4 + 1  - 3 = 2
                 # we need to include the stop_token in the output
-                truncated_output_len = seq.get_token_ids().index(stop_token_id) + 1 - seq.get_prompt_len()
-                self._truncate_step_gen_token_ids(seq, len(output_token_ids) - truncated_output_len)
+                truncated_output_len = seq.get_token_ids().index(
+                    stop_token_id) + 1 - seq.get_prompt_len()
+                self._truncate_step_gen_token_ids(
+                    seq,
+                    len(output_token_ids) - truncated_output_len)
                 # we don't modify logical/physical block here
-                seq.data.output_token_ids = output_token_ids[:truncated_output_len]
+                seq.data.output_token_ids = output_token_ids[:
+                                                             truncated_output_len]
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
 
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
-            truncated_output_len = self.scheduler_config.max_model_len - seq.get_prompt_len()
-            self._truncate_step_gen_token_ids(seq, len(output_token_ids) - truncated_output_len)
+            truncated_output_len = self.scheduler_config.max_model_len - seq.get_prompt_len(
+            )
+            self._truncate_step_gen_token_ids(
+                seq,
+                len(output_token_ids) - truncated_output_len)
             seq.data.output_token_ids = output_token_ids[:truncated_output_len]
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
@@ -694,22 +726,26 @@ class LLMEngine:
         # Check if the sequence has reached max_tokens.
         if seq.get_output_len() >= sampling_params.max_tokens:
             truncated_output_len = sampling_params.max_tokens
-            self._truncate_step_gen_token_ids(seq, len(output_token_ids) - truncated_output_len)
+            self._truncate_step_gen_token_ids(
+                seq,
+                len(output_token_ids) - truncated_output_len)
             seq.data.output_token_ids = output_token_ids[:truncated_output_len]
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
- 
+
         # Check if the sequence has generated the EOS token.
         if ((not sampling_params.ignore_eos)
                 and self.tokenizer.eos_token_id in seq.get_output_token_ids()):
-            truncated_output_len = output_token_ids.index(self.tokenizer.eos_token_id) + 1
-            self._truncate_step_gen_token_ids(seq, len(output_token_ids) - truncated_output_len)
+            truncated_output_len = output_token_ids.index(
+                self.tokenizer.eos_token_id) + 1
+            self._truncate_step_gen_token_ids(
+                seq,
+                len(output_token_ids) - truncated_output_len)
             seq.data.output_token_ids = output_token_ids[:truncated_output_len]
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
-    
-    def _decode_sequence(self, seq: Sequence, 
-                         prms: SamplingParams) -> None:
+
+    def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         if seq.tokens is None:
             # prefill phase
             new_token_ids = seq.get_token_ids()
@@ -743,21 +779,20 @@ class LLMEngine:
             if stop_str in seq.output_text:
                 # Truncate the output text so that the stop string is
                 # not included in the output.
-                seq.output_text = seq.output_text[:seq.output_text.index(
-                    stop_str)]
+                seq.output_text = seq.output_text[:seq.output_text.
+                                                  index(stop_str)]
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
 
-    def _run_workers(
+    def _run_workers_in_batch(
         self,
+        workers,
         method: str,
         *args,
-        get_all_outputs: bool = False,
         **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers."""
+    ):
         all_outputs = []
-        for worker in self.workers:
+        for worker in workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             else:
@@ -765,9 +800,31 @@ class LLMEngine:
 
             output = executor(*args, **kwargs)
             all_outputs.append(output)
-
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)
+        return all_outputs
+
+    def _run_workers(
+        self,
+        method: str,
+        *args,
+        get_all_outputs: bool = False,
+        max_concurrent_workers: Optional[int] = None,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers."""
+        all_outputs = []
+        if max_concurrent_workers:
+            work_groups = [
+                self.workers[i:i + max_concurrent_workers]
+                for i in range(0, len(self.workers), max_concurrent_workers)
+            ]
+        else:
+            work_groups = [self.workers]
+
+        for workers in work_groups:
+            all_outputs.extend(
+                self._run_workers_in_batch(workers, method, *args, **kwargs))
 
         if get_all_outputs:
             return all_outputs
