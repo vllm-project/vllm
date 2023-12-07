@@ -548,7 +548,7 @@ __global__ void paged_attention_v2_reduce_kernel(
 
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                                  \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                                       \
-    ((void*)vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>),            \
+    ((void*)vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>),          \
     shared_mem_size);                                                                         \
   vllm::paged_attention_v1_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>                      \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
