@@ -3,7 +3,7 @@ import random
 import pytest
 import torch
 
-from vllm import cache_ops
+from vllm._C import cache_ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [83]  # Arbitrary values for testing
@@ -190,7 +190,7 @@ def test_reshape_and_cache_quantized(
     cloned_value_cache = value_cache.clone()
 
     cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                          slot_mapping, True, k_scale, k_zp, v_scale, v_zp)
+                                slot_mapping, True, k_scale, k_zp, v_scale, v_zp)
     lower_bound, upper_bound = torch.tensor([-128.0], dtype=dtype, device='cuda'), torch.tensor([127.0], dtype=dtype, device='cuda')
     ## quantize and store here
     ## quantize and store here

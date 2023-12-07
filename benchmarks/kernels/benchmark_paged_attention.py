@@ -4,7 +4,7 @@ import time
 
 import torch
 
-from vllm import attention_ops
+from vllm._C import ops
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
@@ -98,7 +98,7 @@ def main(
 
         for _ in range(num_iters):
             if version == "v1":
-                attention_ops.paged_attention_v1(
+                ops.paged_attention_v1(
                     output,
                     query,
                     key_cache,
@@ -112,7 +112,7 @@ def main(
                     alibi_slopes,
                 )
             elif version == "v2":
-                attention_ops.paged_attention_v2(
+                ops.paged_attention_v2(
                     output,
                     exp_sums,
                     max_logits,

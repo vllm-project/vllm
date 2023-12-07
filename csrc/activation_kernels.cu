@@ -18,9 +18,8 @@ __global__ void silu_and_mul_kernel(
   scalar_t* __restrict__ out,               // [..., d]
   const scalar_t* __restrict__ input,       // [..., 2 * d]
   const int d) {
-
-  const int token_idx = blockIdx.x;
-  for (int idx = threadIdx.x; idx < d; idx += blockDim.x) {
+  const int64_t token_idx = blockIdx.x;
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     const scalar_t x = __ldg(&input[token_idx * 2 * d + idx]);
     const scalar_t y = __ldg(&input[token_idx * 2 * d + d + idx]);
     out[token_idx * d + idx] = silu(x) * y;
@@ -30,18 +29,18 @@ __global__ void silu_and_mul_kernel(
 // dequant int32 input, apply silu and mul, then per token quant to int8
 template <typename scale_type, bool use_per_token_quant>
 __global__ void dequant_silu_and_mul_quant_kernel(
-    int8_t *__restrict__ out,          // [..., d]
-    const int32_t *__restrict__ input, // [..., 2 * d]
+    int8_t* __restrict__ out,          // [..., d]
+    const int32_t* __restrict__ input, // [..., 2 * d]
     const int d, const float scale_gate, const float scale_up,
     scale_type scale_out,                  // [num_tokens]
-    float *__restrict__ tmp = nullptr // [num_tokens, d]
+    float* __restrict__ tmp = nullptr // [num_tokens, d]
 ) {
-  const int token_idx = blockIdx.x;
+  const int64_t token_idx = blockIdx.x;
   if constexpr (use_per_token_quant) {
     float amax_val = 0.0f;
     const float zero = 0.0f;
 
-    for (int idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
       const float x =
           (float)__ldg(&input[token_idx * 2 * d + idx]) * scale_gate;
       const float y =
@@ -62,12 +61,12 @@ __global__ void dequant_silu_and_mul_quant_kernel(
     __syncthreads();
 
     float tmp_scale = 127.0f / s_amax;
-    for (int idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
       out[token_idx * d + idx] =
           float_to_int8_rn(tmp_scale * tmp[token_idx * d + idx]);
     }
   } else {
-    for (int idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
       const float x =
           (float)__ldg(&input[token_idx * 2 * d + idx]) * scale_gate;
       const float y =
@@ -81,8 +80,7 @@ __global__ void dequant_silu_and_mul_quant_kernel(
 
 void silu_and_mul(
   torch::Tensor& out,      // [..., d]
-  torch::Tensor& input)    // [..., 2 * d]
-{
+  torch::Tensor& input) {    // [..., 2 * d]
   int64_t num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1) / 2;
   dim3 grid(num_tokens);
@@ -90,40 +88,53 @@ void silu_and_mul(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "silu_and_mul_kernel", [&] {
     vllm::silu_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
-        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d);
+        out.data_ptr<scalar_t>(),
+        input.data_ptr<scalar_t>(),
+        d);
   });
 }
 
-void invoke_dequant_silu_and_mul_quant(
-    torch::Tensor &out,   // [..., d]
-    torch::Tensor &input, // [..., 2 * d]
-    const float scale_gate, const float scale_up, const float scale_out) {
+void dequant_silu_and_mul_quant(
+  torch::Tensor& out,   // [..., d]
+  torch::Tensor& input, // [..., 2 * d]
+  const float scale_gate,
+  const float scale_up,
+  const float scale_out) {
   int64_t num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1) / 2;
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vllm::dequant_silu_and_mul_quant_kernel<float, false><<<grid, block, 0, stream>>>(
-      out.data_ptr<int8_t>(), input.data_ptr<int32_t>(), d, scale_gate,
-      scale_up, scale_out);
+      out.data_ptr<int8_t>(),
+      input.data_ptr<int32_t>(),
+      d,
+      scale_gate,
+      scale_up,
+      scale_out);
 }
 
 
-void invoke_dequant_silu_and_mul_quant(
-    torch::Tensor &out,   // [..., d]
-    torch::Tensor &input, // [..., 2 * d]
-    const float scale_gate, const float scale_up,
-    torch::Tensor &scale_out, // [num_tokens]
-    torch::Tensor &tmp // [..., d]
-) {
+void dequant_silu_and_mul_quant(
+  torch::Tensor& out,   // [..., d]
+  torch::Tensor& input, // [..., 2 * d]
+  const float scale_gate,
+  const float scale_up,
+  torch::Tensor& scale_out, // [num_tokens]
+  torch::Tensor& tmp) { // [..., d]
   int64_t num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1) / 2;
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vllm::dequant_silu_and_mul_quant_kernel<float*, true><<<grid, block, 0, stream>>>(
-      out.data_ptr<int8_t>(), input.data_ptr<int32_t>(),
-       d, scale_gate, scale_up, scale_out.data_ptr<float>(), tmp.data_ptr<float>());
+      out.data_ptr<int8_t>(),
+      input.data_ptr<int32_t>(),
+      d,
+      scale_gate,
+      scale_up,
+      scale_out.data_ptr<float>(),
+      tmp.data_ptr<float>());
 }
 
 namespace vllm {
@@ -134,8 +145,8 @@ __global__ void activation_kernel(
   scalar_t* __restrict__ out,               // [..., d]
   const scalar_t* __restrict__ input,       // [..., d]
   const int d) {
-  const int token_idx = blockIdx.x;
-  for (int idx = threadIdx.x; idx < d; idx += blockDim.x) {
+  const int64_t token_idx = blockIdx.x;
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     const scalar_t x = __ldg(&input[token_idx * d + idx]);
     out[token_idx * d + idx] = ACT_FN(x);
   }
@@ -146,7 +157,7 @@ __global__ void activation_kernel(
 // Launch element-wise activation kernel.
 #define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                                  \
   int d = input.size(-1);                                                                 \
-  int num_tokens = input.numel() / d;                                                     \
+  int64_t num_tokens = input.numel() / d;                                                 \
   dim3 grid(num_tokens);                                                                  \
   dim3 block(std::min(d, 1024));                                                          \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                           \

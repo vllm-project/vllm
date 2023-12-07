@@ -12,6 +12,8 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
 
+MAIN_CUDA_VERSION = "12.1"
+
 # Supported NVIDIA GPU architectures.
 SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
 
@@ -73,7 +75,8 @@ def get_torch_arch_list() -> Set[str]:
             f"Unsupported CUDA architectures ({invalid_arch_list}) are "
             "excluded from the `TORCH_CUDA_ARCH_LIST` env variable "
             f"({env_arch_list}). Supported CUDA architectures are: "
-            f"{valid_archs}.")
+            f"{valid_archs}.",
+            stacklevel=2)
     return arch_list
 
 
@@ -104,10 +107,10 @@ if not compute_capabilities:
 # Validate the NVCC CUDA version.
 if nvcc_cuda_version < Version("11.0"):
     raise RuntimeError("CUDA 11.0 or higher is required to build the package.")
-if nvcc_cuda_version < Version("11.1"):
-    if any(cc.startswith("8.6") for cc in compute_capabilities):
-        raise RuntimeError(
-            "CUDA 11.1 or higher is required for compute capability 8.6.")
+if (nvcc_cuda_version < Version("11.1")
+        and any(cc.startswith("8.6") for cc in compute_capabilities)):
+    raise RuntimeError(
+        "CUDA 11.1 or higher is required for compute capability 8.6.")
 if nvcc_cuda_version < Version("11.8"):
     if any(cc.startswith("8.9") for cc in compute_capabilities):
         # CUDA 11.8 is required to generate the code targeting compute capability 8.9.
@@ -117,7 +120,8 @@ if nvcc_cuda_version < Version("11.8"):
         # instead of 8.9.
         warnings.warn(
             "CUDA 11.8 or higher is required for compute capability 8.9. "
-            "Targeting compute capability 8.0 instead.")
+            "Targeting compute capability 8.0 instead.",
+            stacklevel=2)
         compute_capabilities = set(cc for cc in compute_capabilities
                                    if not cc.startswith("8.9"))
         compute_capabilities.add("8.0+PTX")
@@ -139,120 +143,36 @@ if nvcc_cuda_version >= Version("11.2"):
 
 ext_modules = []
 
-# int8gemm
-i8cugemm_extension = CUDAExtension(
-    name="vllm.i8cugemm",
+vllm_extension = CUDAExtension(
+    name="vllm._C",
     sources=[
-        "csrc/int8gemm/cublas/bindings.cpp",
-        "csrc/int8gemm/cublas/cublasAlgoMap.cc",
-        "csrc/int8gemm/cublas/cublasINT8MMWrapper.cc",
-        "csrc/int8gemm/cublas/cuda_utils.cc"
-    ],
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(i8cugemm_extension)
-
-# Cache operations.
-cache_extension = CUDAExtension(
-    name="vllm.cache_ops",
-    sources=["csrc/cache.cpp", "csrc/cache_kernels.cu"],
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(cache_extension)
-
-# Fuse kernels.
-fused_extension = CUDAExtension(
-    name="vllm.fused_kernels",
-    sources=["csrc/fused.cpp", "csrc/fused_kernels.cu"],
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(fused_extension)
-
-# Attention kernels.
-attention_extension = CUDAExtension(
-    name="vllm.attention_ops",
-    sources=["csrc/attention.cpp", "csrc/attention/attention_kernels.cu"],
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(attention_extension)
-
-# Positional encoding kernels.
-positional_encoding_extension = CUDAExtension(
-    name="vllm.pos_encoding_ops",
-    sources=["csrc/pos_encoding.cpp", "csrc/pos_encoding_kernels.cu"],
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(positional_encoding_extension)
-
-# Layer normalization kernels.
-layernorm_extension = CUDAExtension(
-    name="vllm.layernorm_ops",
-    sources=["csrc/layernorm.cpp", "csrc/layernorm_kernels.cu"],
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(layernorm_extension)
-
-# Activation kernels.
-activation_extension = CUDAExtension(
-    name="vllm.activation_ops",
-    sources=["csrc/activation.cpp", "csrc/activation_kernels.cu"],
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(activation_extension)
-
-# Quantization kernels.
-quantization_extension = CUDAExtension(
-    name="vllm.quantization_ops",
-    sources=[
-        "csrc/quantization.cpp",
+        "csrc/cache_kernels.cu",
+        "csrc/attention/attention_kernels.cu",
+        "csrc/pos_encoding_kernels.cu",
+        "csrc/activation_kernels.cu",
+        "csrc/layernorm_kernels.cu",
         "csrc/quantization/awq/gemm_kernels.cu",
         "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
+        "csrc/cuda_utils_kernels.cu",
+        "csrc/fused_kernels.cu",
+        "csrc/int8gemm/cublas/cublasAlgoMap.cc",
+        "csrc/int8gemm/cublas/cublasINT8MMWrapper.cc",
+        "csrc/int8gemm/cublas/cuda_utils.cc",
+        "csrc/pybind.cpp",
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,
         "nvcc": NVCC_FLAGS,
     },
 )
-ext_modules.append(quantization_extension)
-
-# Misc. CUDA utils.
-cuda_utils_extension = CUDAExtension(
-    name="vllm.cuda_utils",
-    sources=["csrc/cuda_utils.cpp", "csrc/cuda_utils_kernels.cu"],
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(cuda_utils_extension)
+ext_modules.append(vllm_extension)
 
 
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
 
-def find_version(filepath: str):
+def find_version(filepath: str) -> str:
     """Extract version information from the given filepath.
 
     Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
@@ -263,6 +183,15 @@ def find_version(filepath: str):
         if version_match:
             return version_match.group(1)
         raise RuntimeError("Unable to find version string.")
+
+
+def get_vllm_version() -> str:
+    version = find_version(get_path("vllm", "__init__.py"))
+    cuda_version = str(nvcc_cuda_version)
+    if cuda_version != MAIN_CUDA_VERSION:
+        cuda_version_str = cuda_version.replace(".", "")[:3]
+        version += f"+cu{cuda_version_str}"
+    return version
 
 
 def read_readme() -> str:
@@ -283,7 +212,7 @@ def get_requirements() -> List[str]:
 
 setuptools.setup(
     name="vllm",
-    version=find_version(get_path("vllm", "__init__.py")),
+    version=get_vllm_version(),
     author="vLLM Team",
     license="Apache 2.0",
     description=("A high-throughput and memory-efficient inference and "

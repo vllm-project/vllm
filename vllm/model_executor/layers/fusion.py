@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
+from torch.nn.parameter import Parameter
 
-from vllm import fused_kernels
+from vllm._C import ops
 
 
 class DequantAddResidual(nn.Module):
@@ -10,11 +11,10 @@ class DequantAddResidual(nn.Module):
                  dequant_scale: float = 1.0,
                  use_per_token_dequant: bool = True) -> None:
         super().__init__()
-        self.register_buffer(
-            "dequant_scale",
-            torch.tensor(dequant_scale,
-                         dtype=torch.float32,
-                         requires_grad=False))
+        self.dequant_scale = Parameter(
+            torch.tensor(dequant_scale, dtype=torch.float32),
+            False
+        )
         self.use_per_token_dequant = use_per_token_dequant
 
     def _apply(self, fn):
@@ -29,14 +29,14 @@ class DequantAddResidual(nn.Module):
         return self
 
     def forward(self,
-                residual: torch.Tensor,
                 x: torch.Tensor,
+                residual: torch.Tensor,
                 scale: torch.Tensor = None) -> torch.Tensor:
         out = torch.empty_like(residual)
         if self.use_per_token_dequant and scale is not None:
             scale = scale * self.dequant_scale.item()
-            fused_kernels.invoke_dequant_add_residual(out, x, residual, scale)
+            ops.dequant_add_residual(out, x, residual, scale)
         else:
-            fused_kernels.invoke_dequant_add_residual(
+            ops.dequant_add_residual(
                 out, x, residual, self.dequant_scale.item())
-        return out
+        return out, None
