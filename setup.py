@@ -36,7 +36,8 @@ NVCC_FLAGS = ["-O2", "-std=c++17"]
 if _is_hip():
     if ROCM_HOME is None:
         raise RuntimeError(
-            "Cannot find ROCM_HOME. ROCm must be available to build the package.")
+            "Cannot find ROCM_HOME. ROCm must be available to build the package."
+        )
     NVCC_FLAGS += ["-DUSE_ROCM"]
 
 if _is_cuda() and CUDA_HOME is None:
@@ -198,7 +199,8 @@ if _is_cuda():
 
     # Use NVCC threads to parallelize the build.
     if nvcc_cuda_version >= Version("11.2"):
-        num_threads = min(os.cpu_count(), 8)
+        nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
+        num_threads = min(os.cpu_count(), nvcc_threads)
         NVCC_FLAGS += ["--threads", str(num_threads)]
 
 elif _is_hip():
