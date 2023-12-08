@@ -173,9 +173,9 @@ class LLM:
             token_ids = (
                 None if prompt_token_ids is None else prompt_token_ids[i]
             )
-            prompt_embeds = None if prompt_embeds is None else prompt_embeds[i]
+            embeds = None if prompt_embeds is None else prompt_embeds[i]
             self._add_request(
-                prompt, sampling_params, token_ids, prompt_embeds=prompt_embeds
+                prompt, sampling_params, token_ids, prompt_embeds=embeds
             )
         return self._run_engine(use_tqdm)
 
