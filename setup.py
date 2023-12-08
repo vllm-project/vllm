@@ -36,7 +36,8 @@ NVCC_FLAGS = ["-O2", "-std=c++17"]
 if _is_hip():
     if ROCM_HOME is None:
         raise RuntimeError(
-            "Cannot find ROCM_HOME. ROCm must be available to build the package.")
+            "Cannot find ROCM_HOME. ROCm must be available to build the package."
+        )
     NVCC_FLAGS += ["-DUSE_ROCM"]
 
 if _is_cuda() and CUDA_HOME is None:
@@ -56,7 +57,7 @@ def get_amdgpu_offload_arch():
     except subprocess.CalledProcessError as e:
         error_message = f"Error: {e}"
         raise RuntimeError(error_message) from e
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         # If the command is not found, print an error message
         error_message = f"The command {command} was not found."
         raise RuntimeError(error_message) from e
