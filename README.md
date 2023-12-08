@@ -17,6 +17,7 @@ Easy, fast, and cheap LLM serving for everyone
 ---
 
 *Latest News* 🔥
+- [2023/12] Added ROCm support to vLLM.
 - [2023/10] We hosted [the first vLLM meetup](https://lu.ma/first-vllm-meetup) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit?usp=sharing).
 - [2023/09] We created our [Discord server](https://discord.gg/jz7wjKhh6g)! Join us to discuss vLLM and LLM serving! We will also post the latest announcements and updates there.
 - [2023/09] We released our [PagedAttention paper](https://arxiv.org/abs/2309.06180) on arXiv!
@@ -43,6 +44,7 @@ vLLM is flexible and easy to use with:
 - Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
+- Support NVIDIA CUDA and AMD ROCm.
 
 vLLM seamlessly supports many Hugging Face models, including the following architectures:
 
