@@ -32,5 +32,6 @@ chat_completion = client.chat.completions.create(
     model=model,
 )
 
+
 print("Chat completion results:")
 print(chat_completion)
