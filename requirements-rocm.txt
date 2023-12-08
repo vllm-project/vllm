@@ -1,0 +1,17 @@
+ninja  # For faster builds.
+typing-extensions>=4.8.0
+starlette
+psutil
+ray >= 2.5.1
+pandas  # Required for Ray data.
+pyarrow  # Required for Ray data.
+sentencepiece  # Required for LLaMA tokenizer.
+numpy
+tokenizers>=0.15.0
+huggingface_hub<0.18,>=0.16.4
+einops  # Required for phi-1_5
+transformers >= 4.34.0  # Required for Mistral.
+fastapi
+uvicorn[standard]
+pydantic == 1.10.13  # Required for OpenAI server.
+aioprometheus[starlette]

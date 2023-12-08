@@ -10,6 +10,10 @@ from vllm.config import ModelConfig
 from vllm.model_executor.models import *
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+from vllm.utils import is_hip
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
@@ -39,6 +43,18 @@ _MODEL_REGISTRY = {
     "YiForCausalLM": YiForCausalLM,
 }
 
+# Models to be disabled in ROCm
+_ROCM_UNSUPPORTED_MODELS = []
+if is_hip():
+    for rocm_model in _ROCM_UNSUPPORTED_MODELS:
+        del _MODEL_REGISTRY[rocm_model]
+
+# Models partially supported in ROCm
+_ROCM_PARTIALLY_SUPPORTED_MODELS = {
+    "MistralForCausalLM":
+    "Sliding window attention is not supported in ROCm's flash attention",
+}
+
 
 @contextlib.contextmanager
 def _set_default_torch_dtype(dtype: torch.dtype):
@@ -53,7 +69,15 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
+            if is_hip() and arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
+                logger.warning(
+                    f"{arch} is not fully supported in ROCm. Reason: "
+                    f"{_ROCM_PARTIALLY_SUPPORTED_MODELS[arch]}")
             return _MODEL_REGISTRY[arch]
+        elif arch in _ROCM_UNSUPPORTED_MODELS:
+            raise ValueError(
+                f"Model architecture {arch} is not supported by ROCm for now. \n"
+                f"Supported architectures {list(_MODEL_REGISTRY.keys())}")
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
