@@ -579,7 +579,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                         token_ids = res.prompt_token_ids + token_ids
                         if top_logprobs:
                             top_logprobs = res.prompt_logprobs + top_logprobs
-                    else: # only just return the prompt
+                    else:  # only just return the prompt
                         delta_text = res.prompt
                         token_ids = res.prompt_token_ids
                         if top_logprobs:
