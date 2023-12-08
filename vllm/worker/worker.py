@@ -14,6 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
+from vllm.model_executor.input_metadata import PrefixStatus
 
 
 class Worker:
@@ -46,6 +47,8 @@ class Worker:
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
+        self.prefix_cache = None
+        self.prefix_len = 0
 
     def init_model(self):
         # This env var set by Ray causes exceptions with graph building.
@@ -104,12 +107,14 @@ class Worker:
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seqs)
 
+        input_metadata.use_prefix_cache = PrefixStatus.BLOCK_INIT
         # Execute the model.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         self.model(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=[(None, None)] * num_layers,
+            prefix_caches=[(None, None)] * num_layers,
             input_metadata=input_metadata,
             cache_events=None,
         )
@@ -176,12 +181,12 @@ class Worker:
             seq_data = seq_group_metadata.seq_data[seq_id]
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
-            prompt_lens.append(prompt_len)
+            prompt_lens.append(prompt_len - self.prefix_len)
+            input_tokens.extend(prompt_tokens[self.prefix_len:])
 
-            input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(range(len(prompt_tokens)))
+            input_positions.extend(range(self.prefix_len, len(prompt_tokens)))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -278,8 +283,72 @@ class Worker:
             max_context_len=max_context_len,
             block_tables=block_tables_tensor,
             sliding_window=self.sliding_window,
+            prefix_len=self.prefix_len,
         )
         return tokens_tensor, positions_tensor, input_metadata
+
+    @torch.inference_mode()
+    def prefix_init(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+        prefix_len: int = 0,
+    ):
+        # Issue cache operations.
+        issued_cache_op = False
+        if blocks_to_swap_in:
+            self.cache_engine.swap_in(blocks_to_swap_in)
+            issued_cache_op = True
+        if blocks_to_swap_out:
+            self.cache_engine.swap_out(blocks_to_swap_out)
+            issued_cache_op = True
+        if blocks_to_copy:
+            self.cache_engine.copy(blocks_to_copy)
+            issued_cache_op = True
+
+        if issued_cache_op:
+            cache_events = self.cache_events
+        else:
+            cache_events = None
+
+        # If there is no input, we don't need to execute the model.
+        if not seq_group_metadata_list:
+            if cache_events is not None:
+                for event in cache_events:
+                    event.wait()
+            return {}
+
+        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        self.prefix_cache = []
+        for _ in range(num_layers):
+            key_blocks = torch.empty(
+                size=(prefix_len, 40, 128),
+                dtype=torch.float16,
+                device="cuda",
+            )
+            value_blocks = torch.empty(
+                size=(prefix_len, 40, 128),
+                dtype=torch.float16,
+                device="cuda",
+            )
+            self.prefix_cache.append((key_blocks, value_blocks))
+        # Prepare input tensors.
+        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+            seq_group_metadata_list)
+        self.prefix_len = prefix_len
+        input_metadata.use_prefix_cache = PrefixStatus.PREFIX_INIT
+
+        output, self.prefix_cache = self.model(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=self.gpu_cache,
+            prefix_caches=self.prefix_cache,
+            input_metadata=input_metadata,
+            cache_events=cache_events,
+        )
+        return output
 
     @torch.inference_mode()
     def execute_model(
@@ -318,10 +387,11 @@ class Worker:
             seq_group_metadata_list)
 
         # Execute the model.
-        output = self.model(
+        output, _ = self.model(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=self.gpu_cache,
+            prefix_caches=self.prefix_cache,
             input_metadata=input_metadata,
             cache_events=cache_events,
         )

@@ -5,11 +5,13 @@ import torch
 import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
+                                         LowerTriangularMaskWithTensorBias,
+                                         BlockDiagonalCausalFromBottomRightMask
+                                         )
 
 from vllm import attention_ops
 from vllm import cache_ops
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.input_metadata import InputMetadata, PrefixStatus
 from vllm.model_executor.layers.rotary_embedding import (
     DynamicNTKScalingRotaryEmbedding, LinearScalingRotaryEmbedding,
     RotaryEmbedding)
@@ -171,6 +173,7 @@ class PagedAttention(nn.Module):
         value: torch.Tensor,
         key_cache: Optional[torch.Tensor],
         value_cache: Optional[torch.Tensor],
+        prefix_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
@@ -201,20 +204,53 @@ class PagedAttention(nn.Module):
 
         # Pre-allocate the output tensor.
         output = torch.empty_like(query)
-
+        prefix_key = torch.empty_like(key)
+        prefix_value = torch.empty_like(value)
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
         if num_prompt_tokens > 0:
             # Prompt run.
             assert input_metadata.num_generation_tokens == 0
-            self.set_attn_bias(input_metadata, dtype=query.dtype)
-            self.multi_query_kv_attention(
-                output[:num_prompt_tokens],
-                query[:num_prompt_tokens],
-                key[:num_prompt_tokens],
-                value[:num_prompt_tokens],
-                input_metadata,
-            )
+            if input_metadata.use_prefix_cache == PrefixStatus.USE_PREFIX:
+
+                prefix_chunks: List[torch.Tensor] = []
+                for chunk in torch.split(key[:num_prompt_tokens],
+                                         input_metadata.prompt_lens,
+                                         dim=0):
+                    prefix_chunks.append(
+                        torch.cat([prefix_cache[0], chunk], dim=0))
+                prefix_key = torch.cat(prefix_chunks, dim=0)
+                prefix_chunks.clear()
+                for chunk in torch.split(value[:num_prompt_tokens],
+                                         input_metadata.prompt_lens,
+                                         dim=0):
+                    prefix_chunks.append(
+                        torch.cat([prefix_cache[1], chunk], dim=0))
+                prefix_value = torch.cat(prefix_chunks, dim=0)
+
+                bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
+                    input_metadata.prompt_lens, [
+                        i + input_metadata.prefix_len
+                        for i in input_metadata.prompt_lens
+                    ])
+                input_metadata.attn_bias.append(bias)
+                # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
+                self.multi_query_kv_attention(
+                    output[:num_prompt_tokens],
+                    query[:num_prompt_tokens],
+                    prefix_key,
+                    prefix_value,
+                    input_metadata,
+                )
+            else:
+                self.set_attn_bias(input_metadata, dtype=query.dtype)
+                self.multi_query_kv_attention(
+                    output[:num_prompt_tokens],
+                    query[:num_prompt_tokens],
+                    key[:num_prompt_tokens],
+                    value[:num_prompt_tokens],
+                    input_metadata,
+                )
 
         # Wait until the cache op is done.
         if cache_event is not None:
@@ -227,6 +263,7 @@ class PagedAttention(nn.Module):
         if (num_valid_tokens > 0 and key_cache is not None
                 and value_cache is not None):
             # The stride is 3 because the key and value are sliced from qkv.
+
             key_to_cache = key[:num_valid_tokens]
             value_to_cache = value[:num_valid_tokens]
             slot_mapping = input_metadata.slot_mapping
@@ -234,14 +271,22 @@ class PagedAttention(nn.Module):
                 key_to_cache = key_to_cache[input_metadata.to_cache]
                 value_to_cache = value_to_cache[input_metadata.to_cache]
                 slot_mapping = slot_mapping[input_metadata.to_cache]
-
-            cache_ops.reshape_and_cache(
-                key_to_cache,
-                value_to_cache,
-                key_cache,
-                value_cache,
-                slot_mapping,
-            )
+            if num_prompt_tokens > 0:
+                cache_ops.reshape_and_cache(
+                    prefix_key[:num_valid_tokens],
+                    prefix_value[:num_valid_tokens],
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                )
+            else:
+                cache_ops.reshape_and_cache(
+                    key_to_cache,
+                    value_to_cache,
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                )
 
         if input_metadata.num_generation_tokens > 0:
             # Decoding run.
@@ -307,6 +352,7 @@ class PagedAttentionWithRoPE(PagedAttention):
         value: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
+        prefix_caches: torch.Tensor,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
@@ -337,6 +383,7 @@ class PagedAttentionWithRoPE(PagedAttention):
             value,
             key_cache,
             value_cache,
+            prefix_caches,
             input_metadata,
             cache_event,
         )

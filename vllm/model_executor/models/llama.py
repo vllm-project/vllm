@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.input_metadata import InputMetadata, PrefixStatus
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
@@ -144,16 +144,22 @@ class LlamaAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
+        prefix_caches: KVCache,
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if input_metadata.use_prefix_cache == PrefixStatus.PREFIX_INIT:
+            prefix_caches = (k[:input_metadata.num_valid_tokens].view(
+                -1, self.num_heads,
+                128), v[:input_metadata.num_valid_tokens].view(
+                    -1, self.num_heads, 128))
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+                                prefix_caches, input_metadata, cache_event)
         output, _ = self.o_proj(attn_output)
-        return output
+        return output, prefix_caches
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -195,16 +201,18 @@ class LlamaDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
+        prefix_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        hidden_states, prefix_caches = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
+            prefix_caches=prefix_caches,
             input_metadata=input_metadata,
             cache_event=cache_event,
         )
@@ -215,7 +223,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-        return hidden_states
+        return hidden_states, prefix_caches
 
 
 class LlamaModel(nn.Module):
@@ -244,6 +252,7 @@ class LlamaModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[KVCache],
+        prefix_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
@@ -254,15 +263,29 @@ class LlamaModel(nn.Module):
             else:
                 cache_event = cache_events[i]
             layer = self.layers[i]
-            hidden_states = layer(
-                positions,
-                hidden_states,
-                kv_caches[i],
-                input_metadata,
-                cache_event,
-            )
+            if PrefixStatus.USE_PREFIX == input_metadata.use_prefix_cache:
+                hidden_states, prefix_cache = layer(
+                    positions,
+                    hidden_states,
+                    kv_caches[i],
+                    prefix_caches[i],
+                    input_metadata,
+                    cache_event,
+                )
+            else:
+                hidden_states, prefix_cache = layer(
+                    positions,
+                    hidden_states,
+                    kv_caches[i],
+                    None,
+                    input_metadata,
+                    cache_event,
+                )
+                if PrefixStatus.PREFIX_INIT == input_metadata.use_prefix_cache:
+                    prefix_caches[
+                        i] = prefix_cache if prefix_cache is not None else None
         hidden_states = self.norm(hidden_states)
-        return hidden_states
+        return hidden_states, prefix_caches
 
 
 class LlamaForCausalLM(nn.Module):
@@ -291,14 +314,16 @@ class LlamaForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[KVCache],
+        prefix_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata, cache_events)
+        hidden_states, prefix_caches = self.model(input_ids, positions,
+                                                  kv_caches, prefix_caches,
+                                                  input_metadata, cache_events)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
-        return next_tokens
+        return next_tokens, prefix_caches
 
     _column_parallel_layers = []
     _row_parallel_layers = ["o_proj", "down_proj"]

@@ -17,6 +17,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
+from vllm.utils import random_uuid
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -113,12 +114,47 @@ class LLMEngine:
         # Create the scheduler.
         self.scheduler = Scheduler(scheduler_config, cache_config)
 
+        self.prefix_ids = []
+        self._init_prefix()
+        self.tokenizer.add_bos_token = False
+        self.prefix_len = 0
         # Logging.
         self.last_logging_time = 0.0
         # List of (timestamp, num_tokens)
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
+
+    def _init_prefix(self):
+        prefix_list = [
+            """[INST] <<SYS>>\nYou are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
+            If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.\n<</SYS>>\n\n{} [/INST]"""
+        ]
+        block_size = self.cache_config.block_size
+        seqs: List[Sequence] = []
+
+        for prefix in prefix_list:
+            seq_id = next(self.seq_counter)
+            self.prefix_ids = self.tokenizer.encode(prefix)
+            self.prefix_len = len(self.prefix_ids)
+            seq = Sequence(seq_id, prefix, self.prefix_ids, block_size)
+            seqs.append(seq)
+        request_id = random_uuid()
+        seq_group = SequenceGroup(
+            request_id, seqs,
+            SamplingParams(temperature=0.8, top_p=0.95, n=len(prefix_list)), 0)
+        self.scheduler.add_seq_group(seq_group)
+        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        _ = self._run_workers(
+            "prefix_init",
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+            blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+            blocks_to_copy=scheduler_outputs.blocks_to_copy,
+            prefix_len=self.prefix_len)
+        self.scheduler.free_finished_seq_groups()
+        self.abort_request(request_id)
+        logger.info("init prefix success ")
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -260,7 +296,7 @@ class LLMEngine:
             arrival_time = time.time()
         if prompt_token_ids is None:
             assert prompt is not None
-            prompt_token_ids = self.tokenizer.encode(prompt)
+            prompt_token_ids = self.prefix_ids + self.tokenizer.encode(prompt)
 
         # Create the sequences.
         block_size = self.cache_config.block_size

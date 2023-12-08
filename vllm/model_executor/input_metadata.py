@@ -5,6 +5,13 @@ from xformers.ops import AttentionBias
 
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceData
+import enum
+
+
+class PrefixStatus(enum.Enum):
+    BLOCK_INIT = enum.auto()
+    PREFIX_INIT = enum.auto()
+    USE_PREFIX = enum.auto()
 
 
 class InputMetadata:
@@ -30,7 +37,10 @@ class InputMetadata:
         max_context_len: int,
         block_tables: torch.Tensor,
         sliding_window: Optional[int] = None,
+        use_prefix_cache: PrefixStatus = PrefixStatus.USE_PREFIX,
+        prefix_len: int = 0,
     ) -> None:
+        self.prefix_len = prefix_len
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens
@@ -70,6 +80,7 @@ class InputMetadata:
 
         # Set during the execution of the first attention op.
         self.attn_bias: List[AttentionBias] = []
+        self.use_prefix_cache = use_prefix_cache
 
     def __repr__(self) -> str:
         # Print only useful metadata.
