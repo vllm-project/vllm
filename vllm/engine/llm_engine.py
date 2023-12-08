@@ -7,13 +7,14 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
+from vllm.engine.metrics import record_metrics
+from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupOutputs,
-                           SequenceOutputs, SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupOutput,
+                           SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
@@ -88,8 +89,6 @@ class LLMEngine:
 
         self.model_config = model_config
         self.cache_config = cache_config
-        assert self.cache_config.sliding_window == getattr(
-            self.model_config.hf_config, "sliding_window", None)
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
@@ -125,7 +124,7 @@ class LLMEngine:
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import Worker
 
         assert self.parallel_config.world_size == 1, (
             "Ray is required if parallel_config.world_size > 1.")
@@ -143,25 +142,35 @@ class LLMEngine:
             "init_model",
             get_all_outputs=True,
         )
+        self._run_workers(
+            "load_model",
+            get_all_outputs=True,
+            max_concurrent_workers=self.parallel_config.
+            max_parallel_loading_workers,
+        )
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import Worker
 
         self.workers: List[Worker] = []
         for bundle in placement_group.bundle_specs:
             if not bundle.get("GPU", 0):
                 continue
+            if self.parallel_config.tensor_parallel_size == 1:
+                num_gpus = self.cache_config.gpu_memory_utilization
+            else:
+                num_gpus = 1
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=1,
+                num_gpus=num_gpus,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
                 **ray_remote_kwargs,
-            )(RayWorker).remote(self.model_config.trust_remote_code)
+            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
@@ -181,6 +190,12 @@ class LLMEngine:
         self._run_workers(
             "init_model",
             get_all_outputs=True,
+        )
+        self._run_workers(
+            "load_model",
+            get_all_outputs=True,
+            max_concurrent_workers=self.parallel_config.
+            max_parallel_loading_workers,
         )
 
     def _verify_args(self) -> None:
@@ -351,7 +366,7 @@ class LLMEngine:
         return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutputs) -> None:
+                                        outputs: SequenceGroupOutput) -> None:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
@@ -372,7 +387,7 @@ class LLMEngine:
 
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
-            child_samples: List[SequenceOutputs] = parent_child_dict[
+            child_samples: List[SequenceOutput] = parent_child_dict[
                 parent.seq_id]
             if len(child_samples) == 0:
                 # This parent sequence has no children samples. Remove
@@ -567,7 +582,7 @@ class LLMEngine:
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
 
-        return self._process_model_outputs(output, scheduler_outputs) + ignored
+        return self._process_model_outputs(output, scheduler_outputs)
 
     def _log_system_stats(
         self,
@@ -581,8 +596,8 @@ class LLMEngine:
         else:
             self.num_generation_tokens.append((now, num_batched_tokens))
 
-        elapsed_time = now - self.last_logging_time
-        if elapsed_time < _LOGGING_INTERVAL_SEC:
+        should_log = now - self.last_logging_time >= _LOGGING_INTERVAL_SEC
+        if not should_log:
             return
 
         # Discard the old stats.
@@ -621,6 +636,16 @@ class LLMEngine:
         else:
             cpu_cache_usage = 0.0
 
+        record_metrics(
+            avg_prompt_throughput=avg_prompt_throughput,
+            avg_generation_throughput=avg_generation_throughput,
+            scheduler_running=len(self.scheduler.running),
+            scheduler_swapped=len(self.scheduler.swapped),
+            scheduler_waiting=len(self.scheduler.waiting),
+            gpu_cache_usage=gpu_cache_usage,
+            cpu_cache_usage=cpu_cache_usage,
+        )
+
         logger.info("Avg prompt throughput: "
                     f"{avg_prompt_throughput:.1f} tokens/s, "
                     "Avg generation throughput: "
@@ -632,8 +657,7 @@ class LLMEngine:
                     f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         self.last_logging_time = now
 
-    def _decode_sequence(self, seq: Sequence,
-                         sampling_params: SamplingParams) -> None:
+    def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
@@ -642,7 +666,8 @@ class LLMEngine:
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
-             skip_special_tokens=sampling_params.skip_special_tokens,
+             skip_special_tokens=prms.skip_special_tokens,
+             spaces_between_special_tokens=prms.spaces_between_special_tokens,
          )
         if seq.tokens is None:
             seq.tokens = new_tokens
@@ -682,16 +707,15 @@ class LLMEngine:
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
-    def _run_workers(
+    def _run_workers_in_batch(
         self,
+        workers,
         method: str,
         *args,
-        get_all_outputs: bool = False,
         **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers."""
+    ):
         all_outputs = []
-        for worker in self.workers:
+        for worker in workers:
             if self.parallel_config.worker_use_ray:
                 executor = partial(worker.execute_method.remote, method)
             else:
@@ -699,9 +723,31 @@ class LLMEngine:
 
             output = executor(*args, **kwargs)
             all_outputs.append(output)
-
         if self.parallel_config.worker_use_ray:
             all_outputs = ray.get(all_outputs)
+        return all_outputs
+
+    def _run_workers(
+        self,
+        method: str,
+        *args,
+        get_all_outputs: bool = False,
+        max_concurrent_workers: Optional[int] = None,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers."""
+        all_outputs = []
+        if max_concurrent_workers:
+            work_groups = [
+                self.workers[i:i + max_concurrent_workers]
+                for i in range(0, len(self.workers), max_concurrent_workers)
+            ]
+        else:
+            work_groups = [self.workers]
+
+        for workers in work_groups:
+            all_outputs.extend(
+                self._run_workers_in_batch(workers, method, *args, **kwargs))
 
         if get_all_outputs:
             return all_outputs

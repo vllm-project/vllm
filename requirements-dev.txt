@@ -1,6 +1,6 @@
 # formatting
 yapf==0.32.0
-pylint==2.8.2
+ruff==0.1.5
 pre-commit==3.5.0
 
 # type checking
@@ -13,3 +13,4 @@ types-setuptools
 pytest
 pytest-forked
 pytest-asyncio
+

@@ -6,14 +6,14 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-from vllm import attention_ops
+from vllm._C import ops
 from vllm.utils import get_max_shared_memory_bytes
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-NUM_BLOCKS = 128  # Arbitrary values for testing
+NUM_BLOCKS = 40000  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -165,7 +165,7 @@ def test_paged_attention(
     # Call the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v1":
-        attention_ops.paged_attention_v1(
+        ops.paged_attention_v1(
             output,
             query,
             key_cache,
@@ -194,7 +194,7 @@ def test_paged_attention(
             device=output.device,
         )
         max_logits = torch.empty_like(exp_sums)
-        attention_ops.paged_attention_v2(
+        ops.paged_attention_v2(
             output,
             exp_sums,
             max_logits,
@@ -211,7 +211,7 @@ def test_paged_attention(
             alibi_slopes,
         )
     else:
-        assert False, f"Unknown version: {version}"
+        raise AssertionError(f"Unknown version: {version}")
 
     # Run the reference implementation.
     ref_output = torch.empty_like(query)

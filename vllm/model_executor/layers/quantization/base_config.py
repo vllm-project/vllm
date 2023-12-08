@@ -1,22 +1,26 @@
+from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
 import torch
 
+from vllm.model_executor.layers.linear import LinearMethodBase
 
-class QuantizationConfig:
 
-    @classmethod
-    def get_name(cls) -> str:
+class QuantizationConfig(ABC):
+    """Base class for quantization configs."""
+
+    @abstractmethod
+    def get_name(self) -> str:
         """Name of the quantization method."""
         raise NotImplementedError
 
-    @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    @abstractmethod
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
         """List of supported activation dtypes."""
         raise NotImplementedError
 
-    @classmethod
-    def get_min_capability(cls) -> int:
+    @abstractmethod
+    def get_min_capability(self) -> int:
         """Minimum GPU capability to support the quantization method.
 
         E.g., 70 for Volta, 75 for Turing, 80 for Ampere.
@@ -25,12 +29,14 @@ class QuantizationConfig:
         """
         raise NotImplementedError
 
-    @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    @staticmethod
+    @abstractmethod
+    def get_config_filenames() -> List[str]:
         """List of filenames to search for in the model directory."""
         raise NotImplementedError
 
     @classmethod
+    @abstractmethod
     def from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
@@ -44,32 +50,15 @@ class QuantizationConfig:
         raise ValueError(f"Cannot find any of {keys} in the model's "
                          "quantization config.")
 
-    @classmethod
-    def get_packed_tensor_names(cls) -> List[str]:
+    @abstractmethod
+    def get_linear_method(self) -> LinearMethodBase:
+        """Get the linear method to use for the quantized linear layer."""
         raise NotImplementedError
 
-    @classmethod
-    def is_packed(cls, tensor_name: str) -> bool:
-        """Returns True if a tensor is packed.
+    @abstractmethod
+    def get_scaled_act_names(self) -> List[str]:
+        """Returns the activation function names that should be post-scaled.
 
-        A tensor is considered packed if each element in the tensor is a
-        packed representation of multiple elements in the original tensor.
-        For example, an INT32 element in the tensor may represent 8 INT4
-        elements in the original tensor.
+        For now, this is only used by AWQ.
         """
-        return any(tag in tensor_name for tag in cls.get_packed_tensor_names())
-
-    @classmethod
-    def get_transposed_tensor_names(cls) -> List[str]:
-        raise NotImplementedError
-
-    @classmethod
-    def is_transposed(cls, tensor_name: str) -> bool:
-        """Returns True if a tensor is transposed relative to nn.Linear.weight.
-        """
-        return any(tag in tensor_name
-                   for tag in cls.get_transposed_tensor_names())
-
-    @classmethod
-    def get_tp_tensor_names(cls) -> List[str]:
         raise NotImplementedError
