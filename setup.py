@@ -20,12 +20,12 @@ ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030", "gfx1100"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
-def _is_hip():
-    return torch.version.hip
+def _is_hip() -> bool:
+    return torch.version.hip is not None
 
 
-def _is_cuda():
-    return torch.version.cuda
+def _is_cuda() -> bool:
+    return torch.version.cuda is not None
 
 
 # Compiler flags.
@@ -33,7 +33,10 @@ CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
 # TODO(woosuk): Should we use -O3?
 NVCC_FLAGS = ["-O2", "-std=c++17"]
 
-if _is_hip() and ROCM_HOME is not None:
+if _is_hip():
+    if ROCM_HOME is None:
+        raise RuntimeError(
+            "Cannot find ROCM_HOME. ROCm must be available to build the package.")
     NVCC_FLAGS += ["-DUSE_ROCM"]
 
 if _is_cuda() and CUDA_HOME is None:
@@ -46,19 +49,17 @@ NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
 
 def get_amdgpu_offload_arch():
-    error_message = ""
     command = "/opt/rocm/llvm/bin/amdgpu-offload-arch"
     try:
         output = subprocess.check_output([command])
         return output.decode('utf-8').strip()
     except subprocess.CalledProcessError as e:
         error_message = f"Error: {e}"
+        raise RuntimeError(error_message) from e
     except FileNotFoundError:
         # If the command is not found, print an error message
         error_message = f"The command {command} was not found."
-
-    if error_message:
-        raise RuntimeError(error_message)
+        raise RuntimeError(error_message) from e
 
     return None
 

@@ -36,7 +36,6 @@ Installation options:
        --ipc=host \
        --cap-add=SYS_PTRACE \
        --security-opt seccomp=unconfined \
-       --shm-size 8G \
        --device /dev/kfd \
        --device /dev/dri \
        -v <path/to/model>:/app/model \
@@ -105,7 +104,6 @@ Build a docker image from `Dockerfile.rocm`, and launch a docker container.
        --ipc=host \
        --cap-add=SYS_PTRACE \
        --security-opt seccomp=unconfined \
-       --shm-size 8G \
        --device /dev/kfd \
        --device /dev/dri \
        -v <path/to/model>:/app/model \
