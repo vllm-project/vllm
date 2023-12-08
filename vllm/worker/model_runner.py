@@ -317,7 +317,7 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
             cache_events=cache_events,
-            input_embeds=input_embeds,
+            inputs_embeds=input_embeds,
         )
 
         # Sample the next token.
