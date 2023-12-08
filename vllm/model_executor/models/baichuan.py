@@ -366,7 +366,8 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
 
 
-class BaichuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 13b, baichuan2 13b, baichuan2 7b
+class BaichuanForCausalLM(BaiChuanBaseForCausalLM
+                          ):  # baichuan 13b, baichuan2 13b, baichuan2 7b
 
     def __init__(self,
                  config,
