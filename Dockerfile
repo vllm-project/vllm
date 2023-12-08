@@ -30,11 +30,15 @@ COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
 
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # max jobs used by Ninja to build extensions
-ENV MAX_JOBS=$max_jobs
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
 # number of threads used by nvcc
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
+
 RUN python3 setup.py build_ext --inplace
 
 # image to run unit testing suite
