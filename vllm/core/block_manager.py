@@ -7,6 +7,10 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
 
+def cdiv(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
 class BlockAllocator:
     """Manages free physical token blocks for a device.
 
@@ -97,11 +101,16 @@ class BlockSpaceManager:
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
-    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
+    def can_allocate(self,
+                     seq_group: SequenceGroup,
+                     num_padding_tokens: int = 0) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-        num_required_blocks = len(seq.logical_token_blocks)
+        seq_len = seq.data.get_len()
+        assert cdiv(seq_len, self.block_size) == len(seq.logical_token_blocks)
+        num_required_blocks = cdiv(seq_len + num_padding_tokens,
+                                   self.block_size)
 
         if seq_group.prefix is not None and seq_group.prefix.allocated:
             num_required_blocks -= seq_group.prefix.get_num_blocks()
@@ -120,13 +129,15 @@ class BlockSpaceManager:
         else:
             return AllocStatus.LATER
 
-    def allocate(self, seq_group: SequenceGroup) -> None:
+    def allocate(self,
+                 seq_group: SequenceGroup,
+                 num_padding_tokens: int = 0) -> None:
         # NOTE: Here we assume that all sequences in the group have the same
         # prompt.
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-
+        seq_len = seq.data.get_len()
         # Allocate new physical token blocks that will store the prompt tokens.
-        num_prompt_blocks = len(seq.logical_token_blocks)
+        num_prompt_blocks = cdiv(seq_len + num_padding_tokens, self.block_size)
 
         block_table: BlockTable = []
         prefix_block_table: BlockTable = []
@@ -162,6 +173,16 @@ class BlockSpaceManager:
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
+
+    def can_append_multiple_slots(self,
+                                  seq_group: SequenceGroup,
+                                  num_new_tokens: int = 1) -> bool:
+        # Simple heuristic: If there is at least one free block
+        # for each sequence, we can append.
+        num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
+        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
+        return num_seqs * cdiv(num_new_tokens,
+                               self.block_size) <= num_free_gpu_blocks
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
@@ -201,6 +222,29 @@ class BlockSpaceManager:
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
             return last_block.block_number, new_block.block_number
+
+    def append_multiple_slots(
+            self,
+            seq: Sequence,
+            num_new_tokens: int = 1) -> Optional[Tuple[int, int]]:
+        """Allocate multiple physical slots for new tokens. This function is used in
+           speculative decoding.
+        """
+        block_table = self.block_tables[seq.seq_id]
+        seq_len = seq.data.get_len()
+        num_required_blocks = cdiv(seq_len + num_new_tokens, self.block_size)
+        while len(block_table) < num_required_blocks:
+            if (self.block_sliding_window
+                    and len(block_table) >= self.block_sliding_window):
+                # reuse a block
+                block_table.append(block_table[len(block_table) %
+                                               self.block_sliding_window])
+            else:
+                # The sequence has a new logical block.
+                # Allocate a new physical block.
+                block = self.gpu_allocator.allocate()
+                block_table.append(block)
+        return None
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.

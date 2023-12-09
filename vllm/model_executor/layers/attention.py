@@ -7,6 +7,7 @@ import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
+from vllm.model_executor.layers.triton_kernel.mqa import paged_multi_query_attention
 
 from vllm._C import ops
 from vllm._C import cache_ops
@@ -224,7 +225,9 @@ class PagedAttention(nn.Module):
 
         else:
             # Decoding run.
-            output = _paged_attention(
+            attn_kernel = _paged_multi_query_attention if \
+                input_metadata.is_multi_query_mode else _paged_attention
+            output = attn_kernel(
                 query,
                 key_cache,
                 value_cache,
@@ -344,4 +347,28 @@ def _paged_attention(
             alibi_slopes,
             input_metadata.kv_cache_dtype,
         )
+    return output
+
+
+def _paged_multi_query_attention(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    input_metadata: InputMetadata,
+    num_kv_heads: int,
+    scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+) -> torch.Tensor:
+    output = torch.empty_like(query)
+    paged_multi_query_attention(
+        output,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        input_metadata.block_tables,
+        input_metadata.context_lens,
+        alibi_slopes,
+    )
     return output

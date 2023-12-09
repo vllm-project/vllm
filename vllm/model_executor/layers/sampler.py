@@ -9,7 +9,8 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTensors
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
-                           SequenceData, SequenceGroupOutput, SequenceOutput)
+                           SequenceData, SequenceGroupOutput, SequenceOutput,
+                           SpeculateSequenceOutput, SpeculateSamplerOutput)
 
 
 class Sampler(nn.Module):
@@ -55,7 +56,16 @@ class Sampler(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
         # Get the hidden states that we use for sampling.
-        hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
+        if sampling_metadata.is_multi_query_mode:
+            # NOTE: For the multi-query mode in speculative decoding, we need
+            # to keep logits for all tokens.
+            # hidden_states is of shape [bsz, num_query_tokens, vocab_size]
+            assert len(hidden_states.shape) == 3
+        else:
+            # hidden_states is of shape [bsz, vocab_size]
+            hidden_states = _prune_hidden_states(hidden_states,
+                                                 sampling_metadata)
+            assert len(hidden_states.shape) == 2
 
         # Get the logits for the next tokens.
         logits = self._get_logits(hidden_states, embedding, embedding_bias)
@@ -68,19 +78,20 @@ class Sampler(nn.Module):
             return None
 
         assert logits is not None
-        _, vocab_size = logits.shape
+        vocab_size = logits.shape[-1]
 
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
 
         # Prepare sampling tensors with pinned memory to avoid blocking.
-        (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p) = SamplingTensors.from_sampling_metadata(
+        (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p,
+         do_greedy) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         # Apply presence and frequency penalties.
         if do_penalties:
-            logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
+            logits = _apply_penalties(logits, sampling_metadata,
+                                      sampling_tensors.prompt_tokens,
                                       sampling_tensors.output_tokens,
                                       sampling_tensors.presence_penalties,
                                       sampling_tensors.frequency_penalties,
@@ -88,8 +99,10 @@ class Sampler(nn.Module):
 
         # Apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
-        logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
-
+        if sampling_metadata.is_multi_query_mode:
+            logits.div_(sampling_tensors.temperatures.view(-1, 1, 1))
+        else:
+            logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
         if do_top_p_top_k:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
@@ -103,14 +116,31 @@ class Sampler(nn.Module):
         # Compute the log probabilities.
         # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
-
-        # Sample the next tokens.
-        sample_results = _sample(probs, logprobs, sampling_metadata)
-        # Get the logprobs query results.
-        prompt_logprobs, sample_logprobs = _get_logprobs(
-            logprobs, sampling_metadata, sample_results)
-        return _build_sampler_output(sample_results, sampling_metadata,
-                                     prompt_logprobs, sample_logprobs)
+        if sampling_metadata.is_multi_query_mode:
+            # Run rejection sampling algorithm in speculative decoding.
+            sampled_token_ids, num_accepted = _reject_sample(
+                probs, logprobs, sampling_metadata, do_greedy,
+                sampling_tensors.greedy_flags)
+            out = _build_reject_sampler_output(logprobs, sampling_metadata,
+                                               sampled_token_ids, num_accepted)
+            return out
+        else:
+            # Sample the next tokens.
+            sample_results = _sample(probs, logprobs, sampling_metadata)
+            # Get the logprobs query results.
+            prompt_logprobs, sample_logprobs = _get_logprobs(
+                logprobs, sampling_metadata, sample_results)
+            parent_probs_list = None
+            if sampling_metadata.use_speculate:
+                bs = probs.shape[0]
+                parent_probs_list = torch.split(probs, 1, dim=0)
+                assert len(parent_probs_list) == bs
+            out = _build_sampler_output(sample_results,
+                                        sampling_metadata,
+                                        prompt_logprobs,
+                                        sample_logprobs,
+                                        parent_probs_list=parent_probs_list)
+            return out
 
 
 def _prune_hidden_states(
@@ -139,6 +169,55 @@ def _get_bin_counts_and_mask(
     return bin_counts, mask
 
 
+def _get_multi_query_bin_counts_and_mask(
+    tokens: torch.Tensor,
+    input_token_ids: torch.Tensor,
+    vocab_size: int,
+    num_seqs: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Similar to _get_bin_counts_and_mask, this function
+    supports multiple tokens per request.
+
+    Args:
+        tokens (torch.Tensor): tensor of all generated token ids, padded to
+            the longest sequence.
+        input_token_ids (torch.Tensor): tensor of all input token ids.
+        vocab_size (int): vocabulary size, vocab_size + 1 is used for padding.
+        num_seqs (int): batch size.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: (bin_counts, mask)
+    """
+    assert len(tokens.shape) == len(input_token_ids.shape) == 2
+    assert input_token_ids.shape[0] == num_seqs
+    num_tokens = input_token_ids.shape[1]
+
+    # For the case of multiple input tokens per request, each token will have
+    # one bin counter. We also need to consider the causal relationship among
+    # tokens of the same request. We first construct bins by counting all tokens
+    # and then fix the them by reversing errorly counted tokens using causal mask.
+    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
+                             dtype=torch.long,
+                             device=tokens.device)
+    bin_counts.scatter_add_(1, tokens, torch.ones_like(tokens))
+
+    # reshape bin_counts to [num_seqs, num_tokens, vocab_size + 1]
+    bin_counts = bin_counts[:, None, :].repeat([1, num_tokens, 1])
+
+    # construct tokens_to_remove with shape [num_seqs, num_tokens, num_tokens]
+    tokens_to_remove = input_token_ids[:, None, :].repeat(1, num_tokens, 1)
+
+    # select tokens to be removed using causal mask
+    causal_mask = torch.tril(torch.ones(num_tokens, num_tokens)).to(torch.bool)
+    tokens_to_remove[causal_mask[None, :, :].expand(num_seqs, num_tokens,
+                                                    num_tokens)] = vocab_size
+    bin_counts = bin_counts.scatter_add_(2, tokens_to_remove,
+                                         -torch.ones_like(tokens_to_remove))
+    bin_counts = bin_counts[:, :, :vocab_size]
+    mask = bin_counts > 0
+    return (bin_counts, mask)
+
+
 def _apply_logits_processors(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -163,26 +242,47 @@ def _apply_logits_processors(
     return logits
 
 
-def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
+def _apply_penalties(logits: torch.Tensor, sampling_metadata: SamplingMetadata,
+                     prompt_tokens_tensor: torch.Tensor,
                      output_tokens_tensor: torch.Tensor,
                      presence_penalties: torch.Tensor,
                      frequency_penalties: torch.Tensor,
                      repetition_penalties: torch.Tensor) -> torch.Tensor:
-    num_seqs, vocab_size = logits.shape
+    num_seqs, vocab_size = logits.shape[0], logits.shape[-1]
     _, prompt_mask = _get_bin_counts_and_mask(prompt_tokens_tensor, vocab_size,
                                               num_seqs)
-    output_bin_counts, output_mask = _get_bin_counts_and_mask(
-        output_tokens_tensor, vocab_size, num_seqs)
+    if sampling_metadata.is_multi_query_mode:
+        assert len(logits.shape) == 3
+        assert sampling_metadata.input_token_ids is not None
+    else:
+        assert len(logits.shape) == 2
 
-    repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
-    repetition_penalties[~(prompt_mask | output_mask)] = 1.0
-    logits = torch.where(logits > 0, logits / repetition_penalties,
-                         logits * repetition_penalties)
+    if sampling_metadata.is_multi_query_mode:
+        num_tokens = sampling_metadata.input_token_ids.shape[1]
+        output_bin_counts, output_mask = _get_multi_query_bin_counts_and_mask(
+            output_tokens_tensor, sampling_metadata.input_token_ids,
+            vocab_size, num_seqs)
+        repetition_penalties = repetition_penalties[:, None, None].repeat(
+            1, num_tokens, vocab_size)
+        repetition_penalties[~(prompt_mask[:, None, :] | output_mask)] = 1.0
+        logits = torch.where(logits > 0, logits / repetition_penalties,
+                             logits * repetition_penalties)
+        logits -= frequency_penalties[:, None, None] * output_bin_counts
+        logits -= presence_penalties[:, None, None] * output_mask
+    else:
+        output_bin_counts, output_mask = _get_bin_counts_and_mask(
+            output_tokens_tensor, vocab_size, num_seqs)
 
-    # We follow the definition in OpenAI API.
-    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits -= frequency_penalties.unsqueeze_(dim=1) * output_bin_counts
-    logits -= presence_penalties.unsqueeze_(dim=1) * output_mask
+        repetition_penalties = repetition_penalties[:, None].repeat(
+            1, vocab_size)
+        repetition_penalties[~(prompt_mask | output_mask)] = 1.0
+        logits = torch.where(logits > 0, logits / repetition_penalties,
+                             logits * repetition_penalties)
+
+        # We follow the definition in OpenAI API.
+        # Refer to https://platform.openai.com/docs/api-reference/parameter-details
+        logits -= frequency_penalties.unsqueeze_(dim=1) * output_bin_counts
+        logits -= presence_penalties.unsqueeze_(dim=1) * output_mask
     return logits
 
 
@@ -191,21 +291,35 @@ def _apply_top_k_top_p(
     p: torch.Tensor,
     k: torch.Tensor,
 ) -> torch.Tensor:
+    # logits may have shape [bs, vocab_size] or [bs, num_tokens, vocab_size]
+    assert len(logits.shape) in (2, 3)
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     # Apply top-k.
-    top_k_mask = logits_sort.size(1) - k.to(torch.long)
+    top_k_mask = logits_sort.size(-1) - k.to(torch.long)
+
     # Get all the top_k values.
-    top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
+    if len(logits.shape) == 2:
+        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
+    else:
+        # logits has shape [bs, num_tokens, vocab_size]
+        num_tokens = logits.shape[1]
+        top_k_mask = logits_sort.gather(
+            2, top_k_mask[:, None, None].repeat(1, num_tokens, 1))
     top_k_mask = logits_sort < top_k_mask
     logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
     # Apply top-p.
     probs_sort = logits_sort.softmax(dim=-1)
     probs_sum = probs_sort.cumsum(dim=-1)
-    top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
-    # at least one
-    top_p_mask[:, -1] = False
+    if len(logits.shape) == 2:
+        top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+        # at least one
+        top_p_mask[:, -1] = False
+    else:
+        top_p_mask = probs_sum <= 1 - p.view(-1, 1, 1)
+        # at least one
+        top_p_mask[:, :, -1] = False
     logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
     # Re-sort the probabilities.
@@ -228,7 +342,10 @@ def _apply_min_p(
     """
     probs = torch.softmax(logits, dim=-1)
     top_probs, _ = probs.max(dim=-1, keepdim=True)
-    scaled_min_p = min_p.unsqueeze_(dim=1) * top_probs
+    if len(logits.shape) == 2:
+        scaled_min_p = min_p.unsqueeze_(dim=1) * top_probs
+    else:
+        scaled_min_p = min_p.view(-1, 1, 1) * top_probs
     tokens_to_remove = probs < scaled_min_p
     logits = logits.masked_fill_(tokens_to_remove, -float("inf"))
 
@@ -557,12 +674,17 @@ def _build_sampler_output(
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
+    parent_probs_list: List[torch.Tensor] = None,
+    num_accepted_list: List[int] = None,
 ) -> SamplerOutput:
     sampler_output = []
-    for (seq_group, sample_result, group_prompt_logprobs,
-         group_sample_logprobs) in zip(sampling_metadata.seq_groups,
-                                       sample_results, prompt_logprobs,
-                                       sample_logprobs):
+    for i, seq_group in enumerate(sampling_metadata.seq_groups):
+        sample_result = sample_results[i]
+        group_prompt_logprobs = prompt_logprobs[i]
+        group_sample_logprobs = sample_logprobs[i]
+        parent_probs = parent_probs_list[i] if parent_probs_list else None
+        num_accepted_tokens = num_accepted_list[
+            i] if num_accepted_list else None
         seq_ids, _ = seq_group
         next_token_ids, parent_ids = sample_result
         seq_outputs = []
@@ -570,7 +692,140 @@ def _build_sampler_output(
                                                       next_token_ids,
                                                       group_sample_logprobs):
             seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
+                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs,
+                               parent_probs))
         sampler_output.append(
-            SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
+            SequenceGroupOutput(seq_outputs, group_prompt_logprobs,
+                                num_accepted_tokens))
     return sampler_output
+
+
+def _reject_sample(
+    target_token_probs: torch.Tensor,
+    target_token_logprobs: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    do_greedy: bool = False,
+    greedy_flags: Optional[torch.Tensor] = None,
+) -> Tuple[List[Tuple[List[int], List[int]]], torch.Tensor, List]:
+    assert sampling_metadata.draft_token_ids is not None
+    assert sampling_metadata.draft_token_probs is not None
+    draft_token_ids = sampling_metadata.draft_token_ids
+    draft_token_probs = sampling_metadata.draft_token_probs
+
+    # 1. Gather probs from both target and draft model.
+    gather_indices = draft_token_ids.unsqueeze(-1)
+    target_probs = torch.gather(target_token_probs, -1,
+                                gather_indices).squeeze(-1)
+    draft_probs = torch.gather(draft_token_probs, -1,
+                               gather_indices).squeeze(-1)
+    # 2. Calculate confidence score.
+    confidence = torch.clamp(target_probs / draft_probs, min=0, max=1)
+    # 3. Decide if tokens are accepted or not.
+    random_values = torch.rand(size=(confidence.shape[-1], ),
+                               dtype=confidence.dtype,
+                               device=confidence.device)
+    is_match = confidence > random_values
+    if do_greedy:
+        # Special treatment for greedy sampling
+        assert greedy_flags is not None
+        num_draft_tokens = draft_token_ids.shape[-1]
+        is_greedy_match = torch.argmax(
+            target_token_logprobs, -1)[:, :num_draft_tokens] == draft_token_ids
+        is_match = torch.where(
+            greedy_flags[:, None].expand(-1, num_draft_tokens),
+            is_greedy_match, is_match)
+    # For the convenience of handling the case when all tokens are accepted, we pad
+    # the acceptance matrix's shape from [bsz, n_draft] to [bsz, n_draft+1].
+    is_match = torch.nn.functional.pad(is_match, (0, 1), value=False)
+    num_accepted = torch.argmin(is_match.to(torch.int), axis=-1)
+    # 4. Construct next token probs and sample next token. Note num_acceped
+    # has shape [bsz] and gather_indices has shape[bsz, 1, vocab_size].
+    # Here we set the vocab size to be whichever smaller when the draft model
+    # has different vocab size than the target model.
+    vocab_size = min(draft_token_probs.shape[-1], target_token_probs.shape[-1])
+    gather_indices = num_accepted[:, None, None].expand(-1, 1, vocab_size)
+    # Run rejection sampling algorithm described in https://arxiv.org/abs/2302.01318
+    p = torch.gather(target_token_probs, 1, gather_indices).squeeze(1)
+    q = torch.gather(draft_token_probs, 1, gather_indices).squeeze(1)
+    # For numerical stability, convert nans in draft ptobs to 0.
+    q.nan_to_num_(0, 0, 0)
+    diff = p - q
+    diff.clamp_(min=0)
+    probs = diff / torch.sum(diff, axis=-1).view(-1, 1)
+    sampled_token_ids = _multinomial(probs, 1).squeeze(-1)
+    if do_greedy:
+        # Special treatment for greedy sampling
+        logprobs = torch.gather(target_token_logprobs, 1,
+                                gather_indices).squeeze(1)
+        greedy_sampled_token_ids = torch.argmax(logprobs, dim=-1)
+        sampled_token_ids = torch.where(greedy_flags, greedy_sampled_token_ids,
+                                        sampled_token_ids)
+    return sampled_token_ids, num_accepted
+
+
+def _build_reject_sampler_output(
+        target_token_logprobs: torch.Tensor,
+        sampling_metadata: SamplingMetadata, sampled_token_ids: torch.Tensor,
+        num_accepted_tokens: torch.Tensor) -> SpeculateSamplerOutput:
+    largest_num_logprobs = 0
+    gather_indices = sampling_metadata.draft_token_ids.unsqueeze(-1)
+    # shape: [bsz, seq_len]
+    logprob_matrix = torch.gather(target_token_logprobs, -1,
+                                  gather_indices).squeeze(-1).tolist()
+    # shape: [bsz, seq_len]
+    draft_token_ids = sampling_metadata.draft_token_ids.tolist()
+    # shape: [bsz]
+    sampled_token_ids = sampled_token_ids.tolist()
+    batch_arange = torch.arange(target_token_logprobs.size(0))
+    # shape: [bsz]
+    sampled_token_logprob = target_token_logprobs[batch_arange,
+                                                  num_accepted_tokens,
+                                                  sampled_token_ids].tolist()
+    # shape: [bsz]
+    num_accepted_tokens = num_accepted_tokens.tolist()
+
+    outputs = []
+    # Process generated tokens and their logprob.
+    for sample_idx, (seq_ids, sampling_params) in enumerate(
+            sampling_metadata.seq_groups):
+        assert len(seq_ids) == 1
+
+        num_accepted = num_accepted_tokens[sample_idx]
+        accepted_token_ids = draft_token_ids[sample_idx][:num_accepted]
+        logprob_list = logprob_matrix[sample_idx][:num_accepted]
+        gen_token_ids = accepted_token_ids + [sampled_token_ids[sample_idx]]
+        gen_token_logprob_list = logprob_list + \
+            [sampled_token_logprob[sample_idx]]
+        logprobs_dict_list = [{
+            token_id: logprob
+        } for token_id, logprob in zip(gen_token_ids, gen_token_logprob_list)]
+        outputs.append(
+            SpeculateSequenceOutput(sample_idx, gen_token_ids,
+                                    logprobs_dict_list, num_accepted))
+        if sampling_params.logprobs is not None:
+            largest_num_logprobs = max(largest_num_logprobs,
+                                       sampling_params.logprobs)
+    # Update logprobs dict in case largest_num_logprobs > 0.
+    if largest_num_logprobs > 0:
+        top_logprobs, top_token_ids = torch.topk(target_token_logprobs,
+                                                 largest_num_logprobs,
+                                                 dim=-1)
+        # shape: [bsz, seq_len, largest_num_logprobs]
+        top_logprobs = top_logprobs.cpu()
+        # shape: [bsz, seq_len, largest_num_logprobs]
+        top_token_ids = top_token_ids.cpu()
+        for sample_idx, (_, sampling_params) in enumerate(
+                sampling_metadata.seq_groups):
+            num_logprobs = sampling_params.logprobs
+            if num_logprobs:
+                num_accepted = num_accepted_tokens[sample_idx]
+                logprobs_dict_list = outputs[sample_idx].logprobs_list
+                for position in range(num_accepted + 1):
+                    logprobs_dict = logprobs_dict_list[position]
+                    selected_top_logprobs = top_logprobs[
+                        sample_idx, position, :num_logprobs].tolist()
+                    selected_top_token_ids = top_token_ids[
+                        sample_idx, position, :num_logprobs].tolist()
+                    logprobs_dict.update(
+                        zip(selected_top_token_ids, selected_top_logprobs))
+    return outputs

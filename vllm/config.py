@@ -79,6 +79,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        is_draft_model: Optional[bool] = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -93,6 +94,8 @@ class ModelConfig:
         self.quantization = quantization
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        # Flag to mark if the model is used as draft model for speculative decoding
+        self.is_draft_model = is_draft_model
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -198,7 +201,8 @@ class ModelConfig:
         parallel_config: "ParallelConfig",
     ) -> None:
         total_num_attention_heads = self.hf_config.num_attention_heads
-        tensor_parallel_size = parallel_config.tensor_parallel_size
+        tensor_parallel_size = parallel_config.draft_model_tp_size if self.is_draft_model \
+                               else parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
                 f"Total number of attention heads ({total_num_attention_heads})"
@@ -269,8 +273,9 @@ class ModelConfig:
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
-        return max(1,
-                   total_num_kv_heads // parallel_config.tensor_parallel_size)
+        tensor_parallel_size = parallel_config.draft_model_tp_size if self.is_draft_model \
+                               else parallel_config.tensor_parallel_size
+        return max(1, total_num_kv_heads // tensor_parallel_size)
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_config.num_hidden_layers
@@ -378,12 +383,14 @@ class ParallelConfig:
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
+        draft_model_tp_size: Optional[int] = 1,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
+        self.draft_model_tp_size = draft_model_tp_size
 
         self.world_size = pipeline_parallel_size * tensor_parallel_size
         if self.world_size > 1:

@@ -30,6 +30,7 @@ class CompletionOutput:
         logprobs: Optional[SampleLogprobs],
         finish_reason: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
+        acceptance_history: Optional[List[int]] = None,
     ) -> None:
         self.index = index
         self.text = text
@@ -38,6 +39,7 @@ class CompletionOutput:
         self.logprobs = logprobs
         self.finish_reason = finish_reason
         self.lora_request = lora_request
+        self.acceptance_history = acceptance_history
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -108,10 +110,14 @@ class RequestOutput:
                 # logprobs are not requested.
                 logprobs = None
             finshed_reason = SequenceStatus.get_finished_reason(seq.status)
-            output = CompletionOutput(seqs.index(seq), seq.output_text,
-                                      seq.get_output_token_ids(),
-                                      seq.get_cumulative_logprob(), logprobs,
-                                      finshed_reason)
+            output = CompletionOutput(
+                seqs.index(seq),
+                seq.output_text,
+                seq.get_output_token_ids(),
+                seq.get_cumulative_logprob(),
+                logprobs,
+                finish_reason=finshed_reason,
+                acceptance_history=seq.acceptance_history)
             outputs.append(output)
 
         # Every sequence in the sequence group should have the same prompt.

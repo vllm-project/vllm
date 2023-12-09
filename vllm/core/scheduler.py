@@ -77,6 +77,8 @@ class Scheduler:
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        use_speculate: bool = False,
+        speculate_length: Optional[int] = None,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -84,6 +86,9 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
+
+        self.use_speculate = use_speculate
+        self.speculate_length = speculate_length
 
         self.prompt_limit = min(self.scheduler_config.max_model_len,
                                 self.scheduler_config.max_num_batched_tokens)
@@ -96,6 +101,14 @@ class Scheduler:
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window)
+        if use_speculate:
+            assert speculate_length > 0, "speculate_length must > 0 for speculative decoding."
+            # Create the block space manager for draft model
+            self.d_block_manager = BlockSpaceManager(
+                block_size=self.cache_config.block_size,
+                num_gpu_blocks=self.cache_config.num_gpu_blocks,
+                num_cpu_blocks=self.cache_config.num_cpu_blocks,
+                sliding_window=self.cache_config.sliding_window)
 
         # Create the prefix pool to cache the prefixes.
         self.prefix_pool = PrefixPool(self.cache_config.block_size)
@@ -157,6 +170,24 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
+    def can_allocate(self, seq_group: SequenceGroup) -> bool:
+        if self.use_speculate:
+            # For speculative decoding, at most speculate_length + 1 tokens can be
+            # generated.
+            num_padding_tokens = self.speculate_length + 1
+            status_a = self.block_manager.can_allocate(seq_group,
+                                                       num_padding_tokens)
+            status_b = self.d_block_manager.can_allocate(
+                seq_group, num_padding_tokens)
+            # The status of block_manager and d_block_manager should be exactly the same
+            assert status_a == status_b
+            if status_a == AllocStatus.OK and status_b == AllocStatus.OK:
+                return AllocStatus.OK
+            if status_a == AllocStatus.NEVER or status_b == AllocStatus.NEVER:
+                return AllocStatus.NEVER
+            return AllocStatus.LATER
+        return self.block_manager.can_allocate(seq_group)
+
     def _schedule(self) -> SchedulerOutputs:
         # Blocks that need to be swaped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
@@ -202,7 +233,7 @@ class Scheduler:
                     continue
 
                 # If the sequence group cannot be allocated, stop.
-                can_allocate = self.block_manager.can_allocate(seq_group)
+                can_allocate = self.can_allocate(seq_group)
                 if can_allocate == AllocStatus.LATER:
                     break
                 elif can_allocate == AllocStatus.NEVER:
@@ -277,9 +308,11 @@ class Scheduler:
         # Reserve new token slots for the running sequence groups.
         running: Deque[SequenceGroup] = deque()
         preempted: List[SequenceGroup] = []
+        num_padded_tokens = self.speculate_length + 1 if self.use_speculate else 1
         while self.running:
             seq_group = self.running.popleft()
-            while not self.block_manager.can_append_slot(seq_group):
+            while not self.block_manager.can_append_multiple_slots(
+                    seq_group, num_padded_tokens):
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop()
@@ -293,7 +326,8 @@ class Scheduler:
                     break
             else:
                 # Append new slots to the sequence group.
-                self._append_slot(seq_group, blocks_to_copy)
+                self._append_multiple_slots(seq_group, blocks_to_copy,
+                                            num_padded_tokens)
                 running.append(seq_group)
         self.running = running
 
@@ -336,7 +370,8 @@ class Scheduler:
                     curr_loras.add(lora_int_id)
                 self.swapped.popleft()
                 self._swap_in(seq_group, blocks_to_swap_in)
-                self._append_slot(seq_group, blocks_to_copy)
+                self._append_multiple_slots(seq_group, blocks_to_copy,
+                                            num_padded_tokens)
                 num_curr_seqs += num_new_seqs
                 self.running.append(seq_group)
 
@@ -374,10 +409,14 @@ class Scheduler:
 
             seq_data: Dict[int, SequenceData] = {}
             block_tables: Dict[int, List[int]] = {}
+            d_block_tables: Dict[int, List[int]] = {}
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                if self.use_speculate:
+                    d_block_tables[
+                        seq_id] = self.d_block_manager.get_block_table(seq)
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
@@ -388,6 +427,7 @@ class Scheduler:
                 lora_request=seq_group.lora_request,
                 prefix=seq_group.prefix,
                 state=seq_group.state,
+                d_block_tables=d_block_tables,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
@@ -397,23 +437,38 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         self.block_manager.free(seq)
+        if self.use_speculate:
+            self.d_block_manager.free(seq)
+            assert self.block_manager.get_num_free_gpu_blocks() == \
+                self.d_block_manager.get_num_free_gpu_blocks()
 
     def free_finished_seq_groups(self) -> None:
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
-        self.block_manager.allocate(seq_group)
+        if self.use_speculate:
+            num_padding_tokens = self.speculate_length + 1
+            self.block_manager.allocate(seq_group, num_padding_tokens)
+            self.d_block_manager.allocate(seq_group, num_padding_tokens)
+        else:
+            self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 
-    def _append_slot(
+    def _append_multiple_slots(
         self,
         seq_group: SequenceGroup,
         blocks_to_copy: Dict[int, List[int]],
+        num_new_tokens: int = 1,
     ) -> None:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            ret = self.block_manager.append_slot(seq)
+            ret = self.block_manager.append_multiple_slots(seq, num_new_tokens)
+            if self.use_speculate:
+                ret_draft = self.d_block_manager.append_multiple_slots(
+                    seq, num_new_tokens)
+                assert ret is None and ret_draft is None, "The same memory block"
+                " should never be shared by multiple sequences when using speculative decoding."
             if ret is not None:
                 src_block, dst_block = ret
                 if src_block in blocks_to_copy:
@@ -459,6 +514,8 @@ class Scheduler:
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
             self.block_manager.free(seq)
+            if self.use_speculate:
+                self.d_block_manager.free(seq)
         # NOTE: For FCFS, we insert the preempted sequence group to the front
         # of the waiting queue.
         self.waiting.appendleft(seq_group)
@@ -468,6 +525,10 @@ class Scheduler:
         seq_group: SequenceGroup,
         blocks_to_swap_out: Dict[int, int],
     ) -> None:
+        if self.use_speculate:
+            raise AssertionError(
+                "Preemption by swap is not supported when using speculative decoding."
+            )
         self._swap_out(seq_group, blocks_to_swap_out)
         self.swapped.append(seq_group)
 

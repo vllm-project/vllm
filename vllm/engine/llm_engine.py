@@ -17,7 +17,8 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+                           SequenceGroupOutput, SequenceOutput, SequenceStatus,
+                           SpeculateOutput, SpeculateSequenceGroupOutput)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
@@ -75,6 +76,8 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
+        draft_model_config: Optional[ModelConfig] = None,
+        speculate_length: int = 5,
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -98,6 +101,19 @@ class LLMEngine:
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
+
+        # speculative decoding related params
+        self.draft_model_config = draft_model_config
+        self.speculate_length = speculate_length
+        if draft_model_config is not None:
+            assert 1 <= speculate_length <= 15, "speculate_length must be within [1, 15] when using speculative decoding"
+            logger.info(
+                "Using speculative decoding for LLM engine: "
+                f"draft_model={draft_model_config.model!r}, "
+                f"speculate_length={speculate_length}, "
+                f"draft_model_tp_size={parallel_config.draft_model_tp_size}, "
+                f"quantization={draft_model_config.quantization}")
+
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.parallel_config = parallel_config
@@ -123,7 +139,13 @@ class LLMEngine:
         self._init_cache()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        use_speculate = draft_model_config is not None
+        self.use_speculate = use_speculate
+        self.scheduler = Scheduler(scheduler_config,
+                                   cache_config,
+                                   lora_config,
+                                   use_speculate=use_speculate,
+                                   speculate_length=speculate_length)
 
         # Metric Logging.
         if self.log_stats:
@@ -159,6 +181,8 @@ class LLMEngine:
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
+            draft_model_config=self.draft_model_config,
+            speculate_length=self.speculate_length,
         )
         self._run_workers("init_model")
         self._run_workers("load_model")
@@ -249,6 +273,7 @@ class LLMEngine:
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
         device_config = copy.deepcopy(self.device_config)
+        draft_model_config = copy.deepcopy(self.draft_model_config)
 
         for rank, (worker, (node_id,
                             _)) in enumerate(zip(self.workers,
@@ -266,6 +291,8 @@ class LLMEngine:
                     distributed_init_method,
                     lora_config=self.lora_config,
                     kv_cache_dtype=self.cache_config.cache_dtype,
+                    draft_model_config=draft_model_config,
+                    speculate_length=self.speculate_length,
                 ))
 
         driver_rank = 0
@@ -281,6 +308,8 @@ class LLMEngine:
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
+            draft_model_config=draft_model_config,
+            speculate_length=self.speculate_length,
         )
 
         self._run_workers("init_model", cupy_port=get_open_port())
@@ -363,14 +392,23 @@ class LLMEngine:
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
-        engine_configs = engine_args.create_engine_configs()
-        parallel_config = engine_configs[2]
+        engine_config = engine_args.create_engine_configs()
+        parallel_config = engine_config.parallel_config
         # Initialize the cluster.
         placement_group = initialize_cluster(parallel_config)
         # Create the LLM engine.
-        engine = cls(*engine_configs,
-                     placement_group,
-                     log_stats=not engine_args.disable_log_stats)
+        engine = cls(
+            engine_config.model_config,
+            engine_config.cache_config,
+            engine_config.parallel_config,
+            engine_config.scheduler_config,
+            engine_config.device_config,
+            engine_config.lora_config,
+            placement_group,
+            log_stats=not engine_args.disable_log_stats,
+            draft_model_config=engine_config.draft_model_config,
+            speculate_length=engine_config.speculate_length,
+        )
         return engine
 
     def encode_request(
@@ -725,14 +763,38 @@ class LLMEngine:
                 seq_group.remove(seq.seq_id)
                 self.scheduler.free_seq(seq)
 
+    def _process_speculate_sequence_group_outputs(
+            self, seq_group: SequenceGroup,
+            outputs: SpeculateSequenceGroupOutput) -> None:
+        # Process prompt logprobs
+        prompt_logprobs = outputs.prompt_logprobs
+        if prompt_logprobs is not None:
+            seq_group.prompt_logprobs = prompt_logprobs
+        # Process samples
+        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        assert len(
+            seqs
+        ) == 1, "Only one seq is allowed per seq group when using speculative decoding."
+        seq = seqs[0]
+        for token_id, logprobs in zip(outputs.output_tokens, outputs.logprobs):
+            seq.append_token_id(token_id, logprobs)
+        seq.update_acceptance_history(outputs.num_accepted_tokens)
+        self._decode_sequence(seq, seq_group.sampling_params)
+        self._check_stop(seq, seq_group.sampling_params)
+        if seq.is_finished():
+            self.scheduler.free_seq(seq)
+        return
+
     def _process_model_outputs(
-            self, output: SamplerOutput,
+            self, output: Union[SamplerOutput, SpeculateOutput],
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         now = time.time()
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
+        process_method = self._process_speculate_sequence_group_outputs if self.use_speculate \
+                       else self._process_sequence_group_outputs
         for seq_group, outputs in zip(scheduled_seq_groups, output):
-            self._process_sequence_group_outputs(seq_group, outputs)
+            process_method(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
@@ -821,6 +883,7 @@ class LLMEngine:
                     "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
                     "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
+                    "use_speculate": self.use_speculate,
                 },
                 use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
@@ -911,6 +974,7 @@ class LLMEngine:
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
+             new_token_start_loc=seq.new_token_start_loc,
              skip_special_tokens=prms.skip_special_tokens,
              spaces_between_special_tokens=prms.spaces_between_special_tokens,
          )
@@ -921,15 +985,40 @@ class LLMEngine:
         seq.prefix_offset = prefix_offset
         seq.read_offset = read_offset
         seq.output_text += new_output_text
+        self.new_output_text = new_output_text
+        # Update seq.new_token_start_loc to support decoding multiple tokens in one step.
+        seq.mark_decode_step()
 
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:
         """Stop the finished sequences."""
         for stop_str in sampling_params.stop:
-            if seq.output_text.endswith(stop_str):
-                self._finalize_sequence(seq, sampling_params, stop_str)
+            if self.use_speculate:
+                # Speculate decoding may generate multiple tokens
+                num_new_chars = len(seq.output_text)
+                num_chars = len(seq.output_text)
+                for offset in range(num_chars - num_new_chars, num_chars):
+                    if seq.output_text[:offset].endswith(stop_str):
+                        seq.output_text = seq.output_text[:offset]
+                        self._finalize_sequence(seq, sampling_params, stop_str)
+                        seq.status = SequenceStatus.FINISHED_STOPPED
+                        return
+            else:
+                if seq.output_text.endswith(stop_str):
+                    self._finalize_sequence(seq, sampling_params, stop_str)
+                    seq.status = SequenceStatus.FINISHED_STOPPED
+                    return
+
+        offset = self.speculate_length + 1 if self.use_speculate else 1
+        for token in seq.data.output_token_ids[-offset:]:
+            if token in sampling_params.stop_token_ids:
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
+            if ((not sampling_params.ignore_eos)
+                    and token == self.get_tokenizer_for_seq(seq).eos_token_id):
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                return
+
         if seq.get_last_token_id() in sampling_params.stop_token_ids:
             stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
                 seq.get_last_token_id())
@@ -943,7 +1032,8 @@ class LLMEngine:
             return
 
         # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
+        if sampling_params.max_tokens and seq.get_output_len(
+        ) >= sampling_params.max_tokens:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 

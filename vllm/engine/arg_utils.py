@@ -1,10 +1,25 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+@dataclass
+class EngineConfig:
+    model_config: ModelConfig
+    cache_config: CacheConfig
+    parallel_config: ParallelConfig
+    scheduler_config: SchedulerConfig
+    device_config: DeviceConfig
+    lora_config: Optional[LoRAConfig] = None
+    draft_model_config: Optional[ModelConfig] = None
+    speculate_length: int = 5
 
 
 @dataclass
@@ -45,6 +60,10 @@ class EngineArgs:
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'cuda'
+    draft_model: Optional[str] = None
+    speculate_length: int = 5
+    draft_model_tp_size: int = 1
+    draft_model_quantization: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -271,6 +290,33 @@ class EngineArgs:
             choices=["cuda"],
             help=('Device type for vLLM execution. '
                   'Currently, only CUDA-compatible devices are supported.'))
+        parser.add_argument('--draft-model',
+                            type=str,
+                            default=None,
+                            help='Draft model for speculative decoding')
+        parser.add_argument(
+            '--speculate-length',
+            type=int,
+            default=EngineArgs.speculate_length,
+            help="The speculate length for speculative decoding")
+        parser.add_argument('--draft-model-tp-size',
+                            '-dm-tp',
+                            type=int,
+                            default=1,
+                            help='Tensor parallel size for draft model')
+        parser.add_argument(
+            '--draft-model-quantization',
+            '-dq',
+            type=str,
+            choices=['awq', 'gptq', 'squeezellm', None],
+            default=None,
+            help='Method used to quantize the weights for draft'
+            'model used in speculative decoding. If '
+            'None, we first check the `quantization_config` '
+            'attribute in the model config file. If that is '
+            'None, we assume the model weights are not '
+            'quantized and use `dtype` to determine the data '
+            'type of the weights.')
         return parser
 
     @classmethod
@@ -281,10 +327,7 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
-    def create_engine_configs(
-        self,
-    ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
-               DeviceConfig, Optional[LoRAConfig]]:
+    def create_engine_configs(self) -> EngineConfig:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
@@ -292,6 +335,33 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture)
+        max_model_len = model_config.max_model_len
+        draft_model_config = None
+        if self.draft_model:
+            draft_model_config = ModelConfig(self.draft_model,
+                                             self.tokenizer,
+                                             self.tokenizer_mode,
+                                             self.trust_remote_code,
+                                             self.download_dir,
+                                             self.load_format,
+                                             self.dtype,
+                                             self.seed,
+                                             self.revision,
+                                             self.code_revision,
+                                             self.tokenizer_revision,
+                                             self.max_model_len,
+                                             self.draft_model_quantization,
+                                             self.enforce_eager,
+                                             self.max_context_len_to_capture,
+                                             is_draft_model=True)
+            max_model_len = min(model_config.max_model_len,
+                                draft_model_config.max_model_len)
+            if draft_model_config.max_model_len < model_config.max_model_len:
+                ctx_len, d_ctx_len = model_config.max_model_len, draft_model_config.max_model_len
+                logger.warning(
+                    f"The draft model's max context length ({d_ctx_len}) is smaller than the target model ({ctx_len}), "
+                    f"the max context length is now set to {ctx_len}.")
+
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -300,10 +370,10 @@ class EngineArgs:
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
-                                         self.disable_custom_all_reduce)
+                                         self.disable_custom_all_reduce,
+                                         self.draft_model_tp_size)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
+                                           self.max_num_seqs, max_model_len,
                                            self.max_paddings)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
@@ -312,8 +382,9 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
-        return (model_config, cache_config, parallel_config, scheduler_config,
-                device_config, lora_config)
+        return EngineConfig(model_config, cache_config, parallel_config,
+                            scheduler_config, device_config, lora_config,
+                            draft_model_config, self.speculate_length)
 
 
 @dataclass

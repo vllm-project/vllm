@@ -27,6 +27,9 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         kv_cache_dtype: str,
+        use_speculate: Optional[bool] = False,
+        is_multi_query_mode: Optional[bool] = False,
+        batch_size: Optional[int] = None,
     ) -> None:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens
@@ -42,6 +45,11 @@ class InputMetadata:
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
         self.attn_bias = None
+
+        # Variables used in speculative decoding.
+        self.use_speculate = use_speculate
+        self.is_multi_query_mode = is_multi_query_mode
+        self.batch_size = batch_size
 
     def __repr__(self) -> str:
         return ("InputMetadata("

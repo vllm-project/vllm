@@ -6,11 +6,22 @@
 import contextlib
 
 import torch
+import enum
 
+from typing import Optional
+from contextlib import contextmanager
 from vllm.model_executor.parallel_utils import cupy_utils
+
+
+class ActiveModel(enum.Enum):
+    TARGET = enum.auto()
+    DRAFT = enum.auto()
+
 
 # Tensor model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
+# Draft model tensor parallel group for speculative decoding
+_DRAFT_MODEL_TP_GROUP = None
 # Pipeline model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
 
@@ -18,10 +29,31 @@ _PIPELINE_MODEL_PARALLEL_GROUP = None
 # source rank when broadcasting from the first or last pipeline stage.
 _PIPELINE_GLOBAL_RANKS = None
 
+_ACTIVE_MODEL: ActiveModel = ActiveModel.TARGET
+
+
+# This context manager is used to mark which model
+# is currently active so that the corresponding distributed group can be selected.
+@contextmanager
+def MarkActiveModel(new_value):
+    global _ACTIVE_MODEL
+
+    # Save the original value
+    original_value = _ACTIVE_MODEL
+
+    try:
+        # Temporarily change the global variable
+        _ACTIVE_MODEL = new_value
+        yield
+    finally:
+        # Restore the original value after the block
+        _ACTIVE_MODEL = original_value
+
 
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    draft_model_tp_size: Optional[int] = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -31,6 +63,8 @@ def initialize_model_parallel(
             parallelism.
         pipeline_model_parallel_size: number of GPUs used for pipeline model
             parallelism.
+        draft_model_tp_size: number of GPUs used for draft model's tensor
+            model parallelism.
 
     Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
     use 2 GPUs to parallelize the model tensor, and 4 GPUs to parallelize
@@ -85,10 +119,22 @@ def initialize_model_parallel(
             _PIPELINE_MODEL_PARALLEL_GROUP = group
             _PIPELINE_GLOBAL_RANKS = ranks
 
+    # Build the tensor parallel groups for draft model
+    global _DRAFT_MODEL_TP_GROUP
+    if draft_model_tp_size:
+        assert _DRAFT_MODEL_TP_GROUP is None, (
+            "draft model tensor parallel group is already initialized")
+        # place draft model on the first n devices
+        ranks = range(draft_model_tp_size)
+        group = torch.distributed.new_group(ranks)
+        if rank in ranks:
+            _DRAFT_MODEL_TP_GROUP = group
+
 
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    draft_model_tp_size: Optional[int] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
@@ -96,7 +142,8 @@ def ensure_model_parallel_initialized(
     """
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size)
+                                  pipeline_model_parallel_size,
+                                  draft_model_tp_size)
         return
 
     assert (
@@ -120,7 +167,10 @@ def model_parallel_is_initialized():
 def get_tensor_model_parallel_group():
     """Get the tensor model parallel group the caller rank belongs to."""
     assert _TENSOR_MODEL_PARALLEL_GROUP is not None, (
-        "tensor model parallel group is not initialized")
+        "tenosr model parallel group is not initialized")
+    if _ACTIVE_MODEL == ActiveModel.DRAFT:
+        assert _DRAFT_MODEL_TP_GROUP is not None
+        return _DRAFT_MODEL_TP_GROUP
     return _TENSOR_MODEL_PARALLEL_GROUP
 
 
@@ -209,6 +259,10 @@ def destroy_model_parallel():
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
+    global _DRAFT_MODEL_TP_GROUP
+    if _DRAFT_MODEL_TP_GROUP:
+        torch.distributed.destroy_process_group(_DRAFT_MODEL_TP_GROUP)
+    _DRAFT_MODEL_TP_GROUP = None
 
     # Destroy the cupy states if any.
     cupy_utils.destroy_process_group()

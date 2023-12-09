@@ -193,6 +193,7 @@ class _AsyncLLMEngine(LLMEngine):
                     "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
                     "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
+                    "use_speculate": self.use_speculate,
                 })
 
             # Only the driver worker returns the sampling results.
@@ -616,20 +617,27 @@ class AsyncLLMEngine:
                          start_engine_loop: bool = True) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
-        engine_configs = engine_args.create_engine_configs()
-        parallel_config = engine_configs[2]
+        engine_config = engine_args.create_engine_configs()
+        parallel_config = engine_config.parallel_config
         # Initialize the cluster.
         placement_group = initialize_cluster(parallel_config,
                                              engine_args.engine_use_ray)
         # Create the async LLM engine.
         engine = cls(parallel_config.worker_use_ray,
                      engine_args.engine_use_ray,
-                     *engine_configs,
+                     engine_config.model_config,
+                     engine_config.cache_config,
+                     engine_config.parallel_config,
+                     engine_config.scheduler_config,
+                     engine_config.device_config,
+                     engine_config.lora_config,
                      placement_group,
                      log_requests=not engine_args.disable_log_requests,
                      log_stats=not engine_args.disable_log_stats,
                      max_log_len=engine_args.max_log_len,
-                     start_engine_loop=start_engine_loop)
+                     start_engine_loop=start_engine_loop,
+                     draft_model_config=engine_config.draft_model_config,
+                     speculate_length=engine_config.speculate_length)
         return engine
 
     async def do_log_stats(self) -> None:

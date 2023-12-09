@@ -4,6 +4,7 @@ import enum
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
+import torch
 from vllm.block import LogicalTokenBlock
 from vllm.prefix import Prefix
 from vllm.sampling_params import SamplingParams
@@ -69,6 +70,17 @@ class RequestMetrics:
     finished_time: Optional[float] = None
 
 
+class DraftTokenData:
+
+    def __init__(self,
+                 token_id: int,
+                 logprob: float,
+                 parent_probs: torch.Tensor = None):
+        self.token_id = token_id
+        self.logprob = logprob
+        self.parent_probs = parent_probs
+
+
 class SequenceData:
     """Data associated with a sequence.
 
@@ -88,6 +100,25 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
+        self.draft_tokens: List[DraftTokenData] = []
+
+    def append_draft_token(self, token_id: int, logprob: float,
+                           parent_probs: torch.Tensor) -> None:
+        self.draft_tokens.append(
+            DraftTokenData(token_id, logprob, parent_probs))
+
+    def clear_draft_tokens(self) -> None:
+        self.draft_tokens.clear()
+
+    def get_num_draft_tokens(self) -> int:
+        return len(self.draft_tokens)
+
+    def get_draft_token_ids(self) -> List[int]:
+        return [token.token_id for token in self.draft_tokens]
+
+    def get_last_draft_token_id(self) -> int:
+        assert self.draft_tokens, "draft tokens list must not be empty"
+        return self.draft_tokens[-1].token_id
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
@@ -114,7 +145,8 @@ class SequenceData:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob})")
+                f"cumulative_logprob={self.cumulative_logprob}, "
+                f"draft_token_ids={self.get_draft_token_ids()})")
 
 
 class Sequence:
@@ -145,6 +177,7 @@ class Sequence:
         self.data = SequenceData(prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
+        self.new_output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
@@ -154,8 +187,13 @@ class Sequence:
         # Used for incremental detokenization
         self.prefix_offset = 0
         self.read_offset = 0
+        self.new_token_start_loc = 0
+
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+
+        # Used for speculative decoding
+        self.acceptance_history: List[int] = []
 
     @property
     def lora_int_id(self) -> int:
@@ -241,6 +279,13 @@ class Sequence:
         new_seq = copy.deepcopy(self)
         new_seq.seq_id = new_seq_id
         return new_seq
+
+    def mark_decode_step(self) -> None:
+        self.new_token_start_loc = self.data.get_len()
+
+    def update_acceptance_history(self, num_accepted_tokens: int) -> None:
+        if num_accepted_tokens is not None:
+            self.acceptance_history.append(num_accepted_tokens)
 
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
@@ -409,6 +454,8 @@ class SequenceGroupMetadata:
         state: Internal state tied to this sequence group.
         lora_request: LoRA request.
         prefix: The prefix of the prompt of the sequence group.
+        d_block_tables: The block tables for draft model when using speculative
+            decoding.
     """
 
     def __init__(
@@ -421,6 +468,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         prefix: Optional[Prefix] = None,
         state: Optional[SequenceGroupState] = None,
+        d_block_tables: Optional[Dict[int, List[int]]] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -430,6 +478,7 @@ class SequenceGroupMetadata:
         self.lora_request = lora_request
         self.prefix = prefix
         self.state = SequenceGroupState() if state is None else state
+        self.d_block_tables = d_block_tables
 
     @property
     def lora_int_id(self) -> int:
@@ -445,6 +494,8 @@ class SequenceOutput:
         output_token: The output token ID.
         logprobs: The logprobs of the output token.
             (Token id -> logP(x_i+1 | x_0, ..., x_i))
+        parent_probs: The logprobs of parent token. This is useful for
+            speculative decoding.
     """
 
     def __init__(
@@ -452,10 +503,12 @@ class SequenceOutput:
         parent_seq_id: int,
         output_token: int,
         logprobs: Dict[int, float],
+        parent_probs: torch.Tensor = None,
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
+        self.parent_probs = parent_probs
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
@@ -470,6 +523,41 @@ class SequenceOutput:
                 and self.logprobs == other.logprobs)
 
 
+class SpeculateSequenceOutput:
+    """The model output associated with a sequence with multiple generated
+       tokens.
+
+    Args:
+        parent_seq_id: The ID of the parent sequence (for forking in beam
+            search).
+        output_tokens: The output tokens ID.
+        logprobs_list: The list of logprobs of each output token
+            List[(Token id -> logP(x_i+1 | x_0, ..., x_i))].
+        num_accepted_tokens: The number of accepted tokens.
+        parent_probs: The logprobs of parent token. This is useful for
+            speculative decoding.
+    """
+
+    def __init__(
+        self,
+        parent_seq_id: int,
+        output_tokens: List[int],
+        logprobs_list: List[Dict[int, float]],
+        num_accepted_tokens: int,
+        parent_probs: List[Optional[torch.Tensor]] = None,
+    ) -> None:
+        self.parent_seq_id = parent_seq_id
+        self.output_tokens = output_tokens
+        self.logprobs_list = logprobs_list
+        self.num_accepted_tokens = num_accepted_tokens
+        self.parent_probs = parent_probs
+
+    def __repr__(self) -> str:
+        return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
+                f"output_tokens={self.output_tokens}, "
+                f"logprobs_list={self.logprobs_list})")
+
+
 class SequenceGroupOutput:
     """The model output associated with a sequence group."""
 
@@ -477,9 +565,11 @@ class SequenceGroupOutput:
         self,
         samples: List[SequenceOutput],
         prompt_logprobs: Optional[PromptLogprobs],
+        num_accepted_tokens: Optional[int] = None,
     ) -> None:
         self.samples = samples
         self.prompt_logprobs = prompt_logprobs
+        self.num_accepted_tokens = num_accepted_tokens
 
     def __repr__(self) -> str:
         return (f"SequenceGroupOutput(samples={self.samples}, "
@@ -492,6 +582,42 @@ class SequenceGroupOutput:
                 and self.prompt_logprobs == other.prompt_logprobs)
 
 
+class SpeculateSequenceGroupOutput:
+    """The model output associated with a sequence.
+
+    Args:
+        parent_seq_id: The ID of the parent sequence (for forking in beam
+            search).
+        output_token: The output token ID.
+        logprobs: The logprobs of the output token.
+            (Token id -> logP(x_i+1 | x_0, ..., x_i))
+        num_accepted_tokens: The number of draft tokens accepted.
+    """
+
+    def __init__(
+        self,
+        parent_seq_id: int,
+        output_tokens: List[int],
+        logprobs: List[Dict[int, float]],
+        num_accepted_tokens: int,
+        prompt_logprobs: Optional[PromptLogprobs] = None,
+    ) -> None:
+        self.parent_seq_id = parent_seq_id
+        self.output_tokens = output_tokens
+        self.logprobs = logprobs
+        self.num_accepted_tokens = num_accepted_tokens
+        self.prompt_logprobs = prompt_logprobs
+
+    def __repr__(self) -> str:
+        return (
+            f"SpeculateSequenceGroupOutput(parent_seq_id={self.parent_seq_id}, "
+            f"output_tokens={self.output_tokens}, "
+            f"logprobs={self.logprobs}), num_accepted_tokens={self.num_accepted_tokens}"
+        )
+
+
 # For each sequence group, we generate a list of SequenceOutput object,
 # each of which contains one possible candidate for the next token.
 SamplerOutput = List[SequenceGroupOutput]
+SpeculateOutput = List[SpeculateSequenceGroupOutput]
+SpeculateSamplerOutput = List[SpeculateSequenceOutput]
