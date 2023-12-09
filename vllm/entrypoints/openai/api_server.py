@@ -328,6 +328,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                 if finish_reason_sent[i]:
                     continue
 
+                completion_tokens = 0
                 if output.finish_reason is None:
                     # Send token-by-token response for each request.n
                     delta_text = output.text[len(previous_texts[i]):]
