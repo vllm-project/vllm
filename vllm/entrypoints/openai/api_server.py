@@ -328,13 +328,11 @@ async def create_chat_completion(request: ChatCompletionRequest,
                 if finish_reason_sent[i]:
                     continue
 
-                completion_tokens = 0
                 if output.finish_reason is None:
                     # Send token-by-token response for each request.n
                     delta_text = output.text[len(previous_texts[i]):]
                     previous_texts[i] = output.text
-                    completion_tokens = len(output.token_ids)
-                    previous_num_tokens[i] = completion_tokens
+                    previous_num_tokens[i] = len(output.token_ids)
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=delta_text),
@@ -352,8 +350,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
                     prompt_tokens = len(res.prompt_token_ids)
                     final_usage = UsageInfo(
                         prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=prompt_tokens + completion_tokens,
+                        completion_tokens=previous_num_tokens[i],
+                        total_tokens=prompt_tokens + previous_num_tokens[i],
                     )
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i, delta=[], finish_reason=output.finish_reason)
