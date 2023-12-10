@@ -471,14 +471,16 @@ class CUDAGraphRunner:
 
         # Capture the graph.
         self.graph = torch.cuda.CUDAGraph()
-        with (torch.cuda.graph(self.graph, pool=memory_pool),
-              with_custom_nccl_for_all_reduce()):
-            hidden_states = self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                input_metadata,
-            )
+        # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
+        # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
+        with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
+            with with_custom_nccl_for_all_reduce():
+                hidden_states = self.model(
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    input_metadata,
+                )
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
