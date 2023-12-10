@@ -188,23 +188,23 @@ def destroy_model_parallel():
 # Whether to use cupy for nccl all reduce.
 # We use cupy for all reduce when using CUDA graph, because torch.distributed
 # is not well supported by CUDA graph.
-_ENABLE_CUSTOM_NCCL_FOR_ALL_REDUCE = False
+_ENABLE_CUPY_FOR_ALL_REDUCE = False
 
 
 @contextlib.contextmanager
 def with_custom_nccl_for_all_reduce():
     """use custom nccl instead of torch.distributed for all reduce"""
-    global _ENABLE_CUSTOM_NCCL_FOR_ALL_REDUCE
-    old = _ENABLE_CUSTOM_NCCL_FOR_ALL_REDUCE
-    _ENABLE_CUSTOM_NCCL_FOR_ALL_REDUCE = True
+    global _ENABLE_CUPY_FOR_ALL_REDUCE
+    old = _ENABLE_CUPY_FOR_ALL_REDUCE
+    _ENABLE_CUPY_FOR_ALL_REDUCE = True
 
     stream = torch.cuda.current_stream()
     with cupy_utils.set_cupy_stream(stream):
         yield
-    _ENABLE_CUSTOM_NCCL_FOR_ALL_REDUCE = old
+    _ENABLE_CUPY_FOR_ALL_REDUCE = old
 
 
 def is_custom_nccl_enabled_for_all_reduce():
     """check if custom nccl is enabled for all reduce"""
-    global _ENABLE_CUSTOM_NCCL_FOR_ALL_REDUCE
-    return _ENABLE_CUSTOM_NCCL_FOR_ALL_REDUCE
+    global _ENABLE_CUPY_FOR_ALL_REDUCE
+    return _ENABLE_CUPY_FOR_ALL_REDUCE
