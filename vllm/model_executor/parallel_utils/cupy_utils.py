@@ -1,3 +1,11 @@
+"""CuPY utilities for all-reduce.
+
+We use CuPY all-reduce instead of torch.distributed.all_reduce when capturing
+CUDA graphs, because torch.distributed.all_reduce causes errors when capturing
+CUDA graphs.
+
+TODO: Remove this file when torch.distributed.all_reduce is fixed.
+"""
 import contextlib
 
 import torch
@@ -65,6 +73,7 @@ def init_process_group(world_size: int,
         raise ImportError(
             "NCCLBackend is not available. Please install cupy.") from cupy
 
+    # TODO(woosuk): Create TP and PP process groups for CuPY.
     global _NCCL_BACKEND
     global _WORLD_SIZE
     assert world_size > 0, f"{world_size=} should be a positive integer"
