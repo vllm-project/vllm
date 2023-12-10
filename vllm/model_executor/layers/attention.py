@@ -84,7 +84,6 @@ class PagedAttention(nn.Module):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
-        slot_mapping = input_metadata.slot_mapping.flatten()
 
         # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value
@@ -96,7 +95,7 @@ class PagedAttention(nn.Module):
                 value,
                 key_cache,
                 value_cache,
-                slot_mapping,
+                input_metadata.slot_mapping.flatten(),
             )
 
         if input_metadata.is_prompt:
@@ -156,15 +155,20 @@ class PagedAttention(nn.Module):
             output = out.view_as(query)
         else:
             # Decoding run.
-            output = _paged_attention(
-                query,
-                key_cache,
-                value_cache,
-                input_metadata,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-            )
+            if key_cache is not None and value_cache is not None:
+                output = _paged_attention(
+                    query,
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                )
+            else:
+                # This happens during the initial memory profiling run for
+                # CUDA graphs.
+                output = torch.zeros_like(query)
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
