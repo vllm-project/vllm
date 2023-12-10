@@ -52,10 +52,12 @@ class ModelRunner:
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
-        input_embeds: List[torch.Tensor] = []
+        prompt_embeds: List[torch.Tensor] = []
+        prompt_embeds_indices: List[int] = []
 
         prompt_lens: List[int] = []
-        for seq_group_metadata in seq_group_metadata_list:
+        for seq_group_idx, seq_group_metadata in enumerate(
+                seq_group_metadata_list):
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
@@ -75,7 +77,11 @@ class ModelRunner:
                 # If prompt_embeds are set,
                 # the token_ids of the prompt are treated as 0,
                 # so zero_token_embeds is excluded from prompt_embeds.
-                input_embeds.append(seq_data.prompt_embeds.to("cuda"))
+                prompt_embeds.append(seq_data.prompt_embeds.to("cuda"))
+                prompt_embeds_indices.append(seq_group_idx)
+            else:
+                prompt_embeds.append(
+                    self.zero_token_embeds.repeat(prompt_len, 1))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -118,16 +124,18 @@ class ModelRunner:
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long)
 
-        if input_embeds:
-            padded_input_embeds = [
+        if prompt_embeds:
+            padded_prompt_embeds = [
                 _pad_embeddings_to_max(embeds, max_prompt_len,
                                        self.zero_token_embeds)
-                for embeds in input_embeds
+                for embeds in prompt_embeds
             ]
-            input_embeds = torch.stack(padded_input_embeds).to(
+            prompt_embeds = torch.stack(padded_prompt_embeds).to(
                 dtype=self.model_config.dtype, device="cuda")
         else:
-            input_embeds = None
+            prompt_embeds = None
+
+        prompt_embeds_indices = torch.tensor(prompt_embeds_indices)
 
         input_metadata = InputMetadata(
             prompt_lens=prompt_lens,
@@ -135,8 +143,9 @@ class ModelRunner:
             max_context_len=None,
             context_lens=None,
             block_tables=None,
+            prompt_embeds_indices=prompt_embeds_indices,
         )
-        return input_tokens, input_positions, input_embeds, input_metadata
+        return input_tokens, input_positions, prompt_embeds, input_metadata
 
     def _prepare_decode(
         self,
@@ -206,6 +215,7 @@ class ModelRunner:
             max_context_len=max_context_len,
             context_lens=context_lens,
             block_tables=block_tables,
+            prompt_embeds_indices=None,
         )
         return input_tokens, input_positions, None, input_metadata
 
@@ -292,10 +302,10 @@ class ModelRunner:
         is_prompt = seq_group_metadata_list[0].is_prompt
         if is_prompt:
             inputs = self._prepare_prompt(seq_group_metadata_list)
-            input_tokens, input_positions, input_embeds, input_metadata = inputs
+            input_tokens, input_positions, prompt_embeds, input_metadata = inputs
         else:
             inputs = self._prepare_decode(seq_group_metadata_list)
-            input_tokens, input_positions, input_embeds, input_metadata = inputs
+            input_tokens, input_positions, prompt_embeds, input_metadata = inputs
         sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                  input_metadata.prompt_lens)
 
@@ -306,7 +316,7 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
             cache_events=cache_events,
-            inputs_embeds=input_embeds,
+            prompt_embeds=prompt_embeds,
         )
 
         # Sample the next token.

@@ -36,6 +36,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.utils import replace_prompt_embeds
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -251,10 +252,15 @@ class BloomModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor = None,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        if inputs_embeds is None:
-            inputs_embeds = self.word_embeddings(input_ids)
+        inputs_embeds = self.word_embeddings(input_ids)
+        if prompt_embeds is not None:
+            inputs_embeds = replace_prompt_embeds(
+                inputs_embeds,
+                prompt_embeds,
+                input_metadata.prompt_embeds_indices,
+            )
         hidden_states = self.word_embeddings_layernorm(inputs_embeds)
         for i in range(len(self.h)):
             cache_event = None if cache_events is None else cache_events[i]

@@ -1,6 +1,6 @@
 """Utils for model executor."""
 import random
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -33,3 +33,13 @@ def set_weight_attrs(
         assert not hasattr(
             weight, key), (f"Overwriting existing tensor attribute: {key}")
         setattr(weight, key, value)
+
+
+def replace_prompt_embeds(
+    inputs_embeds: torch.Tensor,
+    prompt_embeds: torch.Tensor,
+    prompt_embeds_indices: List[int],
+):
+    inputs_embeds[torch.tensor(prompt_embeds_indices)] = torch.index_select(
+        prompt_embeds, 0, torch.tensor(prompt_embeds_indices))
+    return inputs_embeds
