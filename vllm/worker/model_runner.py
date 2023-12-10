@@ -49,7 +49,7 @@ class ModelRunner:
         self.max_context_len_to_capture = min(
             self.model_config.max_model_len if self.model_config else 0,
             _MAX_CONTEXT_LEN_TO_CAPTURE)
-        self.graph_capture_stream = torch.cuda.Stream()
+        self.graph_capture_stream = None  # Set after initial profiling.
         self.graph_memory_pool = None  # Set during graph capture.
 
     def load_model(self) -> None:
@@ -400,6 +400,7 @@ class ModelRunner:
                 block_tables=None,
                 use_graph=False,
             )
+            self.graph_capture_stream = torch.cuda.Stream()
             with torch.cuda.stream(self.graph_capture_stream):
                 self.model(
                     input_ids=input_tokens.cuda(),
