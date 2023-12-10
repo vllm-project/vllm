@@ -366,15 +366,20 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
 
 
-class BaichuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 13b
+class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
+    """Baichuan 13B and Baichuan2 7B/13B."""
 
     def __init__(self,
                  config,
                  linear_method: Optional[LinearMethodBase] = None):
-        super().__init__(config, "ALIBI", linear_method)
+        if config.hidden_size == 4096:  # baichuan2 7b
+            super().__init__(config, "ROPE", linear_method)
+        else:  # baichuan 13b, baichuan2 13b
+            super().__init__(config, "ALIBI", linear_method)
 
 
-class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 7b
+class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
+    """Baichuan 7B."""
 
     def __init__(self,
                  config,
