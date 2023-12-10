@@ -1,0 +1,11 @@
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+{{ '<reserved_102>' + message['content']}}
+{% elif message['role'] == 'assistant' %}
+{{ '<reserved_103>' + message['content']}}
+{% endif %}
+{% endfor %}
+
+{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}
+{{  '<reserved_103>' }}
+{% endif %}
