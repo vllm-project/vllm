@@ -500,8 +500,10 @@ class CUDAGraphRunner:
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        # Copy the input tensors to the input buffers.
         # KV caches are fixed tensors, so we don't need to copy them.
+        del kv_caches
+
+        # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids)
         self.input_buffers["positions"].copy_(positions)
         self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping)
