@@ -18,7 +18,10 @@ logger = init_logger(__name__)
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 _PAD_SLOT_ID = -1
 # Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
+# NOTE: _get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
+# If the context length of a sequence is larger than this, we fall back to the
+# eager mode.
 _MAX_CONTEXT_LEN_TO_CAPTURE = 8192
 
 
@@ -497,10 +500,8 @@ class CUDAGraphRunner:
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        # KV caches are fixed tensors, so we don't need to copy them.
-        assert kv_caches == self.input_buffers["kv_caches"]
-
         # Copy the input tensors to the input buffers.
+        # KV caches are fixed tensors, so we don't need to copy them.
         self.input_buffers["input_ids"].copy_(input_ids)
         self.input_buffers["positions"].copy_(positions)
         self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping)
