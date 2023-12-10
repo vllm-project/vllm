@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -78,6 +78,7 @@ class InternLMAttention(nn.Module):
         rope_theta: float = 10000,
         max_position_embeddings: int = 8192,
         linear_method: Optional[LinearMethodBase] = None,
+        rope_scaling: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -110,6 +111,7 @@ class InternLMAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             base=self.rope_theta,
+            rope_scaling=rope_scaling,
         )
         self.attn = PagedAttention(self.num_heads, self.head_dim, self.scaling)
 
@@ -150,6 +152,7 @@ class InternLMDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             max_position_embeddings=max_position_embeddings,
             linear_method=linear_method,
+            rope_scaling=getattr(config, "rope_scaling", None),
         )
         self.mlp = InternLMMLP(
             hidden_size=self.hidden_size,

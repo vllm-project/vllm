@@ -129,7 +129,7 @@ By default, the server uses a predefined chat template stored in the tokenizer. 
 
    $ python -m vllm.entrypoints.openai.api_server \
    $     --model facebook/opt-125m \
-   $     --chat-template ./examples/template_chatml.json
+   $     --chat-template ./examples/template_chatml.jinja
 
 This server can be queried in the same format as OpenAI API. For example, list the models:
 

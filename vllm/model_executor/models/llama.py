@@ -352,7 +352,11 @@ class LlamaForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            if "rotary_emb.cos_cached" in name:
+                continue
+            if "rotary_emb.sin_cached" in name:
+                continue
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 param = params_dict[name.replace(weight_name, param_name)]
