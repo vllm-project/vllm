@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 class GPTQConfig(QuantizationConfig):
     """Config class for GPTQ.
 
-    Reference: https://arxiv.org/abs/2306.00978
+    Reference: https://arxiv.org/abs/2210.17323
     """
 
     def __init__(
