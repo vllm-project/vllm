@@ -436,7 +436,7 @@ class ModelRunner:
             input_metadata = InputMetadata(
                 prompt_lens=[],
                 slot_mapping=slot_mapping[:batch_size],
-                max_context_len=_MAX_CONTEXT_LEN_TO_CAPTURE,
+                max_context_len=self.max_context_len_to_capture,
                 context_lens=context_lens[:batch_size],
                 block_tables=block_tables[:batch_size],
                 use_graph=True,
