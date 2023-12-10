@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -7,8 +8,6 @@ from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
 
 
 class GPTQConfig(QuantizationConfig):
@@ -71,6 +70,9 @@ class GPTQConfig(QuantizationConfig):
         return []
 
 
+ExlState = Enum('ExlState', ['Unused', 'Uninitialized', 'Ready'])
+
+
 class GPTQLinearMethod(LinearMethodBase):
     """Linear method for GPTQ.
 
@@ -80,26 +82,41 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
-        self.use_exllama = True
 
-    def create_weights(self, input_size: int, output_size: int,
-                       params_dtype: torch.dtype,
-                       parallel_type: str = "none") -> Dict[str, torch.Tensor]:
-        if input_size % self.quant_config.group_size != 0:
+    def create_weights(self, input_size_per_partition: int,
+                       output_size_per_partition: int, input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype) -> Dict[str, Any]:
+        if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
-        if output_size % self.quant_config.pack_factor != 0:
+        if output_size_per_partition % self.quant_config.pack_factor != 0:
             raise ValueError(
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
+        if self.quant_config.group_size != -1:
+            group_size = self.quant_config.group_size
+        else:
+            group_size = input_size
+        exllama_state = ExlState.Uninitialized
+        scale_and_zero_size = input_size // group_size
+        scale_and_zero_input_dim = None
+        if input_size != input_size_per_partition and self.quant_config.group_size != -1:
+            # For act-order models, we cannot use Exllama for row parallel layer
+            if self.quant_config.desc_act:
+                exllama_state = ExlState.Unused
+            else:
+                # we need to partition qzeros and scales for exllama kernel
+                scale_and_zero_size = input_size_per_partition // group_size
+                scale_and_zero_input_dim = 0
 
         qweight = Parameter(
             torch.empty(
-                input_size // self.quant_config.pack_factor,
-                output_size,
+                input_size_per_partition // self.quant_config.pack_factor,
+                output_size_per_partition,
                 device="cuda",
                 dtype=torch.int32,
             ),
@@ -114,29 +131,20 @@ class GPTQLinearMethod(LinearMethodBase):
             })
         g_idx = Parameter(
             torch.tensor(
-                [i // self.quant_config.group_size for i in range(input_size)],
+                [
+                    i // self.quant_config.group_size
+                    for i in range(input_size_per_partition)
+                ],
                 device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
         )
         set_weight_attrs(g_idx, {"input_dim": 0})
-        tp_size = get_tensor_model_parallel_world_size()
-        if parallel_type == "row" and tp_size > 1 and (self.quant_config.desc_act
-                and self.quant_config.group_size != -1):
-            input_size = input_size * tp_size
-            use_exllama = Parameter(torch.tensor(False, dtype=torch.bool, device="cuda"), requires_grad=False)
-        else:
-            use_exllama = Parameter(torch.tensor(True, dtype=torch.bool, device="cuda"), requires_grad=False)
-        if self.quant_config.desc_act or self.quant_config.group_size == -1:
-            input_dim = None
-        else:
-            input_dim = 0
-        group_size = self.quant_config.group_size if self.quant_config.group_size != -1 else input_size
         qzeros = Parameter(
             torch.empty(
-                input_size // group_size,
-                output_size // self.quant_config.pack_factor,
+                scale_and_zero_size,
+                output_size_per_partition // self.quant_config.pack_factor,
                 device="cuda",
                 dtype=torch.int32,
             ),
@@ -144,22 +152,22 @@ class GPTQLinearMethod(LinearMethodBase):
         )
         set_weight_attrs(
             qzeros, {
-                "input_dim": input_dim,
+                "input_dim": scale_and_zero_input_dim,
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
             })
         scales = Parameter(
             torch.empty(
-                input_size // group_size,
-                output_size,
+                scale_and_zero_size,
+                output_size_per_partition,
                 device="cuda",
                 dtype=params_dtype,
             ),
             requires_grad=False,
         )
         set_weight_attrs(scales, {
-            "input_dim": input_dim,
+            "input_dim": scale_and_zero_input_dim,
             "output_dim": 1,
         })
         return {
@@ -167,60 +175,30 @@ class GPTQLinearMethod(LinearMethodBase):
             "g_idx": g_idx,
             "qzeros": qzeros,
             "scales": scales,
-            "use_exllama": use_exllama,
+            "exllama_state": exllama_state,
         }
 
     def apply_weights(self,
-                      weights: Dict[str, torch.Tensor],
+                      weights: Dict[str, Any],
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = weights["qweight"]
-        height, width = weights["qweight"].shape
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
-        if weights["use_exllama"]:
-            if "q4" not in weights:
-                if not self.quant_config.desc_act:
-                    none_tensor = torch.empty((1, 1), device="meta")
-                    weights["q4"] = ops.make_q_matrix(
-                        weights["qweight"],
-                        none_tensor,
-                        none_tensor,
-                        weights["qzeros"],
-                        weights["scales"],
-                        none_tensor,
-                    )
-                else:
-                    weights["q_perm"] = torch.empty(
-                        (height * self.quant_config.pack_factor, ),
-                        dtype=torch.short,
-                        device=weights["qweight"].device)
-                    weights["q_invperm"] = torch.empty_like(weights["q_perm"])
-                    weights["q4"] = ops.make_q_matrix(
-                        weights["qweight"],
-                        weights["q_perm"],
-                        weights["q_invperm"],
-                        weights["qzeros"],
-                        weights["scales"],
-                        weights["g_idx"].cpu(),
-                    )
-            temp_dq = torch.empty((height * self.quant_config.pack_factor, width),
-                                  dtype=torch.float16,
-                                  device=x.device)
-            output = torch.empty((reshaped_x.shape[0], qweight.shape[-1]),
-                                 dtype=torch.float16,
-                                 device=x.device)
-            ops.gemm_half_q_half(reshaped_x, weights["q4"], output,
-                                 temp_dq, False)
-        else:
-            output = torch.zeros((reshaped_x.shape[0], qweight.shape[-1]),
-                                 dtype=torch.float32,
-                                 device=x.device)
-            ops.gptq_descact_matmul(reshaped_x.float(),
-                                    weights["qweight"], output,
-                                    weights["scales"].float(),
-                                    weights["qzeros"], weights["g_idx"])
-            output = output.half()
+        # exllama needs to shuffle the weight after the weight is loaded
+        # here we do the shuffle on first forward pass
+        if weights["exllama_state"] == ExlState.Uninitialized:
+            if self.quant_config.desc_act:
+                weights["g_idx"] = torch.argsort(weights["g_idx"]).to(
+                    torch.int)
+            else:
+                weights["g_idx"] = torch.empty((1, 1), device="meta")
+            weights["exllama_state"] = ExlState.Ready
+            ops.gptq_shuffle(weights["qweight"], weights["g_idx"])
+        output = ops.gptq_gemm(reshaped_x, weights["qweight"],
+                               weights["qzeros"], weights["scales"],
+                               weights["g_idx"],
+                               weights["exllama_state"] == ExlState.Ready)
         if bias is not None:
             output = output + bias
         return output.reshape(out_shape)

@@ -36,7 +36,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -377,6 +377,10 @@ class FalconForCausalLM(nn.Module):
         self.config = config
         self.linear_method = linear_method
         self.transformer = FalconModel(config, linear_method)
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+        )
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -401,8 +405,8 @@ class FalconForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        next_tokens = self.sampler(self.transformer.word_embeddings.weight,
-                                   hidden_states, sampling_metadata)
+        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(self,
@@ -421,7 +425,8 @@ class FalconForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if name not in params_dict:
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
                 continue
             param = params_dict[name]
             if "query_key_value" in name:

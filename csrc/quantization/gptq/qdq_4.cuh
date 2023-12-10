@@ -1,8 +1,14 @@
+/*
+Copied from https://github.com/turboderp/exllamav2
+*/
+
 #ifndef _qdq_4_cuh
 #define _qdq_4_cuh
 
 #include "qdq_util.cuh"
 
+namespace vllm {
+namespace gptq {
 // Permutation:
 //
 // 77775555 33331111  66664444 22220000
@@ -134,9 +140,13 @@ __forceinline__ __device__ void dequant_4bit_8_gptq
         dq[3] = __hfma2(q3.as_half2, y1y16[1], z1z16[1]);  // half2( q[6] - z, q[7] - z )
     }
 }
+}  // namespace gptq
+}  // namespace vllm
 
 #else
 
+namespace vllm {
+namespace gptq {
 __forceinline__ __device__ void shuffle_4bit_8
 (
     uint32_t* q,
@@ -218,5 +228,8 @@ __forceinline__ __device__ void dequant_4bit_8_gptq
         dq[3] = __hadd2(dqh2[3], z1[0]);
     }
 }
+
+}  // namespace gptq
+}  // namespace vllm
 
 #endif

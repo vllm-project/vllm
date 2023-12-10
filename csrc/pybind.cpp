@@ -50,19 +50,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Quantization ops
   ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
+  ops.def("gptq_gemm", &gptq_gemm, "Quantized GEMM for GPTQ");
+  ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
-  ops.def(
-    "make_q_matrix",
-    &make_q_matrix,
-    "Post processing for GPTQ");
-  ops.def(
-    "gemm_half_q_half",
-    &gemm_half_q_half,
-    "Quantized GEMM for GPTQ");
-  ops.def(
-    "gptq_descact_matmul",
-    &gptq_descact_matmul,
-    "Quantized GEMM for GPTQ for parallelized desc_act layer");
 
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
