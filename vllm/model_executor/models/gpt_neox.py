@@ -38,8 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (
     default_weight_loader,
@@ -51,6 +50,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GPTNeoXAttention(nn.Module):
+
     def __init__(
         self,
         config: GPTNeoXConfig,
@@ -62,12 +62,10 @@ class GPTNeoXAttention(nn.Module):
         self.head_size = self.hidden_size // self.total_num_heads
 
         tensor_model_parallel_world_size = (
-            get_tensor_model_parallel_world_size()
-        )
+            get_tensor_model_parallel_world_size())
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = (
-            self.total_num_heads // tensor_model_parallel_world_size
-        )
+        self.num_heads = (self.total_num_heads //
+                          tensor_model_parallel_world_size)
 
         self.query_key_value = QKVParallelLinear(
             config.hidden_size,
@@ -85,9 +83,8 @@ class GPTNeoXAttention(nn.Module):
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0
         rope_theta = getattr(config, "rope_theta", 10000)
-        max_position_embeddings = getattr(
-            config, "max_position_embeddings", 8192
-        )
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         self.rotary_emb = get_rope(
             self.head_size,
             rotary_dim=rotary_dim,
@@ -108,14 +105,14 @@ class GPTNeoXAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(
-            q, k, v, k_cache, v_cache, input_metadata, cache_event
-        )
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         output, _ = self.dense(attn_output)
         return output
 
 
 class GPTNeoXMLP(nn.Module):
+
     def __init__(
         self,
         config: GPTNeoXConfig,
@@ -133,9 +130,8 @@ class GPTNeoXMLP(nn.Module):
             linear_method=linear_method,
         )
         quant_config = getattr(linear_method, "quant_config", None)
-        self.act = get_act_fn(
-            config.hidden_act, quant_config, config.intermediate_size
-        )
+        self.act = get_act_fn(config.hidden_act, quant_config,
+                              config.intermediate_size)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.dense_h_to_4h(hidden_states)
@@ -145,6 +141,7 @@ class GPTNeoXMLP(nn.Module):
 
 
 class GPTNeoXLayer(nn.Module):
+
     def __init__(
         self,
         config: GPTNeoXConfig,
@@ -152,12 +149,10 @@ class GPTNeoXLayer(nn.Module):
     ):
         super().__init__()
         self.use_parallel_residual = config.use_parallel_residual
-        self.input_layernorm = nn.LayerNorm(
-            config.hidden_size, eps=config.layer_norm_eps
-        )
-        self.post_attention_layernorm = nn.LayerNorm(
-            config.hidden_size, eps=config.layer_norm_eps
-        )
+        self.input_layernorm = nn.LayerNorm(config.hidden_size,
+                                            eps=config.layer_norm_eps)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
+                                                     eps=config.layer_norm_eps)
         self.attention = GPTNeoXAttention(config, linear_method)
         self.mlp = GPTNeoXMLP(config, linear_method)
 
@@ -196,6 +191,7 @@ class GPTNeoXLayer(nn.Module):
 
 
 class GPTNeoXModel(nn.Module):
+
     def __init__(
         self,
         config: GPTNeoXConfig,
@@ -208,15 +204,12 @@ class GPTNeoXModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
-        self.layers = nn.ModuleList(
-            [
-                GPTNeoXLayer(config, linear_method)
-                for _ in range(config.num_hidden_layers)
-            ]
-        )
-        self.final_layer_norm = nn.LayerNorm(
-            config.hidden_size, eps=config.layer_norm_eps
-        )
+        self.layers = nn.ModuleList([
+            GPTNeoXLayer(config, linear_method)
+            for _ in range(config.num_hidden_layers)
+        ])
+        self.final_layer_norm = nn.LayerNorm(config.hidden_size,
+                                             eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -225,9 +218,10 @@ class GPTNeoXModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.embed_in(input_ids) + inputs_embeds
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_in(input_ids)
         hidden_states = inputs_embeds
 
         for i in range(len(self.layers)):
@@ -245,6 +239,7 @@ class GPTNeoXModel(nn.Module):
 
 
 class GPTNeoXForCausalLM(nn.Module):
+
     def __init__(
         self,
         config,
@@ -267,7 +262,7 @@ class GPTNeoXForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.gpt_neox(
             input_ids,
@@ -275,7 +270,7 @@ class GPTNeoXForCausalLM(nn.Module):
             kv_caches,
             input_metadata,
             cache_events,
-            inputs_embeds,
+            inputs_embeds=inputs_embeds,
         )
         return hidden_states
 
@@ -284,9 +279,8 @@ class GPTNeoXForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        next_tokens = self.sampler(
-            self.embed_out.weight, hidden_states, sampling_metadata
-        )
+        next_tokens = self.sampler(self.embed_out.weight, hidden_states,
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(
@@ -298,13 +292,9 @@ class GPTNeoXForCausalLM(nn.Module):
     ):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
-            if (
-                "attention.bias" in name
-                or "attention.masked_bias" in name
-                or "rotary_emb.inv_freq" in name
-            ):
+                model_name_or_path, cache_dir, load_format, revision):
+            if ("attention.bias" in name or "attention.masked_bias" in name
+                    or "rotary_emb.inv_freq" in name):
                 continue
             param = params_dict[name]
 
@@ -318,18 +308,14 @@ class GPTNeoXForCausalLM(nn.Module):
                 if output_dim is not None:
                     loaded_weight_shape = loaded_weight.shape
                     loaded_weight = loaded_weight.view(
-                        loaded_weight_shape[:output_dim]
-                        + (num_heads, 3, -1)
-                        + loaded_weight_shape[output_dim + 1 :]
-                    )
+                        loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
+                        loaded_weight_shape[output_dim + 1:])
                     loaded_weight = loaded_weight.transpose(
-                        output_dim, output_dim + 1
-                    )
+                        output_dim, output_dim + 1)
                     loaded_weight = loaded_weight.reshape(loaded_weight_shape)
 
-            weight_loader = getattr(
-                param, "weight_loader", default_weight_loader
-            )
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
             weight_loader(param, loaded_weight)
 
     def get_input_embeddings(self):

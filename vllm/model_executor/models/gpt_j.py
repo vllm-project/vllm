@@ -38,8 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (
     default_weight_loader,
@@ -51,6 +50,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GPTJAttention(nn.Module):
+
     def __init__(
         self,
         config: GPTJConfig,
@@ -83,9 +83,8 @@ class GPTJAttention(nn.Module):
         assert getattr(config, "rotary", True)
         assert config.rotary_dim % 2 == 0
         rope_theta = getattr(config, "rope_theta", 10000)
-        max_position_embeddings = getattr(
-            config, "max_position_embeddings", 8192
-        )
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         self.rotary_emb = get_rope(
             self.head_size,
             rotary_dim=config.rotary_dim,
@@ -107,14 +106,14 @@ class GPTJAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(
-            q, k, v, k_cache, v_cache, input_metadata, cache_event
-        )
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
 
 class GPTJMLP(nn.Module):
+
     def __init__(
         self,
         intermediate_size: int,
@@ -134,9 +133,8 @@ class GPTJMLP(nn.Module):
             linear_method=linear_method,
         )
         quant_config = getattr(linear_method, "quant_config", None)
-        self.act = get_act_fn(
-            config.activation_function, quant_config, intermediate_size
-        )
+        self.act = get_act_fn(config.activation_function, quant_config,
+                              intermediate_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc_in(hidden_states)
@@ -146,15 +144,15 @@ class GPTJMLP(nn.Module):
 
 
 class GPTJBlock(nn.Module):
+
     def __init__(
         self,
         config: GPTJConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        inner_dim = (
-            4 * config.n_embd if config.n_inner is None else config.n_inner
-        )
+        inner_dim = (4 * config.n_embd
+                     if config.n_inner is None else config.n_inner)
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = GPTJAttention(config, linear_method)
         self.mlp = GPTJMLP(inner_dim, config, linear_method)
@@ -182,6 +180,7 @@ class GPTJBlock(nn.Module):
 
 
 class GPTJModel(nn.Module):
+
     def __init__(
         self,
         config: GPTJConfig,
@@ -195,8 +194,7 @@ class GPTJModel(nn.Module):
             self.embed_dim,
         )
         self.h = nn.ModuleList(
-            [GPTJBlock(config, linear_method) for _ in range(config.n_layer)]
-        )
+            [GPTJBlock(config, linear_method) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -206,9 +204,10 @@ class GPTJModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.wte(input_ids) + inputs_embeds
+        if inputs_embeds is None:
+            inputs_embeds = self.wte(input_ids)
         hidden_states = inputs_embeds
 
         for i in range(len(self.h)):
@@ -226,6 +225,7 @@ class GPTJModel(nn.Module):
 
 
 class GPTJForCausalLM(nn.Module):
+
     def __init__(
         self,
         config: GPTJConfig,
@@ -250,7 +250,7 @@ class GPTJForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(
             input_ids,
@@ -258,7 +258,7 @@ class GPTJForCausalLM(nn.Module):
             kv_caches,
             input_metadata,
             cache_events,
-            inputs_embeds,
+            inputs_embeds=inputs_embeds,
         )
         return hidden_states
 
@@ -292,8 +292,7 @@ class GPTJForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+                model_name_or_path, cache_dir, load_format, revision):
             if "attn.bias" in name or "attn.masked_bias" in name:
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -305,9 +304,8 @@ class GPTJForCausalLM(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
 
     def get_input_embeddings(self):

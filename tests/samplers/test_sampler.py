@@ -12,17 +12,18 @@ from vllm.worker.model_runner import ModelRunner
 
 
 class MockLogitsSampler(Sampler):
+
     def __init__(self, vocab_size: int, fake_logits: torch.Tensor):
         super().__init__(vocab_size=vocab_size)
         self.fake_logits = fake_logits
 
     def forward(self, *args, **kwargs):
         with patch(
-            "vllm.model_executor.layers.sampler._prune_hidden_states",
-            lambda x, y: x,
+                "vllm.model_executor.layers.sampler._prune_hidden_states",
+                lambda x, y: x,
         ), patch(
-            "vllm.model_executor.layers.sampler._get_logits",
-            lambda *args, **kwargs: self.fake_logits,
+                "vllm.model_executor.layers.sampler._get_logits",
+                lambda *args, **kwargs: self.fake_logits,
         ):
             return super().forward(*args, **kwargs)
 
@@ -31,9 +32,9 @@ def _prepare_test(
     batch_size: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, ModelRunner]:
     vocab_size = 32000
-    input_tensor = torch.rand(
-        (batch_size, 1024), device="cuda", dtype=torch.float16
-    )
+    input_tensor = torch.rand((batch_size, 1024),
+                              device="cuda",
+                              dtype=torch.float16)
     fake_logits = torch.full(
         (batch_size, vocab_size),
         1e-2,
@@ -52,7 +53,8 @@ RANDOM_SEEDS = list(range(128))
 def test_sampler_all_greedy(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
+        batch_size)
 
     seq_group_metadata_list = []
     prompt_lens = []
@@ -62,17 +64,13 @@ def test_sampler_all_greedy(seed: int):
                 request_id=f"test_{i}",
                 is_prompt=True,
                 seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(
-                    temperature=0,
-                ),
+                sampling_params=SamplingParams(temperature=0, ),
                 block_tables={0: [1]},
-            )
-        )
+            ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens
-    )
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler_output = sampler(
         embedding=None,
         hidden_states=input_tensor,
@@ -88,7 +86,8 @@ def test_sampler_all_greedy(seed: int):
 def test_sampler_all_random(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
+        batch_size)
 
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
@@ -106,13 +105,11 @@ def test_sampler_all_random(seed: int):
                     n=random.randint(1, 10),
                 ),
                 block_tables={0: [1]},
-            )
-        )
+            ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens
-    )
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler_output = sampler(
         embedding=None,
         hidden_states=input_tensor,
@@ -143,13 +140,11 @@ def test_sampler_all_beam(seed: int):
                     use_beam_search=True,
                 ),
                 block_tables={0: [1]},
-            )
-        )
+            ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens
-    )
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler(
         embedding=None,
         hidden_states=input_tensor,
@@ -165,7 +160,8 @@ def test_sampler_all_beam(seed: int):
 def test_sampler_mixed(seed: int):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
+        batch_size)
 
     seq_group_metadata_list = []
     expected_tokens = []
@@ -185,9 +181,9 @@ def test_sampler_mixed(seed: int):
                 presence_penalty=random.randint(0, 1),
             )
         else:
-            sampling_params = SamplingParams(
-                temperature=0, use_beam_search=True, best_of=2
-            )
+            sampling_params = SamplingParams(temperature=0,
+                                             use_beam_search=True,
+                                             best_of=2)
         for idx in range(n):
             fake_logits[i, i + idx] = 1e2
             expected_tokens.append(i + idx)
@@ -198,13 +194,11 @@ def test_sampler_mixed(seed: int):
                 seq_data={0: SequenceData([1, 2, 3])},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
-            )
-        )
+            ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens
-    )
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler_output = sampler(
         embedding=None,
         hidden_states=input_tensor,
@@ -238,17 +232,14 @@ def test_sampler_logits_processors(seed: int):
                 request_id=f"test_{i}",
                 is_prompt=True,
                 seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(
-                    temperature=0, logits_processors=[pick_ith]
-                ),
+                sampling_params=SamplingParams(temperature=0,
+                                               logits_processors=[pick_ith]),
                 block_tables={0: [1]},
-            )
-        )
+            ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(
-        seq_group_metadata_list, prompt_lens
-    )
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
     sampler_output = sampler(
         embedding=None,
         hidden_states=input_tensor,

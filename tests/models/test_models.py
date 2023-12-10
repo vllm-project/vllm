@@ -3,6 +3,7 @@
 Run `pytest tests/models/test_models.py --forked`.
 """
 import pytest
+from vllm.sampling_params import SamplingParams
 
 MODELS = [
     "facebook/opt-125m",
@@ -17,7 +18,6 @@ MODELS = [
     "mosaicml/mpt-7b",
     "microsoft/phi-1_5",
 ]
-
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
@@ -51,47 +51,38 @@ def test_models(
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models_from_prompt_embeds(
-    hf_runner,
     vllm_runner,
     example_prompts,
     model: str,
     dtype: str,
     max_tokens: int,
 ) -> None:
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+    vllm_model = vllm_runner(model, dtype=dtype)
+    tokenizer = vllm_model.model.llm_engine.tokenizer
+    input_embeddings = vllm_model.model.llm_engine.workers[
+        0].model_runner.model.get_input_embeddings()
 
     prompt_embeds = []
     for prompt in example_prompts:
-        token_ids = hf_model.tokenizer(
-            prompt, return_tensors="pt").input_ids.to("cuda")
-        token_embeds = hf_model.model.get_input_embeddings()(token_ids)
+        token_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
+        token_embeds = input_embeddings(token_ids)
         prompt_embeds.append(token_embeds[0])
-    del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs_from_prompts = vllm_model.generate_greedy(example_prompts,
-                                                           max_tokens,
-                                                           prompt_embeds=None)
-    vllm_outputs_from_embeds = vllm_model.generate_greedy(
-        example_prompts, max_tokens, prompt_embeds=prompt_embeds)
+    outputs_from_prompts = vllm_model.model.generate(
+        example_prompts,
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=max_tokens),
+        prompt_embeds=None)
+    outputs_from_embeds = vllm_model.model.generate(
+        None,
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=max_tokens),
+        prompt_embeds=prompt_embeds,
+    )
     del vllm_model
 
-    for i in range(len(example_prompts)):
-        prompt = example_prompts[i]
-        hf_output_str = hf_outputs[i][1]
-        vllm_output_str_from_prompts = vllm_outputs_from_prompts[i][1]
-        vllm_output_str_from_embeds = vllm_outputs_from_embeds[i][1]
-
-        assert hf_output_str == vllm_output_str_from_prompts, (
-            f"Test{i}:\n"
-            "HF: {hf_output_str!r}\n"
-            "vLLM_prompt: {vllm_output_str_from_prompts!r}")
-        assert hf_output_str == vllm_output_str_from_embeds, (
-            f"Test{i}:\n"
-            "HF: {hf_output_str}\n"
-            "vLLM_embeds: {vllm_output_str_from_embeds}")
-        assert vllm_output_str_from_prompts == vllm_output_str_from_embeds, (
-            f"Test{i}:\n"
-            "vLLM_prompt: {vllm_output_str_from_prompts}\n"
-            "vLLM_embeds: {vllm_output_str_from_embeds}")
+    for output_prompt, output_embed in zip(outputs_from_prompts,
+                                           outputs_from_embeds):
+        assert output_prompt.outputs[0].token_ids == output_embed.outputs[
+            0].token_ids, (
+                f"output_prompt: {output_prompt.outputs[0].token_ids}\n",
+                f"output_embed: {output_embed.outputs[0].token_ids}",
+            )

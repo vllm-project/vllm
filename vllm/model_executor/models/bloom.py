@@ -251,9 +251,10 @@ class BloomModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.word_embeddings(input_ids) + inputs_embeds
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
         hidden_states = self.word_embeddings_layernorm(inputs_embeds)
         for i in range(len(self.h)):
             cache_event = None if cache_events is None else cache_events[i]
@@ -290,11 +291,16 @@ class BloomForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events,
-                                         inputs_embeds)
+        hidden_states = self.transformer(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            cache_events,
+            inputs_embeds=inputs_embeds,
+        )
         return hidden_states
 
     def sample(
@@ -339,7 +345,6 @@ class BloomForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-
 
     def get_input_embeddings(self):
         return self.transformer.word_embeddings

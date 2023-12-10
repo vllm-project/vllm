@@ -42,8 +42,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (
     default_weight_loader,
@@ -56,6 +55,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class AquilaMLP(nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
@@ -77,10 +77,8 @@ class AquilaMLP(nn.Module):
             linear_method=linear_method,
         )
         if hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {hidden_act}. "
-                "Only silu is supported for now."
-            )
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -91,6 +89,7 @@ class AquilaMLP(nn.Module):
 
 
 class AquilaRMSNorm(nn.Module):
+
     def __init__(self, hidden_size, eps=1e-6):
         """
         AquilaRMSNorm is equivalent to T5LayerNorm
@@ -101,15 +100,16 @@ class AquilaRMSNorm(nn.Module):
 
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
-        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(
-            variance + self.variance_epsilon
-        )
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1,
+                                                               keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance +
+                                                    self.variance_epsilon)
 
         return (self.weight * hidden_states).to(input_dtype)
 
 
 class AquilaAttention(nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
@@ -176,14 +176,14 @@ class AquilaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(
-            q, k, v, k_cache, v_cache, input_metadata, cache_event
-        )
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                cache_event)
         output, _ = self.o_proj(attn_output)
         return output
 
 
 class AquilaDecoderLayer(nn.Module):
+
     def __init__(
         self,
         config: AquilaConfig,
@@ -193,9 +193,8 @@ class AquilaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(
-            config, "max_position_embeddings", 8192
-        )
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         self.self_attn = AquilaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -211,12 +210,10 @@ class AquilaDecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             linear_method=linear_method,
         )
-        self.input_layernorm = AquilaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_attention_layernorm = AquilaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = AquilaRMSNorm(config.hidden_size,
+                                             eps=config.rms_norm_eps)
+        self.post_attention_layernorm = AquilaRMSNorm(config.hidden_size,
+                                                      eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -247,6 +244,7 @@ class AquilaDecoderLayer(nn.Module):
 
 
 class AquilaModel(nn.Module):
+
     def __init__(
         self,
         config: AquilaConfig,
@@ -260,12 +258,10 @@ class AquilaModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
-        self.layers = nn.ModuleList(
-            [
-                AquilaDecoderLayer(config, linear_method)
-                for _ in range(config.num_hidden_layers)
-            ]
-        )
+        self.layers = nn.ModuleList([
+            AquilaDecoderLayer(config, linear_method)
+            for _ in range(config.num_hidden_layers)
+        ])
         self.norm = AquilaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -275,9 +271,10 @@ class AquilaModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.embed_tokens(input_ids) + inputs_embeds
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
         for i in range(len(self.layers)):
             cache_event = None if cache_events is None else cache_events[i]
@@ -295,6 +292,7 @@ class AquilaModel(nn.Module):
 
 
 class AquilaForCausalLM(nn.Module):
+
     def __init__(
         self,
         config,
@@ -314,7 +312,7 @@ class AquilaForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids,
@@ -322,7 +320,7 @@ class AquilaForCausalLM(nn.Module):
             kv_caches,
             input_metadata,
             cache_events,
-            inputs_embeds,
+            inputs_embeds=inputs_embeds,
         )
         return hidden_states
 
@@ -331,9 +329,8 @@ class AquilaForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        next_tokens = self.sampler(
-            self.lm_head.weight, hidden_states, sampling_metadata
-        )
+        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(
@@ -353,8 +350,7 @@ class AquilaForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+                model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -366,9 +362,8 @@ class AquilaForCausalLM(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
 
     def get_input_embeddings(self):

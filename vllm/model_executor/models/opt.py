@@ -246,9 +246,10 @@ class OPTDecoder(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.embed_tokens(input_ids) + inputs_embeds
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
         pos_embeds = self.embed_positions(positions)
         if self.project_in is not None:
             inputs_embeds, _ = self.project_in(inputs_embeds)
@@ -284,10 +285,16 @@ class OPTModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor,
+        inputs_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        return self.decoder(input_ids, positions, kv_caches, input_metadata,
-                            cache_events, inputs_embeds)
+        return self.decoder(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            cache_events,
+            inputs_embeds=inputs_embeds,
+        )
 
 
 class OPTForCausalLM(nn.Module):
@@ -313,14 +320,8 @@ class OPTForCausalLM(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
         inputs_embeds: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids,
-            positions,
-            kv_caches,
-            input_metadata,
-            cache_events,
-            inputs_embeds
-        )
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   input_metadata, cache_events, inputs_embeds)
         return hidden_states
 
     def sample(
@@ -363,7 +364,6 @@ class OPTForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-
 
     def get_input_embeddings(self):
         return self.model.decoder.embed_tokens

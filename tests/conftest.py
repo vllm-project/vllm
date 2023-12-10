@@ -48,7 +48,10 @@ class HfRunner:
         ).cuda()
         if tokenizer_name is None:
             tokenizer_name = model_name
-        self.tokenizer = get_tokenizer(tokenizer_name, trust_remote_code=True)
+        self.tokenizer = get_tokenizer(
+            tokenizer_name,
+            trust_remote_code=True,
+        )
 
     def generate(
         self,

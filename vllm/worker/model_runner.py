@@ -31,7 +31,7 @@ class ModelRunner:
                                if model_config is not None else None)
         self.model = None
         self.block_size = None  # Set after initial profiling.
-        self.zero_token_embeds = None # Set after model loading.
+        self.zero_token_embeds = None  # Set after model loading.
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
@@ -41,8 +41,8 @@ class ModelRunner:
 
     def set_zero_token_embeds(self):
         assert self.model is not None
-        self.zero_token_embeds = self.model.get_input_embeddings()(torch.tensor(
-            [[0]], device="cuda"))[0]
+        self.zero_token_embeds = self.model.get_input_embeddings()(
+            torch.tensor([[0]], device="cuda"))[0]
 
     def _prepare_prompt(
         self,
@@ -53,7 +53,6 @@ class ModelRunner:
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
         input_embeds: List[torch.Tensor] = []
-        zero_embeds = torch.zeros(self.zero_token_embeds.shape, device="cuda")
 
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
@@ -76,12 +75,7 @@ class ModelRunner:
                 # If prompt_embeds are set,
                 # the token_ids of the prompt are treated as 0,
                 # so zero_token_embeds is excluded from prompt_embeds.
-                input_embeds.append(
-                    seq_data.prompt_embeds.to("cuda") -
-                    self.zero_token_embeds.repeat(len(prompt_tokens), 1))
-            else:
-                input_embeds.append(zero_embeds.repeat(len(prompt_tokens), 1))
-
+                input_embeds.append(seq_data.prompt_embeds.to("cuda"))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -123,13 +117,17 @@ class ModelRunner:
                                              max_prompt_len,
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long)
-        
-        padded_input_embeds = [
-            _pad_embeddings_to_max(embeds, max_prompt_len, zero_embeds)
-            for embeds in input_embeds
-        ]
-        input_embeds = torch.stack(padded_input_embeds).to(
-            dtype=self.model_config.dtype, device="cuda")
+
+        if input_embeds:
+            padded_input_embeds = [
+                _pad_embeddings_to_max(embeds, max_prompt_len,
+                                       self.zero_token_embeds)
+                for embeds in input_embeds
+            ]
+            input_embeds = torch.stack(padded_input_embeds).to(
+                dtype=self.model_config.dtype, device="cuda")
+        else:
+            input_embeds = None
 
         input_metadata = InputMetadata(
             prompt_lens=prompt_lens,
@@ -150,8 +148,6 @@ class ModelRunner:
         slot_mapping: List[List[int]] = []
         context_lens: List[int] = []
         block_tables: List[List[int]] = []
-        input_embeds: List[torch.Tensor] = []
-        zero_embeds = torch.zeros(self.zero_token_embeds.shape, device="cuda")
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
@@ -161,7 +157,6 @@ class ModelRunner:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append([generation_token])
-                input_embeds.append(zero_embeds)
 
                 context_len = seq_data.get_len()
                 if self.sliding_window is not None:
@@ -204,13 +199,7 @@ class ModelRunner:
                                              max_len=max_block_table_len,
                                              pad=0,
                                              dtype=torch.int)
-        padded_input_embeds = [
-            _pad_embeddings_to_max(embeds, 1, zero_embeds)
-            for embeds in input_embeds
-        ]
-        input_embeds = torch.stack(padded_input_embeds).to(
-            dtype=self.model_config.dtype, device="cuda")
-        
+
         input_metadata = InputMetadata(
             prompt_lens=[],
             slot_mapping=slot_mapping,
@@ -218,7 +207,7 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
         )
-        return input_tokens, input_positions, input_embeds, input_metadata
+        return input_tokens, input_positions, None, input_metadata
 
     def _prepare_sample(
         self,
@@ -369,6 +358,7 @@ def _pad_embeddings_to_max(x: torch.Tensor, max_len: int,
         [x, pad.repeat(max_len - x.shape[0], 1)],
         dim=0,
     )
+
 
 def _make_tensor_with_pad(
     x: List[List[int]],
