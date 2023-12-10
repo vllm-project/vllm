@@ -49,6 +49,7 @@ class ModelRunner:
         self.max_context_len_to_capture = min(
             self.model_config.max_model_len if self.model_config else 0,
             _MAX_CONTEXT_LEN_TO_CAPTURE)
+        self.graph_capture_stream = torch.cuda.Stream()
         self.graph_memory_pool = None  # Set during graph capture.
 
     def load_model(self) -> None:
@@ -382,6 +383,31 @@ class ModelRunner:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [(None, None)] * num_layers
         self.execute_model(seqs, kv_caches)
+        torch.cuda.synchronize()
+
+        if not self.model_config.enforce_eager:
+            # Approximately profile the memory usage of the CUDA graph by
+            # running the model with a maximum batch size to capture on
+            # the capture stream.
+            max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
+            input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long)
+            input_positions = torch.zeros(max_batch_size, 1, dtype=torch.long)
+            input_metadata = InputMetadata(
+                prompt_lens=[],
+                slot_mapping=None,
+                max_context_len=None,
+                context_lens=None,
+                block_tables=None,
+                use_graph=False,
+            )
+            with torch.cuda.stream(self.graph_capture_stream):
+                self.model(
+                    input_ids=input_tokens.cuda(),
+                    positions=input_positions.cuda(),
+                    kv_caches=kv_caches,
+                    input_metadata=input_metadata,
+                )
+            torch.cuda.synchronize()
         return
 
     @torch.inference_mode()
@@ -391,44 +417,37 @@ class ModelRunner:
                     "unexpected consequences if the model is not static. To "
                     "run the model in eager mode, set 'enforce_eager=True' or "
                     "use '--enforce-eager' in the CLI.")
-
         start_time = time.perf_counter()
-        self.block_tables.fill(0)
+
+        # Prepare dummy inputs. These will be reused for all batch sizes.
+        max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
+        input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda()
+        input_positions = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda()
+        slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
+        slot_mapping.fill_(_PAD_SLOT_ID)
+        context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
+        block_tables = torch.from_numpy(self.block_tables).cuda()
+
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
         for batch_size in reversed(_BATCH_SIZES_TO_CAPTURE):
-            # Create dummy inputs.
-            input_tokens = _make_tensor_with_pad([[]] * batch_size,
-                                                 max_len=1,
-                                                 pad=0,
-                                                 dtype=torch.long)
-            input_positions = _make_tensor_with_pad([[]] * batch_size,
-                                                    max_len=1,
-                                                    pad=0,
-                                                    dtype=torch.long)
-            slot_mapping = _make_tensor_with_pad([[]] * batch_size,
-                                                 max_len=1,
-                                                 pad=_PAD_SLOT_ID,
-                                                 dtype=torch.long)
-            context_lens = torch.tensor([1] * batch_size,
-                                        dtype=torch.int,
-                                        device="cuda")
-            input_block_tables = self.block_tables[:batch_size]
+            # Create dummy input_metadata.
             input_metadata = InputMetadata(
                 prompt_lens=[],
-                slot_mapping=slot_mapping,
+                slot_mapping=slot_mapping[:batch_size],
                 max_context_len=_MAX_CONTEXT_LEN_TO_CAPTURE,
-                context_lens=context_lens,
-                block_tables=torch.from_numpy(input_block_tables).cuda(),
+                context_lens=context_lens[:batch_size],
+                block_tables=block_tables[:batch_size],
                 use_graph=True,
             )
 
             graph_runner = CUDAGraphRunner(self.model)
             graph_runner.capture(
-                input_tokens,
-                input_positions,
+                input_tokens[:batch_size],
+                input_positions[:batch_size],
                 kv_caches,
                 input_metadata,
+                capture_stream=self.graph_capture_stream,
                 memory_pool=self.graph_memory_pool,
             )
             self.graph_memory_pool = graph_runner.graph.pool()
@@ -454,26 +473,32 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        capture_stream: torch.cuda.Stream,
         memory_pool,
     ) -> None:
         assert self.graph is None
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with with_custom_nccl_for_all_reduce():
-            self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                input_metadata,
-            )
+
+        # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
+        # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
+        with torch.cuda.stream(capture_stream):  # noqa: SIM117
+            with with_custom_nccl_for_all_reduce():
+                self.model(
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    input_metadata,
+                )
         torch.cuda.synchronize()
 
         # Capture the graph.
         self.graph = torch.cuda.CUDAGraph()
-        # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
-        # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
-        with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
+        with torch.cuda.graph(  # noqa: SIM117
+                self.graph,
+                stream=capture_stream,
+                pool=memory_pool):
             with with_custom_nccl_for_all_reduce():
                 hidden_states = self.model(
                     input_ids,
