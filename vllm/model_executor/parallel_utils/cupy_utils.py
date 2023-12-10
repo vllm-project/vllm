@@ -68,8 +68,8 @@ def init_process_group(world_size: int,
     global _NCCL_BACKEND
     global _WORLD_SIZE
     assert world_size > 0, f"{world_size=} should be a positive integer"
-    assert 0 <= rank < world_size,\
-        f"{rank=} should be a integer between [0, {world_size})"
+    assert 0 <= rank < world_size, (
+        f"{rank=} should be a integer between [0, {world_size})")
     cupy.cuda.runtime.setDevice(torch.cuda.current_device())
     _NCCL_BACKEND = NCCLBackendWithBFloat16(world_size, rank, host, port)
     _WORLD_SIZE = world_size
@@ -77,8 +77,7 @@ def init_process_group(world_size: int,
 
 def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
     """All-reduces the input tensor across the process group."""
-    assert input_.is_cuda,\
-        f"{input_} should be a cuda tensor"
+    assert input_.is_cuda, f"{input_} should be a cuda tensor"
     # Hack to support bfloat16
     torch_dtype = input_.dtype
     if torch_dtype is torch.bfloat16:
