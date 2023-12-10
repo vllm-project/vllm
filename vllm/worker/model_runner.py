@@ -135,7 +135,9 @@ class ModelRunner:
         else:
             prompt_embeds = None
 
-        prompt_embeds_indices = torch.tensor(prompt_embeds_indices)
+        prompt_embeds_indices = torch.tensor(prompt_embeds_indices,
+                                             device="cuda",
+                                             dtype=torch.int)
 
         input_metadata = InputMetadata(
             prompt_lens=prompt_lens,

@@ -297,7 +297,7 @@ class BloomForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor = None,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(
             input_ids,
@@ -305,7 +305,7 @@ class BloomForCausalLM(nn.Module):
             kv_caches,
             input_metadata,
             cache_events,
-            inputs_embeds=inputs_embeds,
+            prompt_embeds=prompt_embeds,
         )
         return hidden_states
 

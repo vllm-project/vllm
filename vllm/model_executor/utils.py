@@ -1,6 +1,6 @@
 """Utils for model executor."""
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -38,8 +38,8 @@ def set_weight_attrs(
 def replace_prompt_embeds(
     inputs_embeds: torch.Tensor,
     prompt_embeds: torch.Tensor,
-    prompt_embeds_indices: List[int],
+    prompt_embeds_indices: torch.Tensor,
 ):
-    inputs_embeds[torch.tensor(prompt_embeds_indices)] = torch.index_select(
-        prompt_embeds, 0, torch.tensor(prompt_embeds_indices))
+    inputs_embeds[prompt_embeds_indices] = torch.index_select(
+        prompt_embeds, 0, prompt_embeds_indices)
     return inputs_embeds

@@ -292,7 +292,7 @@ class OPTModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        inputs_embeds: torch.Tensor = None,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         return self.decoder(
             input_ids,
@@ -300,7 +300,7 @@ class OPTModel(nn.Module):
             kv_caches,
             input_metadata,
             cache_events,
-            inputs_embeds=inputs_embeds,
+            prompt_embeds=prompt_embeds,
         )
 
 
@@ -325,7 +325,7 @@ class OPTForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        prompt_embeds: torch.Tensor,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids,
