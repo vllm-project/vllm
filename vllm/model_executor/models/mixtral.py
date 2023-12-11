@@ -34,10 +34,10 @@ from transformers import MistralConfig
 try:
     import megablocks.ops as ops
 except ImportError:
-    print("MegaBlocks not found, please see "
-          "https://github.com/stanford-futuredata/megablocks/. "
-          "Note that MegaBlocks depends on mosaicml-turbo, which only "
-          "supports python 3.10.")
+    print(
+        "MegaBlocks not found. Please install it by `pip install megablocks`. "
+        "Note that MegaBlocks depends on mosaicml-turbo, which only supports "
+        "Python 3.10 for now.")
 try:
     import stk
 except ImportError:
