@@ -10,9 +10,9 @@ RUN apt-get update -y \
 WORKDIR /workspace
 
 # install build and runtime dependencies
-COPY requirements.txt requirements.txt
+COPY requirements-gpu.txt requirements-gpu.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install -r requirements-gpu.txt
 
 # install development dependencies
 COPY requirements-dev.txt requirements-dev.txt
@@ -25,14 +25,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 FROM dev AS build
 
 # install build dependencies
-COPY requirements-build.txt requirements-build.txt
+COPY requirements-build-gpu.txt requirements-build-gpu.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-build.txt
+    pip install -r requirements-build-gpu.txt
 
 # copy input files
 COPY csrc csrc
 COPY setup.py setup.py
-COPY requirements.txt requirements.txt
+COPY requirements-gpu.txt requirements-gpu.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
 
@@ -75,9 +75,9 @@ RUN apt-get update -y \
     && apt-get install -y python3-pip
 
 WORKDIR /workspace
-COPY requirements.txt requirements.txt
+COPY requirements-gpu.txt requirements-gpu.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install -r requirements-gpu.txt
 #################### RUNTIME BASE IMAGE ####################
 
 

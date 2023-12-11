@@ -7,9 +7,9 @@ from typing import List
 
 import psutil
 import torch
+import os
 
 from vllm._C import cuda_utils
-
 
 class Device(enum.Enum):
     GPU = enum.auto()

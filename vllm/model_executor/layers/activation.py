@@ -27,7 +27,7 @@ class SiluAndMul(nn.Module):
     def _forward(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
-        return F.silu(x[..., :d]) * x[..., d:]
+        return (F.silu(x[..., :d].float()) * x[..., d:].float()).to(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2

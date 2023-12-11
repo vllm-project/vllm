@@ -14,10 +14,14 @@
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...)                          \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
+#ifdef VLLM_BUILD_CPU_ONLY
+#define VLLM_DISPATCH_TO_CUDA_CASE(BASENAME, ...) 
+#else
 #define VLLM_DISPATCH_TO_CUDA_CASE(BASENAME, ...)                              \
   case c10::DeviceType::CUDA: {                                                \
     return BASENAME(__VA_ARGS__);                                              \
   }
+#endif
 
 #ifdef VLLM_BUILD_CPU_OPS
 #define VLLM_DISPATCH_TO_CPU_CASE(BASENAME, ...)                               \

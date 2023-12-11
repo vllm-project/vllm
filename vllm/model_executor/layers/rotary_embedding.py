@@ -98,16 +98,19 @@ class RotaryEmbedding(nn.Module):
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        device = query.device
+        dtype = query.dtype
+
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
-        query_rot = query[..., :self.rotary_dim]
-        key_rot = key[..., :self.rotary_dim]
+        query_rot = query[..., :self.rotary_dim].float()
+        key_rot = key[..., :self.rotary_dim].float()
         if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim:]
-            key_pass = key[..., self.rotary_dim:]
+            query_pass = query[..., self.rotary_dim:].float()
+            key_pass = key[..., self.rotary_dim:].float()
 
-        cos_sin = self.cos_sin_cache[positions]
+        cos_sin = self.cos_sin_cache[positions].float()
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             # NOTE(woosuk): Here we assume that the positions tensor has the
@@ -128,8 +131,8 @@ class RotaryEmbedding(nn.Module):
         else:
             query = query_rot
             key = key_rot
-        query = query.flatten(-2)
-        key = key.flatten(-2)
+        query = query.flatten(-2).to(dtype=dtype, device=device)
+        key = key.flatten(-2).to(dtype=dtype, device=device)
         return query, key
 
     def forward(

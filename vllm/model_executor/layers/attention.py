@@ -3,9 +3,17 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
-from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
+try:
+    from xformers import ops as xops
+except:
+    pass
+
+try:
+    from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
+                                            LowerTriangularMaskWithTensorBias)
+except:
+    from vllm.model_executor.layers.xformers_cpu.attn_bias import (BlockDiagonalCausalMask,
+                                            LowerTriangularMaskWithTensorBias)
 
 from vllm._C import ops
 from vllm._C import cache_ops
@@ -160,12 +168,9 @@ class PagedAttention(nn.Module):
                 op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
                 (is_hip()) else None,
             ) if not self.cpu_only else torch.nn.functional.scaled_dot_product_attention(
-                query.movedim(1,
-                              query.dim() -
-                              2), key.movedim(1,
-                                              query.dim() - 2),
-                value.movedim(1,
-                              value.dim() - 2), input_metadata.attn_bias,
+                query.movedim(1, query.dim() -2), key.movedim(1, query.dim() - 2),
+                value.movedim(1, value.dim() - 2), 
+                input_metadata.attn_bias,
                 0.0).movedim(query.dim() - 2, 1).contiguous()
             output = out.view_as(query)
         else:
