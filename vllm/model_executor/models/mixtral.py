@@ -35,9 +35,7 @@ try:
     import megablocks.ops as ops
 except ImportError:
     print(
-        "MegaBlocks not found. Please install it by `pip install megablocks`. "
-        "Note that MegaBlocks depends on mosaicml-turbo, which only supports "
-        "Python 3.10 for now.")
+        "MegaBlocks not found. Please install it by `pip install megablocks`.")
 try:
     import stk
 except ImportError:
