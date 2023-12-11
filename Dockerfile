@@ -73,9 +73,9 @@ ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
 
 # openai api server alternative
 FROM vllm-base AS vllm-openai
-# install additional dependencies for openai api server
+# install additional dependencies for openai api server, and mixtral
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate fschat
+    pip install accelerate megablocks
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
