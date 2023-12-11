@@ -48,9 +48,9 @@ def test_api_server(api_server):
         result = None
         while not result:
             try:
-                for result in pool.map(_query_server, prompts):
+                for _ in pool.map(_query_server, prompts):
                     break
-            except:
+            except Exception:
                 time.sleep(1)
 
         # Actual tests start here

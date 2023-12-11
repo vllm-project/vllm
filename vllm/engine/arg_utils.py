@@ -22,24 +22,30 @@ class EngineArgs:
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
-    max_num_batched_tokens: int = 2560
+    max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
+    max_paddings: int = 256
     disable_log_stats: bool = False
     revision: Optional[str] = None
+    tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
-        self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
 
     @staticmethod
     def add_cli_args(
             parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Shared CLI arguments for vLLM engine."""
+
+        # NOTE: If you update any of the arguments below, please also
+        # make sure to update docs/source/models/engine_args.rst
+
         # Model arguments
         parser.add_argument(
             '--model',
@@ -56,6 +62,13 @@ class EngineArgs:
             type=str,
             default=None,
             help='the specific model version to use. It can be a branch '
+            'name, a tag name, or a commit id. If unspecified, will use '
+            'the default version.')
+        parser.add_argument(
+            '--tokenizer-revision',
+            type=str,
+            default=None,
+            help='the specific tokenizer version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
         parser.add_argument('--tokenizer-mode',
@@ -120,6 +133,12 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='number of tensor parallel replicas')
+        parser.add_argument(
+            '--max-parallel-loading-workers',
+            type=int,
+            help='load model sequentially in multiple batches, '
+            'to avoid RAM OOM when using tensor '
+            'parallel and large models')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
@@ -149,6 +168,10 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='maximum number of sequences per iteration')
+        parser.add_argument('--max-paddings',
+                            type=int,
+                            default=EngineArgs.max_paddings,
+                            help='maximum number of paddings in a batch')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
@@ -156,7 +179,7 @@ class EngineArgs:
         parser.add_argument('--quantization',
                             '-q',
                             type=str,
-                            choices=['awq', None],
+                            choices=['awq', 'squeezellm', None],
                             default=None,
                             help='Method used to quantize the weights')
         return parser
@@ -176,16 +199,20 @@ class EngineArgs:
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
                                    self.dtype, self.seed, self.revision,
-                                   self.max_model_len, self.quantization)
+                                   self.tokenizer_revision, self.max_model_len,
+                                   self.quantization)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
-                                   self.swap_space)
+                                   self.swap_space,
+                                   model_config.get_sliding_window())
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
-                                         self.worker_use_ray)
+                                         self.worker_use_ray,
+                                         self.max_parallel_loading_workers)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
-                                           model_config.get_max_model_len())
+                                           model_config.max_model_len,
+                                           self.max_paddings)
         return model_config, cache_config, parallel_config, scheduler_config
 
 

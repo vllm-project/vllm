@@ -43,13 +43,14 @@ jobs:
     name: Build Wheel
     runs-on: ${{ matrix.os }}
     needs: release
-    
+
     strategy:
       fail-fast: false
       matrix:
           os: ['ubuntu-20.04']
           python-version: ['3.8', '3.9', '3.10', '3.11']
-          cuda-version: ['11.8'] # Github runner can't build anything older than 11.8
+          pytorch-version: ['2.1.0']
+          cuda-version: ['11.8', '12.1']
 
     steps:
       - name: Checkout
@@ -69,9 +70,9 @@ jobs:
         run: |
           bash -x .github/workflows/scripts/cuda-install.sh ${{ matrix.cuda-version }} ${{ matrix.os }}
 
-      - name: Install PyTorch-cu${{ matrix.cuda-version }}
+      - name: Install PyTorch ${{ matrix.pytorch-version }} with CUDA ${{ matrix.cuda-version }}
         run: |
-          bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
+          bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.pytorch-version }} ${{ matrix.cuda-version }}
 
       - name: Build wheel
         shell: bash
@@ -81,7 +82,7 @@ jobs:
           asset_name=${wheel_name//"linux"/"manylinux1"}
           echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
           echo "asset_name=${asset_name}" >> $GITHUB_ENV
-      
+
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
         env:

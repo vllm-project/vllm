@@ -39,6 +39,7 @@ vLLM is flexible and easy to use with:
 * Tensor parallelism support for distributed inference
 * Streaming outputs
 * OpenAI-compatible API server
+* Support NVIDIA CUDA and AMD ROCm.
 
 For more information, check out the following:
 
@@ -56,6 +57,7 @@ Documentation
    :caption: Getting Started
 
    getting_started/installation
+   getting_started/amd-installation
    getting_started/quickstart
 
 .. toctree::
@@ -65,6 +67,9 @@ Documentation
    serving/distributed_serving
    serving/run_on_sky
    serving/deploying_with_triton
+   serving/deploying_with_docker
+   serving/serving_with_langchain
+   serving/metrics
 
 .. toctree::
    :maxdepth: 1
@@ -72,3 +77,10 @@ Documentation
 
    models/supported_models
    models/adding_model
+   models/engine_args
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Quantization
+
+   quantization/auto_awq

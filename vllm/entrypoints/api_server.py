@@ -17,6 +17,12 @@ app = FastAPI()
 engine = None
 
 
+@app.get("/health")
+async def health() -> Response:
+    """Health check."""
+    return Response(status_code=200)
+
+
 @app.post("/generate")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
@@ -65,7 +71,7 @@ async def generate(request: Request) -> Response:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="localhost")
+    parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=8000)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()

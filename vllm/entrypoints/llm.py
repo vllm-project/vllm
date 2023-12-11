@@ -42,6 +42,8 @@ class LLM:
             quantized and use `dtype` to determine the data type of the weights.
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id.
+        tokenizer_revision: The specific tokenizer version to use. It can be a
+            branch name, a tag name, or a commit id.
         seed: The seed to initialize the random number generator for sampling.
         gpu_memory_utilization: The ratio (between 0 and 1) of GPU memory to
             reserve for the model weights, activations, and KV cache. Higher
@@ -65,6 +67,7 @@ class LLM:
         dtype: str = "auto",
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
+        tokenizer_revision: Optional[str] = None,
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
@@ -81,6 +84,7 @@ class LLM:
             dtype=dtype,
             quantization=quantization,
             revision=revision,
+            tokenizer_revision=tokenizer_revision,
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             swap_space=swap_space,
@@ -130,25 +134,21 @@ class LLM:
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
-        if prompts is not None and prompt_token_ids is not None:
-            if len(prompts) != len(prompt_token_ids):
-                raise ValueError("The lengths of prompts and prompt_token_ids "
-                                 "must be the same.")
+        if (prompts is not None and prompt_token_ids is not None
+                and len(prompts) != len(prompt_token_ids)):
+            raise ValueError("The lengths of prompts and prompt_token_ids "
+                             "must be the same.")
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
         # Add requests to the engine.
-        if prompts is not None:
-            num_requests = len(prompts)
-        else:
-            num_requests = len(prompt_token_ids)
+        num_requests = len(prompts) if prompts is not None else len(
+            prompt_token_ids)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
-            if prompt_token_ids is None:
-                token_ids = None
-            else:
-                token_ids = prompt_token_ids[i]
+            token_ids = None if prompt_token_ids is None else prompt_token_ids[
+                i]
             self._add_request(prompt, sampling_params, token_ids)
         return self._run_engine(use_tqdm)
 
