@@ -95,6 +95,7 @@ def _awq_kernel(A, B, C, M, N, K, Z, S, shifter_ptr, stride_am, stride_ak,
     AWQ_BIT_WIDTH = 32 // AWQ_PACK_FACTOR
     AWQ_MASK = (1 << AWQ_BIT_WIDTH) - 1
     shifter = tl.load(shifter_ptr + tl.arange(0, AWQ_PACK_FACTOR))
+    shifter_tiled = tl.load(shifter_ptr + (tl.arange(0, BLOCK_N) % AWQ_PACK_FACTOR))
 
     s = tl.zeros([BLOCK_N], dtype=A.dtype.element_ty)
     z = tl.zeros([BLOCK_N], dtype=tl.int32)
@@ -113,10 +114,11 @@ def _awq_kernel(A, B, C, M, N, K, Z, S, shifter_ptr, stride_am, stride_ak,
             k_idx = pid_z * BLOCK_K + k * BLOCK_K * SPLIT_K
             k_idx = tl.where(k_idx < K, k_idx, 0)
             awq_g_idx = k_idx // AWQ_GROUP_SIZE
-            # FIXME(woosuk): Currently, there's a bug in unpacking z.
-            # As a temporary workaround, we unpack z before the kernel.
-            z = tl.load(Z + awq_g_idx * stride_zk + rn * stride_zn)
+
+            z = tl.load(Z + awq_g_idx * stride_zk + (rn // AWQ_PACK_FACTOR) * stride_zn)
+            z = (z >> shifter_tiled) & AWQ_MASK
             z = z.to(tl.int32)
+
             s = tl.load(S + awq_g_idx * stride_sk + rn * stride_sn)
 
         # Unpack b from [BLOCK_K, PACKED_BLOCK_N] to [BLOCK_K, BLOCK_N]
@@ -153,7 +155,6 @@ def awq_matmul(
     pack_factor: int,
     group_size: int,
     shifter: Optional[torch.Tensor] = None,
-    is_qzero_packed: bool = True,
 ) -> torch.Tensor:
     """Matrix multiplication for AWQ quantized weights.
 
@@ -183,10 +184,7 @@ def awq_matmul(
     # Check dtypes.
     assert a.dtype in (torch.float16, torch.bfloat16)
     assert b.dtype == torch.int32
-    if is_qzero_packed:
-        assert qzeros.dtype == torch.int32
-    else:
-        assert qzeros.dtype == torch.int8
+    assert qzeros.dtype == torch.int32
     assert scales.dtype == a.dtype
 
     # Check shapes.
@@ -196,15 +194,8 @@ def awq_matmul(
     P = pack_factor
     N = P * PACKED_N
     G = group_size
-    if is_qzero_packed:
-        assert qzeros.shape == (K // G, PACKED_N)
-    else:
-        assert qzeros.shape == (K // G, N)
+    assert qzeros.shape == (K // G, PACKED_N)
     assert scales.shape == (K // G, N)
-
-    # FIXME: Unpack qzeros inside the kernel.
-    if is_qzero_packed:
-        qzeros = unpack_int32(qzeros, P, shifter)
 
     # Allocate output.
     c = torch.empty((M, N), dtype=a.dtype, device=a.device)
@@ -237,23 +228,6 @@ def awq_matmul(
                       dot_out_dtype=dot_out_dtype,
                       GROUP_M=8)
     return c
-
-
-def unpack_int32(
-    packed_tensor: torch.Tensor,
-    pack_factor: int,
-    shifter: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    assert packed_tensor.dtype == torch.int32
-    if shifter is None:
-        shifter = get_shifter(pack_factor, packed_tensor.device)
-
-    bit_width = 32 // pack_factor
-    bit_mask = (1 << bit_width) - 1
-    unpacked = packed_tensor[:, :, None] >> shifter[None, None, :]
-    unpacked = unpacked & bit_mask
-    unpacked = unpacked.to(torch.int8)
-    return unpacked.view(unpacked.shape[0], -1)
 
 
 def get_shifter(
@@ -296,4 +270,5 @@ if __name__ == "__main__":
 
     c = awq_matmul(a, b, qzeros, scales, PACK_FACTOR, GROUP_SIZE)
     ans = quantization_ops.awq_gemm(a, b, scales, qzeros, PACK_FACTOR)
+
     print((c - ans).abs().max())
