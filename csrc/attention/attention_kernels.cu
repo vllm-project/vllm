@@ -74,6 +74,8 @@ template<
   int BLOCK_SIZE,
   int NUM_THREADS,
   int PARTITION_SIZE = 0> // Zero means no partitioning.
+
+// xmc: replace the kernel with faster flashattention
 __device__ void paged_attention_kernel(
   float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
   float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
