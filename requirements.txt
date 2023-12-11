@@ -13,3 +13,4 @@ fastapi
 uvicorn[standard]
 pydantic == 1.10.13  # Required for OpenAI server.
 aioprometheus[starlette]
+megablocks # Required for mixtral
