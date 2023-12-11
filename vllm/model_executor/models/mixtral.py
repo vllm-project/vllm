@@ -34,15 +34,12 @@ from transformers import MistralConfig
 try:
     import megablocks.ops as ops
 except ImportError:
-    print("MegaBlocks not found, please see "
-          "https://github.com/stanford-futuredata/megablocks/. "
-          "Note that MegaBlocks depends on mosaicml-turbo, which only "
-          "supports python 3.10.")
-try:
-    import stk
-except ImportError:
-    print(
-        "STK not found: please see https://github.com/stanford-futuredata/stk")
+    raise ImportError(
+        "MegaBlocks not found. Please install it via `pip install "
+        "git+https://github.com/stanford-futuredata/megablocks.git@v0.5.0`\n"
+        "Note that MegaBlocks depends on mosaicml-turbo, which only supports "
+        "Python 3.10.")
+import stk
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttention
@@ -251,7 +248,7 @@ class BlockSparseMoE(nn.Module):
         return column_indices_t, offsets_t, block_offsets_t
 
     def topology(self, x: torch.Tensor,
-                 padded_bins: torch.Tensor) -> stk.Matrix:
+                 padded_bins: torch.Tensor) -> "stk.Matrix":
         padded_tokens, _ = x.size()
         assert padded_tokens % self.blocking == 0
         assert self.ffn_dim_per_partition % self.blocking == 0
