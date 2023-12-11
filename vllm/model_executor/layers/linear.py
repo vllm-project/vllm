@@ -23,7 +23,7 @@ class LinearMethodBase(ABC):
     @abstractmethod
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
-                       utput_size: int,
+                       output_size: int,
                        params_dtype: torch.dtype) -> Dict[str, Any]:
         """Create weights for a linear layer."""
         raise NotImplementedError
