@@ -1,5 +1,6 @@
 """Utilities for selecting and loading models."""
 import contextlib
+import importlib
 from typing import Type
 
 import torch
@@ -17,31 +18,31 @@ logger = init_logger(__name__)
 
 # TODO(woosuk): Lazy-load the model classes.
 _MODEL_REGISTRY = {
-    "AquilaModel": AquilaForCausalLM,
-    "AquilaForCausalLM": AquilaForCausalLM,  # AquilaChat2
-    "BaiChuanForCausalLM": BaiChuanForCausalLM,  # baichuan-7b
-    "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
-    "BloomForCausalLM": BloomForCausalLM,
-    "ChatGLMModel": ChatGLMForCausalLM,
-    "ChatGLMForConditionalGeneration": ChatGLMForCausalLM,
-    "FalconForCausalLM": FalconForCausalLM,
-    "GPT2LMHeadModel": GPT2LMHeadModel,
-    "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
-    "GPTJForCausalLM": GPTJForCausalLM,
-    "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
-    "InternLMForCausalLM": InternLMForCausalLM,
-    "LlamaForCausalLM": LlamaForCausalLM,
-    "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
-    "MistralForCausalLM": MistralForCausalLM,
-    "MixtralForCausalLM": MixtralForCausalLM,
-    # transformers's mpt class has lower case
-    "MptForCausalLM": MPTForCausalLM,
-    "MPTForCausalLM": MPTForCausalLM,
-    "OPTForCausalLM": OPTForCausalLM,
-    "PhiForCausalLM": PhiForCausalLM,
-    "QWenLMHeadModel": QWenLMHeadModel,
-    "RWForCausalLM": FalconForCausalLM,
-    "YiForCausalLM": YiForCausalLM,
+    # "AquilaModel": AquilaForCausalLM,
+    # "AquilaForCausalLM": AquilaForCausalLM,  # AquilaChat2
+    # "BaiChuanForCausalLM": BaiChuanForCausalLM,  # baichuan-7b
+    # "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
+    # "BloomForCausalLM": BloomForCausalLM,
+    # "ChatGLMModel": ChatGLMForCausalLM,
+    # "ChatGLMForConditionalGeneration": ChatGLMForCausalLM,
+    # "FalconForCausalLM": FalconForCausalLM,
+    # "GPT2LMHeadModel": GPT2LMHeadModel,
+    # "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
+    # "GPTJForCausalLM": GPTJForCausalLM,
+    # "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
+    # "InternLMForCausalLM": InternLMForCausalLM,
+    # "LlamaForCausalLM": LlamaForCausalLM,
+    # "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    # "MistralForCausalLM": MistralForCausalLM,
+    # "MixtralForCausalLM": MixtralForCausalLM,
+    # # transformers's mpt class has lower case
+    # "MptForCausalLM": MPTForCausalLM,
+    # "MPTForCausalLM": MPTForCausalLM,
+    # "OPTForCausalLM": OPTForCausalLM,
+    # "PhiForCausalLM": PhiForCausalLM,
+    # "QWenLMHeadModel": QWenLMHeadModel,
+    # "RWForCausalLM": FalconForCausalLM,
+    # "YiForCausalLM": YiForCausalLM,
 }
 
 # Models to be disabled in ROCm
@@ -69,6 +70,9 @@ def _set_default_torch_dtype(dtype: torch.dtype):
 def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
+        model = ModelRegistry.load_model(arch)
+        if model is not None:
+            return model
         if arch in _MODEL_REGISTRY:
             if is_hip() and arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
                 logger.warning(

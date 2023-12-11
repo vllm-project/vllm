@@ -1,41 +1,77 @@
-from vllm.model_executor.models.aquila import AquilaForCausalLM
-from vllm.model_executor.models.baichuan import (BaiChuanForCausalLM,
-                                                 BaichuanForCausalLM)
-from vllm.model_executor.models.bloom import BloomForCausalLM
-from vllm.model_executor.models.falcon import FalconForCausalLM
-from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
-from vllm.model_executor.models.gpt_bigcode import GPTBigCodeForCausalLM
-from vllm.model_executor.models.gpt_j import GPTJForCausalLM
-from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
-from vllm.model_executor.models.internlm import InternLMForCausalLM
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.mistral import MistralForCausalLM
-from vllm.model_executor.models.mixtral import MixtralForCausalLM
-from vllm.model_executor.models.mpt import MPTForCausalLM
-from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm.model_executor.models.phi_1_5 import PhiForCausalLM
-from vllm.model_executor.models.qwen import QWenLMHeadModel
-from vllm.model_executor.models.chatglm import ChatGLMForCausalLM
-from vllm.model_executor.models.yi import YiForCausalLM
+import importlib
+from typing import List, Optional, Type
+
+import torch.nn as nn
+
+
+_MODEL_REGISTRY = {
+    "AquilaModel": ("aquila", "AquilaForCausalLM"),
+    "AquilaForCausalLM": ("aquila", "AquilaForCausalLM"),  # AquilaChat2
+    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
+    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
+    "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
+    "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
+    "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
+    "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
+    "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
+    "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
+    "GPTJForCausalLM": GPTJForCausalLM,
+    "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
+    "InternLMForCausalLM": InternLMForCausalLM,
+    "LlamaForCausalLM": LlamaForCausalLM,
+    "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    "MistralForCausalLM": MistralForCausalLM,
+    "MixtralForCausalLM": MixtralForCausalLM,
+    # transformers's mpt class has lower case
+    "MptForCausalLM": MPTForCausalLM,
+    "MPTForCausalLM": MPTForCausalLM,
+    "OPTForCausalLM": OPTForCausalLM,
+    "PhiForCausalLM": PhiForCausalLM,
+    "QWenLMHeadModel": QWenLMHeadModel,
+    "RWForCausalLM": FalconForCausalLM,
+    "YiForCausalLM": YiForCausalLM,
+}
+
+_MODELS_TO_MODULES = {
+    "AquilaForCausalLM": "aquila",
+    "BaiChuanForCausalLM": "baichuan",
+    "BaichuanForCausalLM": "baichuan",
+    "BloomForCausalLM": "bloom",
+    "ChatGLMForCausalLM": "chatglm",
+    "FalconForCausalLM": "falcon",
+    "GPT2LMHeadModel": "gpt2",
+    "GPTBigCodeForCausalLM": "gpt_bigcode",
+    "GPTJForCausalLM": "gpt_j",
+    "GPTNeoXForCausalLM": "gpt_neox",
+    "InternLMForCausalLM": "internlm",
+    "LlamaForCausalLM": "llama",
+    "MPTForCausalLM": "mpt",
+    "OPTForCausalLM": "opt",
+    "PhiForCausalLM": "phi_1_5",
+    "QWenLMHeadModel": "qwen",
+    "MistralForCausalLM": "mistral",
+    "MixtralForCausalLM": "mixtral",
+    "YiForCausalLM": "yi",
+}
+
+
+
+class ModelRegistry:
+
+    @staticmethod
+    def load_model(model_arch: str) -> Optional[Type[nn.Module]]:
+        if model_arch not in _MODELS_TO_MODULES:
+            return None
+        module_name = _MODELS_TO_MODULES[model_arch]
+        module = importlib.import_module(
+            f"vllm.model_executor.models.{module_name}")
+        return getattr(module, model_arch, None)
+
+    @staticmethod
+    def get_supported_archs() -> List[str]:
+        return list(_MODELS_TO_MODULES.keys())
+
 
 __all__ = [
-    "AquilaForCausalLM",
-    "BaiChuanForCausalLM",
-    "BaichuanForCausalLM",
-    "BloomForCausalLM",
-    "ChatGLMForCausalLM",
-    "FalconForCausalLM",
-    "GPT2LMHeadModel",
-    "GPTBigCodeForCausalLM",
-    "GPTJForCausalLM",
-    "GPTNeoXForCausalLM",
-    "InternLMForCausalLM",
-    "LlamaForCausalLM",
-    "MPTForCausalLM",
-    "OPTForCausalLM",
-    "PhiForCausalLM",
-    "QWenLMHeadModel",
-    "MistralForCausalLM",
-    "MixtralForCausalLM",
-    "YiForCausalLM",
+    "ModelRegistry",
 ]
