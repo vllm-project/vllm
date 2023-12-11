@@ -87,6 +87,12 @@ void gptq_shuffle_dispatch(
     VLLM_DISPATCH_DEVICES(q_weight.device(), gptq_shuffle, q_weight, q_perm);
 }
 
+#ifdef VLLM_BUILD_CPU_ONLY
+int get_device_attribute(
+    int attribute,
+    int device_id) { return 94387; }
+#endif
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // vLLM custom ops
   pybind11::module ops = m.def_submodule("ops", "vLLM custom operators");

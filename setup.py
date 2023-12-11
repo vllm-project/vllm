@@ -8,7 +8,13 @@ import warnings
 from packaging.version import parse, Version
 import setuptools
 import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
+
+BUILD_CPU_ONLY = os.getenv('VLLM_BUILD_CPU_ONLY', "1") == "1"
+
+if not BUILD_CPU_ONLY:
+    from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
+else:
+    from torch.utils.cpp_extension import BuildExtension, CppExtension
 
 ROOT_DIR = os.path.dirname(__file__)
 
@@ -21,11 +27,11 @@ ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030", "gfx1100"}
 
 
 def _is_hip() -> bool:
-    return torch.version.hip is not None
+    return torch.version.hip is not None and not BUILD_CPU_ONLY
 
 
 def _is_cuda() -> bool:
-    return torch.version.cuda is not None
+    return torch.version.cuda is not None and not BUILD_CPU_ONLY
 
 
 # Compiler flags.
@@ -86,7 +92,6 @@ def get_hipcc_rocm_version():
         print("Could not find HIP version in the output")
         return None
 
-
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
     """Get the CUDA version from nvcc.
 
@@ -137,6 +142,19 @@ def get_torch_arch_list() -> Set[str]:
             stacklevel=2)
     return arch_list
 
+if not BUILD_CPU_ONLY:
+    # First, check the TORCH_CUDA_ARCH_LIST environment variable.
+    compute_capabilities = get_torch_arch_list()
+    if not compute_capabilities:
+        # If TORCH_CUDA_ARCH_LIST is not defined or empty, target all available
+        # GPUs on the current machine.
+        device_count = torch.cuda.device_count()
+        for i in range(device_count):
+            major, minor = torch.cuda.get_device_capability(i)
+            if major < 7:
+                raise RuntimeError(
+                    "GPUs with compute capability below 7.0 are not supported.")
+            compute_capabilities.add(f"{major}.{minor}")
 
 # First, check the TORCH_CUDA_ARCH_LIST environment variable.
 compute_capabilities = get_torch_arch_list()
@@ -211,9 +229,11 @@ elif _is_hip():
             f"amdgpu_arch_found: {amd_arch}")
 
 # Setup CPU Operations
-BUILD_CPU_OPS = os.getenv('VLLM_BUILD_CPU_OPS', "0") == "1"
+BUILD_CPU_OPS = (os.getenv('VLLM_BUILD_CPU_OPS', "0") == "1" or BUILD_CPU_ONLY)
 CPU_OPS_SOURCES = []
 if BUILD_CPU_OPS:
+    if BUILD_CPU_ONLY:
+        CXX_FLAGS += ["-DVLLM_BUILD_CPU_ONLY"]
     CXX_FLAGS += [
         "-DVLLM_BUILD_CPU_OPS", "-fopenmp", "-mavx512f", "-mavx512bf16",
         "-mavx512vl"
@@ -228,29 +248,42 @@ if BUILD_CPU_OPS:
 
 ext_modules = []
 
-vllm_extension_sources = [
-    "csrc/cache_kernels.cu",
-    "csrc/attention/attention_kernels.cu",
-    "csrc/pos_encoding_kernels.cu",
-    "csrc/activation_kernels.cu",
-    "csrc/layernorm_kernels.cu",
-    "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
-    "csrc/quantization/gptq/q_gemm.cu",
-    "csrc/cuda_utils_kernels.cu",
-    "csrc/pybind.cpp",
-] + CPU_OPS_SOURCES
+if not BUILD_CPU_ONLY:
+    vllm_extension_sources = [
+        "csrc/cache_kernels.cu",
+        "csrc/attention/attention_kernels.cu",
+        "csrc/pos_encoding_kernels.cu",
+        "csrc/activation_kernels.cu",
+        "csrc/layernorm_kernels.cu",
+        "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
+        "csrc/quantization/gptq/q_gemm.cu",
+        "csrc/cuda_utils_kernels.cu",
+        "csrc/pybind.cpp",
+    ] + CPU_OPS_SOURCES
 
-if _is_cuda():
-    vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    if _is_cuda():
+        vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
 
-vllm_extension = CUDAExtension(
-    name="vllm._C",
-    sources=vllm_extension_sources,
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
+    vllm_extension = CUDAExtension(
+        name="vllm._C",
+        sources=vllm_extension_sources,
+        extra_compile_args={
+            "cxx": CXX_FLAGS,
+            "nvcc": NVCC_FLAGS,
+        },
+    )
+else:
+    vllm_extension_sources = [
+        "csrc/pybind.cpp",
+    ] + CPU_OPS_SOURCES
+    vllm_extension = CppExtension(
+        name="vllm._C",
+        sources=vllm_extension_sources,
+        extra_compile_args={
+            "cxx": CXX_FLAGS,
+        },
+    )
+
 ext_modules.append(vllm_extension)
 
 
@@ -280,7 +313,7 @@ def get_vllm_version() -> str:
         if hipcc_version != MAIN_CUDA_VERSION:
             rocm_version_str = hipcc_version.replace(".", "")[:3]
             version += f"+rocm{rocm_version_str}"
-    else:
+    elif _is_cuda():
         cuda_version = str(nvcc_cuda_version)
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
@@ -303,9 +336,13 @@ def get_requirements() -> List[str]:
     if _is_hip():
         with open(get_path("requirements-rocm.txt")) as f:
             requirements = f.read().strip().split("\n")
-    else:
-        with open(get_path("requirements.txt")) as f:
+    elif _is_cuda():
+        with open(get_path("requirements-gpu.txt")) as f:
             requirements = f.read().strip().split("\n")
+    else:
+        with open(get_path("requirements-cpu.txt")) as f:
+            requirements = f.read().strip().split("\n")
+
     return requirements
 
 
