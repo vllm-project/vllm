@@ -13,7 +13,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
-from vllm.utils import get_gpu_memory
 
 
 class Worker:
