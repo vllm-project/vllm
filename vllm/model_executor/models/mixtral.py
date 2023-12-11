@@ -251,7 +251,7 @@ class BlockSparseMoE(nn.Module):
         return column_indices_t, offsets_t, block_offsets_t
 
     def topology(self, x: torch.Tensor,
-                 padded_bins: torch.Tensor) -> stk.Matrix:
+                 padded_bins: torch.Tensor) -> "stk.Matrix":
         padded_tokens, _ = x.size()
         assert padded_tokens % self.blocking == 0
         assert self.ffn_dim_per_partition % self.blocking == 0
