@@ -72,7 +72,7 @@ Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/get
 ```bash
 pip install vllm
 ```
-**NOTE:** The Mixtral model additionally requires `megablocks` which can be installed with pip or [from source](https://github.com/stanford-futuredata/megablocks) on **Python 3.10**:
+**NOTE:** The Mixtral model additionally requires `megablocks` which can be installed with pip or [from source](https://github.com/stanford-futuredata/megablocks):
 ```bash
 pip install megablocks
 ```
