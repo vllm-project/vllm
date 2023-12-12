@@ -33,13 +33,15 @@ from transformers import MistralConfig
 
 try:
     import megablocks.ops as ops
-except ImportError:
+except ImportError as e:
+    raise ImportError("MegaBlocks not found. "
+                      "Please install it by `pip install megablocks`.") from e
+try:
+    import stk
+except ImportError as e:
     raise ImportError(
-        "MegaBlocks not found. Please install it via `pip install "
-        "git+https://github.com/stanford-futuredata/megablocks.git@v0.5.0`\n"
-        "Note that MegaBlocks depends on mosaicml-turbo, which only supports "
-        "Python 3.10.")
-import stk
+        "STK not found. "
+        "Please install it by `pip install stanford-stk`.") from e
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttention
