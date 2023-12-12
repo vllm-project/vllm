@@ -8,8 +8,7 @@ import triton.language as tl
 from triton.ops.matmul_perf_model import (early_config_prune,
                                           estimate_matmul_time)
 
-from vllm import quantization_ops
-from vllm.model_executor.layers.quantized_ops.matmul_utils import (
+from vllm.model_executor.layers.quantization.ops.matmul_utils import (
     get_configs_compute_bound, get_configs_io_bound)
 
 # NOTE(woosuk): These variables should be defined outside of the @triton
@@ -269,6 +268,7 @@ if __name__ == "__main__":
                          device="cuda")
 
     c = awq_matmul(a, b, qzeros, scales, PACK_FACTOR, GROUP_SIZE)
+    from vllm import quantization_ops
     ans = quantization_ops.awq_gemm(a, b, scales, qzeros, PACK_FACTOR)
 
     print((c - ans).abs().max())
