@@ -10,13 +10,14 @@ Easy, fast, and cheap LLM serving for everyone
 </h3>
 
 <p align="center">
-| <a href="https://vllm.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://vllm.ai"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://discord.gg/jz7wjKhh6g"><b>Discord</b></a> |
+| <a href="https://docs.vllm.ai"><b>Documentation</b></a> | <a href="https://vllm.ai"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://discord.gg/jz7wjKhh6g"><b>Discord</b></a> |
 
 </p>
 
 ---
 
 *Latest News* 🔥
+- [2023/12] Added ROCm support to vLLM.
 - [2023/10] We hosted [the first vLLM meetup](https://lu.ma/first-vllm-meetup) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit?usp=sharing).
 - [2023/09] We created our [Discord server](https://discord.gg/jz7wjKhh6g)! Join us to discuss vLLM and LLM serving! We will also post the latest announcements and updates there.
 - [2023/09] We released our [PagedAttention paper](https://arxiv.org/abs/2309.06180) on arXiv!
@@ -43,12 +44,14 @@ vLLM is flexible and easy to use with:
 - Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
+- Support NVIDIA CUDA and AMD ROCm.
 
 vLLM seamlessly supports many Hugging Face models, including the following architectures:
 
 - Aquila & Aquila2 (`BAAI/AquilaChat2-7B`, `BAAI/AquilaChat2-34B`, `BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc.)
-- Baichuan (`baichuan-inc/Baichuan-7B`, `baichuan-inc/Baichuan-13B-Chat`, etc.)
+- Baichuan & Baichuan2 (`baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.)
 - BLOOM (`bigscience/bloom`, `bigscience/bloomz`, etc.)
+- ChatGLM (`THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.)
 - Falcon (`tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc.)
 - GPT-2 (`gpt2`, `gpt2-xl`, etc.)
 - GPT BigCode (`bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, etc.)
@@ -57,14 +60,21 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - InternLM (`internlm/internlm-7b`, `internlm/internlm-chat-7b`, etc.)
 - LLaMA & LLaMA-2 (`meta-llama/Llama-2-70b-hf`, `lmsys/vicuna-13b-v1.3`, `young-geng/koala`, `openlm-research/open_llama_13b`, etc.)
 - Mistral (`mistralai/Mistral-7B-v0.1`, `mistralai/Mistral-7B-Instruct-v0.1`, etc.)
+- Mixtral (`mistralai/Mixtral-8x7B-v0.1`, `mistralai/Mixtral-8x7B-Instruct-v0.1`, etc.)
 - MPT (`mosaicml/mpt-7b`, `mosaicml/mpt-30b`, etc.)
 - OPT (`facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc.)
+- Phi-1.5 (`microsoft/phi-1_5`, etc.)
 - Qwen (`Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.)
+- Yi (`01-ai/Yi-6B`, `01-ai/Yi-34B`, etc.)
 
 Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):
 
 ```bash
 pip install vllm
+```
+**NOTE:** The Mixtral model additionally requires `megablocks` which can be installed with pip or [from source](https://github.com/stanford-futuredata/megablocks):
+```bash
+pip install megablocks
 ```
 
 ## Getting Started

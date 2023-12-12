@@ -3,6 +3,7 @@ from typing import Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
+from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -10,13 +11,12 @@ try:
     import ray
     from ray.air.util.torch_dist import TorchDistributedWorker
 
-    class RayWorker(TorchDistributedWorker):
+    class RayWorkerVllm(TorchDistributedWorker):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
         lazliy initialized after Ray sets CUDA_VISIBLE_DEVICES."""
 
         def __init__(self, init_cached_hf_modules=False) -> None:
             if init_cached_hf_modules:
-                # pylint: disable=import-outside-toplevel
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
             self.worker = None
@@ -37,7 +37,7 @@ except ImportError as e:
                    "`pip install ray pandas pyarrow`.")
     ray = None
     TorchDistributedWorker = None
-    RayWorker = None  # pylint: disable=invalid-name
+    RayWorkerVllm = None
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -74,7 +74,12 @@ def initialize_cluster(
                 "Ray is not installed. Please install Ray to use distributed "
                 "serving.")
         # Connect to a ray cluster.
-        ray.init(address=ray_address, ignore_reinit_error=True)
+        if is_hip():
+            ray.init(address=ray_address,
+                     ignore_reinit_error=True,
+                     num_gpus=parallel_config.world_size)
+        else:
+            ray.init(address=ray_address, ignore_reinit_error=True)
 
     if not parallel_config.worker_use_ray:
         # Initialize cluster locally.

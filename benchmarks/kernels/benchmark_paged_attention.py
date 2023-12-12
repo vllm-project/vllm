@@ -4,7 +4,7 @@ import time
 
 import torch
 
-from vllm import attention_ops
+from vllm._C import ops
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
@@ -37,10 +37,6 @@ def main(
     query.uniform_(-scale, scale)
 
     assert num_query_heads % num_kv_heads == 0
-    num_queries_per_kv = num_query_heads // num_kv_heads
-    head_mapping = torch.repeat_interleave(
-        torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"),
-        num_queries_per_kv)
     alibi_slopes = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads,
@@ -98,12 +94,12 @@ def main(
 
         for _ in range(num_iters):
             if version == "v1":
-                attention_ops.paged_attention_v1(
+                ops.paged_attention_v1(
                     output,
                     query,
                     key_cache,
                     value_cache,
-                    head_mapping,
+                    num_kv_heads,
                     scale,
                     block_tables,
                     context_lens,
@@ -112,7 +108,7 @@ def main(
                     alibi_slopes,
                 )
             elif version == "v2":
-                attention_ops.paged_attention_v2(
+                ops.paged_attention_v2(
                     output,
                     exp_sums,
                     max_logits,
@@ -120,7 +116,7 @@ def main(
                     query,
                     key_cache,
                     value_cache,
-                    head_mapping,
+                    num_kv_heads,
                     scale,
                     block_tables,
                     context_lens,
