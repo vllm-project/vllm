@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -147,6 +146,8 @@ class AWQLinearMethod(LinearMethodBase):
                       weights: Dict[str, Any],
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        from vllm._C import ops
+
         qweight = weights["qweight"]
         qzeros = weights["qzeros"]
         scales = weights["scales"]

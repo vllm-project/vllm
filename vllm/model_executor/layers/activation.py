@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm._C import ops
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
@@ -30,6 +29,8 @@ class SiluAndMul(nn.Module):
         return F.silu(x[..., :d]) * x[..., d:]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm._C import ops
+
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
@@ -46,6 +47,8 @@ class NewGELU(nn.Module):
                                            (x + 0.044715 * torch.pow(x, 3.0))))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm._C import ops
+
         out = torch.empty_like(x)
         ops.gelu_new(out, x)
         return out
@@ -59,6 +62,8 @@ class FastGELU(nn.Module):
                                            (1.0 + 0.044715 * x * x)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm._C import ops
+
         out = torch.empty_like(x)
         ops.gelu_fast(out, x)
         return out
