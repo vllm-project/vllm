@@ -5,7 +5,7 @@ import time
 import torch
 
 from vllm import quantization_ops
-from vllm.model_executor.layers.quantized_ops.awq import awq_matmul, unpack_int32
+from vllm.model_executor.layers.quantized_ops.awq import awq_matmul
 
 MAX_INT32 = 0x7fffffff
 MIN_INT32 = -MAX_INT32 - 1
@@ -40,7 +40,6 @@ def main(args: argparse.Namespace) -> None:
                          device="cuda")
 
     if args.version == "triton":
-        unpacked_qzeros = unpack_int32(qzeros, pack_factor)
         shifter = torch.tensor(
             [0, 4, 1, 5, 2, 6, 3, 7], dtype=torch.int32, device="cuda") * 4
 
@@ -51,12 +50,11 @@ def main(args: argparse.Namespace) -> None:
             elif args.version == "triton":
                 awq_matmul(x,
                            w,
-                           unpacked_qzeros,
+                           qzeros,
                            scales,
                            pack_factor,
                            args.group_size,
-                           shifter,
-                           is_qzero_packed=False)
+                           shifter)
             else:
                 raise ValueError(f"Invalid version: {args.version}")
         torch.cuda.synchronize()
@@ -81,11 +79,11 @@ def main(args: argparse.Namespace) -> None:
         end_time = time.perf_counter()
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
-        return (end_time - start_time) / num_iters
+        return (end_time - start_time) / num_iters * 1000000
 
     # Warmup.
     print("Warming up...")
-    run_benchmark(num_iters=3, profile=False) * 1000000
+    run_benchmark(num_iters=3, profile=False)
     # Benchmark.
     if args.gpu_time:
         assert not args.profile
