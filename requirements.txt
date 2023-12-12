@@ -5,7 +5,6 @@ pandas  # Required for Ray data.
 pyarrow  # Required for Ray data.
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
-einops  # Required for phi-1_5
 torch >= 2.1.1
 transformers >= 4.36.0  # Required for Mixtral.
 xformers >= 0.0.23  # Required for CUDA 12.1.
