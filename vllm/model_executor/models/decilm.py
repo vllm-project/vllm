@@ -52,12 +52,11 @@ class DeciLMForCausalLM(LlamaForCausalLM):
     """
 
     def __init__(
-            self,
-            config: Optional[PretrainedConfig] = None,
-            linear_method: Optional[LinearMethodBase] = None,
+        self,
+        config: Optional[PretrainedConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
-        config.num_key_value_heads = max(
-            config.num_key_value_heads_per_layer)
+        config.num_key_value_heads = max(config.num_key_value_heads_per_layer)
         delattr(config, 'num_key_value_heads_per_layer')
         super().__init__(config=config, linear_method=linear_method)
 
@@ -109,9 +108,11 @@ class DeciLMForCausalLM(LlamaForCausalLM):
         assert n_repeats == int(n_repeats)
 
         n_repeats = int(n_repeats)
-        loaded_weight = loaded_weight.view(num_kv_heads, head_size, hidden_size)
+        loaded_weight = loaded_weight.view(num_kv_heads, head_size,
+                                           hidden_size)
         loaded_weight = torch.repeat_interleave(loaded_weight,
-                                                repeats=n_repeats, dim=0)
+                                                repeats=n_repeats,
+                                                dim=0)
         loaded_weight = loaded_weight.reshape(target_num_kv_heads * head_size,
                                               hidden_size)
 
