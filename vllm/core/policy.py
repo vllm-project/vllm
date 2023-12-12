@@ -75,10 +75,7 @@ class PriorityQueuesScheduler(Policy):
             now: float,
             seq_group: SequenceGroup,
     ) -> float:
-        # In this strategy, the arrival_time can be combined with priority to determine the return value.
-        # A simple method is to represent different priorities with fixed numerical values and then add the arrival time as the priority value.
-        # Assume ‘high’ = 1, ‘medium’ = 2, ‘low’ = 3.
-        priority_weights = {'high': 1, 'medium': 2, 'low': 3}
+        priority_weights = {'high': 1, 'medium': 2, 'low': 3} 
         seq_priority = None
         for priority, queue in self.queues.items():
             if seq_group in queue:
