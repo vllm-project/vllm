@@ -5,7 +5,7 @@ import time
 import torch
 
 from vllm import quantization_ops
-from vllm.model_executor.layers.quantized_ops.awq import awq_matmul
+from vllm.model_executor.layers.quantization.ops.awq import awq_matmul
 
 MAX_INT32 = 0x7fffffff
 MIN_INT32 = -MAX_INT32 - 1
