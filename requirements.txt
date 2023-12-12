@@ -6,9 +6,9 @@ pyarrow  # Required for Ray data.
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 einops  # Required for phi-1_5
-torch >= 2.1.0
+torch >= 2.1.1
 transformers >= 4.34.0  # Required for Mistral.
-xformers >= 0.0.22.post7  # Required for CUDA 12.1.
+xformers >= 0.0.23  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
 pydantic == 1.10.13  # Required for OpenAI server.
