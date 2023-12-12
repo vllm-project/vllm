@@ -33,6 +33,28 @@ class FCFS(Policy):
     ) -> float:
         return now - seq_group.arrival_time
 
+class RoundRobin(Policy):
+    def __init__(self, time_slice: float):
+        self.time_slice = time_slice
+        self.current_time = 0
+        self.last_exec_time = {}
+
+    def get_priority(
+            self,
+            now: float,
+            seq_group: SequenceGroup,
+    ) -> float:
+        self.current_time = now
+
+        if seq_group not in self.last_exec_time:
+            self.last_exec_time[seq_group] = now
+
+        time_since_last_exec = now - self.last_exec_time[seq_group]
+
+        if time_since_last_exec >= self.time_slice or seq_group.is_new:
+            return seq_group.arrival_time
+
+        return now
 
 class PolicyFactory:
 
