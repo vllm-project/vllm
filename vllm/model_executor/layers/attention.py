@@ -76,6 +76,7 @@ class PagedAttention(nn.Module):
         """
         from xformers import ops as xops
         from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
+        from vllm._C import cache_ops
 
         batch_size, seq_len, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
@@ -214,7 +215,6 @@ def _paged_attention(
     alibi_slopes: Optional[torch.Tensor],
 ) -> torch.Tensor:
     from vllm._C import ops
-    from vllm._C import cache_ops
 
     output = torch.empty_like(query)
 
