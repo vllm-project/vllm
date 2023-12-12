@@ -6,7 +6,9 @@ from torch.nn.parameter import Parameter
 from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.layers.quantization.ops.awq import awq_matmul
 
 
 class AWQConfig(QuantizationConfig):
@@ -149,9 +151,18 @@ class AWQLinearMethod(LinearMethodBase):
         qzeros = weights["qzeros"]
         scales = weights["scales"]
         pack_factor = self.quant_config.pack_factor
+        group_size = self.quant_config.group_size
+
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
-        out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, pack_factor)
+
+        num_tokens = x.shape[:-1].numel()
+        if num_tokens < 128:
+            out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
+                               pack_factor)
+        else:
+            out = awq_matmul(reshaped_x, qweight, qzeros, scales, pack_factor,
+                             group_size)
         if bias is not None:
             out = out + bias
         return out.reshape(out_shape)
