@@ -24,8 +24,17 @@ def _is_hip() -> bool:
     return torch.version.hip is not None
 
 
+def _is_neuron() -> bool:
+    torch_neuronx_installed = True
+    try:
+        subprocess.run(["neuron-ls"], capture_output=True, check=True)
+    except FileNotFoundError as e:
+        torch_neuronx_installed = False
+    return torch_neuronx_installed
+
+
 def _is_cuda() -> bool:
-    return torch.version.cuda is not None
+    return (torch.version.cuda is not None) and not _is_neuron()
 
 
 # Compiler flags.
@@ -84,6 +93,28 @@ def get_hipcc_rocm_version():
         return match.group(1)
     else:
         print("Could not find HIP version in the output")
+        return None
+
+
+def get_neuronxcc_version():
+    # Run the neuronx-cc --version command
+    result = subprocess.run(['neuronx-cc', '--version'],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True)
+
+    # Check if the command was executed successfully
+    if result.returncode != 0:
+        print("Error running 'neuronx-cc --version'")
+        return None
+
+    # Extract the version using a regular expression
+    match = re.search(r'NeuronX Compiler version (\S+)', result.stdout)
+    if match:
+        # Return the version string
+        return match.group(1)
+    else:
+        print("Could not find NeuronX Compiler version in the output")
         return None
 
 
@@ -210,6 +241,9 @@ elif _is_hip():
             f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
             f"amdgpu_arch_found: {amd_arch}")
 
+elif _is_neuron():
+    neuronxcc_version = get_neuronxcc_version()
+
 ext_modules = []
 
 vllm_extension_sources = [
@@ -227,15 +261,16 @@ vllm_extension_sources = [
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
 
-vllm_extension = CUDAExtension(
-    name="vllm._C",
-    sources=vllm_extension_sources,
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(vllm_extension)
+if not _is_neuron():
+    vllm_extension = CUDAExtension(
+        name="vllm._C",
+        sources=vllm_extension_sources,
+        extra_compile_args={
+            "cxx": CXX_FLAGS,
+            "nvcc": NVCC_FLAGS,
+        },
+    )
+    ext_modules.append(vllm_extension)
 
 
 def get_path(*filepath) -> str:
@@ -264,6 +299,12 @@ def get_vllm_version() -> str:
         if hipcc_version != MAIN_CUDA_VERSION:
             rocm_version_str = hipcc_version.replace(".", "")[:3]
             version += f"+rocm{rocm_version_str}"
+    elif _is_neuron():
+        # Get the Neuron version
+        neuron_version = str(neuronxcc_version)
+        if neuron_version != MAIN_CUDA_VERSION:
+            neuron_version_str = neuron_version.replace(".", "")[:3]
+            version += f"+neuron{neuron_version_str}"
     else:
         cuda_version = str(nvcc_cuda_version)
         if cuda_version != MAIN_CUDA_VERSION:
@@ -286,6 +327,9 @@ def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
     if _is_hip():
         with open(get_path("requirements-rocm.txt")) as f:
+            requirements = f.read().strip().split("\n")
+    elif _is_neuron():
+        with open(get_path("requirements-neuron.txt")) as f:
             requirements = f.read().strip().split("\n")
     else:
         with open(get_path("requirements.txt")) as f:
@@ -325,6 +369,6 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension},
+    cmdclass={} if _is_neuron() else {"build_ext": BuildExtension},
     package_data=package_data,
 )
