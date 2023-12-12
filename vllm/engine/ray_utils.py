@@ -77,9 +77,10 @@ def initialize_cluster(
         if is_hip():
             ray.init(address=ray_address,
                      ignore_reinit_error=True,
-                     num_gpus=parallel_config.world_size)
+                     num_gpus=parallel_config.world_size,
+                     _temp_dir=parallel_config.ray_temp_dir)
         else:
-            ray.init(address=ray_address, ignore_reinit_error=True)
+            ray.init(address=ray_address, ignore_reinit_error=True, _temp_dir=parallel_config.ray_temp_dir)
 
     if not parallel_config.worker_use_ray:
         # Initialize cluster locally.

@@ -33,6 +33,7 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+    ray_temp_dir: Optional[str] = "/tmp/ray"
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -175,6 +176,11 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+        # Change ray temp storage dir
+        parser.add_argument('--ray-temp-dir',
+                            type=str,
+                            default=EngineArgs.ray_temp_dir,
+                            help='temp storage dir for ray session')
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
@@ -208,7 +214,8 @@ class EngineArgs:
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
-                                         self.max_parallel_loading_workers)
+                                         self.max_parallel_loading_workers,
+                                         self.ray_temp_dir)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
