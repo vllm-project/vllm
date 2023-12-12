@@ -71,6 +71,8 @@ class SamplingParams:
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
             the stop tokens are special tokens.
+        include_stop_in_output: Whether to include the stop strings in output
+            text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
@@ -104,6 +106,7 @@ class SamplingParams:
         early_stopping: Union[bool, str] = False,
         stop: Optional[Union[str, List[str]]] = None,
         stop_token_ids: Optional[List[int]] = None,
+        include_stop_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
@@ -111,7 +114,6 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
-        include_stop: bool = False,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -142,7 +144,7 @@ class SamplingParams:
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
-        self.include_stop = include_stop
+        self.include_stop_in_output = include_stop_in_output
         self._verify_args()
         if self.use_beam_search:
             self._verify_beam_search()
@@ -244,11 +246,11 @@ class SamplingParams:
                 f"early_stopping={self.early_stopping}, "
                 f"stop={self.stop}, "
                 f"stop_token_ids={self.stop_token_ids}, "
+                f"include_stop_in_output={self.include_stop_in_output}, "
                 f"ignore_eos={self.ignore_eos}, "
                 f"max_tokens={self.max_tokens}, "
                 f"logprobs={self.logprobs}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
                 f"skip_special_tokens={self.skip_special_tokens}, "
                 "spaces_between_special_tokens="
-                f"{self.spaces_between_special_tokens}, "
-                f"include_stop={self.include_stop})")
+                f"{self.spaces_between_special_tokens})")
