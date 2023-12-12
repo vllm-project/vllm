@@ -21,6 +21,7 @@ _MODEL_REGISTRY = {
     "AquilaForCausalLM": AquilaForCausalLM,  # AquilaChat2
     "BaiChuanForCausalLM": BaiChuanForCausalLM,  # baichuan-7b
     "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
+    "DeciLMForCausalLM": DeciLMForCausalLM,
     "BloomForCausalLM": BloomForCausalLM,
     "ChatGLMModel": ChatGLMForCausalLM,
     "ChatGLMForConditionalGeneration": ChatGLMForCausalLM,
