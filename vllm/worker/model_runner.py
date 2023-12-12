@@ -49,7 +49,6 @@ class ModelRunner:
         self.max_context_len_to_capture = min(
             self.model_config.max_model_len if self.model_config else 0,
             _MAX_CONTEXT_LEN_TO_CAPTURE)
-        self.graph_capture_stream = None  # Set after initial profiling.
         self.graph_memory_pool = None  # Set during graph capture.
 
     def load_model(self) -> None:
@@ -384,31 +383,6 @@ class ModelRunner:
         kv_caches = [(None, None)] * num_layers
         self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
-
-        if not self.model_config.enforce_eager:
-            # Approximately profile the memory usage of the CUDA graph by
-            # running the model with a maximum batch size to capture on
-            # the capture stream.
-            max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-            input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long)
-            input_positions = torch.zeros(max_batch_size, 1, dtype=torch.long)
-            input_metadata = InputMetadata(
-                prompt_lens=[],
-                slot_mapping=None,
-                max_context_len=None,
-                context_lens=None,
-                block_tables=None,
-                use_graph=False,
-            )
-            self.graph_capture_stream = torch.cuda.Stream()
-            with torch.cuda.stream(self.graph_capture_stream):
-                self.model(
-                    input_ids=input_tokens.cuda(),
-                    positions=input_positions.cuda(),
-                    kv_caches=kv_caches,
-                    input_metadata=input_metadata,
-                )
-            torch.cuda.synchronize()
         return
 
     @torch.inference_mode()
@@ -449,7 +423,6 @@ class ModelRunner:
                 input_positions[:batch_size],
                 kv_caches,
                 input_metadata,
-                capture_stream=self.graph_capture_stream,
                 memory_pool=self.graph_memory_pool,
             )
             self.graph_memory_pool = graph_runner.graph.pool()
@@ -475,32 +448,26 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        capture_stream: torch.cuda.Stream,
         memory_pool,
     ) -> None:
         assert self.graph is None
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-
-        # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
-        # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
-        with torch.cuda.stream(capture_stream):  # noqa: SIM117
-            with with_custom_nccl_for_all_reduce():
-                self.model(
-                    input_ids,
-                    positions,
-                    kv_caches,
-                    input_metadata,
-                )
+        with with_custom_nccl_for_all_reduce():
+            self.model(
+                input_ids,
+                positions,
+                kv_caches,
+                input_metadata,
+            )
         torch.cuda.synchronize()
 
         # Capture the graph.
+        # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
+        # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(  # noqa: SIM117
-                self.graph,
-                stream=capture_stream,
-                pool=memory_pool):
+        with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
             with with_custom_nccl_for_all_reduce():
                 hidden_states = self.model(
                     input_ids,
