@@ -4,7 +4,7 @@ import time
 
 import torch
 
-from vllm import quantization_ops
+from vllm._C import ops
 from vllm.model_executor.layers.quantization.ops.awq import awq_matmul
 
 MAX_INT32 = 0x7fffffff
@@ -46,7 +46,7 @@ def main(args: argparse.Namespace) -> None:
     def run(num_iters: int) -> None:
         for _ in range(num_iters):
             if args.version == "orig":
-                quantization_ops.awq_gemm(x, w, scales, qzeros, pack_factor)
+                ops.awq_gemm(x, w, scales, qzeros, pack_factor)
             elif args.version == "triton":
                 awq_matmul(x,
                            w,

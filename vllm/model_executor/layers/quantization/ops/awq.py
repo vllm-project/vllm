@@ -242,6 +242,8 @@ def get_shifter(
 
 
 if __name__ == "__main__":
+    from vllm._C import ops
+
     torch.manual_seed(0)
     torch.cuda.manual_seed(0)
     torch.cuda.manual_seed_all(0)
@@ -268,7 +270,6 @@ if __name__ == "__main__":
                          device="cuda")
 
     c = awq_matmul(a, b, qzeros, scales, PACK_FACTOR, GROUP_SIZE)
-    from vllm import quantization_ops
-    ans = quantization_ops.awq_gemm(a, b, scales, qzeros, PACK_FACTOR)
+    ans = ops.awq_gemm(a, b, scales, qzeros, PACK_FACTOR)
 
     print((c - ans).abs().max())
