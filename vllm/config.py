@@ -7,6 +7,7 @@ from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 from vllm.utils import get_cpu_memory, is_hip
+from ray._private.utils import get_ray_temp_dir
 
 logger = init_logger(__name__)
 
@@ -323,7 +324,7 @@ class ParallelConfig:
         tensor_parallel_size: int,
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
-        ray_temp_dir: Optional[str] = "/tmp",
+        ray_temp_dir: Optional[str] = get_ray_temp_dir(),
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size

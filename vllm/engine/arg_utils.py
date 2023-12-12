@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
+from ray._private.utils import get_ray_temp_dir
 
 
 @dataclass
@@ -33,7 +34,7 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-    ray_temp_dir: Optional[str] = "/tmp"
+    ray_temp_dir: Optional[str] = get_ray_temp_dir()
 
     def __post_init__(self):
         if self.tokenizer is None:
