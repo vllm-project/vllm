@@ -20,10 +20,10 @@ void reshape_and_cache(
   torch::Tensor& value_cache, 
   torch::Tensor& slot_mapping, 
   bool use_quant = false,
-  const float k_scale = 1.0f,
-  const float k_zp = 0.0f,
-  const float v_scale = 1.0f,
-  const float v_zp = 0.0f);
+  float k_scale = 1.0f,
+  float k_zp = 0.0f,
+  float v_scale = 1.0f,
+  float v_zp = 0.0f);
 
 void gather_cached_kv(
   torch::Tensor& key,

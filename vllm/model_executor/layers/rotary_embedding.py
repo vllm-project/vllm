@@ -156,7 +156,9 @@ class DequantRotaryEmbedding(RotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        dequant_scale: float,
+        q_dequant_scale: float,
+        k_dequant_scale: float,
+        v_dequant_scale: float
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
@@ -164,7 +166,7 @@ class DequantRotaryEmbedding(RotaryEmbedding):
         key_dequant = torch.empty_like(key, dtype=self.cos_sin_cache.dtype)
         value_dequant = torch.empty_like(value, dtype=self.cos_sin_cache.dtype)
 
-        ops.dequant(value_dequant, value, dequant_scale)
+        ops.dequant(value_dequant, value, v_dequant_scale)
         ops.rotary_embedding(
             positions,
             query,
@@ -175,8 +177,8 @@ class DequantRotaryEmbedding(RotaryEmbedding):
             query_dequant,
             key_dequant,
             True,  # enable dequant
-            dequant_scale,
-            dequant_scale,
+            q_dequant_scale,
+            k_dequant_scale,
         )
         return query_dequant, key_dequant, value_dequant
 

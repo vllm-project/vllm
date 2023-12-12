@@ -107,10 +107,9 @@ class DequantAddResidualI8RMSNormQuant(nn.Module):
                 scale: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         out = torch.empty_like(x, dtype=torch.int8)
         if self.use_per_token_dequant and scale is not None:
-            scale = scale * self.dequant_scale.item()
             ops.dequant_add_residual_rms_norm_quant(
                 out, x, residual, self.weight.data, scale,
-                self.variance_epsilon)
+                self.variance_epsilon, self.dequant_scale.item())
         else:
             ops.dequant_add_residual_rms_norm_quant(
                 out, x, residual, self.weight.data, self.dequant_scale.item(),

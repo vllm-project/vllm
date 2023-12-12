@@ -114,8 +114,8 @@ void rotary_embedding(
   torch::Tensor& query_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
   torch::Tensor& key_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
   bool use_dequant = false,
-  const float query_scale = 1.0f,
-  const float key_scale = 1.0f) {
+  float query_scale = 1.0f,
+  float key_scale = 1.0f) {
   int64_t num_tokens = query.numel() / query.size(-1);
   int rot_dim = cos_sin_cache.size(1);
   int num_heads = query.size(-1) / head_size;

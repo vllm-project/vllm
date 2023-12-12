@@ -13,10 +13,10 @@ void paged_attention_v1(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   bool enable_quant = false,
-  const float k_scale = 1.0f,
-  const float k_zp = 0.0f,
-  const float v_scale = 1.0f,
-  const float v_zp = 0.0f);
+  float k_scale = 1.0f,
+  float k_zp = 0.0f,
+  float v_scale = 1.0f,
+  float v_zp = 0.0f);
 
 void paged_attention_v2(
   torch::Tensor& out,
@@ -34,10 +34,10 @@ void paged_attention_v2(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   bool enable_quant = false,
-  const float k_scale = 1.0f,
-  const float k_zp = 0.0f,
-  const float v_scale = 1.0f,
-  const float v_zp = 0.0f);
+  float k_scale = 1.0f,
+  float k_zp = 0.0f,
+  float v_scale = 1.0f,
+  float v_zp = 0.0f);
 
 void rms_norm(
   torch::Tensor& out,
@@ -51,7 +51,8 @@ void dequant_add_residual_rms_norm_quant(
   torch::Tensor& input,
   torch::Tensor& residual,
   torch::Tensor& gamma,
-  float scale, float epsilon);
+  float scale,
+  float epsilon);
 
 void dequant_add_residual_rms_norm_quant(
   torch::Tensor& out,
@@ -59,7 +60,8 @@ void dequant_add_residual_rms_norm_quant(
   torch::Tensor& residual,
   torch::Tensor& gamma,
   torch::Tensor& scale,
-  float epsilon);
+  float epsilon,
+  float weight_dequant_scale);
 
 void fused_add_rms_norm(
   torch::Tensor& out,
@@ -79,8 +81,8 @@ void rotary_embedding(
   torch::Tensor& query_out,
   torch::Tensor& key_out,
   bool use_dequant = false,
-  const float query_scale = 1.0f,
-  const float key_scale = 1.0f);
+  float query_scale = 1.0f,
+  float key_scale = 1.0f);
 
 void silu_and_mul(
   torch::Tensor& out,
@@ -97,17 +99,17 @@ void gelu_fast(
 void dequant_silu_and_mul_quant(
   torch::Tensor& out,
   torch::Tensor& input,
-  const float scale_gate,
-  const float scale_up,
-  const float scale_out);
+  float gate_scale,
+  float up_scale,
+  float out_scale);
 
 void dequant_silu_and_mul_quant(
   torch::Tensor& out,
   torch::Tensor& input,
-  const float scale_gate,
-  const float scale_up,
-  torch::Tensor& scale_out,
-  torch::Tensor& tmp);
+  float gate_scale,
+  float up_scale,
+  torch::Tensor& out_scale,
+  torch::Tensor& tmp); 
 
 void dequant_add_residual(
   torch::Tensor& out,
@@ -119,7 +121,8 @@ void dequant_add_residual(
   torch::Tensor& out,
   torch::Tensor& input,
   torch::Tensor& residual,
-  torch::Tensor& scale);
+  torch::Tensor& scale,
+  float weight_dequant_scale);
 
 void dequant(
   torch::Tensor& out,
@@ -129,7 +132,8 @@ void dequant(
 void dequant(
   torch::Tensor& out,
   torch::Tensor& input,
-  torch::Tensor& scale);
+  torch::Tensor& scale,
+  float weight_dequant_scale);
 
 void quant(
   torch::Tensor& out,

@@ -42,32 +42,30 @@ __global__ void rms_norm_kernel(
 }
 
 
-template <typename T, typename scale_type, bool use_per_token_dequant>
+template <typename T, bool use_per_token_dequant>
 __global__ void dequant_add_residual_rms_norm_quant_kernel(
   const int32_t* __restrict__ input,
   T* __restrict__ residual,
-  int8_t* __restrict__ output,
+  int8_t* __restrict__ out,
   const T* __restrict__ gamma,
   const float layernorm_eps,
-  const scale_type scale,
-  int num_tokens,
-  int hidden_size) {
+  const float scale,
+  const int num_tokens,
+  const int hidden_size,
+  const float* __restrict__ act_scale = nullptr) {
   // layernorm module in the T5 style No bias and no subtraction of mean.
   const int tid = threadIdx.x;
 
   __shared__ float s_variance;
   float variance = 0.0f;
-
   float local_var_sum = 0.0f;
+  float scale_ = scale;
+  if constexpr (use_per_token_dequant) {
+    scale_ = scale * act_scale[blockIdx.x];
+  }
   for (int i = tid; i < hidden_size; i += blockDim.x) {
-    float diff = 0.0f;
-    if constexpr (use_per_token_dequant) {
-      diff = ((((float)input[blockIdx.x * hidden_size + i]) * scale[blockIdx.x]) +
+    float diff = ((((float)input[blockIdx.x * hidden_size + i]) * scale_) +
                   (float)residual[blockIdx.x * hidden_size + i]);
-    } else {
-      diff = ((((float)input[blockIdx.x * hidden_size + i]) * scale) +
-                  (float)residual[blockIdx.x * hidden_size + i]);
-    }
     residual[blockIdx.x * hidden_size + i] = (T)diff;
     local_var_sum += diff * diff;
   }
@@ -170,16 +168,15 @@ void dequant_add_residual_rms_norm_quant(
   VLLM_DISPATCH_FLOATING_TYPES(
       residual.scalar_type(), "dequant_add_residual_rms_norm_quant_kernel",
       [&] {
-          vllm::dequant_add_residual_rms_norm_quant_kernel<scalar_t, float, false>
-            <<<grid, block, 0, stream>>>(
-                input.data_ptr<int32_t>(),
-                residual.data_ptr<scalar_t>(),
-                out.data_ptr<int8_t>(),
-                gamma.data_ptr<scalar_t>(),
-                epsilon,
-                scale,
-                num_tokens,
-                hidden_size);
+          vllm::dequant_add_residual_rms_norm_quant_kernel<scalar_t, false><<<grid, block, 0, stream>>>(
+            input.data_ptr<int32_t>(),
+            residual.data_ptr<scalar_t>(),
+            out.data_ptr<int8_t>(),
+            gamma.data_ptr<scalar_t>(),
+            epsilon,
+            scale,
+            num_tokens,
+            hidden_size);
       });
 }
 
@@ -189,7 +186,8 @@ void dequant_add_residual_rms_norm_quant(
   torch::Tensor& residual, // [..., hidden_size]
   torch::Tensor& gamma,    // [hidden_size]
   torch::Tensor& scale,    // [num_tokens]
-  float epsilon) {
+  float epsilon,
+  float weight_dequant_scale) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 
@@ -200,16 +198,16 @@ void dequant_add_residual_rms_norm_quant(
   VLLM_DISPATCH_FLOATING_TYPES(
       residual.scalar_type(), "dequant_add_residual_rms_norm_quant_kernel",
       [&] {
-          vllm::dequant_add_residual_rms_norm_quant_kernel<scalar_t, float*, true>
-            <<<grid, block, 0, stream>>>(
-                input.data_ptr<int32_t>(),
-                residual.data_ptr<scalar_t>(),
-                out.data_ptr<int8_t>(),
-                gamma.data_ptr<scalar_t>(),
-                epsilon,
-                scale.data_ptr<float>(),
-                num_tokens,
-                hidden_size);
+          vllm::dequant_add_residual_rms_norm_quant_kernel<scalar_t, true><<<grid, block, 0, stream>>>(
+            input.data_ptr<int32_t>(),
+            residual.data_ptr<scalar_t>(),
+            out.data_ptr<int8_t>(),
+            gamma.data_ptr<scalar_t>(),
+            epsilon,
+            weight_dequant_scale,
+            num_tokens,
+            hidden_size,
+            scale.data_ptr<float>());
       });
 }
 

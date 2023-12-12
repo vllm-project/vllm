@@ -301,14 +301,24 @@ class DequantPagedAttentionQuant(PagedAttention):
     def __init__(
         self,
         *args,
-        dequant_scale: float = 1.0,
+        q_dequant_scale: float = 1.0,
+        k_dequant_scale: float = 1.0,
+        v_dequant_scale: float = 1.0,
         quant_scale: float = 1.0,
         use_per_token_quant: bool = True,
         **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.dequant_scale = Parameter(
-            torch.tensor(dequant_scale, dtype=torch.float32),
+        self.q_dequant_scale = Parameter(
+            torch.tensor(q_dequant_scale, dtype=torch.float32),
+            False
+        )
+        self.k_dequant_scale = Parameter(
+            torch.tensor(k_dequant_scale, dtype=torch.float32),
+            False
+        )
+        self.v_dequant_scale = Parameter(
+            torch.tensor(v_dequant_scale, dtype=torch.float32),
             False
         )
         self.quant_scale = Parameter(
@@ -320,14 +330,20 @@ class DequantPagedAttentionQuant(PagedAttention):
 
     def _apply(self, fn):
         super()._apply(fn)
-        self.dequant_scale = self.dequant_scale.cpu()
+        self.q_dequant_scale = self.q_dequant_scale.cpu()
+        self.k_dequant_scale = self.k_dequant_scale.cpu()
+        self.v_dequant_scale = self.v_dequant_scale.cpu()
         self.quant_scale = self.quant_scale.cpu()
         return self
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
-        self.dequant_scale = self.dequant_scale.to(*args, **kwargs)
-        self.dequant_scale = self.dequant_scale.to(torch.float32)
+        self.q_dequant_scale = self.q_dequant_scale.to(*args, **kwargs)
+        self.q_dequant_scale = self.q_dequant_scale.to(torch.float32)
+        self.k_dequant_scale = self.k_dequant_scale.to(*args, **kwargs)
+        self.k_dequant_scale = self.k_dequant_scale.to(torch.float32)
+        self.v_dequant_scale = self.v_dequant_scale.to(*args, **kwargs)
+        self.v_dequant_scale = self.v_dequant_scale.to(torch.float32)
         self.quant_scale = self.quant_scale.to(*args, **kwargs)
         self.quant_scale = self.quant_scale.to(torch.float32)
         return self
@@ -364,9 +380,9 @@ class DequantPagedAttentionQuant(PagedAttention):
             query_dequant = torch.empty_like(query, dtype=self.default_dtype)
             key_dequant = torch.empty_like(key, dtype=self.default_dtype)
             value_dequant = torch.empty_like(value, dtype=self.default_dtype)
-            ops.dequant(query_dequant, query, self.dequant_scale.item())
-            ops.dequant(key_dequant, key, self.dequant_scale.item())
-            ops.dequant(value_dequant, value, self.dequant_scale.item())
+            ops.dequant(query_dequant, query, self.q_dequant_scale.item())
+            ops.dequant(key_dequant, key, self.k_dequant_scale.item())
+            ops.dequant(value_dequant, value, self.v_dequant_scale.item())
             out = super().forward(
                 query_dequant,
                 key_dequant,
