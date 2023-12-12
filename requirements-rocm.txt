@@ -10,7 +10,7 @@ numpy
 tokenizers>=0.15.0
 huggingface_hub<0.18,>=0.16.4
 einops  # Required for phi-1_5
-transformers >= 4.34.0  # Required for Mistral.
+transformers >= 4.36.0  # Required for Mixtral.
 fastapi
 uvicorn[standard]
 pydantic == 1.10.13  # Required for OpenAI server.

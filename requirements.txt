@@ -7,7 +7,7 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 einops  # Required for phi-1_5
 torch >= 2.1.1
-transformers >= 4.34.0  # Required for Mistral.
+transformers >= 4.36.0  # Required for Mixtral.
 xformers >= 0.0.23  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
