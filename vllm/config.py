@@ -323,7 +323,7 @@ class ParallelConfig:
         tensor_parallel_size: int,
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
-        ray_temp_dir: Optional[str] = "/tmp/ray",
+        ray_temp_dir: Optional[str] = "/tmp",
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size

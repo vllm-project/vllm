@@ -33,7 +33,7 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-    ray_temp_dir: Optional[str] = "/tmp/ray"
+    ray_temp_dir: Optional[str] = "/tmp"
 
     def __post_init__(self):
         if self.tokenizer is None:
