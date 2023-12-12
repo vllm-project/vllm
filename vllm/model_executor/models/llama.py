@@ -276,8 +276,7 @@ class LlamaDecoderLayer(nn.Module):
                 residual, hidden_states = self.post_attention_layernorm(
                     residual, hidden_states, scale)
                 hidden_states, scale = self.mlp(hidden_states)
-                hidden_states = self.dequant_add_residual(residual, hidden_states,
-                                                        scale)
+                hidden_states = self.dequant_add_residual(residual, hidden_states, scale)
         else:
             hidden_states = residual + hidden_states
             # Fully Connected
@@ -376,13 +375,15 @@ class LlamaForCausalLM(nn.Module):
     _row_parallel_layers = ["o_proj", "down_proj"]
     # name map, you may need to modify it according to your situation
     _int8_scale_params = {
-        "self_attn.q_proj.dequant_scale": "self_attn.attn.dequant_scale",
-        "self_attn.k_proj.dequant_scale": "self_attn.attn.dequant_scale",
-        "self_attn.v_proj.dequant_scale": "self_attn.attn.dequant_scale",
+        "self_attn.q_proj.dequant_scale": "self_attn.attn.q_dequant_scale",
+        "self_attn.k_proj.dequant_scale": "self_attn.attn.k_dequant_scale",
+        "self_attn.v_proj.dequant_scale": "self_attn.attn.v_dequant_scale",
+        # "self_attn.o_proj.quant_scale": "self_attn.attn.quant_scale",
         "self_attn.o_proj.dequant_scale":
         "post_attention_layernorm.dequant_scale",
-        "mlp.gate_proj.dequant_scale": "mlp.act_fn.dequant_scale",
-        "mlp.up_proj.dequant_scale": "mlp.act_fn.dequant_scale",
+        "mlp.gate_proj.dequant_scale": "mlp.act_fn.gate_dequant_scale",
+        "mlp.up_proj.dequant_scale": "mlp.act_fn.up_dequant_scale",
+        # "mlp.down_proj.quant_scale": "mlp.act_fn.quant_scale",
         "mlp.down_proj.dequant_scale": "dequant_add_residual.dequant_scale"
     }
 

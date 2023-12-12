@@ -18,7 +18,8 @@ void invoke_dequant_add_residual_rms_norm_quant(
     torch::Tensor &residual, // [..., hidden_size]
     torch::Tensor &gamma,    // [hidden_size]
     torch::Tensor &scale,    // [num_tokens]
-    float epsilon);
+    float epsilon,
+    float weight_dequant_scale);
 
 void invoke_add_residual_rms_norm_quant(
     torch::Tensor &out,      // [..., hidden_size]
@@ -36,16 +37,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::overload_cast<torch::Tensor &, torch::Tensor &, torch::Tensor &,
                           torch::Tensor &, float, float>(
             &invoke_dequant_add_residual_rms_norm_quant),
-        "Add the dequanted result and residual, then use RMS norm and quant "
-        "output.");
+        "Add the dequanted result and residual, then use RMS norm and quant output.");
   m.def("invoke_dequant_add_residual_rms_norm_quant",
         py::overload_cast<torch::Tensor &, torch::Tensor &, torch::Tensor &,
-                          torch::Tensor &, torch::Tensor &, float>(
+                          torch::Tensor &, torch::Tensor &, float, float>(
             &invoke_dequant_add_residual_rms_norm_quant),
-        "Add the dequanted result and residual, then use RMS norm and quant "
-        "output.");
+        "Add the dequanted result and residual, then use RMS norm and quant output.");
   m.def("invoke_add_residual_rms_norm_quant",
         &invoke_add_residual_rms_norm_quant,
-        "Add the result and residual, then use RMS norm and quant "
-        "output.");
+        "Add the result and residual, then use RMS norm and quant output.");
 }

@@ -35,13 +35,19 @@ class DequantSiluAndMulQuant(nn.Module):
 
     # TODO(Zhang Ying): use_per_token_quant
     def __init__(self,
-                 dequant_scale: float = 1.0,
+                 gate_dequant_scale: float = 1.0,
+                 up_dequant_scale: float = 1.0,
                  quant_scale: float = 1.0,
                  use_per_token_quant: bool = True) -> None:
         super().__init__()
         self.register_buffer(
-            "dequant_scale",
-            torch.tensor(dequant_scale,
+            "gate_dequant_scale",
+            torch.tensor(gate_dequant_scale,
+                         dtype=torch.float32,
+                         requires_grad=False))
+        self.register_buffer(
+            "up_dequant_scale",
+            torch.tensor(up_dequant_scale,
                          dtype=torch.float32,
                          requires_grad=False))
         self.register_buffer(
@@ -52,14 +58,17 @@ class DequantSiluAndMulQuant(nn.Module):
 
     def _apply(self, fn):
         super()._apply(fn)
-        self.dequant_scale = self.dequant_scale.cpu()
+        self.gate_dequant_scale = self.gate_dequant_scale.cpu()
+        self.up_dequant_scale = self.up_dequant_scale.cpu()
         self.quant_scale = self.quant_scale.cpu()
         return self
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
-        self.dequant_scale = self.dequant_scale.to(*args, **kwargs)
-        self.dequant_scale = self.dequant_scale.to(torch.float32)
+        self.gate_dequant_scale = self.gate_dequant_scale.to(*args, **kwargs)
+        self.gate_dequant_scale = self.gate_dequant_scale.to(torch.float32)
+        self.up_dequant_scale = self.up_dequant_scale.to(*args, **kwargs)
+        self.up_dequant_scale = self.up_dequant_scale.to(torch.float32)
         self.quant_scale = self.quant_scale.to(*args, **kwargs)
         self.quant_scale = self.quant_scale.to(torch.float32)
         return self
@@ -78,12 +87,12 @@ class DequantSiluAndMulQuant(nn.Module):
                               dtype=torch.float32,
                               device=x.device)
             activation_ops.invoke_dequant_silu_and_mul_quant(
-                out, x, self.dequant_scale.item(), self.dequant_scale.item(),
+                out, x, self.gate_dequant_scale.item(), self.up_dequant_scale.item(),
                 scale, tmp)
             return out, scale
         else:
             activation_ops.invoke_dequant_silu_and_mul_quant(
-                out, x, self.dequant_scale.item(), self.dequant_scale.item(),
+                out, x, self.gate_dequant_scale.item(), self.up_dequant_scale.item(),
                 self.quant_scale.item())
             return (out, )
 

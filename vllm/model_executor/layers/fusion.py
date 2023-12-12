@@ -34,8 +34,7 @@ class DequantAddResidual(nn.Module):
                 scale: torch.Tensor = None) -> torch.Tensor:
         out = torch.empty_like(residual)
         if self.use_per_token_dequant and scale is not None:
-            scale = scale * self.dequant_scale.item()
-            fused_kernels.invoke_dequant_add_residual(out, x, residual, scale)
+            fused_kernels.invoke_dequant_add_residual(out, x, residual, scale, self.dequant_scale.item())
         else:
             fused_kernels.invoke_dequant_add_residual(
                 out, x, residual, self.dequant_scale.item())

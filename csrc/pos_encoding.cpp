@@ -9,8 +9,9 @@ void rotary_embedding(
     bool is_neox,
     torch::Tensor &query_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
     torch::Tensor &key_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
-    bool use_dequant = false, const float query_scale = 1.0f,
-    const float key_scale = 1.0f);
+    bool use_dequant = false,
+    float query_scale = 1.0f,
+    float key_scale = 1.0f);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rotary_embedding", &rotary_embedding, py::arg("positions"),

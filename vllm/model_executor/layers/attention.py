@@ -398,7 +398,11 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
         is_neox_style: bool = True,
         rope_scaling: Optional[Dict[str, Any]] = None,
         sliding_window: Optional[int] = None,
-        dequant_scale: float = 1.0,
+        quant_kv_cache: bool = False,
+        kv_quant_params: torch.Tensor = None,
+        q_dequant_scale: float = 1.0,
+        k_dequant_scale: float = 1.0,
+        v_dequant_scale: float = 1.0,
         quant_scale: float = 1.0,
         use_per_token_quant: bool = True,
     ) -> None:
@@ -425,8 +429,18 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
         self.register_buffer(
-            "dequant_scale",
-            torch.tensor(dequant_scale,
+            "q_dequant_scale",
+            torch.tensor(q_dequant_scale,
+                         dtype=torch.float32,
+                         requires_grad=False))
+        self.register_buffer(
+            "k_dequant_scale",
+            torch.tensor(k_dequant_scale,
+                         dtype=torch.float32,
+                         requires_grad=False))
+        self.register_buffer(
+            "v_dequant_scale",
+            torch.tensor(v_dequant_scale,
                          dtype=torch.float32,
                          requires_grad=False))
         self.register_buffer(
@@ -437,14 +451,20 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
 
     def _apply(self, fn):
         super()._apply(fn)
-        self.dequant_scale = self.dequant_scale.cpu()
+        self.q_dequant_scale = self.q_dequant_scale.cpu()
+        self.k_dequant_scale = self.k_dequant_scale.cpu()
+        self.v_dequant_scale = self.v_dequant_scale.cpu()
         self.quant_scale = self.quant_scale.cpu()
         return self
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
-        self.dequant_scale = self.dequant_scale.to(*args, **kwargs)
-        self.dequant_scale = self.dequant_scale.to(torch.float32)
+        self.q_dequant_scale = self.q_dequant_scale.to(*args, **kwargs)
+        self.q_dequant_scale = self.q_dequant_scale.to(torch.float32)
+        self.k_dequant_scale = self.k_dequant_scale.to(*args, **kwargs)
+        self.k_dequant_scale = self.k_dequant_scale.to(torch.float32)
+        self.v_dequant_scale = self.v_dequant_scale.to(*args, **kwargs)
+        self.v_dequant_scale = self.v_dequant_scale.to(torch.float32)
         self.quant_scale = self.quant_scale.to(*args, **kwargs)
         self.quant_scale = self.quant_scale.to(torch.float32)
         return self
@@ -481,7 +501,10 @@ class DequantPagedAttentionWithRoPEQuant(PagedAttention):
         # Apply rotary embedding to the query and key before passing them
         # to the attention op.
         query_dequant, key_dequant, value_dequant = self.rotary_emb(
-            positions, query, key, value, self.dequant_scale.item())
+            positions, query, key, value,
+            self.q_dequant_scale.item(),
+            self.k_dequant_scale.item(),
+            self.v_dequant_scale.item())
         out = super().forward(
             query_dequant,
             key_dequant,

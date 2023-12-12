@@ -44,16 +44,15 @@ template <typename scalar_t, typename input_type, bool IS_NEOX,
       const int64_t *__restrict__ positions, 
       input_type *__restrict__ query, 
       input_type *__restrict__ key,
-      const scalar_t
-          *__restrict__ cos_sin_cache,
+      const scalar_t *__restrict__ cos_sin_cache,
       const int rot_dim, const int query_stride, const int key_stride,
       const int num_heads, const int num_kv_heads, const int head_size,
-      scalar_t *__restrict__ query_out =
-          nullptr,
-      scalar_t * __restrict__ key_out =
-          nullptr,
-      const int query_out_stride = 1, const int key_out_stride = 1,
-      const float query_scale = 1.0f, const float key_scale = 1.0f) {
+      scalar_t *__restrict__ query_out = nullptr,
+      scalar_t * __restrict__ key_out = nullptr,
+      const int query_out_stride = 1,
+      const int key_out_stride = 1,
+      const float query_scale = 1.0f,
+      const float key_scale = 1.0f) {
     // Each thread block is responsible for one token.
     const int token_idx = blockIdx.x;
     int64_t pos = positions[token_idx];
@@ -108,8 +107,9 @@ void rotary_embedding(
     bool is_neox,
     torch::Tensor &query_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
     torch::Tensor &key_out, // [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size]
-    bool use_dequant = false, const float query_scale = 1.0f,
-    const float key_scale = 1.0f) {
+    bool use_dequant = false,
+    float query_scale = 1.0f,
+    float key_scale = 1.0f) {
   int64_t num_tokens = query.numel() / query.size(-1);
   int rot_dim = cos_sin_cache.size(1);
   int num_heads = query.size(-1) / head_size;

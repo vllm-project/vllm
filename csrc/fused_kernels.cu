@@ -7,48 +7,46 @@
 #include <cassert>
 
 namespace vllm {
-template <typename T, typename scale_type, bool use_per_token_dequant>
+template <typename T, bool use_per_token_dequant>
 __global__ void dequant_add_residual_kernel(const int32_t *__restrict__ input,
                                             const T *__restrict__ residual,
-                                            T *__restrict__ output,
-                                            const scale_type scale, int num_tokens,
-                                            int hidden_size) {
+                                            T *__restrict__ out,
+                                            const float scale, const int num_tokens,
+                                            const int hidden_size, const float *__restrict__ act_scale = nullptr) {
   const int tid = threadIdx.x;
   const int token_idx = blockIdx.x;
+  float scale_ = scale;
+  if constexpr (use_per_token_dequant) {
+    scale_ = scale * act_scale[token_idx];
+  }
   for (int i = tid; i < hidden_size; i += blockDim.x) {
-    if constexpr (use_per_token_dequant) {
-      output[token_idx * hidden_size + i] =
-          (T)((((float)input[token_idx * hidden_size + i]) * scale[token_idx]) +
-              (float)residual[token_idx * hidden_size + i]);
-    } else {
-      output[token_idx * hidden_size + i] =
-          (T)((((float)input[token_idx * hidden_size + i]) * scale) +
-              (float)residual[token_idx * hidden_size + i]);
-    }
+    out[token_idx * hidden_size + i] =
+      (T)((((float)input[token_idx * hidden_size + i]) * scale_) +
+          (float)residual[token_idx * hidden_size + i]);
   }
 }
 
-template <typename T, typename scale_type, bool use_per_token_dequant>
+template <typename T, bool use_per_token_dequant>
 __global__ void dequant_kernel(const int32_t *__restrict__ input,
-                               T *__restrict__ output, const scale_type scale, int m,
-                               int hidden_size, int input_stride, int out_stride) {
+                               T *__restrict__ out, const float scale, const int m,
+                               const int hidden_size, const int input_stride, const int out_stride,
+                               const float *__restrict__ act_scale = nullptr) {
   const int tid = threadIdx.x;
   const int token_idx = blockIdx.x;
+  float scale_ = scale;
+  if constexpr (use_per_token_dequant) {
+    scale_ = scale * act_scale[token_idx];
+  }
   for (int i = tid; i < hidden_size; i += blockDim.x) {
-    if constexpr (use_per_token_dequant) {
-      output[token_idx * out_stride + i] =
-          (T)(((float)input[token_idx * input_stride + i]) * scale[token_idx]);
-    } else {
-      output[token_idx * out_stride + i] =
-        (T)(((float)input[token_idx * input_stride + i]) * scale);
-    }
+    out[token_idx * out_stride + i] =
+    (T)(((float)input[token_idx * input_stride + i]) * scale_);
   }
 }
 
 template <typename T, typename scale_type, bool use_per_token_quant>
 __global__ void quant_kernel(const T *__restrict__ input,
-                             int8_t *__restrict__ output, scale_type scale,
-                             int num_tokens, int hidden_size) {
+                             int8_t *__restrict__ out, scale_type scale,
+                             const int num_tokens, const int hidden_size) {
   const int tid = threadIdx.x;
   const int token_idx = blockIdx.x;
 
@@ -73,12 +71,12 @@ __global__ void quant_kernel(const T *__restrict__ input,
 
     float tmp_scale = 127.0f / s_amax;
     for (int i = tid; i < hidden_size; i += blockDim.x) {
-      output[token_idx * hidden_size + i] =
+      out[token_idx * hidden_size + i] =
           float_to_int8_rn(((float)input[token_idx * hidden_size + i]) * tmp_scale);
     }
   } else {
     for (int i = tid; i < hidden_size; i += blockDim.x) {
-      output[token_idx * hidden_size + i] =
+      out[token_idx * hidden_size + i] =
           float_to_int8_rn(((float)input[token_idx * hidden_size + i]) / scale);
     }
   }
@@ -98,7 +96,7 @@ void invoke_dequant_add_residual(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       residual.scalar_type(), "dequant_add_residual_kernel", [&] {
-        vllm::dequant_add_residual_kernel<scalar_t, float, false>
+        vllm::dequant_add_residual_kernel<scalar_t, false>
             <<<grid, block, 0, stream>>>(input.data_ptr<int32_t>(),
                                          residual.data_ptr<scalar_t>(),
                                          out.data_ptr<scalar_t>(), scale, m, n);
@@ -109,7 +107,8 @@ void invoke_dequant_add_residual(
     torch::Tensor &out,      // [..., hidden_size]
     torch::Tensor &input,    // [..., hidden_size]
     torch::Tensor &residual, // [..., hidden_size]
-    torch::Tensor &scale) {  // [num_tokens]
+    torch::Tensor &scale,
+    float weight_dequant_scale) {  // [num_tokens]
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   dim3 grid(num_tokens);
@@ -117,10 +116,10 @@ void invoke_dequant_add_residual(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       residual.scalar_type(), "dequant_add_residual_kernel", [&] {
-        vllm::dequant_add_residual_kernel<scalar_t, float *, true>
+        vllm::dequant_add_residual_kernel<scalar_t, true>
             <<<grid, block, 0, stream>>>(
                 input.data_ptr<int32_t>(), residual.data_ptr<scalar_t>(),
-                out.data_ptr<scalar_t>(), scale.data_ptr<float>(), num_tokens, hidden_size);
+                out.data_ptr<scalar_t>(), weight_dequant_scale, num_tokens, hidden_size, scale.data_ptr<float>());
       });
 }
 
@@ -136,7 +135,7 @@ void invoke_dequant(torch::Tensor &out,   // [..., hidden_size]
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(out.scalar_type(), "dequant_kernel", [&] {
-    vllm::dequant_kernel<scalar_t, float, false><<<grid, block, 0, stream>>>(
+    vllm::dequant_kernel<scalar_t, false><<<grid, block, 0, stream>>>(
         input.data_ptr<int32_t>(), out.data_ptr<scalar_t>(), scale, num_tokens, hidden_size,
         input_stride, out_stride);
   });
@@ -144,7 +143,8 @@ void invoke_dequant(torch::Tensor &out,   // [..., hidden_size]
 
 void invoke_dequant(torch::Tensor &out,   // [..., hidden_size]
                     torch::Tensor &input, // [..., hidden_size]
-                    torch::Tensor &scale) {
+                    torch::Tensor &scale,
+                    float weight_dequant_scale) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   dim3 grid(num_tokens);
@@ -154,9 +154,9 @@ void invoke_dequant(torch::Tensor &out,   // [..., hidden_size]
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(out.scalar_type(), "dequant_kernel", [&] {
-    vllm::dequant_kernel<scalar_t, float *, true><<<grid, block, 0, stream>>>(
-        input.data_ptr<int32_t>(), out.data_ptr<scalar_t>(), scale.data_ptr<float>(), num_tokens, hidden_size,
-        input_stride, out_stride);
+    vllm::dequant_kernel<scalar_t, true><<<grid, block, 0, stream>>>(
+        input.data_ptr<int32_t>(), out.data_ptr<scalar_t>(), weight_dequant_scale, num_tokens, hidden_size,
+        input_stride, out_stride, scale.data_ptr<float>());
   });
 }
 

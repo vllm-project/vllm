@@ -310,10 +310,8 @@ class RowParallelLinear(torch.nn.Module):
         # Matrix multiply.
         output_parallel = self.apply_weights(input_parallel)
         if self.use_int8 and self.tp_size > 1:
-        # FIXME (Zhang Ying): handle dtype 
-            out = torch.empty_like(output_parallel, dtype=torch.float16)
-            scale = self.dequant_scale.item() * scale
-            fused_kernels.invoke_dequant(out, output_parallel, scale)
+            out = torch.empty_like(output_parallel, dtype=torch.get_default_dtype())
+            fused_kernels.invoke_dequant(out, output_parallel, scale, self.dequant_scale.item())
             output_parallel = out
         if self.reduce_results and self.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)

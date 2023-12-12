@@ -9,15 +9,15 @@ void gelu_fast(torch::Tensor &out, torch::Tensor &input);
 
 void invoke_dequant_silu_and_mul_quant(torch::Tensor &out,   // [..., d]
                                        torch::Tensor &input, // [..., 2 * d]
-                                       const float scale_gate,
-                                       const float scale_up,
-                                       const float scale_out);
+                                       float gate_scale,
+                                       float up_scale,
+                                       float out_scale);
 
 void invoke_dequant_silu_and_mul_quant(torch::Tensor &out,   // [..., d]
                                        torch::Tensor &input, // [..., 2 * d]
-                                       const float scale_gate,
-                                       const float scale_up,
-                                       torch::Tensor &scale_out, // [num_tokens]
+                                       float gate_scale,
+                                       float up_scale,
+                                       torch::Tensor &out_scale, // [num_tokens]
                                        torch::Tensor &tmp // [num_tokens, d]
 );
 
