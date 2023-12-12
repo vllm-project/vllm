@@ -15,7 +15,6 @@ Easy, fast, and cheap LLM serving for everyone
 </p>
 
 ---
-## DiscoLM implementation for Mixtral MoE is available on the DiscoLM branch 
 
 *Latest News* 🔥
 - [2023/12] Added ROCm support to vLLM.
