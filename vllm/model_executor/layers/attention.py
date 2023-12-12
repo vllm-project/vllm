@@ -138,7 +138,8 @@ class PagedAttention(nn.Module):
                     input_metadata.attn_bias = attn_bias
                 else:
                     input_metadata.attn_bias = _make_alibi_bias(
-                        self.alibi_slopes, batch_size, seq_len, query.dtype)
+                        self.alibi_slopes, self.num_kv_heads, batch_size,
+                        seq_len, query.dtype)
 
             # TODO(woosuk): Too many view operations. Let's try to reduce them
             # in the future for code readability.
@@ -180,31 +181,34 @@ class PagedAttention(nn.Module):
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
+    num_kv_heads: int,
     batch_size: int,
     seq_len: int,
     dtype: torch.dtype,
 ) -> LowerTriangularMaskWithTensorBias:
-    bias = torch.arange(seq_len, dtype=dtype)
+    bias = torch.arange(seq_len, dtype=dtype, device="cuda")
     # NOTE(zhuohan): HF uses
     #     `bias = bias[None, :].repeat(prompt_len, 1)`
     # here. We find that both biases give the same results, but
     # the bias below more accurately follows the original ALiBi
     # paper.
     bias = bias[None, :] - bias[:, None]
-    bias = bias.to(alibi_slopes.device)
 
     # When using custom attention bias, xformers requires the bias to
     # be sliced from a tensor whose length is a multiple of 8.
     padded_len = (seq_len + 7) // 8 * 8
+    num_heads = alibi_slopes.shape[0]
     bias = torch.empty(
         batch_size,
-        alibi_slopes.shape[0],
+        num_heads,
         seq_len,
         padded_len,
         device=alibi_slopes.device,
         dtype=dtype,
     )[:, :, :, :seq_len].copy_(bias)
     bias.mul_(alibi_slopes[:, None, None])
+    if num_heads != num_kv_heads:
+        bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
     attn_bias = LowerTriangularMaskWithTensorBias(bias)
     return attn_bias
 
