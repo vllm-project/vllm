@@ -52,7 +52,7 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS = {
 class ModelRegistry:
 
     @staticmethod
-    def load_model(model_arch: str) -> Optional[Type[nn.Module]]:
+    def load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
         if model_arch not in _MODELS:
             return None
         if is_hip():

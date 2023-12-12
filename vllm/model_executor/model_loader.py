@@ -24,9 +24,9 @@ def _set_default_torch_dtype(dtype: torch.dtype):
 def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
-        model = ModelRegistry.load_model(arch)
-        if model is not None:
-            return model
+        model_cls = ModelRegistry.load_model_cls(arch)
+        if model_cls is not None:
+            return model_cls
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
