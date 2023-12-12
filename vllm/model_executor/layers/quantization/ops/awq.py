@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import Dict, List, Optional
 
 import torch
 import triton
@@ -54,7 +54,7 @@ def _prune_configs(configs, named_args):
     prune_configs_by={
         'early_config_prune': _prune_configs,
         'perf_model': estimate_matmul_time,
-        'top_k': 50,
+        'top_k': 50,  # FIXME: Too much. Reduce it to 10.
     },
 )
 @triton.heuristics(HEURISTICS)
@@ -94,7 +94,8 @@ def _awq_kernel(A, B, C, M, N, K, Z, S, shifter_ptr, stride_am, stride_ak,
     AWQ_BIT_WIDTH = 32 // AWQ_PACK_FACTOR
     AWQ_MASK = (1 << AWQ_BIT_WIDTH) - 1
     shifter = tl.load(shifter_ptr + tl.arange(0, AWQ_PACK_FACTOR))
-    shifter_tiled = tl.load(shifter_ptr + (tl.arange(0, BLOCK_N) % AWQ_PACK_FACTOR))
+    shifter_tiled = tl.load(shifter_ptr +
+                            (tl.arange(0, BLOCK_N) % AWQ_PACK_FACTOR))
 
     s = tl.zeros([BLOCK_N], dtype=A.dtype.element_ty)
     z = tl.zeros([BLOCK_N], dtype=tl.int32)
@@ -114,7 +115,8 @@ def _awq_kernel(A, B, C, M, N, K, Z, S, shifter_ptr, stride_am, stride_ak,
             k_idx = tl.where(k_idx < K, k_idx, 0)
             awq_g_idx = k_idx // AWQ_GROUP_SIZE
 
-            z = tl.load(Z + awq_g_idx * stride_zk + (rn // AWQ_PACK_FACTOR) * stride_zn)
+            z = tl.load(Z + awq_g_idx * stride_zk +
+                        (rn // AWQ_PACK_FACTOR) * stride_zn)
             z = (z >> shifter_tiled) & AWQ_MASK
             z = z.to(tl.int32)
 
@@ -172,7 +174,7 @@ def awq_matmul(
     if group_size != 128:
         raise NotImplementedError("AWQ group size must be 128.")
     if shifter is None:
-        shifter = get_shifter(pack_factor, a.device)
+        shifter = get_shifter(pack_factor)
 
     # Check if the tensors are contiguous.
     assert a.is_contiguous()
@@ -229,15 +231,19 @@ def awq_matmul(
     return c
 
 
-def get_shifter(
-    pack_factor: int,
-    device: Union[str, torch.device] = "cuda",
-) -> torch.Tensor:
+_SHIFTER_CACHE: Dict[int, torch.Tensor] = {}
+
+
+def get_shifter(pack_factor: int) -> torch.Tensor:
     assert pack_factor == 8
+    if pack_factor in _SHIFTER_CACHE:
+        return _SHIFTER_CACHE[pack_factor]
+
     shifter = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
                            dtype=torch.int32,
-                           device=device)
+                           device="cuda")
     shifter *= 4
+    _SHIFTER_CACHE[pack_factor] = shifter
     return shifter
 
 

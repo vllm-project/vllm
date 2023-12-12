@@ -48,12 +48,7 @@ def main(args: argparse.Namespace) -> None:
             if args.version == "orig":
                 ops.awq_gemm(x, w, scales, qzeros, pack_factor)
             elif args.version == "triton":
-                awq_matmul(x,
-                           w,
-                           qzeros,
-                           scales,
-                           pack_factor,
-                           args.group_size,
+                awq_matmul(x, w, qzeros, scales, pack_factor, args.group_size,
                            shifter)
             else:
                 raise ValueError(f"Invalid version: {args.version}")
