@@ -52,14 +52,14 @@ _GLOBAL_LORA_ID = 0
 
 
 def convert_mapping(
-    mapping: LoRAMapping, lora_id_to_index: List[Optional[int]],
+    mapping: LoRAMapping, lora_index_to_id: List[Optional[int]],
     max_loras: int, vocab_size: int, extra_vocab_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, List[int]]:
     """Converts LoRAMapping to index tensors.
 
     Args:
         mapping: LoRAMapping mapping rows in a batch to LoRA ids.
-        lora_id_to_index: List mapping LoRA ids to LoRA indices.
+        lora_index_to_id: List mapping LoRA ids to LoRA indices.
         max_loras: Maximum number of LoRAs.
         vocab_size: Model vocab size.
         extra_vocab_size: Extra vocab size each LoRA can have.
@@ -86,13 +86,13 @@ def convert_mapping(
     embedding_indices = indices.copy()
     lora_indices = indices.copy()
     prompt_mapping = [
-        lora_id_to_index.index(x) if x > 0 else -1
+        lora_index_to_id.index(x) if x > 0 else -1
         for x in mapping.prompt_mapping
     ]
     lora_idx = None
     for i in range(len(indices)):
         # TODO index can be slow. optimize
-        lora_idx = (lora_id_to_index.index(indices[i])
+        lora_idx = (lora_index_to_id.index(indices[i])
                     if indices[i] > 0 else -1)
         embedding_indices[i] = lora_idx if indices[i] > 0 else 0
         indices[i] = i
@@ -327,7 +327,7 @@ class LoRAModelManager:
         self.max_num_seqs = max_num_seqs
         assert self.capacity >= self.lora_slots
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
-        self.lora_id_to_index: List[Optional[int]] = [None] * self.lora_slots
+        self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.base_indices = torch.empty(self.max_num_batched_tokens,
                                         dtype=torch.long,
@@ -377,7 +377,7 @@ class LoRAModelManager:
         if lora_id in self._active_loras:
             return False
         first_free_slot = next(
-            ((i, lora_id) for i, lora_id in enumerate(self.lora_id_to_index)
+            ((i, lora_id) for i, lora_id in enumerate(self.lora_index_to_id)
              if lora_id is None), None)
         if first_free_slot is None:
             raise ValueError("No free lora slots")
@@ -386,7 +386,7 @@ class LoRAModelManager:
         lora_model = self._registered_loras[lora_id]
         logger.debug(
             f"Activating LoRA. int id: {lora_model.id}, slot index: {index}")
-        self.lora_id_to_index[index] = lora_model.id
+        self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
             module_lora = lora_model.get_lora(module_name)
             if module_lora:
@@ -399,8 +399,8 @@ class LoRAModelManager:
 
     def _deactivate_lora(self, lora_id: int):
         try:
-            index = self.lora_id_to_index.index(lora_id)
-            self.lora_id_to_index[index] = None
+            index = self.lora_index_to_id.index(lora_id)
+            self.lora_index_to_id[index] = None
         except ValueError:
             pass
 
@@ -431,7 +431,7 @@ class LoRAModelManager:
     def convert_mapping(self, mapping: LoRAMapping) -> None:
         (base_indices, sampler_indices, sampler_indices_padded,
          embeddings_indices,
-         indices_len) = convert_mapping(mapping, self.lora_id_to_index,
+         indices_len) = convert_mapping(mapping, self.lora_index_to_id,
                                         self.lora_slots + 1, self.vocab_size,
                                         self.lora_config.lora_extra_vocab_size)
         self.base_indices[:base_indices.shape[0]].copy_(base_indices)
@@ -459,7 +459,7 @@ class LoRAModelManager:
     def remove_all_loras(self) -> bool:
         """Remove all LoRAModels from the manager."""
         self._registered_loras.clear()
-        self.lora_id_to_index = [None] * self.lora_slots
+        self.lora_index_to_id = [None] * self.lora_slots
         self._active_loras.clear()
 
     def _create_lora_modules(self):
