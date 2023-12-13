@@ -75,7 +75,7 @@ You can build and install vLLM from source:
     .. code-block:: console
 
         $ pip install xformers==0.0.23 --no-deps
-        $ bash patch_xformers-0.0.23.rocm.sh
+        $ bash patch_xformers.rocm.sh
 
 3. Build vLLM.
 
@@ -132,7 +132,7 @@ Alternatively, if you plan to install vLLM-ROCm on a local machine or start from
     .. code-block:: console
 
         $ pip install xformers==0.0.23 --no-deps
-        $ bash patch_xformers-0.0.23.rocm.sh
+        $ bash patch_xformers.rocm.sh
 
 3. Build vLLM.
 
