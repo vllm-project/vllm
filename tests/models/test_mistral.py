@@ -1,6 +1,6 @@
-"""Compare the outputs of HF and vLLM when using greedy sampling.
+"""Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
 
-Run `pytest tests/models/test_models.py --forked`.
+Run `pytest tests/models/test_mistral.py --forked`.
 """
 import pytest
 
