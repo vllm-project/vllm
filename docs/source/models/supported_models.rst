@@ -73,6 +73,10 @@ If your model uses one of the above model architectures, you can seamlessly run 
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
 Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ project.
 
+.. note::
+    Currently, the ROCm version of vLLM does not support Mixtral.
+    Additionally, it only supports Mistral for context lengths up to 4096.
+
 .. tip::
     The easiest way to check if your model is supported is to run the program below:
 
@@ -84,11 +88,16 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
         output = llm.generate("Hello, my name is")
         print(output)
 
-    To use model from www.modelscope.cn
+    If vLLM successfully generates text, it indicates that your model is supported.
+
+.. tip::
+    To use models from `ModelScope <www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
 
     .. code-block:: shell
 
        $ export VLLM_USE_MODELSCOPE=True
+
+    And use with :code:`trust_remote_code=True`.
 
     .. code-block:: python
 
@@ -97,5 +106,3 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
         llm = LLM(model=..., revision=..., trust_remote_code=True)  # Name or path of your model
         output = llm.generate("Hello, my name is")
         print(output)
-
-    If vLLM successfully generates text, it indicates that your model is supported.
