@@ -8,7 +8,6 @@ pyarrow  # Required for Ray data.
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 tokenizers>=0.15.0
-huggingface_hub<0.18,>=0.16.4
 transformers >= 4.36.0  # Required for Mixtral.
 fastapi
 uvicorn[standard]
