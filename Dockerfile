@@ -30,9 +30,24 @@ COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
 
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # max jobs used by Ninja to build extensions
-ENV MAX_JOBS=$max_jobs
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+# number of threads used by nvcc
+ARG nvcc_threads=8
+ENV NVCC_THREADS=$nvcc_threads
+
 RUN python3 setup.py build_ext --inplace
+
+# Build the megablocks library as wheel because it doesn't publish pre-built wheels.
+# https://github.com/stanford-futuredata/megablocks/commit/5897cd6f254b7b3edf7a708a3a3314ecb54b6f78
+RUN apt-get install -y git && \
+    git clone https://github.com/stanford-futuredata/megablocks.git && \
+    cd megablocks && \
+    git checkout 5897cd6f254b7b3edf7a708a3a3314ecb54b6f78 && \
+    MAX_JOBS=8 NVCC_THREADS=8 python3 setup.py bdist_wheel
 
 # image to run unit testing suite
 FROM dev AS test
@@ -68,10 +83,14 @@ ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
 FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate fschat
+    pip install accelerate
 
-COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
+COPY --from=build /workspace/vllm/*.so /workspace/vllm/
+COPY --from=build /workspace/megablocks/dist/*.whl /tmp/
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install /tmp/megablocks-0.5.0-cp310-cp310-linux_x86_64.whl && \
+    rm /tmp/megablocks-0.5.0-cp310-cp310-linux_x86_64.whl
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 

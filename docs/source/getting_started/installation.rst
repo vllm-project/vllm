@@ -20,7 +20,7 @@ You can install vLLM using pip:
 .. code-block:: console
 
     $ # (Optional) Create a new conda environment.
-    $ conda create -n myenv python=3.8 -y
+    $ conda create -n myenv python=3.9 -y
     $ conda activate myenv
 
     $ # Install vLLM with CUDA 12.1.
@@ -34,8 +34,9 @@ You can install vLLM using pip:
     .. code-block:: console
 
         $ # Install vLLM with CUDA 11.8.
-        $ # Replace `cp310` with your Python version (e.g., `cp38`, `cp39`, `cp311`).
-        $ pip install https://github.com/vllm-project/vllm/releases/download/v0.2.2/vllm-0.2.2+cu118-cp310-cp310-manylinux1_x86_64.whl
+        $ export VLLM_VERSION=0.2.4
+        $ export PYTHON_VERSION=39
+        $ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl
 
         $ # Re-install PyTorch with CUDA 11.8.
         $ pip uninstall torch -y
