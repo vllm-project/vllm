@@ -40,11 +40,6 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     return int(max_shared_mem)
 
 
-def get_gpu_memory(gpu: int = 0) -> int:
-    """Returns the total memory of the GPU in bytes."""
-    return torch.cuda.get_device_properties(gpu).total_memory
-
-
 def get_cpu_memory() -> int:
     """Returns the total CPU memory of the node in bytes."""
     return psutil.virtual_memory().total
