@@ -182,7 +182,9 @@ class LlamaAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 self.scaling,
-                num_kv_heads=self.num_kv_heads)
+                num_kv_heads=self.num_kv_heads,
+                quant_kv_cache=quant_kv_cache,
+                kv_quant_params=kv_quant_params)
 
     def forward(
         self,
