@@ -33,14 +33,15 @@ from transformers import MixtralConfig
 
 try:
     import megablocks.ops as ops
-except ImportError:
-    print(
-        "MegaBlocks not found. Please install it by `pip install megablocks`.")
+except ImportError as e:
+    raise ImportError("MegaBlocks not found. "
+                      "Please install it by `pip install megablocks`.") from e
 try:
     import stk
-except ImportError:
-    print(
-        "STK not found: please see https://github.com/stanford-futuredata/stk")
+except ImportError as e:
+    raise ImportError(
+        "STK not found. "
+        "Please install it by `pip install stanford-stk`.") from e
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttention
