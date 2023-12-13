@@ -230,6 +230,7 @@ class RowParallelLinear(torch.nn.Module):
         self.output_size = output_size
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
+        self.default_dtype = torch.get_default_dtype()
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
@@ -310,7 +311,7 @@ class RowParallelLinear(torch.nn.Module):
         # Matrix multiply.
         output_parallel = self.apply_weights(input_parallel)
         if self.use_int8 and self.tp_size > 1:
-            out = torch.empty_like(output_parallel, dtype=torch.get_default_dtype())
+            out = torch.empty_like(output_parallel, dtype=self.default_dtype)
             fused_kernels.invoke_dequant(out, output_parallel, scale, self.dequant_scale.item())
             output_parallel = out
         if self.reduce_results and self.tp_size > 1:
