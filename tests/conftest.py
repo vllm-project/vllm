@@ -9,7 +9,6 @@ from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 _TEST_PROMPTS = ["prompts/example.txt"]
-
 _LONG_PROMPTS = ["prompts/summary.txt"]
 
 
