@@ -622,14 +622,8 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def add_lora(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
-        was_added = False
-        if lora.id not in self._registered_loras:
-            was_added = True
-            logger.debug(f"Adding LoRA. Model id: {lora.id}, "
-                         f"int id: {lora.id}")
-            self._create_merged_loras_inplace(lora)
-            self._registered_loras[lora.id] = lora
-        else:
+        was_added = super().add_lora(lora)
+        if not was_added:
             # We always touch to update the LRU cache order
             self._registered_loras.touch(lora.id)
         return was_added
