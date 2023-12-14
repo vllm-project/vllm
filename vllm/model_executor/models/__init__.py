@@ -39,12 +39,14 @@ _MODELS = {
 }
 
 # Models not supported by ROCm.
-_ROCM_UNSUPPORTED_MODELS = ["MixtralForCausalLM"]
+_ROCM_UNSUPPORTED_MODELS = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
 _ROCM_PARTIALLY_SUPPORTED_MODELS = {
     "MistralForCausalLM":
+    "Sliding window attention is not yet supported in ROCm's flash attention",
+    "MixtralForCausalLM":
     "Sliding window attention is not yet supported in ROCm's flash attention",
 }
 
