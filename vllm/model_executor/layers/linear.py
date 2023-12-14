@@ -13,6 +13,7 @@ from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.logger import init_logger
+from auto_gptq.nn_modules.qlinear.qlinear_exllama import ext_make_q4
 
 logger = init_logger(__name__)
 
@@ -107,7 +108,7 @@ class ReplicatedLinear(torch.nn.Module):
             self.register_parameter(name, weight)
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size,
+                torch.zeros(self.output_size,
                             device=torch.cuda.current_device(),
                             dtype=self.params_dtype))
             set_weight_attrs(self.bias, {"output_dim": 0})
@@ -174,7 +175,7 @@ class ColumnParallelLinear(torch.nn.Module):
             set_weight_attrs(weight, {"weight_loader": self.weight_loader})
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size_per_partition,
+                torch.zeros(self.output_size_per_partition,
                             device=torch.cuda.current_device(),
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
@@ -195,6 +196,22 @@ class ColumnParallelLinear(torch.nn.Module):
                                                  shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+    def get_q4(self):
+        qweight = self.linear_weights["qweight"]
+        qzeros = self.linear_weights["qzeros"]
+        scales = self.linear_weights["scales"]
+        q4 = ext_make_q4(
+            qweight,
+            qzeros,
+            scales,
+            None,
+            qweight.device.index
+        )
+        width = qweight.shape[1]
+        self.linear_weights["q4"] = q4
+        self.linear_weights["width"] = width
+        self.linear_weights["qweight_shape"] = qweight.shape[-1]
 
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
@@ -301,6 +318,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 "the same for all partitions.")
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
 
 
 class QKVParallelLinear(ColumnParallelLinear):
@@ -492,7 +510,7 @@ class RowParallelLinear(torch.nn.Module):
 
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size,
+                torch.zeros(self.output_size,
                             device=torch.cuda.current_device(),
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
@@ -501,6 +519,22 @@ class RowParallelLinear(torch.nn.Module):
             })
         else:
             self.register_parameter("bias", None)
+
+    def get_q4(self):
+        qweight = self.linear_weights["qweight"]
+        qzeros = self.linear_weights["qzeros"]
+        scales = self.linear_weights["scales"]
+        q4 = ext_make_q4(
+            qweight,
+            qzeros,
+            scales,
+            None,
+            qweight.device.index
+        )
+        width = qweight.shape[1]
+        self.linear_weights["q4"] = q4
+        self.linear_weights["width"] = width
+        self.linear_weights["qweight_shape"] = qweight.shape[-1]
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()

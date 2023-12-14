@@ -3,9 +3,9 @@ from typing import List, Optional, Tuple
 import pytest
 import torch
 from transformers import AutoModelForCausalLM
-
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
+import copy
 
 _TEST_PROMPTS = [
     "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",

@@ -1,7 +1,7 @@
-这是vLLM（对应版本0.22）的一个分支。在这个分支里，我们提供了gptq量化的支持，通过这个分支你可以直接加载由AutoGPTQ得到的量化模型。
+This is a fork of vLLM(Version: 0.2.2). The features we added is to support gptq quantization, you can directly load an A16W4 quantization model trained by AutoGPTQ.
 
-## 新增功能
-该版本vLLM跟官方0.22版本的vLLM主要区别在于增加gptq a16w4量化模型支持。我们在Qwen-72B上测试了量化模型性能，结果如下表。
+## New features
+The features we added is to support gptq quantization. We test on the Qwen-72B and the test performance is shown in the table.
 
 | context length | generate length | tokens/s    | tokens/s   | tokens/s    | tokens/s   | tokens/s    | tokens/s   |   tokens/s  |  tokens/s  |
 |----------------|-----------------|-------------|------------|-------------|------------|-------------|------------|:-----------:|:----------:|
@@ -13,20 +13,21 @@
 |       30k      |        2k       |    19.95    |    19.87   |    17.05    |    16.93   |      -      |      -     |      -      |      -     |
 
 
-## 如何开始
+## Quickstart
 
-### 安装
-目前，我们仅支持源码安装。
+### Installation
+You can build and install vLLM from source.
+
 ```
    cd vllm 
    pip install -e .
 ```
 
-### 如何使用
-我们在此仅介绍如何运行gptq a16w4量化模型，如果想使用vllm其他功能，请阅读 [官方文档](https://github.com/vllm-project/vllm)。关于QWen量化模型的示例代码，代码目录在tests/qwen/。
+### Usage Examples
+We introduce how to run the gptq a16w4 quantization model here. If you want to learn more about vllm, please read [official documentation](https://github.com/vllm-project/vllm). The example codes of the QWen can be found in the directory 'tests/qwen/'.
 
-#### 批处理调用模型
-注意：运行以下代码，需要先进入对应的目录：tests/qwen/。
+#### Offline Batched Inference
+Note: To run the following code, you need to enter the directory 'tests/qwen/' first.
 
 ```python
 from vllm_wrapper import vLLMWrapper
@@ -51,9 +52,9 @@ if __name__ == '__main__':
 
 ```
 
-#### API方式调用模型
+#### API Server
 
-注意：除去安装vllm根目录下的requirement.txt里提到的软件，以API方式调用模型需要额外安装fast chat
+Note: In addition to installing the software required by vllm, you should install FastChat.
 
 ```bash
 pip install fschat
@@ -61,32 +62,31 @@ pip install accelerate
 
 ```
 
-##### 启动Server
+##### Start the Server
 
-step 1. 启动控制器
-
+step 1. Launch the controller
 ```
     cd FastChat/
     python -m fastchat.serve.controller
 ```
 
-step 2. 启动模型worker
+step 2. Launch the model worker 
 ```
     python -m fastchat.serve.vllm_worker --model-path $model_path --tensor-parallel-size 4 --trust-remote-code
 ```
 
-step 3. 启动服务器
+step 3. Launch the openai api server
 ```
    python -m fastchat.serve.openai_api_server --host localhost --port 8000
 ```
 
-##### API调用
+##### Query the model by API
 
-step 1. 安装openai-python
+step 1. install openai-python
 ```bash
 pip install --upgrade openai
 ```
-step 2. 调用接口
+step 2. Query codes
 ```python
 import openai
 # to get proper authentication, make sure to use a valid key that's listed in

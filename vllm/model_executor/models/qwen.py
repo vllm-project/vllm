@@ -20,7 +20,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,ColumnParallelLinear)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
@@ -46,11 +46,11 @@ class QWenMLP(nn.Module):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
-            bias=False,
+            bias=True,
             linear_method=linear_method)
         self.c_proj = RowParallelLinear(intermediate_size,
                                         hidden_size,
-                                        bias=False,
+                                        bias=True,
                                         linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -95,7 +95,7 @@ class QWenAttention(nn.Module):
         self.c_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=False,
+            bias=True,
             linear_method=linear_method,
         )
         self.scaling = self.head_dim**-0.5
@@ -270,6 +270,8 @@ class QWenLMHeadModel(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "g_idx" in name:
+                continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -282,3 +284,11 @@ class QWenLMHeadModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+
+    def q4_init(self):
+        for name, module in self.transformer.named_modules():
+            if isinstance(module, ColumnParallelLinear) or isinstance(module, RowParallelLinear):
+                module.get_q4()
+
+

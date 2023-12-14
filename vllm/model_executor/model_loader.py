@@ -98,4 +98,12 @@ def get_model(model_config: ModelConfig) -> nn.Module:
             model.load_weights(model_config.model, model_config.download_dir,
                                model_config.load_format, model_config.revision)
             model = model.cuda()
+            if model_config.quantization is not None \
+                    and quant_config.get_name() == "gptq":
+                architectures = getattr(model_config.hf_config, "architectures", [])
+                for arch in architectures:
+                    if arch in _MODEL_REGISTRY:
+                        break
+                if arch == 'QWenLMHeadModel':
+                    model.q4_init()
     return model.eval()
