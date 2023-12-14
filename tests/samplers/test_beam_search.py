@@ -3,6 +3,7 @@
 Run `pytest tests/samplers/test_beam_search.py --forked`.
 """
 import pytest
+from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
@@ -35,6 +36,7 @@ def test_beam_search_single_input(
     vllm_outputs = vllm_model.generate_beam_search(example_prompts, beam_width,
                                                    max_tokens)
     del vllm_model
+    destroy_model_parallel()
 
     for i in range(len(example_prompts)):
         hf_output_ids, _ = hf_outputs[i]

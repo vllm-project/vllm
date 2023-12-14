@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from vllm import SamplingParams
+from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 
 MODELS = ["facebook/opt-125m"]
 
@@ -30,6 +31,8 @@ def test_get_prompt_logprobs(
                                           temperature=0.0)
     vllm_results = vllm_model.model.generate(
         example_prompts, sampling_params=vllm_sampling_params)
+    del vllm_model
+    destroy_model_parallel()
 
     # Test whether logprobs are included in the results.
     for result in vllm_results:
