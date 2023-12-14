@@ -120,6 +120,17 @@ class ModelConfig:
             if load_format == "auto":
                 load_format = "pt"
 
+        # TODO: Remove this check once HF updates the pt weights of Mixtral.
+        architectures = getattr(self.hf_config, "architectures", [])
+        if "MixtralForCausalLM" in architectures:
+            if load_format == "pt":
+                raise ValueError(
+                    "Currently, the 'pt' format is not supported for Mixtral. "
+                    "Please use the 'safetensors' format instead. ")
+            elif load_format == "auto":
+                # Do not fall back to pt weights.
+                load_format = "safetensors"
+
         self.load_format = load_format
 
     def _verify_tokenizer_mode(self) -> None:
