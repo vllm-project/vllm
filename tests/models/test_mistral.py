@@ -3,6 +3,7 @@
 Run `pytest tests/models/test_mistral.py --forked`.
 """
 import pytest
+from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 
 MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.1",
@@ -10,7 +11,7 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(
     hf_runner,
@@ -27,6 +28,7 @@ def test_models(
     vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_greedy(example_long_prompts, max_tokens)
     del vllm_model
+    destroy_model_parallel()
 
     for i in range(len(example_long_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]

@@ -3,6 +3,7 @@
 Run `pytest tests/models/test_models.py --forked`.
 """
 import pytest
+from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 
 MODELS = [
     "facebook/opt-125m",
@@ -37,6 +38,7 @@ def test_models(
     vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
+    destroy_model_parallel()
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
