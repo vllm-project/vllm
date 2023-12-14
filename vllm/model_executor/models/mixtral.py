@@ -179,13 +179,12 @@ class MixtralMoE(nn.Module):
             expert_mask = (selected_experts == expert_idx)
             expert_weights = (routing_weights * expert_mask).sum(dim=-1,
                                                                  keepdim=True)
-            expert_idx, _ = expert_mask.any(
-                dim=-1, keepdim=True).nonzero(as_tuple=True)
+            expert_rows, _ = expert_mask.any(dim=-1).nonzero(as_tuple=False).flatten()
 
-            current_state = hidden_states[expert_idx]
+            current_state = hidden_states[expert_rows]
             current_hidden_states = expert_layer(current_state).mul_(
-                expert_weights[expert_idx])
-            final_hidden_states.index_add_(0, expert_idx,
+                expert_weights[expert_rows])
+            final_hidden_states.index_add_(0, expert_rows,
                                            current_hidden_states)
 
         return tensor_model_parallel_all_reduce(final_hidden_states).view(
