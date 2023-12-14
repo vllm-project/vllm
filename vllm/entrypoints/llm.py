@@ -65,6 +65,7 @@ class LLM:
             When a sequence has context length larger than this, we fall back
             to eager mode.
         disable_custom_all_reduce: See ParallelConfig
+        compile_model: Compile created model with torch.compile.
     """
 
     def __init__(
@@ -84,6 +85,7 @@ class LLM:
         enforce_eager: bool = False,
         max_context_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
+        compile_model: bool = False,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -104,6 +106,7 @@ class LLM:
             enforce_eager=enforce_eager,
             max_context_len_to_capture=max_context_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
+            compile_model=compile_model,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)

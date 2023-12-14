@@ -73,7 +73,10 @@ def run_vllm(
     enforce_eager: bool,
     kv_cache_dtype: str,
     device: str,
+    warm_up: int = 0,
+    compile_model: bool = False,
 ) -> float:
+    print('compile', compile_model)
     from vllm import LLM, SamplingParams
     llm = LLM(
         model=model,
@@ -87,7 +90,26 @@ def run_vllm(
         enforce_eager=enforce_eager,
         kv_cache_dtype=kv_cache_dtype,
         device=device,
+        compile_model=compile_model,
     )
+
+    # Add the requests to the engine.
+    for prompt, _, output_len in requests[0:warm_up]:
+        sampling_params = SamplingParams(
+            n=n,
+            temperature=0.0 if use_beam_search else 1.0,
+            top_p=1.0,
+            use_beam_search=use_beam_search,
+            ignore_eos=True,
+            max_tokens=output_len,
+        )
+        llm._add_request(
+            prompt=prompt,
+            prompt_token_ids=None,
+            sampling_params=sampling_params,
+        )
+    if warm_up > 0:
+        llm._run_engine(use_tqdm=False)
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
@@ -211,7 +233,8 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device)
+                                args.kv_cache_dtype, args.device,
+                                args.warm_up_prompts, args.compile_model)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -254,6 +277,7 @@ if __name__ == "__main__":
                         choices=['awq', 'gptq', 'squeezellm', None],
                         default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
+    parser.add_argument("--compile_model", type=bool, default=False)
     parser.add_argument("--n",
                         type=int,
                         default=1,
@@ -263,6 +287,10 @@ if __name__ == "__main__":
                         type=int,
                         default=1000,
                         help="Number of prompts to process.")
+    parser.add_argument("--warm-up-prompts",
+                        type=int,
+                        default=0,
+                        help="Number of warm-up prompts.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--hf-max-batch-size",
                         type=int,

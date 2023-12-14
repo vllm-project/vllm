@@ -102,6 +102,7 @@ class LLMEngine:
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"device_config={device_config.device}, "
+            f"compile_model={model_config.compile_model}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
