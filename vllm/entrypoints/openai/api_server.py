@@ -726,6 +726,16 @@ if __name__ == "__main__":
     response_role = args.response_role
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
+
+    # Auto detect gpu count
+    if engine_args.tensor_parallel_size == -1:
+        import torch
+
+        engine_args.tensor_parallel_size = max(torch.cuda.device_count(), 1)
+        logger.info(
+            f"Setting tensor_parallel_size automatically to {engine_args.tensor_parallel_size}"
+        )
+
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     engine_model_config = asyncio.run(engine.get_model_config())
     max_model_len = engine_model_config.max_model_len
