@@ -6,11 +6,9 @@ class TokenIndex:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
 
-        self.tok_id_map = tokenizer.vocab
-
         # map id -> token str including whitespace
         self.norm_vocab = {}
-        for token_id in self.tok_id_map.values():
+        for token_id in tokenizer.vocab.values():
             # TODO: look into difference between tokens, e.g. 28705, 35 are both " 9"
             # assert norm_token not in self.norm_vocab,
             norm_token = tokenizer.decode([tokenizer.bos_token_id, token_id])[len(tokenizer.bos_token):]
@@ -72,7 +70,7 @@ class TokenConstraintLogitProcessor:
 
         logits = [
             logit_val if tok_id in valid_token_ids else -float("inf")
-            for tok_id, logit_val in zip(sorted(self.token_index.tok_id_map.values()), logits)
+            for tok_id, logit_val in zip(sorted(self.token_index.norm_vocab.values()), logits)
         ]
         return logits
 
