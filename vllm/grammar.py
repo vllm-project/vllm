@@ -38,81 +38,6 @@ class TokenIndex:
         return tok in self.norm_vocab
 
 
-class TokenConstraintLogitProcessor:
-    def __init__(self, tokenizer, nfa):
-        self.tokenizer = tokenizer
-        self.token_index = TokenIndex(tokenizer)
-        self.nfa = nfa
-        self.prev_token_ids = []
-        self.prev_text = ""
-
-    def __call__(self, token_ids, logits):
-
-        # ensure integrity
-        assert token_ids[:len(self.prev_token_ids)] == self.prev_token_ids
-        self.prev_token_ids = token_ids
-
-        # get new text and step NFA forward
-        text = tokenizer.decode(token_ids)
-        new_text = text[len(self.prev_text):]
-        self.prev_text = text
-        self.nfa.step_seq(new_text)
-
-        # get valid new token ids
-        valid_tokens = set(self.get_allowable_next_token_set())
-        valid_token_ids = [
-            self.tokenizer.eos_token_id if t is None else self.token_index.norm_vocab[t]
-            for t in valid_tokens
-        ]
-
-        if not valid_token_ids:
-            raise ValueError("Found no valid tokens, this should never occur.")
-
-        logits = [
-            logit_val if tok_id in valid_token_ids else -float("inf")
-            for tok_id, logit_val in zip(sorted(self.token_index.norm_vocab.values()), logits)
-        ]
-        return logits
-
-    def get_allowable_next_token_set(self, current_text="", nfa_next_tok_states=False):
-        """
-        Get set of valid tokens.
-        1) Ask NFA for legal first char
-        3) While legal TokenIndex hasn't been exhausted
-          A) Ask TokenIndex for legal Nth char set
-          B) Ask NFA for
-        """
-        if nfa_next_tok_states is None:
-            return [None]
-        if nfa_next_tok_states == False:
-            nfa_next_tok_states = self.nfa.next_char_state_map()
-
-        legal_tokens = []
-
-        if None in nfa_next_tok_states:
-            legal_tokens.append(None)
-            del nfa_next_tok_states[None]
-
-        for char, next_states in nfa_next_tok_states.items():
-            # all current sequences are legal per nfa, find legal next token with token index
-            new_seq = current_text + char
-            tokidx_next_chars = self.token_index.get_valid_next_charset(
-                new_seq,
-                self.nfa.legal_chars
-            )
-
-            if self.token_index.is_token(new_seq):
-                legal_tokens.append(new_seq)
-
-            # given legal next chars in token index, get the subset allowed by NFA and recurse
-            legal_tokens += self.get_allowable_next_token_set(
-                new_seq,
-                self.nfa.simulate_step(tokidx_next_chars, next_states)
-            )
-
-        return legal_tokens
-
-
 class EpsilonNFA:
     """
     Traverses a Character-Based Epsilon-NFA.
@@ -218,6 +143,81 @@ class EpsilonNFA:
                 stack.extend(self.nfa["transition_function"][current_state].get('$', []))
 
         return visited
+
+class TokenConstraintLogitProcessor:
+    def __init__(self, tokenizer, nfa):
+        self.tokenizer = tokenizer
+        self.token_index = TokenIndex(tokenizer)
+        self.nfa = nfa
+        self.prev_token_ids = []
+        self.prev_text = ""
+
+    def __call__(self, token_ids, logits):
+
+        # ensure integrity
+        assert token_ids[:len(self.prev_token_ids)] == self.prev_token_ids
+        self.prev_token_ids = token_ids
+
+        # get new text and step NFA forward
+        text = tokenizer.decode(token_ids)
+        new_text = text[len(self.prev_text):]
+        self.prev_text = text
+        self.nfa.step_seq(new_text)
+
+        # get valid new token ids
+        valid_tokens = set(self.get_allowable_next_token_set())
+        valid_token_ids = [
+            self.tokenizer.eos_token_id if t is None else self.token_index.norm_vocab[t]
+            for t in valid_tokens
+        ]
+
+        if not valid_token_ids:
+            raise ValueError("Found no valid tokens, this should never occur.")
+
+        logits = [
+            logit_val if tok_id in valid_token_ids else -float("inf")
+            for tok_id, logit_val in zip(sorted(self.token_index.norm_vocab.values()), logits)
+        ]
+        return logits
+
+
+    def get_allowable_next_token_set(self, current_text="", nfa_next_tok_states=False):
+        """
+        Get set of valid tokens.
+        1) Ask NFA for legal first char
+        3) While legal TokenIndex hasn't been exhausted
+          A) Ask TokenIndex for legal Nth char set
+          B) Ask NFA for
+        """
+        if nfa_next_tok_states is None:
+            return [None]
+        if nfa_next_tok_states == False:
+            nfa_next_tok_states = self.nfa.next_char_state_map()
+
+        legal_tokens = []
+
+        if None in nfa_next_tok_states:
+            legal_tokens.append(None)
+            del nfa_next_tok_states[None]
+
+        for char, next_states in nfa_next_tok_states.items():
+            # all current sequences are legal per nfa, find legal next token with token index
+            new_seq = current_text + char
+            tokidx_next_chars = self.token_index.get_valid_next_charset(
+                new_seq,
+                self.nfa.legal_chars
+            )
+
+            if self.token_index.is_token(new_seq):
+                legal_tokens.append(new_seq)
+
+            # given legal next chars in token index, get the subset allowed by NFA and recurse
+            legal_tokens += self.get_allowable_next_token_set(
+                new_seq,
+                self.nfa.simulate_step(tokidx_next_chars, next_states)
+            )
+
+        return legal_tokens
 
 
 if __name__ == "__main__":
