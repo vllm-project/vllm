@@ -1,6 +1,4 @@
-//avoid multiple redefinition 
-#ifndef OPS_H
-#define OPS_H
+#pragma once
 
 #include <torch/extension.h>
 
@@ -79,5 +77,3 @@ void squeezellm_gemm(
   torch::Tensor mat,
   torch::Tensor mul,
   torch::Tensor lookup_table);
-
-#endif // OPS_H
