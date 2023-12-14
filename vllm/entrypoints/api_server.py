@@ -206,10 +206,9 @@ async def stream_results(
             yield (json.dumps(response) + "\0").encode("utf-8")
             # TODO: Get feedback from vLLM authors if we want to switch to this as this is backwards incompatible. Can we have both?
             # yield (f"data: {json.dumps(response)}\n\n").encode("utf-8")
-            final_output = request_output
-        assert final_output is not None
-
+            #final_output = request_output
         # TODO: Get feedback from vLLM authors if we want to switch to this as this is backwards incompatible. Can we have both?
+        # assert final_output is not None
         # response = _add_details(generate_request=generate_request, final_output=final_output)
         # response = response.dict(exclude_none=True)
         # response.pop("text", None)  # We do not want to return complete text at the end for now
@@ -223,8 +222,8 @@ async def stream_results(
         exc_metadata = response.copy()
         exc_metadata["traceback"] = traceback.format_exc()
         logger.error(f"Aborting request {json.dumps(exc_metadata)}")
-    # TODO: Get feedback from vLLM authors if we want to switch to this as this is backwards incompatible. Can we have both?
-    # yield (f"data: {json.dumps(response)}\n\n").encode("utf-8")
+        # TODO: Get feedback from vLLM authors if we want to switch to this as this is backwards incompatible. Can we have both?
+        # yield (f"data: {json.dumps(response)}\n\n").encode("utf-8")
     # finally:
     #     yield "data: [DONE]\n\n"
 
