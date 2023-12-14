@@ -6,7 +6,7 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-from vllm import attention_ops
+from vllm._C import ops
 from vllm.utils import get_max_shared_memory_bytes
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
@@ -131,9 +131,6 @@ def test_paged_attention(
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
-    head_mapping = torch.repeat_interleave(
-        torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"),
-        num_queries_per_kv)
     alibi_slopes = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads,
@@ -165,12 +162,12 @@ def test_paged_attention(
     # Call the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v1":
-        attention_ops.paged_attention_v1(
+        ops.paged_attention_v1(
             output,
             query,
             key_cache,
             value_cache,
-            head_mapping,
+            num_kv_heads,
             scale,
             block_tables,
             context_lens,
@@ -194,7 +191,7 @@ def test_paged_attention(
             device=output.device,
         )
         max_logits = torch.empty_like(exp_sums)
-        attention_ops.paged_attention_v2(
+        ops.paged_attention_v2(
             output,
             exp_sums,
             max_logits,
@@ -202,7 +199,7 @@ def test_paged_attention(
             query,
             key_cache,
             value_cache,
-            head_mapping,
+            num_kv_heads,
             scale,
             block_tables,
             context_lens,
@@ -211,7 +208,7 @@ def test_paged_attention(
             alibi_slopes,
         )
     else:
-        assert False, f"Unknown version: {version}"
+        raise AssertionError(f"Unknown version: {version}")
 
     # Run the reference implementation.
     ref_output = torch.empty_like(query)

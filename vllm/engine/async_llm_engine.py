@@ -142,10 +142,10 @@ class RequestTracker:
 
         self._request_streams[request_id].finish()
 
-    def get_new_and_finished_requests(self) -> Tuple[List[dict], Set[str]]:
+    def get_new_and_finished_requests(self) -> Tuple[List[Dict], Set[str]]:
         """Get the new requests and finished requests to be
         sent to the engine."""
-        new_requests: List[dict] = []
+        new_requests: List[Dict] = []
         finished_requests: Set[str] = set()
 
         while not self._finished_requests.empty():
@@ -301,7 +301,16 @@ class AsyncLLMEngine:
         elif self.worker_use_ray:
             engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
         else:
-            engine_class = ray.remote(num_gpus=1)(self._engine_class).remote
+            # FIXME(woosuk): This is a bit hacky. Be careful when changing the
+            # order of the arguments.
+            cache_config = args[1]
+            parallel_config = args[2]
+            if parallel_config.tensor_parallel_size == 1:
+                num_gpus = cache_config.gpu_memory_utilization
+            else:
+                num_gpus = 1
+            engine_class = ray.remote(num_gpus=num_gpus)(
+                self._engine_class).remote
         return engine_class(*args, **kwargs)
 
     async def engine_step(self) -> bool:
