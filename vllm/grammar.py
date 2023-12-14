@@ -176,7 +176,7 @@ class TokenConstraintLogitProcessor:
 
         logits = [
             logit_val if tok_id in valid_token_ids else -float("inf")
-            for tok_id, logit_val in zip(sorted(self.token_index.norm_vocab.values()), logits)
+            for tok_id, logit_val in zip(sorted(self.tokenizer.vocab.values()), logits)
         ]
         return logits
 
