@@ -8,7 +8,7 @@ import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import PagedAttentionWithALiBi
+from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
@@ -18,6 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -49,9 +50,14 @@ class MPTAttention(nn.Module):
         super().__init__()
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
+        self.head_dim = self.d_model // self.total_num_heads
         self.clip_qkv = config.attn_config["clip_qkv"]
         self.qk_ln = config.attn_config["qk_ln"]
         self.alibi_bias_max = config.attn_config["alibi_bias_max"]
+        if "kv_n_heads" in config.attn_config:
+            self.total_num_kv_heads = config.attn_config['kv_n_heads']
+        else:
+            self.total_num_kv_heads = self.total_num_heads
         assert not config.attn_config["prefix_lm"]
         assert config.attn_config["alibi"]
 
@@ -60,6 +66,7 @@ class MPTAttention(nn.Module):
             self.d_model,
             self.d_model // self.total_num_heads,
             self.total_num_heads,
+            self.total_num_kv_heads,
             bias=not config.no_bias,
             linear_method=linear_method,
         )
@@ -77,6 +84,17 @@ class MPTAttention(nn.Module):
         assert self.total_num_heads % tp_world_size == 0
         self.num_heads = self.total_num_heads // tp_world_size
 
+        if self.total_num_kv_heads >= tp_world_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_world_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_world_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
         # Create the alibi slopes and slice them.
         tp_rank = get_tensor_model_parallel_rank()
         head_start = tp_rank * self.num_heads
@@ -87,8 +105,11 @@ class MPTAttention(nn.Module):
 
         self.head_dim = self.d_model // self.total_num_heads
         scaling = self.head_dim**-0.5
-        self.attn = PagedAttentionWithALiBi(self.num_heads, self.head_dim,
-                                            scaling, alibi_slopes)
+        self.attn = PagedAttention(self.num_heads,
+                                   self.head_dim,
+                                   scaling,
+                                   alibi_slopes=alibi_slopes,
+                                   num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -102,7 +123,7 @@ class MPTAttention(nn.Module):
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
-        q, k, v = qkv.chunk(chunks=3, dim=-1)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.qk_ln:
             q = self.q_ln(q)
             k = self.k_ln(k)
@@ -254,11 +275,18 @@ class MPTForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
+        return hidden_states
+
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> SamplerOutput:
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   input_metadata)
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(self,

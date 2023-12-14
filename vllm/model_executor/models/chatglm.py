@@ -10,17 +10,19 @@ from torch.nn import LayerNorm
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -75,13 +77,21 @@ class GLMAttention(nn.Module):
             linear_method=linear_method,
         )
 
-        self.attn = PagedAttentionWithRoPE(
+        # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
+        rope_ratio = getattr(config, "rope_ratio", 1.0)
+        max_positions = getattr(config, "seq_length", 8192)
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim // 2,
+            max_position=max_positions,
+            base=10000 * rope_ratio,
+            is_neox_style=False,
+        )
+        self.attn = PagedAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
-            rotary_dim=self.head_dim // 2,
             num_kv_heads=self.num_kv_heads,
-            is_neox_style=False,
         )
 
     def forward(
@@ -94,10 +104,9 @@ class GLMAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(position_ids, q, k)
         key_cache, value_cache = kv_cache
-
         context_layer = self.attn(
-            position_ids,
             q,
             k,
             v,
@@ -106,9 +115,7 @@ class GLMAttention(nn.Module):
             input_metadata,
             cache_event,
         )
-
         attn_output, _ = self.dense(context_layer)
-
         return attn_output
 
 
@@ -344,11 +351,18 @@ class ChatGLMForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
+        return hidden_states
+
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> SamplerOutput:
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   input_metadata)
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(self,

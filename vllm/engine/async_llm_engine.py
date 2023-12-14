@@ -2,7 +2,7 @@ import asyncio
 import time
 from functools import partial
 from typing import (Any, Dict, Iterable, List, Optional, Set, Tuple, Type,
-                    Union)
+                    Union, AsyncIterator)
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -301,7 +301,16 @@ class AsyncLLMEngine:
         elif self.worker_use_ray:
             engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
         else:
-            engine_class = ray.remote(num_gpus=1)(self._engine_class).remote
+            # FIXME(woosuk): This is a bit hacky. Be careful when changing the
+            # order of the arguments.
+            cache_config = args[1]
+            parallel_config = args[2]
+            if parallel_config.tensor_parallel_size == 1:
+                num_gpus = cache_config.gpu_memory_utilization
+            else:
+                num_gpus = 1
+            engine_class = ray.remote(num_gpus=num_gpus)(
+                self._engine_class).remote
         return engine_class(*args, **kwargs)
 
     async def engine_step(self) -> bool:
@@ -392,11 +401,12 @@ class AsyncLLMEngine:
         return stream
 
     async def generate(
-            self,
-            prompt: Optional[str],
-            sampling_params: SamplingParams,
-            request_id: str,
-            prompt_token_ids: Optional[List[int]] = None) -> RequestOutput:
+        self,
+        prompt: Optional[str],
+        sampling_params: SamplingParams,
+        request_id: str,
+        prompt_token_ids: Optional[List[int]] = None
+    ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the

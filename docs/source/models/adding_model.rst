@@ -18,7 +18,7 @@ This document provides a high-level guide on integrating a `HuggingFace Transfor
 0. Fork the vLLM repository
 --------------------------------
 
-Start by forking our `GitHub <https://github.com/vllm-project/vllm/>`_ repository and then :ref:`build it from source <build_from_source>`.
+Start by forking our `GitHub`_ repository and then :ref:`build it from source <build_from_source>`.
 This gives you the ability to modify the codebase and test your model.
 
 
@@ -26,7 +26,7 @@ This gives you the ability to modify the codebase and test your model.
 ------------------------
 
 Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the `vllm/model_executor/models <https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models>`_ directory.
-For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/opt.py>`_ was adpated from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
+For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/opt.py>`_ was adapted from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
 
 .. warning::
     When copying the model code, make sure to review and adhere to the code's copyright and licensing terms.
