@@ -1,7 +1,19 @@
-这是vLLM（对应版本0.22）的一个分支。在这个分支里，我们提供了gptq量化的支持，通过这个分支你可以直接加载由AutoGPTQ得到的量化模型。
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-dark.png">
+    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-light.png" width=55%>
+  </picture>
+</p>
+
+本仓库是基于vLLM（版本0.2.2）进行修改的一个分支，主要为了支持[Qwen系列大语言模型](https://github.com/QwenLM/Qwen)的GPTQ量化推理。
+
+This repo is a fork of vLLM(Version: 0.2.2), which supports the GPTQ model inference of [Qwen large language models](https://github.com/QwenLM/Qwen).
 
 ## 新增功能
-该版本vLLM跟官方0.22版本的vLLM主要区别在于增加gptq a16w4量化模型支持。我们在Qwen-72B上测试了量化模型性能，结果如下表。
+
+该版本vLLM跟官方0.22版本的主要区别在于增加GPTQ int4量化模型支持。我们在Qwen-72B-Chat上测试了量化模型性能，结果如下表。
+
+The features we added is to support GPTQ int4 quantization. We test on the Qwen-72B and the test performance is shown in the table.
 
 | context length | generate length | tokens/s    | tokens/s   | tokens/s    | tokens/s   | tokens/s    | tokens/s   |   tokens/s  |  tokens/s  |
 |----------------|-----------------|-------------|------------|-------------|------------|-------------|------------|:-----------:|:----------:|
@@ -16,28 +28,68 @@
 ## 如何开始
 
 ### 安装
+
+为了安装vLLM，你必须满足以下要求：
+
+To install vLLM, you must meet the below requirements.
+
+* torch >= 2.0
+* cuda 11.8 or 12.1
+
 目前，我们仅支持源码安装。
+
+You can install vLLM from source.
+
+如果你使用cuda 12.1和torch 2.1，你可以使用以下方法安装
+
+If you use cuda 12.2 and torch 2.1, you can install vLLM by
+
 ```
-   cd vllm 
+   git clone https://github.com/QwenLM/vllm-gptq.git
+   cd vllm-gptq
    pip install -e .
 ```
 
+其他情况下，安装可能较为复杂。一个可能的方式是，安装对应版本的cuda和PyTorch后，**删除`requirements.txt`的torch依赖，并删除`pyproject.toml`**，再尝试执行`pip install -e .`。
+
+In other cases, installation may be complicated. One possible way is to install the corresponding versions of CUDA and PyTorch, **delete the torch dependencies in `Requirements.txt`, delete `pyproject.toml`, and then try to execute `pip install -e.`
+
 ### 如何使用
-我们在此仅介绍如何运行gptq a16w4量化模型，如果想使用vllm其他功能，请阅读 [官方文档](https://github.com/vllm-project/vllm)。关于QWen量化模型的示例代码，代码目录在tests/qwen/。
+
+我们在此仅介绍如何运行Qwen的量化模型。
+
+We only introduce how to run Qwen's quantized model.
+
+* 如果想了解更多关于Qwen系列模型的用法，请访问[Qwen官方仓库](https://github.com/QwenLM/Qwen)
+* 如果想使用vLLM其他功能，请阅读 [官方文档](https://github.com/vllm-project/vllm)。
+
+* If you want to know more about the Qwen series model, visit [Qwen's official repo] (https://github.com/qwenlm/qwen)
+* If you want to use other functions of VLLM, read [Official Document] (https://github.com/vllm-project/vllm).
+
+关于Qen量化模型的示例代码，代码目录在tests/qwen/。
+
+Regarding the example code of Qwen quantized model, the code directory is in tests/qwen/.
+
+注意：当前本仓库仅支持Int4量化模型。Int8量化模型将在后续支持。
+
+Note: The current warehouse only supports Int4 quantized model. Int8 quantization will be supported in near future.
 
 #### 批处理调用模型
+
 注意：运行以下代码，需要先进入对应的目录：tests/qwen/。
+
+Note: To run the following code, you need to enter the directory 'tests/qwen/' first.
 
 ```python
 from vllm_wrapper import vLLMWrapper
 
 if __name__ == '__main__':
-    model = ""
-    #gptq a16w4 model
+    model = "Qwen/Qwen-72B-Chat-Int4"
+
     vllm_model = vLLMWrapper(model,
                              quantization = 'gptq',
                              dtype="float16",
-                             tensor_parallel_size=2)
+                             tensor_parallel_size=1)
 
     response, history = vllm_model.chat(query="你好",
                                         history=None)
@@ -53,29 +105,36 @@ if __name__ == '__main__':
 
 #### API方式调用模型
 
-注意：除去安装vllm根目录下的requirement.txt里提到的软件，以API方式调用模型需要额外安装fast chat
+除去安装vLLM外，以API方式调用模型需要额外安装fastchat
+
+In addition to installing vLLM, you should install FastChat.
 
 ```bash
 pip install fschat
-pip install accelerate
-
 ```
 
 ##### 启动Server
 
 step 1. 启动控制器
 
+step 1. Launch the controller
+
 ```
-    cd FastChat/
     python -m fastchat.serve.controller
 ```
 
 step 2. 启动模型worker
+
+step 2. Launch the model worker 
+
 ```
-    python -m fastchat.serve.vllm_worker --model-path $model_path --tensor-parallel-size 4 --trust-remote-code
+    python -m fastchat.serve.vllm_worker --model-path $model_path --tensor-parallel-size 1 --trust-remote-code
 ```
 
 step 3. 启动服务器
+
+step 3. Launch the openai api server
+
 ```
    python -m fastchat.serve.openai_api_server --host localhost --port 8000
 ```
@@ -83,10 +142,17 @@ step 3. 启动服务器
 ##### API调用
 
 step 1. 安装openai-python
+
+step 1. install openai-python
+
 ```bash
 pip install --upgrade openai
 ```
+
 step 2. 调用接口
+
+step 2. Query APIs
+
 ```python
 import openai
 # to get proper authentication, make sure to use a valid key that's listed in
