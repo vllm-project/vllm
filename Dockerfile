@@ -75,7 +75,7 @@ ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
 FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate fschat
+    pip install accelerate
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
