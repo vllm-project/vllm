@@ -110,9 +110,8 @@ class DummyModule(nn.Module):
         set_weight_attrs(self.w3.weight,
                          {"weight_loader": self.dummy_weight_loader})
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Noop
-        return hidden_states
+    def forward(self, *args, **kwargs) -> None:
+        raise NotImplementedError()
 
     def dummy_weight_loader(self, *args, **kwargs) -> None:  # pylint: disable=unused-argument
         # Noop
@@ -120,13 +119,17 @@ class DummyModule(nn.Module):
 
 
 class MixtralMoE(nn.Module):
-    # pylint: disable=unused-argument
+
     def __init__(
         self,
         config: MixtralConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
+        self.hidden_dim = config.hidden_size
+        self.ffn_dim = config.intermediate_size
+        self.num_experts = config.num_local_experts
+        self.top_k = config.num_experts_per_tok
         self.config = config
         self.rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -150,41 +153,43 @@ class MixtralMoE(nn.Module):
             if idx in self.expert_indicies else DummyModule()
             for idx in range(self.num_total_experts)
         ])
-        self.gate = nn.Linear(config.hidden_size,
-                              self.num_total_experts,
-                              bias=False)
-        self.num_experts_per_token = config.num_experts_per_tok
+        self.gate = ReplicatedLinear(config.hidden_size,
+                                     self.num_total_experts,
+                                     bias=False,
+                                     linear_method=linear_method)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_logits = self.gate(x)
-        routing_weights = F.softmax(gate_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(
-            routing_weights, self.num_experts_per_token, dim=-1)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        # router_logits: (batch * sequence_length, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights,
+                                                       self.top_k,
+                                                       dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        # calculate the weighted sum of the local expert results.
-        accumulated_expert_results = None
-        for expert_id in self.expert_indicies:
-            expert_result = self.calculate_weighted_experts_result(
-                x, routing_weights, selected_experts, expert_id)
-            if accumulated_expert_results is None:
-                accumulated_expert_results = expert_result
-            else:
-                accumulated_expert_results += expert_result
+        final_hidden_states = torch.zeros(
+            (batch_size * sequence_length, hidden_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device)
+        for expert_idx in self.expert_indicies:
+            expert_layer = self.experts[expert_idx]
+            expert_mask = (selected_experts == expert_idx)
+            expert_weights = (routing_weights * expert_mask).sum(dim=-1,
+                                                                 keepdim=True)
+            expert_idx, _ = expert_mask.any(
+                dim=-1, keepdim=True).nonzero(as_tuple=True)
 
-        # reduce across all ranks
-        return tensor_model_parallel_all_reduce(accumulated_expert_results)
+            current_state = hidden_states[expert_idx]
+            current_hidden_states = expert_layer(current_state).mul_(
+                expert_weights[expert_idx])
+            final_hidden_states.index_add_(0, expert_idx,
+                                           current_hidden_states)
 
-    def calculate_weighted_experts_result(self, x: torch.Tensor,
-                                          routing_weights: torch.Tensor,
-                                          selected_experts: torch.Tensor,
-                                          expert_id: int) -> torch.Tensor:
-        # calculate the weighted mask for the expert
-        mask = (selected_experts == expert_id)
-        weighted_mask = (routing_weights * mask).sum(dim=-1, keepdim=True)
-
-        # calculate the expert result and apply mask.
-        return self.experts[expert_id](x).mul_(weighted_mask)
+        return tensor_model_parallel_all_reduce(final_hidden_states).view(
+            batch_size, sequence_length, hidden_dim)
 
 
 class MixtralAttention(nn.Module):
