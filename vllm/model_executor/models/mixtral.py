@@ -170,22 +170,19 @@ class MixtralMoE(nn.Module):
                                                        dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        final_hidden_states = torch.zeros(
-            (batch_size * sequence_length, hidden_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device)
+        final_hidden_states = None
         for expert_idx in self.expert_indicies:
             expert_layer = self.experts[expert_idx]
             expert_mask = (selected_experts == expert_idx)
             expert_weights = (routing_weights * expert_mask).sum(dim=-1,
                                                                  keepdim=True)
-            expert_rows, _ = expert_mask.any(dim=-1).nonzero(as_tuple=False).flatten()
 
-            current_state = hidden_states[expert_rows]
-            current_hidden_states = expert_layer(current_state).mul_(
-                expert_weights[expert_rows])
-            final_hidden_states.index_add_(0, expert_rows,
-                                           current_hidden_states)
+            current_hidden_states = expert_layer(hidden_states).mul_(
+                expert_weights)
+            if final_hidden_states is None:
+                final_hidden_states = current_hidden_states
+            else:
+                final_hidden_states.add_(current_hidden_states)
 
         return tensor_model_parallel_all_reduce(final_hidden_states).view(
             batch_size, sequence_length, hidden_dim)
