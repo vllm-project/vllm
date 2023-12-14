@@ -251,7 +251,7 @@ async def generate(generate_request: GenerateRequest,
         return JSONResponse(response, status_code=400)
 
     if tokenizer and max_model_len:
-        error_response = check_length(request=generate_request)
+        error_response = await check_length(request=generate_request)
         if error_response:
             logger.error(f"Rejecting request {json.dumps(error_response)}")
             return error_response
