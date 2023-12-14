@@ -189,7 +189,7 @@ async def stream_results(
 ) -> AsyncGenerator[bytes, None]:
     request_id = generate_request.request_id
     try:
-        final_output = None
+        # final_output = None
         previous_lengths = [0] * generate_request.n
         async for request_output in results_generator:
             if generate_request.return_full_text:
@@ -206,7 +206,7 @@ async def stream_results(
             yield (json.dumps(response) + "\0").encode("utf-8")
             # TODO: Get feedback from vLLM authors if we want to switch to this as this is backwards incompatible. Can we have both?
             # yield (f"data: {json.dumps(response)}\n\n").encode("utf-8")
-            #final_output = request_output
+            # final_output = request_output
         # TODO: Get feedback from vLLM authors if we want to switch to this as this is backwards incompatible. Can we have both?
         # assert final_output is not None
         # response = _add_details(generate_request=generate_request, final_output=final_output)
