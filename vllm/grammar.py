@@ -1,5 +1,4 @@
 import collections
-import functools
 
 
 class TokenIndex:
@@ -88,18 +87,6 @@ class EpsilonNFA:
             state_set = self.current_states
         state_map = self.next_char_state_map(state_set)
         return {tok: state_map[tok] for tok in chars if tok in state_map}
-
-
-    def copy(self):
-        new_nfa = EpsilonNFA(self.nfa)
-        new_nfa.current_states = self.current_states
-        new_nfa.current_str = self.current_str
-        new_nfa._resolved_epsilon_cache = self._resolved_epsilon_cache
-        return new_nfa
-
-    @property
-    def allow_stop_next(self):
-        return None in self.next_char_state_map()
 
     def next_char_state_map(self, current_states=None):
         """
