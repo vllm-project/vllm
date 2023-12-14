@@ -50,6 +50,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`MistralForCausalLM`
     - Mistral, Mistral-Instruct
     - :code:`mistralai/Mistral-7B-v0.1`, :code:`mistralai/Mistral-7B-Instruct-v0.1`, etc.
+  * - :code:`MixtralForCausalLM`
+    - Mixtral-8x7B, Mixtral-8x7B-Instruct
+    - :code:`mistralai/Mixtral-8x7B-v0.1`, :code:`mistralai/Mixtral-8x7B-Instruct-v0.1`, etc.
   * - :code:`MPTForCausalLM`
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
@@ -70,6 +73,9 @@ If your model uses one of the above model architectures, you can seamlessly run 
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
 Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ project.
 
+.. note::
+    Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
+
 .. tip::
     The easiest way to check if your model is supported is to run the program below:
 
@@ -81,11 +87,16 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
         output = llm.generate("Hello, my name is")
         print(output)
 
-    To use model from www.modelscope.cn
+    If vLLM successfully generates text, it indicates that your model is supported.
+
+.. tip::
+    To use models from `ModelScope <www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
 
     .. code-block:: shell
 
        $ export VLLM_USE_MODELSCOPE=True
+
+    And use with :code:`trust_remote_code=True`.
 
     .. code-block:: python
 
@@ -94,5 +105,3 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
         llm = LLM(model=..., revision=..., trust_remote_code=True)  # Name or path of your model
         output = llm.generate("Hello, my name is")
         print(output)
-
-    If vLLM successfully generates text, it indicates that your model is supported.

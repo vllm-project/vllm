@@ -134,13 +134,13 @@ class ModelRunner:
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append([generation_token])
 
-                context_len = seq_data.get_len()
-                if self.sliding_window is not None:
-                    context_len = min(context_len, self.sliding_window)
-                context_lens.append(context_len)
-
-                position = context_len - 1
+                seq_len = seq_data.get_len()
+                position = seq_len - 1
                 input_positions.append([position])
+
+                context_len = seq_len if self.sliding_window is None else min(
+                    seq_len, self.sliding_window)
+                context_lens.append(context_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
                 block_number = block_table[position // self.block_size]
