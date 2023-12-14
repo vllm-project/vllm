@@ -52,7 +52,7 @@ RUN pip install xformers==0.0.23 --no-deps
 RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
-    && bash patch_xformers-0.0.23.rocm.sh \
+    && bash patch_xformers.rocm.sh \
     && python3 setup.py install \
     && cd ..
 
