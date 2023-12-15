@@ -4,7 +4,6 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.config import FLAGS
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -151,7 +150,7 @@ class Sampler(nn.Module):
         # change probs to a list of lists
         probdis = [list(tensor.unbind(0)) for tensor in probdis.unbind(0)]
         return _build_sampler_output(sample_results, sampling_metadata,
-                                     prompt_logprobs, sample_logprobs, probdis)
+                                     prompt_logprobs, sample_logprobs)
 
 
 def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
@@ -693,35 +692,21 @@ def _build_sampler_output(
     sample_results: List[Tuple[List[int], List[int]]],
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
-    sample_logprobs: List[SampleLogprobs],
-    sample_probdis: List[List[torch.Tensor]] = None,
+    sample_logprobs: List[SampleLogprobs]
 ) -> SamplerOutput:
-    if sample_probdis is None:
-        sample_probdis = [[None]] * len(sample_logprobs)
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,
-         group_sample_logprobs,
-         group_sample_probdis) in zip(sampling_metadata.seq_groups,
+         group_sample_logprobs) in zip(sampling_metadata.seq_groups,
                                       sample_results, prompt_logprobs,
-                                      sample_logprobs, sample_probdis):
+                                      sample_logprobs):
         seq_ids, _ = seq_group
         next_token_ids, parent_ids = sample_result
         seq_outputs = []
 
-        if FLAGS.ENABLE_SD and len(next_token_ids) > 1:
-            assert len(parent_ids) == 1
-            parent_id = parent_ids[0]
-            # FIXME: group_sample_logprobs incorrect
+        for parent_id, next_token_id, logprobs in zip(
+                parent_ids, next_token_ids, group_sample_logprobs):
             seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_ids,
-                               group_sample_logprobs, group_sample_probdis))
-        else:
-            for parent_id, next_token_id, logprobs, probdis in zip(
-                    parent_ids, next_token_ids, group_sample_logprobs,
-                    group_sample_probdis):
-                seq_outputs.append(
-                    SequenceOutput(seq_ids[parent_id], next_token_id, logprobs,
-                                   probdis))
+                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
     return sampler_output
