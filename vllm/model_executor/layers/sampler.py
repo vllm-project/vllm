@@ -42,8 +42,9 @@ class Sampler(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> SamplerOutput:
         prompt_run = sampling_metadata.num_prompts > 0
-        if FLAGS.ENABLE_SD and (not prompt_run):
-            return self._sd_forward(embedding, hidden_states,
+        len_to_gen = hidden_states.shape[1]
+        if len_to_gen > 1 and (not prompt_run):
+            return self._multi_token_forward(embedding, hidden_states,
                                     sampling_metadata, embedding_bias)
         else:
             return self._forward(embedding, hidden_states, sampling_metadata,
@@ -113,7 +114,7 @@ class Sampler(nn.Module):
         return _build_sampler_output(sample_results, sampling_metadata,
                                      prompt_logprobs, sample_logprobs)
 
-    def _sd_forward(
+    def _multi_token_forward(
         self,
         embedding: torch.Tensor,
         hidden_states: torch.Tensor,

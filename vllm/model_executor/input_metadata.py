@@ -14,23 +14,19 @@ class InputMetadata:
         block_tables: The block tables. (Seq id -> list of physical block)
     """
 
-    def __init__(self,
-                 prompt_lens: List[int],
-                 slot_mapping: torch.Tensor,
-                 context_lens: torch.Tensor,
-                 max_context_len: int,
-                 block_tables: torch.Tensor,
-                 start_loc: Optional[torch.Tensor] = None,
-                 sd_len_to_gen: Optional[int] = None,
-                 sd_prompt_lens: Optional[List[int]] = None) -> None:
+    def __init__(
+        self,
+        prompt_lens: List[int],
+        slot_mapping: torch.Tensor,
+        max_context_len: Optional[int],
+        context_lens: Optional[torch.Tensor],
+        block_tables: Optional[torch.Tensor],
+    ) -> None:
         self.prompt_lens = prompt_lens
         self.max_context_len = max_context_len
         self.slot_mapping = slot_mapping
-        self.start_loc = start_loc
         self.context_lens = context_lens
         self.block_tables = block_tables
-        self.sd_len_to_gen = sd_len_to_gen
-        self.sd_prompt_lens = sd_prompt_lens
 
         self.is_prompt = len(prompt_lens) > 0
         # Set during the execution of the first attention op.
