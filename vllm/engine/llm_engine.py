@@ -4,7 +4,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpecDecConfig, FLAGS)
+                         SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import record_metrics
@@ -18,7 +18,6 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
-from vllm.engine.spec_dec import SpecDecWorker
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -67,7 +66,6 @@ class LLMEngine:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        spec_dec_config: Optional[SpecDecConfig],
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
@@ -122,12 +120,6 @@ class LLMEngine:
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
-
-        self.spec_dec_worker: SpecDecWorker = None
-        if spec_dec_config:
-            self.spec_dec_worker = SpecDecWorker(spec_dec_config,
-                                                 self.scheduler)
-            FLAGS.ENABLE_SD = True
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -416,20 +408,9 @@ class LLMEngine:
             # We reuse the parent sequence here to reduce redundant memory
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
-            if last_child_sample.accepted_tokens:
-                # Speculative Decoding enabled: invlidate kv cache for non-accepted tokens
-                self.scheduler.free_invalid_kv(parent, last_child_sample)
-                # add the last accept token to the output_token_ids
-                # TODO: we need to get the logprob of the last token
-                last_token_id = last_child_sample.accepted_tokens[-1]
-                parent.append_token_id(last_token_id, {last_token_id: -1})
-                # always clear draft tokens
-                parent.data.draft_token_probs = []
-                parent.step_gen_token_ids = last_child_sample.accepted_tokens
-            else:
-                parent.append_token_id(last_child_sample.output_token,
-                                       last_child_sample.logprobs)
-                parent.step_gen_token_ids = [last_child_sample.output_token]
+            parent.append_token_id(last_child_sample.output_token,
+                                    last_child_sample.logprobs)
+            parent.step_gen_token_ids = [last_child_sample.output_token]
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
@@ -594,11 +575,6 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
 
-        # only enable speculative decoding for generation run
-        if self.spec_dec_worker and (not scheduler_outputs.prompt_run):
-            self.spec_dec_worker.set_draft_tokens(seq_group_metadata_list,
-                                                  scheduler_outputs)
-
         # Execute the model.
         output = self._run_workers(
             "execute_model",
@@ -607,10 +583,6 @@ class LLMEngine:
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
-
-        if self.spec_dec_worker and (not scheduler_outputs.prompt_run):
-            # accept will set accepted_token_ids and accepted_token_probs in output
-            self.spec_dec_worker.accept(output, scheduler_outputs)
 
         return self._process_model_outputs(output, scheduler_outputs)
 
