@@ -43,24 +43,32 @@ class ModelRunner:
                                if model_config is not None else None)
         self.model = None
         self.block_size = None  # Set after initial profiling.
-        self.block_tables = None  # Set after initial profiling.
 
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
-        self.max_context_len_to_capture = min(
-            self.model_config.max_model_len if self.model_config else 0,
-            _MAX_CONTEXT_LEN_TO_CAPTURE)
         self.graph_memory_pool = None  # Set during graph capture.
+
+        # When using CUDA graph, the input block tables must be padded to
+        # _MAX_CONTEXT_LEN_TO_CAPTURE. However, creating the block table in
+        # Python can be expensive. To optimize this, we cache the block table
+        # in numpy and only copy the actual input content at every iteration.
+        # The shape of the cached block table will be
+        # (max batch size to capture, max context len to capture / block size).
+        self.graph_block_tables = None  # Set after initial profiling.
+        max_model_len = (self.model_config.max_model_len
+                         if self.model_config is not None else 0)
+        self.max_context_len_to_capture = min(max_model_len,
+                                              _MAX_CONTEXT_LEN_TO_CAPTURE)
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
-        max_block_size_to_capture = (self.max_context_len_to_capture +
-                                     block_size - 1) // block_size
-        self.block_tables = np.zeros(
-            (max(_BATCH_SIZES_TO_CAPTURE), max_block_size_to_capture),
-            dtype=np.int32)
+
+        max_num_blocks = (self.max_context_len_to_capture + block_size -
+                          1) // block_size
+        self.graph_block_tables = np.zeros(
+            (max(_BATCH_SIZES_TO_CAPTURE), max_num_blocks), dtype=np.int32)
 
     def _prepare_prompt(
         self,
@@ -220,9 +228,10 @@ class ModelRunner:
                                     dtype=torch.int,
                                     device=device)
 
-        # FIXME
-        if max_context_len <= self.max_context_len_to_capture:
-            input_block_tables = self.block_tables[:batch_size]
+        if use_captured_graph:
+            # The shape of graph_block_tables is
+            # [max batch size, max context len // block size].
+            input_block_tables = self.graph_block_tables[:batch_size]
             for i, block_table in enumerate(block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
@@ -402,7 +411,7 @@ class ModelRunner:
         slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
-        block_tables = torch.from_numpy(self.block_tables).cuda()
+        block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
