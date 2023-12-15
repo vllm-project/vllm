@@ -94,7 +94,7 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
             })
         lookup_table = Parameter(
             torch.empty(
-                output_size_per_partition,
+                output_size,
                 self.quant_config.weight_bits**2,
                 device="cuda",
                 dtype=params_dtype,
