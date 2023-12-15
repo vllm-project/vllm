@@ -92,7 +92,7 @@ def run_vllm(
         compile_model=compile_model,
     )
 
-    # Add the requests to the engine.
+    # warm-up the engine.
     for prompt, _, output_len in requests[0:warm_up]:
         sampling_params = SamplingParams(
             n=n,
