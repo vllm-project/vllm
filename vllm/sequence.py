@@ -67,11 +67,6 @@ class SequenceData:
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
-        # we use a list here because
-        # we can generate the same token multiple times in different locations
-        # for each entry in the list, it's a map of
-        # token_id -> probability distribution
-        self.draft_token_probs: List[Dict[int, torch.Tensor]] = []
         self.cumulative_logprob = 0.0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
@@ -94,17 +89,6 @@ class SequenceData:
         if not self.output_token_ids:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
-
-    def get_draft_token_ids(self) -> List[int]:
-        draft_tokens = [list(tp.keys())[0] for tp in self.draft_token_probs]
-        return draft_tokens
-
-    def get_verified_token_ids(self) -> List[int]:
-        draft_token_ids = self.get_draft_token_ids()
-        assert self.output_token_ids[-len(draft_token_ids):] == draft_token_ids
-        if len(draft_token_ids) == len(self.output_token_ids):
-            return [self.prompt_token_ids[-1]] + draft_token_ids
-        return self.output_token_ids[-len(draft_token_ids) - 1:]
 
     def __repr__(self) -> str:
         return (f"SequenceData("
@@ -251,11 +235,6 @@ class Sequence:
         return (f"Sequence(seq_id={self.seq_id}, "
                 f"status={self.status.name}, "
                 f"num_blocks={len(self.logical_token_blocks)})")
-
-    def get_draft_probdis(self, token_id: int, pos: int) -> torch.Tensor:
-        token_probdis = self.data.draft_token_probs[pos]
-        assert token_id in token_probdis
-        return token_probdis[token_id]
 
 
 class SequenceGroup:
@@ -408,14 +387,10 @@ class SequenceOutput:
         parent_seq_id: int,
         output_token: Union[int, List[int]],
         logprobs: Union[Dict[int, float], List[Dict[int, float]]],
-        probdis: Optional[List[Dict[int, torch.Tensor]]] = None,
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
-
-        self.accepted_tokens = None
-        self.probdis = probdis
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
