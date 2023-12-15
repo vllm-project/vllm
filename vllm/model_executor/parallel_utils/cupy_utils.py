@@ -7,12 +7,9 @@ CUDA graphs.
 TODO: Remove this file when torch.distributed.all_reduce is fixed.
 """
 import contextlib
-from typing import Optional
 
 import torch
 from torch.distributed import ReduceOp
-
-from vllm.utils import get_open_port
 
 try:
     import cupy
@@ -64,14 +61,11 @@ def set_cupy_stream(stream: torch.cuda.Stream) -> None:
         yield
 
 
-def init_process_group(world_size: int,
-                       rank: int,
-                       host: str = "localhost",
-                       port: Optional[int] = None) -> None:
+def init_process_group(world_size: int, rank: int, host: str,
+                       port: int) -> None:
     """Initializes the CuPy NCCL backend.
 
     # TODO: handle NCCL timeouts.
-    # TODO: Support multi-node connection.
     """
     assert not is_initialized()
 
@@ -87,8 +81,6 @@ def init_process_group(world_size: int,
         f"{rank=} should be a integer between [0, {world_size})")
 
     cupy.cuda.runtime.setDevice(torch.cuda.current_device())
-    if port is None:
-        port = get_open_port()
     _NCCL_BACKEND = NCCLBackendWithBFloat16(world_size, rank, host, port)
     _WORLD_SIZE = world_size
 

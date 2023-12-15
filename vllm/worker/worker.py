@@ -47,7 +47,7 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
-    def init_model(self):
+    def init_model(self, cupy_port: Optional[int] = None):
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
         # Env vars will be set by Ray.
@@ -63,7 +63,7 @@ class Worker:
 
         # Initialize the distributed environment.
         _init_distributed_environment(self.parallel_config, self.rank,
-                                      self.distributed_init_method)
+                                      cupy_port, self.distributed_init_method)
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
@@ -158,6 +158,7 @@ class Worker:
 def _init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
+    cupy_port: Optional[int],
     distributed_init_method: Optional[str] = None,
 ) -> None:
     """Initialize the distributed environment."""
@@ -190,9 +191,12 @@ def _init_distributed_environment(
     elif parallel_config.world_size > 1:
         # NOTE(woosuk): We don't initialize CuPy process group when world size
         # is 1.
+        # TODO(woosuk): Support multi-node connection.
         cupy_utils.init_process_group(
             world_size=parallel_config.world_size,
             rank=rank,
+            host="localhost",
+            port=cupy_port,
         )
 
     if parallel_config.world_size > 1:
