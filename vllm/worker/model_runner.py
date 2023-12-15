@@ -2,7 +2,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, FLAGS
+from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -130,7 +130,6 @@ class ModelRunner:
         slot_mapping: List[List[int]] = []
         context_lens: List[int] = []
         block_tables: List[List[int]] = []
-        sd_prompt_lens: List[int] = []
         len_to_gen: int = 1
 
         for seq_group_metadata in seq_group_metadata_list:
@@ -139,40 +138,20 @@ class ModelRunner:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
-                if FLAGS.ENABLE_SD:
-                    verify_tokens = seq_data.get_verified_token_ids()
-                    len_to_gen = len(verify_tokens)
-                    input_tokens.append(verify_tokens)
+                generation_token = seq_data.get_last_token_id()
+                input_tokens.append([generation_token])
 
-                    context_len = seq_data.get_len()
-                    context_lens.append(context_len)
+                context_len = seq_data.get_len()
+                if self.sliding_window is not None:
+                    context_len = min(context_len, self.sliding_window)
+                context_lens.append(context_len)
 
-                    positions = list(
-                        range(context_len - len_to_gen, context_len))
-                    input_positions.append(positions)
+                position = context_len - 1
+                input_positions.append([position])
 
-                    block_table = seq_group_metadata.block_tables[seq_id]
-                    slots = []
-                    for position in positions:
-                        slots.append(self._get_slot(block_table, position))
-                    slot_mapping.append(slots)
-
-                    sd_prompt_lens.append(context_len - len_to_gen)
-                else:
-                    generation_token = seq_data.get_last_token_id()
-                    input_tokens.append([generation_token])
-
-                    context_len = seq_data.get_len()
-                    if self.sliding_window is not None:
-                        context_len = min(context_len, self.sliding_window)
-                    context_lens.append(context_len)
-
-                    position = context_len - 1
-                    input_positions.append([position])
-
-                    block_table = seq_group_metadata.block_tables[seq_id]
-                    slot = self._get_slot(block_table, position)
-                    slot_mapping.append([slot])
+                block_table = seq_group_metadata.block_tables[seq_id]
+                slot = self._get_slot(block_table, position)
+                slot_mapping.append([slot])
 
                 if self.sliding_window is not None:
                     sliding_window_blocks = (self.sliding_window //
@@ -202,25 +181,11 @@ class ModelRunner:
                                              pad=0,
                                              dtype=torch.int)
 
-        start_loc_tensor = None
-        if FLAGS.ENABLE_SD:
-            start_loc_tensor = torch.arange(0,
-                                            len(sd_prompt_lens) * len_to_gen,
-                                            len_to_gen,
-                                            dtype=torch.long,
-                                            device='cuda')
-            sd_prompt_lens = torch.tensor(sd_prompt_lens,
-                                          dtype=torch.long,
-                                          device='cuda')
-
         input_metadata = InputMetadata(prompt_lens=[],
                                        slot_mapping=slot_mapping,
                                        max_context_len=max_context_len,
                                        context_lens=context_lens,
-                                       block_tables=block_tables,
-                                       start_loc=start_loc_tensor,
-                                       sd_len_to_gen=len_to_gen,
-                                       sd_prompt_lens=sd_prompt_lens)
+                                       block_tables=block_tables)
         return input_tokens, input_positions, input_metadata
 
     def _prepare_sample(
@@ -261,13 +226,7 @@ class ModelRunner:
                 selected_token_start_idx += max_prompt_len
             else:
                 num_seqs = len(seq_ids)
-                if FLAGS.ENABLE_SD:
-                    assert len(seq_ids) == 1
-                    seq = seq_group_metadata.seq_data[seq_ids[0]]
-                    selected_token_end_idx = selected_token_start_idx + len(
-                        seq.get_draft_token_ids()) + 1
-                else:
-                    selected_token_end_idx = selected_token_start_idx + num_seqs
+                selected_token_end_idx = selected_token_start_idx + num_seqs
 
                 selected_token_indices.extend(
                     range(selected_token_start_idx, selected_token_end_idx))
