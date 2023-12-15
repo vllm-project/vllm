@@ -2,7 +2,7 @@ import asyncio
 import time
 from functools import partial
 from typing import (Any, Dict, Iterable, List, Optional, Set, Tuple, Type,
-                    Union)
+                    Union, AsyncIterator)
 import torch
 
 from vllm.config import ModelConfig
@@ -411,7 +411,7 @@ class AsyncLLMEngine:
         request_id: str,
         prompt_token_ids: Optional[List[int]] = None,
         prompt_embeds: Optional[torch.Tensor] = None,
-    ) -> RequestOutput:
+    ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
