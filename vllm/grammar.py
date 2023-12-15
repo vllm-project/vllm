@@ -3,8 +3,6 @@ import collections
 
 class TokenIndex:
     def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-
         # map id -> token str including whitespace
         self.norm_vocab = {}
         for token_id in tokenizer.vocab.values():
