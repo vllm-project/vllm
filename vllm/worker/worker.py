@@ -155,15 +155,6 @@ class Worker:
                                                  self.gpu_cache)
         return output
 
-    def __del__(self):
-        # Clean up the distributed environment.
-        # This is needed to avoid hanging on exit, since the cupy states are
-        # not cleaned up properly.
-        # NOTE(woosuk): The __del__ method is called by the Python garbage
-        # collector, so the timing of the call is not deterministic.
-        if model_parallel_is_initialized():
-            destroy_model_parallel()
-
 
 def _init_distributed_environment(
     parallel_config: ParallelConfig,
