@@ -10,8 +10,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.parallel_state import (
-    destroy_model_parallel, initialize_model_parallel,
-    model_parallel_is_initialized)
+    initialize_model_parallel)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
@@ -188,15 +187,19 @@ def _init_distributed_environment(
                 "cupy.distributed is already initialized but the cupy world "
                 "size does not match parallel_config.world_size "
                 f"({cupy_world_size} vs. {parallel_config.world_size}).")
-    else:
+    elif parallel_config.world_size > 1:
+        # NOTE(woosuk): We don't initialize CuPy process group when world size
+        # is 1.
         cupy_utils.init_process_group(
             world_size=parallel_config.world_size,
             rank=rank,
         )
 
-    # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda())
-    cupy_utils.all_reduce(torch.zeros(1).cuda())
+    if parallel_config.world_size > 1:
+        # A small all_reduce for warmup.
+        torch.distributed.all_reduce(torch.zeros(1).cuda())
+        cupy_utils.all_reduce(torch.zeros(1).cuda())
+
     initialize_model_parallel(parallel_config.tensor_parallel_size,
                               parallel_config.pipeline_parallel_size)
 

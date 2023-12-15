@@ -194,14 +194,20 @@ _ENABLE_CUPY_FOR_ALL_REDUCE = False
 @contextlib.contextmanager
 def with_custom_nccl_for_all_reduce():
     """use custom nccl instead of torch.distributed for all reduce"""
-    global _ENABLE_CUPY_FOR_ALL_REDUCE
-    old = _ENABLE_CUPY_FOR_ALL_REDUCE
-    _ENABLE_CUPY_FOR_ALL_REDUCE = True
-
-    stream = torch.cuda.current_stream()
-    with cupy_utils.set_cupy_stream(stream):
+    tp_size = get_tensor_model_parallel_world_size()
+    if tp_size == 1:
+        # No-op.
+        # NOTE(woosuk): We don't initialize CuPy when tp_size is 1.
         yield
-    _ENABLE_CUPY_FOR_ALL_REDUCE = old
+    else:
+        global _ENABLE_CUPY_FOR_ALL_REDUCE
+        old = _ENABLE_CUPY_FOR_ALL_REDUCE
+        _ENABLE_CUPY_FOR_ALL_REDUCE = True
+
+        stream = torch.cuda.current_stream()
+        with cupy_utils.set_cupy_stream(stream):
+            yield
+        _ENABLE_CUPY_FOR_ALL_REDUCE = old
 
 
 def is_custom_nccl_enabled_for_all_reduce():
