@@ -13,10 +13,6 @@ logger = init_logger(__name__)
 _GB = 1 << 30
 
 
-class FLAGS:
-    ENABLE_SD = False
-
-
 class ModelConfig:
     """Configuration for the model.
 
@@ -358,14 +354,6 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
-
-
-class SpecDecConfig:
-
-    def __init__(self, draft_model_config: ModelConfig,
-                 propose_cnt: int) -> None:
-        self.draft_model_config = draft_model_config
-        self.propose_cnt = propose_cnt
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
