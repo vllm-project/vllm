@@ -10,8 +10,6 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 from vllm._C import ops
 from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.kv_mqa import context_attention_fwd
-from vllm.config import FLAGS
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -165,20 +163,16 @@ class PagedAttention(nn.Module):
             )
             output = out.view_as(query)
         else:
-            if FLAGS.ENABLE_SD:
-                output = _multi_query_cached_kv_attention(
-                    query, key, value, key_cache, value_cache, input_metadata)
-            else:
-                # Decoding run.
-                output = _paged_attention(
-                    query,
-                    key_cache,
-                    value_cache,
-                    input_metadata,
-                    self.head_mapping,
-                    self.scale,
-                    self.alibi_slopes,
-                )
+            # Decoding run.
+            output = _paged_attention(
+                query,
+                key_cache,
+                value_cache,
+                input_metadata,
+                self.head_mapping,
+                self.scale,
+                self.alibi_slopes,
+            )
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
@@ -285,26 +279,4 @@ def _paged_attention(
             input_metadata.max_context_len,
             alibi_slopes,
         )
-    return output
-
-
-def _multi_query_cached_kv_attention(query: torch.Tensor, key: torch.Tensor,
-                                     value: torch.Tensor,
-                                     key_cache: torch.Tensor,
-                                     value_cache: torch.Tensor,
-                                     input_metadata: InputMetadata):
-    # Pre-allocate the output tensor.
-    output = torch.empty_like(query)
-    context_attention_fwd(
-        query,
-        key,
-        value,
-        output,
-        key_cache,
-        value_cache,
-        input_metadata.block_tables,  # [BS, max_block_per_request]
-        input_metadata.start_loc,
-        input_metadata.context_lens,
-        input_metadata.sd_prompt_lens,
-        input_metadata.sd_len_to_gen)
     return output
