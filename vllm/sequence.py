@@ -375,11 +375,9 @@ class SequenceOutput:
     Args:
         parent_seq_id: The ID of the parent sequence (for forking in beam
             search).
-        output_token: The output token ID.
-        logprobs: The logprobs of the output token.
+        output_token: The output token ID(s).
+        logprobs: The logprobs of the output token(s).
             (Token id -> logP(x_i+1 | x_0, ..., x_i))
-        accepted_tokens: The tokens that are accepted by the speculative decoding.
-        probdis: The probability distribution of the output token. It is used in speculative decoding.
     """
 
     def __init__(
