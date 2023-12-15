@@ -3,7 +3,7 @@
 Installation with ROCm
 ======================
 
-vLLM 0.2.x onwards supports model inferencing and serving on AMD GPUs with ROCm.
+vLLM 0.2.4 onwards supports model inferencing and serving on AMD GPUs with ROCm.
 At the moment AWQ quantization is not supported in ROCm, but SqueezeLLM quantization has been ported.
 Data types currently supported in ROCm are FP16 and BF16.
 
@@ -29,7 +29,7 @@ Installation options:
 
 .. code-block:: console
 
-    $ docker pull embeddedllminfo/vllm-rocm:vllm-v0.2.3
+    $ docker pull embeddedllminfo/vllm-rocm:vllm-v0.2.4
     $ docker run -it \
        --network=host \
        --group-add=video \
@@ -70,12 +70,12 @@ You can build and install vLLM from source:
     - ROCm's Flash-attention-2 (v2.0.4) does not support sliding windows attention.
     - You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
 
-2. Setup `xformers==0.0.22.post7` without dependencies, and apply patches to adapt for ROCm flash attention
+2. Setup `xformers==0.0.23` without dependencies, and apply patches to adapt for ROCm flash attention
 
     .. code-block:: console
 
-        $ pip install xformers==0.0.22.post7 --no-deps
-        $ bash patch_xformers-0.0.22.post7.rocm.sh
+        $ pip install xformers==0.0.23 --no-deps
+        $ bash patch_xformers.rocm.sh
 
 3. Build vLLM.
 
@@ -127,12 +127,12 @@ Alternatively, if you plan to install vLLM-ROCm on a local machine or start from
     - ROCm's Flash-attention-2 (v2.0.4) does not support sliding windows attention.
     - You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
 
-2. Setup `xformers==0.0.22.post7` without dependencies, and apply patches to adapt for ROCm flash attention
+2. Setup `xformers==0.0.23` without dependencies, and apply patches to adapt for ROCm flash attention
 
     .. code-block:: console
 
-        $ pip install xformers==0.0.22.post7 --no-deps
-        $ bash patch_xformers-0.0.22.post7.rocm.sh
+        $ pip install xformers==0.0.23 --no-deps
+        $ bash patch_xformers.rocm.sh
 
 3. Build vLLM.
 
