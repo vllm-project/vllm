@@ -303,10 +303,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
         else:
-            logger.warning(
-                "Loading a weight without `output_dim` attribute in "
-                "MergedColumnParallelLinear, assume the weight is "
-                "the same for all partitions.")
+            ignore_warning = getattr(param, "ignore_warning", False)
+            if not ignore_warning:
+                logger.warning(
+                    "Loading a weight without `output_dim` attribute in "
+                    "MergedColumnParallelLinear, assume the weight is "
+                    "the same for all partitions.")
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -426,10 +428,12 @@ class QKVParallelLinear(ColumnParallelLinear):
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
         else:
-            logger.warning(
-                "Loading a weight without `output_dim` attribute in "
-                "QKVParallelLinear, assume the weight is the same "
-                "for all partitions.")
+            ignore_warning = getattr(param, "ignore_warning", False)
+            if not ignore_warning:
+                logger.warning(
+                    "Loading a weight without `output_dim` attribute in "
+                    "QKVParallelLinear, assume the weight is the same "
+                    "for all partitions.")
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

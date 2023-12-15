@@ -150,7 +150,8 @@ class GPTQLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        set_weight_attrs(g_idx, {"input_dim": 0})
+        # Ignore warning from fused linear layers such as QKVParallelLinear.
+        set_weight_attrs(g_idx, {"input_dim": 0, "ignore_warning": True})
         qzeros = Parameter(
             torch.empty(
                 scale_and_zero_size,
