@@ -2,7 +2,6 @@
 import copy
 import enum
 from typing import Dict, List, Optional, Union
-import torch
 
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
