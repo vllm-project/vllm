@@ -77,14 +77,16 @@ class AWQLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, input_size: int, output_size: int,
-                       params_dtype: torch.dtype) -> Dict[str, torch.Tensor]:
-        if input_size % self.quant_config.group_size != 0:
+    def create_weights(self, input_size_per_partition: int,
+                       output_size_per_partition: int, input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype) -> Dict[str, Any]:
+        if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
-        if output_size % self.quant_config.pack_factor != 0:
+        if output_size_per_partition % self.quant_config.pack_factor != 0:
             raise ValueError(
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
@@ -92,8 +94,8 @@ class AWQLinearMethod(LinearMethodBase):
 
         qweight = Parameter(
             torch.empty(
-                input_size,
-                output_size // self.quant_config.pack_factor,
+                input_size_per_partition,
+                output_size_per_partition // self.quant_config.pack_factor,
                 device="cuda",
                 dtype=torch.int32,
             ),
@@ -108,8 +110,8 @@ class AWQLinearMethod(LinearMethodBase):
             })
         qzeros = Parameter(
             torch.empty(
-                input_size // self.quant_config.group_size,
-                output_size // self.quant_config.pack_factor,
+                input_size_per_partition // self.quant_config.group_size,
+                output_size_per_partition // self.quant_config.pack_factor,
                 device="cuda",
                 dtype=torch.int32,
             ),
@@ -124,8 +126,8 @@ class AWQLinearMethod(LinearMethodBase):
             })
         scales = Parameter(
             torch.empty(
-                input_size // self.quant_config.group_size,
-                output_size,
+                input_size_per_partition // self.quant_config.group_size,
+                output_size_per_partition,
                 device="cuda",
                 dtype=params_dtype,
             ),
@@ -142,7 +144,7 @@ class AWQLinearMethod(LinearMethodBase):
         }
 
     def apply_weights(self,
-                      weights: Dict[str, torch.Tensor],
+                      weights: Dict[str, Any],
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = weights["qweight"]

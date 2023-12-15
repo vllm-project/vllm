@@ -287,4 +287,5 @@ def initialize_dummy_weights(
     values between -1e-3 and 1e-3 works well for most models.
     """
     for param in model.state_dict().values():
-        param.data.uniform_(low, high)
+        if torch.is_floating_point(param):
+            param.data.uniform_(low, high)
