@@ -2,6 +2,8 @@
  * Adapted from
  * https://github.com/pytorch/pytorch/blob/v2.0.1/aten/src/ATen/Dispatch.h
  */
+#pragma once
+
 #include <torch/extension.h>
 
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)              \

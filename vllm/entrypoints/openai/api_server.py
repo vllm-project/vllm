@@ -332,8 +332,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                     # Send token-by-token response for each request.n
                     delta_text = output.text[len(previous_texts[i]):]
                     previous_texts[i] = output.text
-                    completion_tokens = len(output.token_ids)
-                    previous_num_tokens[i] = completion_tokens
+                    previous_num_tokens[i] = len(output.token_ids)
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=delta_text),
@@ -351,8 +350,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
                     prompt_tokens = len(res.prompt_token_ids)
                     final_usage = UsageInfo(
                         prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=prompt_tokens + completion_tokens,
+                        completion_tokens=previous_num_tokens[i],
+                        total_tokens=prompt_tokens + previous_num_tokens[i],
                     )
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i, delta=[], finish_reason=output.finish_reason)
@@ -568,17 +567,22 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 i = output.index
                 delta_text = output.text[len(previous_texts[i]):]
                 token_ids = output.token_ids[previous_num_tokens[i]:]
-                top_logprobs = output.logprobs[previous_num_tokens[i]:]
+                if request.logprobs is not None:
+                    top_logprobs = output.logprobs[previous_num_tokens[i]:]
+                else:
+                    top_logprobs = None
                 offsets = len(previous_texts[i])
                 if request.echo and not has_echoed[i]:
                     if not echo_without_generation:
                         delta_text = res.prompt + delta_text
                         token_ids = res.prompt_token_ids + token_ids
-                        top_logprobs = res.prompt_logprobs + top_logprobs
-                    else:
+                        if top_logprobs:
+                            top_logprobs = res.prompt_logprobs + top_logprobs
+                    else:  # only just return the prompt
                         delta_text = res.prompt
                         token_ids = res.prompt_token_ids
-                        top_logprobs = res.prompt_logprobs
+                        if top_logprobs:
+                            top_logprobs = res.prompt_logprobs
                     has_echoed[i] = True
                 if request.logprobs is not None:
                     logprobs = create_logprobs(
