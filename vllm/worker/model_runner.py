@@ -20,9 +20,6 @@ _PAD_SLOT_ID = -1
 # Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
-# If the context length of a sequence is larger than this, we fall back to the
-# eager mode.
-_MAX_CONTEXT_LEN_TO_CAPTURE = 8192
 
 
 class ModelRunner:
@@ -47,17 +44,16 @@ class ModelRunner:
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.graph_memory_pool = None  # Set during graph capture.
 
+        self.max_context_len_to_capture = (
+            self.model_config.max_context_len_to_capture
+            if self.model_config is not None else 0)
         # When using CUDA graph, the input block tables must be padded to
-        # _MAX_CONTEXT_LEN_TO_CAPTURE. However, creating the block table in
+        # max_context_len_to_capture. However, creating the block table in
         # Python can be expensive. To optimize this, we cache the block table
         # in numpy and only copy the actual input content at every iteration.
         # The shape of the cached block table will be
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables = None  # Set after initial profiling.
-        max_model_len = (self.model_config.max_model_len
-                         if self.model_config is not None else 0)
-        self.max_context_len_to_capture = min(max_model_len,
-                                              _MAX_CONTEXT_LEN_TO_CAPTURE)
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
