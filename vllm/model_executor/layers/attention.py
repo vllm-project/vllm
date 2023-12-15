@@ -93,6 +93,7 @@ class PagedAttention(nn.Module):
         out = torch.einsum("hqk,khd->qhd", attn_weights, value)
         return out
 
+    @torch.compiler.disable
     def forward(
         self,
         query: torch.Tensor,

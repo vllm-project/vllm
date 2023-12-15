@@ -76,7 +76,6 @@ def run_vllm(
     warm_up: int = 0,
     compile_model: bool = False,
 ) -> float:
-    print('compile', compile_model)
     from vllm import LLM, SamplingParams
     llm = LLM(
         model=model,
@@ -277,7 +276,7 @@ if __name__ == "__main__":
                         choices=['awq', 'gptq', 'squeezellm', None],
                         default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
-    parser.add_argument("--compile_model", type=bool, default=False)
+    parser.add_argument("--compile-model", type=bool, default=False)
     parser.add_argument("--n",
                         type=int,
                         default=1,

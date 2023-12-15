@@ -93,6 +93,7 @@ class OPTAttention(nn.Module):
                                    self.head_dim,
                                    scale=self.scaling)
 
+    @torch.compiler.disable
     def forward(
         self,
         hidden_states: torch.Tensor,
