@@ -44,7 +44,7 @@ class Sampler(nn.Module):
         len_to_gen = hidden_states.shape[1]
         if len_to_gen > 1 and (not prompt_run):
             return self._multi_token_forward(embedding, hidden_states,
-                                    sampling_metadata, embedding_bias)
+                                             sampling_metadata, embedding_bias)
         else:
             return self._forward(embedding, hidden_states, sampling_metadata,
                                  embedding_bias)
@@ -689,22 +689,22 @@ def _get_logprobs(
 
 
 def _build_sampler_output(
-    sample_results: List[Tuple[List[int], List[int]]],
-    sampling_metadata: SamplingMetadata,
-    prompt_logprobs: List[Optional[PromptLogprobs]],
-    sample_logprobs: List[SampleLogprobs]
-) -> SamplerOutput:
+        sample_results: List[Tuple[List[int], List[int]]],
+        sampling_metadata: SamplingMetadata,
+        prompt_logprobs: List[Optional[PromptLogprobs]],
+        sample_logprobs: List[SampleLogprobs]) -> SamplerOutput:
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,
          group_sample_logprobs) in zip(sampling_metadata.seq_groups,
-                                      sample_results, prompt_logprobs,
-                                      sample_logprobs):
+                                       sample_results, prompt_logprobs,
+                                       sample_logprobs):
         seq_ids, _ = seq_group
         next_token_ids, parent_ids = sample_result
         seq_outputs = []
 
-        for parent_id, next_token_id, logprobs in zip(
-                parent_ids, next_token_ids, group_sample_logprobs):
+        for parent_id, next_token_id, logprobs in zip(parent_ids,
+                                                      next_token_ids,
+                                                      group_sample_logprobs):
             seq_outputs.append(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(

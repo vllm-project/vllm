@@ -409,7 +409,7 @@ class LLMEngine:
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
             parent.append_token_id(last_child_sample.output_token,
-                                    last_child_sample.logprobs)
+                                   last_child_sample.logprobs)
             parent.step_gen_token_ids = [last_child_sample.output_token]
             child_seqs.append((parent, parent))
 
