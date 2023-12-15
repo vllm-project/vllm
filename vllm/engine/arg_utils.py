@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpecDecConfig)
+                         SchedulerConfig)
 
 
 @dataclass
@@ -25,7 +25,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     swap_space: int = 4  # GiB
-    gpu_memory_utilization: float = 0.80
+    gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_paddings: int = 256
@@ -33,9 +33,6 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-
-    draft_model: Optional[str] = None
-    propose_cnt: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -185,21 +182,6 @@ class EngineArgs:
                             choices=['awq', 'squeezellm', None],
                             default=None,
                             help='Method used to quantize the weights')
-
-        # speculative decoding setting
-        parser.add_argument(
-            '--draft-model',
-            type=str,
-            default=None,
-            help=
-            'name or path of the huggingface model to use as the draft model')
-        parser.add_argument(
-            '--propose-cnt',
-            type=int,
-            default=5,
-            help=
-            'for speculative decoding, number of tokens to propose each step')
-
         return parser
 
     @classmethod
@@ -231,20 +213,7 @@ class EngineArgs:
                                            self.max_num_seqs,
                                            model_config.max_model_len,
                                            self.max_paddings)
-
-        spec_dec_config: SpecDecConfig = None
-        if self.draft_model:
-            # assume the draft model and target model share the same tokenizer
-            # for now, share the same seed as the target
-            draft_model_config = ModelConfig(self.draft_model, self.tokenizer,
-                                             self.tokenizer_mode,
-                                             self.trust_remote_code,
-                                             self.download_dir,
-                                             self.load_format, 'auto',
-                                             self.seed)
-            spec_dec_config = SpecDecConfig(draft_model_config,
-                                            self.propose_cnt)
-        return model_config, cache_config, parallel_config, scheduler_config, spec_dec_config
+        return model_config, cache_config, parallel_config, scheduler_config
 
 
 @dataclass
