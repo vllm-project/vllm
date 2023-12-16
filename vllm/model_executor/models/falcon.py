@@ -425,27 +425,32 @@ class FalconForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
+                continue
             param = params_dict[name]
             if "query_key_value" in name:
                 output_dim = getattr(param, "output_dim", None)
                 loaded_weight_shape = loaded_weight.shape
-                loaded_weight = loaded_weight.view(
-                    loaded_weight_shape[:output_dim] +
-                    (total_num_kv_heads, num_query_heads_per_kv_head + 2, -1) +
-                    loaded_weight_shape[output_dim + 1:])
-                wq = loaded_weight.narrow(
-                    output_dim + 1, 0, num_query_heads_per_kv_head).reshape(
-                        *loaded_weight_shape[:output_dim], -1,
-                        *loaded_weight_shape[output_dim + 1:])
-                wk = loaded_weight.narrow(
-                    output_dim + 1, num_query_heads_per_kv_head,
-                    1).reshape(*loaded_weight_shape[:output_dim], -1,
-                               *loaded_weight_shape[output_dim + 1:])
-                wv = loaded_weight.narrow(
-                    output_dim + 1, num_query_heads_per_kv_head + 1,
-                    1).reshape(*loaded_weight_shape[:output_dim], -1,
-                               *loaded_weight_shape[output_dim + 1:])
-                loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
+                if output_dim is not None:
+                    loaded_weight = loaded_weight.view(
+                        loaded_weight_shape[:output_dim] +
+                        (total_num_kv_heads, num_query_heads_per_kv_head + 2,
+                         -1) + loaded_weight_shape[output_dim + 1:])
+                    wq = loaded_weight.narrow(
+                        output_dim + 1, 0,
+                        num_query_heads_per_kv_head).reshape(
+                            *loaded_weight_shape[:output_dim], -1,
+                            *loaded_weight_shape[output_dim + 1:])
+                    wk = loaded_weight.narrow(
+                        output_dim + 1, num_query_heads_per_kv_head,
+                        1).reshape(*loaded_weight_shape[:output_dim], -1,
+                                   *loaded_weight_shape[output_dim + 1:])
+                    wv = loaded_weight.narrow(
+                        output_dim + 1, num_query_heads_per_kv_head + 1,
+                        1).reshape(*loaded_weight_shape[:output_dim], -1,
+                                   *loaded_weight_shape[output_dim + 1:])
+                    loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
 
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
