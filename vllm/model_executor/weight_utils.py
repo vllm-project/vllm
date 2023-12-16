@@ -132,17 +132,16 @@ def prepare_hf_model_weights(
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
     use_safetensors = False
-    allow_patterns = ["*.bin"]
     # Some quantized models use .pt files for storing the weights.
     if load_format == "auto":
-        allow_patterns = ["*.safetensors"] + allow_patterns
+        allow_patterns = ["*.safetensors", "*.bin"]
     elif load_format == "safetensors":
         use_safetensors = True
         allow_patterns = ["*.safetensors"]
     elif load_format == "pt":
         allow_patterns = ["*.pt"]
     elif load_format == "npcache":
-        pass
+        allow_patterns = ["*.bin"]
     else:
         raise ValueError(f"Unknown load_format: {load_format}")
 
