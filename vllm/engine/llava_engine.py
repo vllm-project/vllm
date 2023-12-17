@@ -66,7 +66,7 @@ class LLaVAEngine(LLMEngine):
             execute_model_methord = partial(worker.execute_method.remote,
                                             'execute_model_methord')
         else:
-            execute_model_methord = getattr(worker, 'execute_model_methord')
+            execute_model_methord = worker.execute_model_methord
         outputs = execute_model_methord('prepare_promt', prompt_token_ids,
                                         pixel_values)
         if self.parallel_config.worker_use_ray:
