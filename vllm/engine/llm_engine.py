@@ -190,7 +190,6 @@ class LLMEngine:
                           ))
         self._run_workers(
             "init_model",
-            cupy_port=get_open_port(),
             get_all_outputs=True,
         )
         self._run_workers(
