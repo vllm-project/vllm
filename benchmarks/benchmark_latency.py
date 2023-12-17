@@ -23,6 +23,7 @@ def main(args: argparse.Namespace):
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
+        enforce_eager=args.enforce_eager,
     )
 
     sampling_params = SamplingParams(
@@ -84,7 +85,7 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
-                        choices=['awq', 'squeezellm', None],
+                        choices=['awq', 'gptq', 'squeezellm', None],
                         default=None)
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
     parser.add_argument('--input-len', type=int, default=32)
@@ -111,6 +112,9 @@ if __name__ == '__main__':
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
+    parser.add_argument('--enforce-eager',
+                        action='store_true',
+                        help='enforce eager mode and disable CUDA graph')
     parser.add_argument(
         '--profile',
         action='store_true',

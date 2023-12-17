@@ -35,6 +35,8 @@ vLLM is fast with:
 - State-of-the-art serving throughput
 - Efficient management of attention key and value memory with **PagedAttention**
 - Continuous batching of incoming requests
+- Fast model execution with CUDA/HIP graph
+- Quantization: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [SqueezeLLM](https://arxiv.org/abs/2306.07629)
 - Optimized CUDA kernels
 
 vLLM is flexible and easy to use with:
@@ -44,7 +46,7 @@ vLLM is flexible and easy to use with:
 - Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
-- Support NVIDIA CUDA and AMD ROCm.
+- Support NVIDIA GPUs and AMD GPUs
 
 vLLM seamlessly supports many Hugging Face models, including the following architectures:
 
@@ -71,10 +73,6 @@ Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/get
 
 ```bash
 pip install vllm
-```
-**NOTE:** The Mixtral model additionally requires `megablocks` which can be installed with pip or [from source](https://github.com/stanford-futuredata/megablocks):
-```bash
-pip install megablocks
 ```
 
 ## Getting Started

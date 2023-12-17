@@ -84,6 +84,7 @@ class LLMEngine:
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"quantization={model_config.quantization}, "
+            f"enforce_eager={model_config.enforce_eager}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -232,6 +233,9 @@ class LLMEngine:
 
         # Initialize the cache.
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
+        # Warm up the model. This includes capturing the model into CUDA graph
+        # if enforce_eager is False.
+        self._run_workers("warm_up_model")
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
@@ -682,9 +686,10 @@ class LLMEngine:
         """Stop the finished sequences."""
         for stop_str in sampling_params.stop:
             if seq.output_text.endswith(stop_str):
-                # Truncate the output text so that the stop string is
-                # not included in the output.
-                seq.output_text = seq.output_text[:-len(stop_str)]
+                if not sampling_params.include_stop_str_in_output:
+                    # Truncate the output text so that the stop string is
+                    # not included in the output.
+                    seq.output_text = seq.output_text[:-len(stop_str)]
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
         if seq.get_last_token_id() in sampling_params.stop_token_ids:

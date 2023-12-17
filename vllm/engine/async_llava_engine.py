@@ -2,7 +2,7 @@ from vllm.engine.llava_engine import LLaVAEngine
 from vllm.engine.async_llm_engine import AsyncLLMEngine, _AsyncLLMEngine, AsyncStream, AsyncEngineDeadError
 import asyncio
 import time
-from typing import (List, Optional, Type)
+from typing import (List, Optional, Type, AsyncIterator)
 from PIL import Image
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -98,7 +98,7 @@ class AsyncLLaVAEngine(AsyncLLMEngine):
             sampling_params: SamplingParams,
             request_id: str,
             prompt_token_ids: Optional[List[int]] = None,
-            images: Optional[List[Image.Image]] = None) -> RequestOutput:
+            images: Optional[List[Image.Image]] = None) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the

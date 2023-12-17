@@ -129,7 +129,6 @@ class LlavaForConditionalGeneration(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
         image_features: Optional[List[torch.Tensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> torch.Tensor:
@@ -160,7 +159,6 @@ class LlavaForConditionalGeneration(nn.Module):
                                             positions,
                                             kv_caches,
                                             input_metadata,
-                                            cache_events,
                                             inputs_embeds=inputs_embeds)
         return hidden_states
 
