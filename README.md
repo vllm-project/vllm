@@ -65,7 +65,7 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - Mixtral (`mistralai/Mixtral-8x7B-v0.1`, `mistralai/Mixtral-8x7B-Instruct-v0.1`, etc.)
 - MPT (`mosaicml/mpt-7b`, `mosaicml/mpt-30b`, etc.)
 - OPT (`facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc.)
-- Phi-1.5 (`microsoft/phi-1_5`, etc.)
+- Phi (`microsoft/phi-1_5`, `microsoft/phi-2`, etc.)
 - Qwen (`Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.)
 - Yi (`01-ai/Yi-6B`, `01-ai/Yi-34B`, etc.)
 
