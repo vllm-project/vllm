@@ -72,7 +72,6 @@ class GPTNeoXAttention(nn.Module):
             config.hidden_size,
             linear_method=linear_method,
         )
-
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0

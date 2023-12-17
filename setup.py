@@ -225,6 +225,7 @@ vllm_extension_sources = [
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    vllm_extension_sources.append("csrc/quantization/gptq/q_gemm.cu")
 
 vllm_extension = CUDAExtension(
     name="vllm._C",

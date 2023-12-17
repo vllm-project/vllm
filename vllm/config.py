@@ -130,15 +130,10 @@ class ModelConfig:
 
         # TODO: Remove this check once HF updates the pt weights of Mixtral.
         architectures = getattr(self.hf_config, "architectures", [])
-        if "MixtralForCausalLM" in architectures:
-            if load_format == "pt":
-                raise ValueError(
-                    "Currently, the 'pt' format is not supported for Mixtral. "
-                    "Please use the 'safetensors' format instead. ")
-            elif load_format == "auto":
-                # Do not fall back to pt weights.
-                load_format = "safetensors"
-
+        if "MixtralForCausalLM" in architectures and load_format == "pt":
+            raise ValueError(
+                "Currently, the 'pt' format is not supported for Mixtral. "
+                "Please use the 'safetensors' format instead. ")
         self.load_format = load_format
 
     def _verify_tokenizer_mode(self) -> None:
@@ -150,8 +145,8 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "squeezellm"]
-        rocm_not_supported_quantization = ["awq"]
+        supported_quantization = ["awq", "gptq", "squeezellm"]
+        rocm_not_supported_quantization = ["awq", "gptq"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
