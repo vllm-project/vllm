@@ -29,12 +29,12 @@ class EngineArgs:
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_paddings: int = 256
-    max_context_len_to_capture: int = 8192
     disable_log_stats: bool = False
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
+    max_context_len_to_capture: int = 8192
 
     def __post_init__(self):
         if self.tokenizer is None:
