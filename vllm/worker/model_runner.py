@@ -139,7 +139,7 @@ class ModelRunner:
             max_context_len=None,
             context_lens=None,
             block_tables=None,
-            use_graph=False,
+            use_cuda_graph=False,
         )
         return input_tokens, input_positions, input_metadata
 
@@ -246,7 +246,7 @@ class ModelRunner:
             max_context_len=max_context_len,
             context_lens=context_lens,
             block_tables=block_tables,
-            use_graph=use_captured_graph,
+            use_cuda_graph=use_captured_graph,
         )
         return input_tokens, input_positions, input_metadata
 
@@ -340,7 +340,7 @@ class ModelRunner:
                                                  input_metadata.prompt_lens)
 
         # Execute the model.
-        if input_metadata.use_graph:
+        if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
@@ -419,7 +419,7 @@ class ModelRunner:
                 max_context_len=self.max_context_len_to_capture,
                 context_lens=context_lens[:batch_size],
                 block_tables=block_tables[:batch_size],
-                use_graph=True,
+                use_cuda_graph=True,
             )
 
             graph_runner = CUDAGraphRunner(self.model)
