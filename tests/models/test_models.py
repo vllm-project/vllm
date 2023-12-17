@@ -15,12 +15,12 @@ MODELS = [
     "EleutherAI/pythia-70m",
     "bigscience/bloom-560m",
     "mosaicml/mpt-7b",
-    "microsoft/phi-1_5",
+    "microsoft/phi-2",
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(
     hf_runner,
