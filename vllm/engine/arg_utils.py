@@ -174,12 +174,6 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_paddings,
                             help='maximum number of paddings in a batch')
-        parser.add_argument('--max-context-len-to-capture',
-                            type=int,
-                            default=EngineArgs.max_context_len_to_capture,
-                            help='maximum context length covered by CUDA '
-                            'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
@@ -195,6 +189,12 @@ class EngineArgs:
                             help='Always use eager-mode PyTorch. If False, '
                             'will use eager mode and CUDA graph in hybrid '
                             'for maximal performance and flexibility.')
+        parser.add_argument('--max-context-len-to-capture',
+                            type=int,
+                            default=EngineArgs.max_context_len_to_capture,
+                            help='maximum context length covered by CUDA '
+                            'graphs. When a sequence has context length '
+                            'larger than this, we fall back to eager mode.')
         return parser
 
     @classmethod
