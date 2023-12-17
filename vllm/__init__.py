@@ -5,6 +5,7 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_cluster
 from vllm.entrypoints.llm import LLM
+from vllm.entrypoints.llava_llm import LLaVA
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 
@@ -12,6 +13,7 @@ __version__ = "0.2.4"
 
 __all__ = [
     "LLM",
+    "LLaVA",
     "SamplingParams",
     "RequestOutput",
     "CompletionOutput",

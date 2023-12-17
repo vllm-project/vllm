@@ -251,8 +251,12 @@ class LlamaModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
+        inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        if inputs_embeds is None:
+            hidden_states = self.embed_tokens(input_ids)
+        else:
+            hidden_states = inputs_embeds
         residual = None
         for i in range(len(self.layers)):
             cache_event = None if cache_events is None else cache_events[i]
@@ -283,6 +287,9 @@ class LlamaForCausalLM(nn.Module):
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)
 
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -290,9 +297,14 @@ class LlamaForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
+        inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata, cache_events)
+        hidden_states = self.model(input_ids,
+                                   positions,
+                                   kv_caches,
+                                   input_metadata,
+                                   cache_events,
+                                   inputs_embeds=inputs_embeds)
         return hidden_states
 
     def sample(

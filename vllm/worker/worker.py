@@ -122,6 +122,7 @@ class Worker:
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        runner_method: str = "execute_model",
     ) -> SamplerOutput:
         # Issue cache operations.
         issued_cache_op = False
@@ -144,9 +145,22 @@ class Worker:
                     event.wait()
             return {}
 
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache, cache_events)
+        output = self.model_runner.__getattribute__(runner_method)(
+            seq_group_metadata_list, self.gpu_cache, cache_events)
         return output
+
+    @torch.inference_mode()
+    def execute_model_methord(
+        self,
+        model_methord: str,
+        *args,
+        **kwargs,
+    ):
+        """Directly execute some none distributed model methord. Just a temporary hack.
+        For the image token replace of the llava model.
+        """
+        return self.model_runner.model.__getattribute__(model_methord)(
+            *args, **kwargs)
 
 
 def _init_distributed_environment(

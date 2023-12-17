@@ -71,6 +71,14 @@ COPY vllm vllm
 EXPOSE 8000
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
 
+
+FROM vllm-base as vllm-llava
+
+COPY --from=build /workspace/vllm/*.so /workspace/vllm/
+COPY vllm vllm
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.llava_server"]
+
 # openai api server alternative
 FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server, and mixtral

@@ -292,6 +292,55 @@ class ModelRunner:
         return output
 
     @torch.inference_mode()
+    def execute_llava_model(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        cache_events: Optional[List[torch.cuda.Event]] = None,
+    ) -> SamplerOutput:
+        # NOTE: We assume that all sequences in the group are all prompts or
+        # all decodes.
+        # Prepare input tensors.
+        is_prompt = seq_group_metadata_list[0].is_prompt
+        image_features = None
+        if is_prompt:
+            inputs = self._prepare_prompt(seq_group_metadata_list)
+            input_tokens, input_positions, input_metadata = inputs
+
+            image_features = []
+            for seq_group_metadata in seq_group_metadata_list:
+                extra_data = seq_group_metadata.seq_data[list(
+                    seq_group_metadata.seq_data.keys())[0]].extra_data
+                if extra_data is not None and 'image_features' in extra_data:
+                    image_features.append(
+                        extra_data.get('image_features', None))
+                else:
+                    image_features.append(None)
+
+        else:
+            inputs = self._prepare_decode(seq_group_metadata_list)
+            input_tokens, input_positions, input_metadata = inputs
+        sampling_metadata = self._prepare_sample(seq_group_metadata_list,
+                                                 input_metadata.prompt_lens)
+
+        # Execute the model.
+        hidden_states = self.model(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=kv_caches,
+            input_metadata=input_metadata,
+            cache_events=cache_events,
+            image_features=image_features,
+        )
+
+        # Sample the next token.
+        output = self.model.sample(
+            hidden_states=hidden_states,
+            sampling_metadata=sampling_metadata,
+        )
+        return output
+
+    @torch.inference_mode()
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         vocab_size = self.model_config.get_vocab_size()
