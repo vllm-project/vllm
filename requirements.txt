@@ -7,7 +7,7 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch == 2.1.2
 transformers >= 4.36.0  # Required for Mixtral.
-xformers == 0.0.23  # Required for CUDA 12.1.
+xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
 pydantic == 1.10.13  # Required for OpenAI server.
