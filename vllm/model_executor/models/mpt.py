@@ -117,7 +117,6 @@ class MPTAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         del position_ids  # unused.
         qkv, _ = self.Wqkv(hidden_states)
@@ -128,8 +127,7 @@ class MPTAttention(nn.Module):
             q = self.q_ln(q)
             k = self.k_ln(k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
-                                cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -187,7 +185,6 @@ class MPTBlock(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         x = self.norm_1(hidden_states)
         x = self.attn(
@@ -195,7 +192,6 @@ class MPTBlock(nn.Module):
             hidden_states=x,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
         hidden_states = hidden_states + x
         x = self.norm_2(hidden_states)
@@ -235,18 +231,15 @@ class MPTModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
         for i in range(len(self.blocks)):
-            cache_event = None if cache_events is None else cache_events[i]
             block = self.blocks[i]
             hidden_states = block(
                 position_ids,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
-                cache_event,
             )
         hidden_states = self.norm_f(hidden_states)
         return hidden_states
@@ -274,10 +267,9 @@ class MPTForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
+                                         input_metadata)
         return hidden_states
 
     def sample(
