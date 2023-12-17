@@ -17,7 +17,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
-from vllm.utils import Counter, get_open_port
+from vllm.utils import Counter
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -190,7 +190,6 @@ class LLMEngine:
                           ))
         self._run_workers(
             "init_model",
-            cupy_port=get_open_port(),
             get_all_outputs=True,
         )
         self._run_workers(
