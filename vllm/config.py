@@ -185,6 +185,11 @@ class ModelConfig:
             self.max_context_len_to_capture = self.max_model_len
         self.max_context_len_to_capture = min(self.max_context_len_to_capture,
                                               self.max_model_len)
+        if self.quantization == "gptq" and not self.enforce_eager:
+            # Related issue: https://github.com/vllm-project/vllm/issues/2147
+            logger.warning("GPTQ does not support CUDA graph yet. Disabling "
+                           "CUDA graph.")
+            self.enforce_eager = True
 
     def verify_with_parallel_config(
         self,
