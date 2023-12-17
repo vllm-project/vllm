@@ -69,7 +69,8 @@ def run_vllm(
     use_beam_search: bool,
     trust_remote_code: bool,
     dtype: str,
-    max_model_len: Optional[int] = None,
+    max_model_len: Optional[int],
+    enforce_eager: bool,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -81,6 +82,7 @@ def run_vllm(
         trust_remote_code=trust_remote_code,
         dtype=dtype,
         max_model_len=max_model_len,
+        enforce_eager=enforce_eager,
     )
 
     # Add the requests to the engine.
@@ -204,7 +206,7 @@ def main(args: argparse.Namespace):
                                 args.quantization, args.tensor_parallel_size,
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
-                                args.max_model_len)
+                                args.max_model_len, args.enforce_eager)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -279,6 +281,9 @@ if __name__ == "__main__":
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
+    parser.add_argument("--enforce-eager",
+                        action="store_true",
+                        help="enforce eager execution")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

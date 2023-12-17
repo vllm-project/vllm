@@ -56,6 +56,12 @@ class LLM:
             when their `best_of` sampling parameters are larger than 1. If all
             requests will have `best_of=1`, you can safely set this to 0.
             Otherwise, too small values may cause out-of-memory (OOM) errors.
+        enforce_eager: Whether to enforce eager execution. If True, we will
+            disable CUDA graph and always execute the model in eager mode.
+            If False, we will use CUDA graph and eager execution in hybrid.
+        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
+            When a sequence has context length larger than this, we fall back
+            to eager mode.
     """
 
     def __init__(
@@ -72,6 +78,8 @@ class LLM:
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
+        enforce_eager: bool = False,
+        max_context_len_to_capture: int = 8192,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -89,6 +97,8 @@ class LLM:
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             swap_space=swap_space,
+            enforce_eager=enforce_eager,
+            max_context_len_to_capture=max_context_len_to_capture,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)

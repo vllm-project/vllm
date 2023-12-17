@@ -82,13 +82,12 @@ class GPT2Attention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(q, k, v, key_cache, value_cache,
-                                input_metadata, cache_event)
+                                input_metadata)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output
 
@@ -148,7 +147,6 @@ class GPT2Block(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -156,7 +154,6 @@ class GPT2Block(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
         # residual connection
         hidden_states = attn_output + residual
@@ -196,17 +193,14 @@ class GPT2Model(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         inputs_embeds = self.wte(input_ids)
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds
 
         for i in range(len(self.h)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
-            hidden_states = layer(hidden_states, kv_caches[i], input_metadata,
-                                  cache_event)
+            hidden_states = layer(hidden_states, kv_caches[i], input_metadata)
 
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
@@ -232,10 +226,9 @@ class GPT2LMHeadModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
+                                         input_metadata)
         return hidden_states
 
     def sample(

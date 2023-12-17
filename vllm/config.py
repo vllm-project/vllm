@@ -49,6 +49,12 @@ class ModelConfig:
             output). If None, will be derived from the model.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
+        enforce_eager: Whether to enforce eager execution. If True, we will
+            disable CUDA graph and always execute the model in eager mode.
+            If False, we will use CUDA graph and eager execution in hybrid.
+        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
+            When a sequence has context length larger than this, we fall back
+            to eager mode.
     """
 
     def __init__(
@@ -65,6 +71,8 @@ class ModelConfig:
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        enforce_eager: bool = False,
+        max_context_len_to_capture: Optional[int] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -76,6 +84,8 @@ class ModelConfig:
         self.revision = revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
+        self.enforce_eager = enforce_eager
+        self.max_context_len_to_capture = max_context_len_to_capture
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -95,6 +105,7 @@ class ModelConfig:
         self._verify_load_format()
         self._verify_tokenizer_mode()
         self._verify_quantization()
+        self._verify_cuda_graph()
 
     def _verify_load_format(self) -> None:
         load_format = self.load_format.lower()
@@ -168,6 +179,12 @@ class ModelConfig:
             logger.warning(f"{self.quantization} quantization is not fully "
                            "optimized yet. The speed can be slower than "
                            "non-quantized models.")
+
+    def _verify_cuda_graph(self) -> None:
+        if self.max_context_len_to_capture is None:
+            self.max_context_len_to_capture = self.max_model_len
+        self.max_context_len_to_capture = min(self.max_context_len_to_capture,
+                                              self.max_model_len)
 
     def verify_with_parallel_config(
         self,

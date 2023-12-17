@@ -100,7 +100,6 @@ class GLMAttention(nn.Module):
         position_ids: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -113,7 +112,6 @@ class GLMAttention(nn.Module):
             key_cache,
             value_cache,
             input_metadata,
-            cache_event,
         )
         attn_output, _ = self.dense(context_layer)
         return attn_output
@@ -203,7 +201,6 @@ class GLMBlock(nn.Module):
         position_ids: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         # hidden_states: [num_tokens, h]
         # Layer norm at the beginning of the transformer layer.
@@ -214,7 +211,6 @@ class GLMBlock(nn.Module):
             position_ids=position_ids,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
 
         # Residual connection.
@@ -269,17 +265,14 @@ class GLMTransformer(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         for i in range(self.num_layers):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
             hidden_states = layer(
                 hidden_states=hidden_states,
                 position_ids=position_ids,
                 kv_cache=kv_caches[i],
                 input_metadata=input_metadata,
-                cache_event=cache_event,
             )
         # Final layer norm.
         if self.post_layer_norm:
@@ -314,8 +307,7 @@ class ChatGLMModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-    ):
+    ) -> torch.Tensor:
         inputs_embeds = self.embedding(input_ids)
 
         # Run encoder.
@@ -324,9 +316,7 @@ class ChatGLMModel(nn.Module):
             position_ids=position_ids,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
-            cache_events=cache_events,
         )
-
         return hidden_states
 
 
@@ -350,10 +340,9 @@ class ChatGLMForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
+                                         input_metadata)
         return hidden_states
 
     def sample(

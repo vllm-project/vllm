@@ -8,6 +8,7 @@ import torch.distributed
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -46,7 +47,7 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
-    def init_model(self):
+    def init_model(self, cupy_port: Optional[int] = None):
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
         # Env vars will be set by Ray.
@@ -62,7 +63,7 @@ class Worker:
 
         # Initialize the distributed environment.
         _init_distributed_environment(self.parallel_config, self.rank,
-                                      self.distributed_init_method)
+                                      cupy_port, self.distributed_init_method)
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
@@ -100,10 +101,6 @@ class Worker:
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
         torch.cuda.empty_cache()
-
-        # Reset the seed to ensure that the random state is not affected by
-        # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
@@ -113,6 +110,13 @@ class Worker:
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
+
+    def warm_up_model(self) -> None:
+        if not self.model_config.enforce_eager:
+            self.model_runner.capture_model(self.gpu_cache)
+        # Reset the seed to ensure that the random state is not affected by
+        # the model initialization and profiling.
+        set_random_seed(self.model_config.seed)
 
     @torch.inference_mode()
     def execute_model(
@@ -136,21 +140,24 @@ class Worker:
 
         cache_events = self.cache_events if issued_cache_op else None
 
+        # Wait for cache operations to finish.
+        # TODO(woosuk): Profile swapping overhead and optimize if needed.
+        if cache_events is not None:
+            for event in cache_events:
+                event.wait()
         # If there is no input, we don't need to execute the model.
         if not seq_group_metadata_list:
-            if cache_events is not None:
-                for event in cache_events:
-                    event.wait()
             return {}
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache, cache_events)
+                                                 self.gpu_cache)
         return output
 
 
 def _init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
+    cupy_port: Optional[int],
     distributed_init_method: Optional[str] = None,
 ) -> None:
     """Initialize the distributed environment."""
@@ -173,8 +180,29 @@ def _init_distributed_environment(
             init_method=distributed_init_method,
         )
 
-    # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda())
+    if cupy_utils.is_initialized():
+        cupy_world_size = cupy_utils.get_world_size()
+        if cupy_world_size != parallel_config.world_size:
+            raise RuntimeError(
+                "cupy.distributed is already initialized but the cupy world "
+                "size does not match parallel_config.world_size "
+                f"({cupy_world_size} vs. {parallel_config.world_size}).")
+    elif parallel_config.world_size > 1:
+        # NOTE(woosuk): We don't initialize CuPy process group when world size
+        # is 1.
+        # TODO(woosuk): Support multi-node connection.
+        cupy_utils.init_process_group(
+            world_size=parallel_config.world_size,
+            rank=rank,
+            host="localhost",
+            port=cupy_port,
+        )
+
+    if parallel_config.world_size > 1:
+        # A small all_reduce for warmup.
+        torch.distributed.all_reduce(torch.zeros(1).cuda())
+        cupy_utils.all_reduce(torch.zeros(1).cuda())
+
     initialize_model_parallel(parallel_config.tensor_parallel_size,
                               parallel_config.pipeline_parallel_size)
 

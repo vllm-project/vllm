@@ -172,15 +172,13 @@ class BaiChuanAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.W_pack(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         if self.postion_embedding != "ALIBI":
             q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
-                                cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -221,7 +219,6 @@ class BaiChuanDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -236,7 +233,6 @@ class BaiChuanDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
 
         # Fully Connected
@@ -273,19 +269,16 @@ class BaiChuanModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for i in range(len(self.layers)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
-                cache_event,
                 residual,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -311,10 +304,9 @@ class BaiChuanBaseForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata, cache_events)
+                                   input_metadata)
         return hidden_states
 
     def sample(

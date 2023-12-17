@@ -98,13 +98,12 @@ class OPTAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(q, k, v, key_cache, value_cache,
-                                input_metadata, cache_event)
+                                input_metadata)
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -154,7 +153,6 @@ class OPTDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
@@ -163,8 +161,7 @@ class OPTDecoderLayer(nn.Module):
             hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(hidden_states=hidden_states,
                                        kv_cache=kv_cache,
-                                       input_metadata=input_metadata,
-                                       cache_event=cache_event)
+                                       input_metadata=input_metadata)
         hidden_states = residual + hidden_states
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
@@ -245,7 +242,6 @@ class OPTDecoder(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
         pos_embeds = self.embed_positions(positions)
@@ -254,10 +250,8 @@ class OPTDecoder(nn.Module):
         hidden_states = inputs_embeds + pos_embeds
 
         for i in range(len(self.layers)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
-            hidden_states = layer(hidden_states, kv_caches[i], input_metadata,
-                                  cache_event)
+            hidden_states = layer(hidden_states, kv_caches[i], input_metadata)
 
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
@@ -282,10 +276,8 @@ class OPTModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
-        return self.decoder(input_ids, positions, kv_caches, input_metadata,
-                            cache_events)
+        return self.decoder(input_ids, positions, kv_caches, input_metadata)
 
 
 class OPTForCausalLM(nn.Module):
@@ -308,10 +300,9 @@ class OPTForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata, cache_events)
+                                   input_metadata)
         return hidden_states
 
     def sample(

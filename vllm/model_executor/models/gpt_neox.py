@@ -92,14 +92,12 @@ class GPTNeoXAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
-                                cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         output, _ = self.dense(attn_output)
         return output
 
@@ -155,7 +153,6 @@ class GPTNeoXLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         attn_input = self.input_layernorm(hidden_states)
         attn_output = self.attention(
@@ -163,7 +160,6 @@ class GPTNeoXLayer(nn.Module):
             hidden_states=attn_input,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
 
         if self.use_parallel_residual:
@@ -210,18 +206,15 @@ class GPTNeoXModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.embed_in(input_ids)
         for i in range(len(self.layers)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
             hidden_states = layer(
                 position_ids,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
-                cache_event,
             )
         hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
@@ -250,10 +243,9 @@ class GPTNeoXForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.gpt_neox(input_ids, positions, kv_caches,
-                                      input_metadata, cache_events)
+                                      input_metadata)
         return hidden_states
 
     def sample(
