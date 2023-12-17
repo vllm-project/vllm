@@ -46,7 +46,7 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
-    def init_model(self):
+    def init_model(self) -> None:
         # torch.distributed.all_reduce does not free the input tensor until
         # the synchronization point. This causes the memory usage to grow
         # as the number of all_reduce calls increases. This env var disables
