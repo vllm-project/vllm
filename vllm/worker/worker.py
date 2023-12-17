@@ -54,7 +54,7 @@ class Worker:
         # this behavior.
         # Related issue:
         # https://discuss.pytorch.org/t/cuda-allocation-lifetime-for-inputs-to-distributed-all-reduce/191573
-        os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = 1
+        os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
 
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
@@ -89,7 +89,6 @@ class Worker:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
-        torch.cuda.memory._record_memory_history()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -98,7 +97,6 @@ class Worker:
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         torch.cuda.synchronize()
-        torch.cuda.memory._dump_snapshot("llama7b.pickle")
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         peak_memory = total_gpu_memory - free_gpu_memory
 
