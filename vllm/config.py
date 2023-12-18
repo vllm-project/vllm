@@ -127,9 +127,6 @@ class ModelConfig:
                     f"load format \'{load_format}\' is not supported in ROCm. "
                     f"Supported load format are "
                     f"{rocm_supported_load_format}")
-            # Force ROCm to load from pt weights if nothing specific is set
-            if load_format == "auto":
-                load_format = "pt"
 
         # TODO: Remove this check once HF updates the pt weights of Mixtral.
         architectures = getattr(self.hf_config, "architectures", [])
