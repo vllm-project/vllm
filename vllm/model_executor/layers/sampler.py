@@ -206,28 +206,17 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
 
 def _apply_top_p_top_k_with_new_kernel(
     logits: torch.Tensor,
-    top_ps: List[float],
-    top_ks: List[int],
+    top_ps: torch.Tensor,
+    top_ks: torch.Tensor,
 ) -> torch.Tensor:
     do_top_p = True
     do_top_k = True
     softmax_res = logits.softmax(dim=-1)
     logit_dst = torch.full(logits.shape, -float("inf"), device=logits.device, dtype=logits.dtype)
-    max_top_k = 0
-    if top_ps:
-        p = torch.tensor(top_ps, dtype=torch.float32, device=logits.device)
-    else:
-        p = torch.Tensor()
-        do_top_p = False
-
-    if top_ks:
-        max_top_k = max(top_ks)
-        k = torch.tensor(top_ks, dtype=torch.int32, device=logits.device)
-    else:
-        k = torch.Tensor()
-        do_top_k = False
-    topk.top_k(logits, softmax_res, logit_dst, do_top_k, max_top_k, k,
-               do_top_p, p)
+    max_top_k = top_ks.max().item()
+    p = torch.tensor(top_ps, dtype=torch.float32, device=logits.device)
+    topk.top_k(logits, softmax_res, logit_dst, do_top_k, max_top_k, top_ks,
+               do_top_p, top_ps)
     return logit_dst
 
 
