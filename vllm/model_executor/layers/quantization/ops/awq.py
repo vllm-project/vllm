@@ -132,7 +132,7 @@ def _awq_kernel(A, B, C, M, N, K, Z, S, shifter_ptr, stride_am, stride_ak,
         # Compute a @ b
         acc += tl.dot(a, b, out_dtype=dot_out_dtype)
 
-        # 7. update pointers
+        # Update pointers
         A += BLOCK_K * SPLIT_K * stride_ak
         B += BLOCK_K * SPLIT_K * stride_bk
     acc = acc.to(C.dtype.element_ty)
