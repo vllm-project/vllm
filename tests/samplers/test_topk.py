@@ -2,7 +2,6 @@ from typing import List
 import pytest
 import torch
 from vllm import topk
-import random
 
 batch_size = 100
 vocab_size = 50000
