@@ -89,3 +89,18 @@ torch::Tensor gptq_gemm(
 void gptq_shuffle(
   torch::Tensor q_weight,
   torch::Tensor q_perm);
+
+
+using fptr_t = uint64_t;
+fptr_t prepare_buffer(fptr_t ptr, const std::vector<std::string> &handles,
+                        const std::vector<int64_t> &offsets, int rank,
+                        bool full_nvlink);
+void allreduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out);
+void dispose(fptr_t _fa);
+int meta_size();
+void register_buffer(fptr_t _fa, torch::Tensor &t,
+                     const std::vector<std::string> &handles,
+                     const std::vector<int64_t> &offsets);
+std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(fptr_t _fa);
+void register_graph_buffers(fptr_t _fa, const std::vector<std::string> &handles,
+                            const std::vector<std::vector<int64_t>> &offsets);

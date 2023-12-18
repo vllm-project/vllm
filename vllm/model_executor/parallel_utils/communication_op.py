@@ -3,10 +3,33 @@ import torch
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_group,
+    get_tensor_model_parallel_rank
 )
+from vllm.model_executor.parallel_utils.fast_allreduce import FastAllreduce
 
 
-def tensor_model_parallel_all_reduce(input_):
+fa_handle = None
+is_capturing = False
+
+
+def init_fast_ar():
+    global fa_handle
+    world_size = get_tensor_model_parallel_world_size()
+    if world_size > 1:
+        fa_handle = FastAllreduce(get_tensor_model_parallel_rank(), world_size)
+
+
+def begin_capture():
+    global is_capturing
+    is_capturing = True
+
+
+def end_capture():
+    global is_capturing
+    is_capturing = False
+
+
+def tensor_model_parallel_all_reduce(input_: torch.Tensor):
     """All-reduce the input tensor across model parallel group.
 
     NOTE: This operation is applied in-place on the input tensor.
@@ -14,9 +37,20 @@ def tensor_model_parallel_all_reduce(input_):
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
         return input_
-    # All-reduce.
+    # fast allreduce only works with IPC pre-registered buffer.
+    # This is only handled when captured with cuda graph
+    if is_capturing and fa_handle is not None:
+        if torch.cuda.is_current_stream_capturing():
+            if fa_handle.should_fast_ar(input_):
+                return fa_handle.all_reduce(input_)
+        else:
+            if fa_handle.should_fast_ar(input_):
+                # if warm up, mimic the allocation pattern
+                # since fast allreduce is out-of-place
+                return torch.empty_like(input_)
+
     torch.distributed.all_reduce(input_,
-                                 group=get_tensor_model_parallel_group())
+                                group=get_tensor_model_parallel_group())
     return input_
 
 

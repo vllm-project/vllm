@@ -220,6 +220,7 @@ vllm_extension_sources = [
     "csrc/layernorm_kernels.cu",
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     "csrc/cuda_utils_kernels.cu",
+    "csrc/fast_allreduce.cu",
     "csrc/pybind.cpp",
 ]
 

@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+import vllm.model_executor.parallel_utils.communication_op as comm_op
 
 logger = init_logger(__name__)
 
@@ -406,7 +407,9 @@ class ModelRunner:
         slot_mapping.fill_(_PAD_SLOT_ID)
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
-
+        
+        comm_op.init_fast_ar()
+        comm_op.begin_capture()
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
         for batch_size in reversed(_BATCH_SIZES_TO_CAPTURE):
@@ -430,6 +433,9 @@ class ModelRunner:
             )
             self.graph_memory_pool = graph_runner.graph.pool()
             self.graph_runners[batch_size] = graph_runner
+        comm_op.end_capture()
+        if comm_op.fa_handle is not None:
+            comm_op.fa_handle.register_graph_buffers()
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
