@@ -51,6 +51,7 @@ class Sampler(nn.Module):
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
 
+        self._copy_stream.wait_stream(torch.cuda.current_stream())
         # Prepare sampling tensors in another stream to overlap
         # CPU<->GPU data transfer with GPU computation in forward pass.
         with torch.cuda.stream(self._copy_stream):
