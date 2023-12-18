@@ -89,9 +89,11 @@ Below, you can find an explanation of every engine argument for vLLM:
 
     CPU swap space size (GiB) per GPU.
 
-.. option:: --gpu-memory-utilization <percentage>
+.. option:: --gpu-memory-utilization <fraction>
 
-    The percentage of GPU memory to be used for the model executor.
+    The fraction of GPU memory to be used for the model executor, which can range from 0 to 1. 
+    For example, a value of 0.5 would imply 50% GPU memory utilization.
+    If unspecified, will use the default value of 0.9.
 
 .. option:: --max-num-batched-tokens <tokens>
 
