@@ -395,6 +395,9 @@ class ModelRunner:
                     "unexpected consequences if the model is not static. To "
                     "run the model in eager mode, set 'enforce_eager=True' or "
                     "use '--enforce-eager' in the CLI.")
+        logger.info("CUDA graphs can take additional 1~3 GiB memory per GPU. "
+                    "If you are running out of memory, consider decreasing "
+                    "`gpu_memory_utilization` or enforcing eager mode.")
         start_time = time.perf_counter()
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
