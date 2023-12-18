@@ -219,13 +219,13 @@ vllm_extension_sources = [
     "csrc/activation_kernels.cu",
     "csrc/layernorm_kernels.cu",
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
+    "csrc/quantization/gptq/q_gemm.cu",
     "csrc/cuda_utils_kernels.cu",
     "csrc/pybind.cpp",
 ]
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
-    vllm_extension_sources.append("csrc/quantization/gptq/q_gemm.cu")
 
 vllm_extension = CUDAExtension(
     name="vllm._C",
