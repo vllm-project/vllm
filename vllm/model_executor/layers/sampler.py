@@ -214,9 +214,8 @@ def _apply_top_p_top_k_with_new_kernel(
     softmax_res = logits.softmax(dim=-1)
     logit_dst = torch.full(logits.shape, -float("inf"), device=logits.device, dtype=logits.dtype)
     max_top_k = top_ks.max().item()
-    p = torch.tensor(top_ps, dtype=torch.float32, device=logits.device)
-    topk.top_k(logits, softmax_res, logit_dst, do_top_k, max_top_k, top_ks,
-               do_top_p, top_ps)
+    topk.top_k(logits, softmax_res, logit_dst, do_top_k, max_top_k, top_ks.to(logits.device),
+               do_top_p, top_ps.type(torch.float32).to(logits.device))
     return logit_dst
 
 
