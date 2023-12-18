@@ -106,6 +106,5 @@ def test_topk_kernel(inputs, topps, topks, data_type):
     assert torch.allclose(lnew_sorted, lold_sorted)
 
 if __name__ == "__main__":
-    test_topk_kernel(INPUTS_TEST[0], TOPS_TEST[0], TOPK_TEST[0], torch.float32)
-    test_topk_kernel(INPUTS_TEST[0], TOPS_TEST[0], TOPK_TEST[0], torch.float16)
-    test_topk_kernel(INPUTS_TEST[0], TOPS_TEST[0], TOPK_TEST[0], torch.bfloat16)
+    for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+        test_topk_kernel(INPUTS_TEST[0], TOPS_TEST[0], TOPK_TEST[0], dtype)
