@@ -11,6 +11,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceData, SequenceGroupOutput, SequenceOutput)
 
+from vllm import topk
 
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
@@ -73,7 +74,7 @@ class Sampler(nn.Module):
         logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
 
         if do_top_p_top_k:
-            logits = _apply_top_p_top_k(logits, sampling_tensors.top_ps,
+            logits = _apply_top_p_top_k_with_new_kernel(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
 
         if do_min_p:
@@ -200,6 +201,33 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     logits -= frequency_penalties.unsqueeze_(dim=1) * output_bin_counts
     logits -= presence_penalties.unsqueeze_(dim=1) * output_mask
     return logits
+
+
+def _apply_top_p_top_k_with_new_kernel(
+    logits: torch.Tensor,
+    top_ps: List[float],
+    top_ks: List[int],
+) -> torch.Tensor:
+    do_top_p = True
+    do_top_k = True
+    softmax_res = logits.softmax(dim=-1)
+    logit_dst = torch.full(logits.shape, -float("inf"), device=logits.device)
+    max_top_k = 0
+    if top_ps:
+        p = torch.tensor(top_ps, dtype=logits.dtype, device=logits.device)
+    else:
+        p = torch.Tensor()
+        do_top_p = False
+
+    if top_ks:
+        max_top_k = max(top_ks)
+        k = torch.tensor(top_ks, dtype=torch.int32, device=logits.device)
+    else:
+        k = torch.Tensor()
+        do_top_k = False
+    topk.top_k(logits, softmax_res, logit_dst, do_top_k, max_top_k, k,
+               do_top_p, p)
+    return logit_dst
 
 
 def _apply_top_p_top_k(

@@ -122,6 +122,7 @@ class SamplingParams:
         self.repetition_penalty = repetition_penalty
         self.temperature = temperature
         self.top_p = top_p
+        assert top_k <= 1024
         self.top_k = top_k
         self.min_p = min_p
         self.use_beam_search = use_beam_search
