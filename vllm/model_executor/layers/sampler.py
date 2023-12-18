@@ -13,6 +13,7 @@ from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
 
 from vllm import topk
 
+
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
 
@@ -75,8 +76,8 @@ class Sampler(nn.Module):
 
         if do_top_p_top_k:
             # new kernel changes logits from arbitrary float16/bfloat16 to float32
-            logits = _apply_top_p_top_k_with_new_kernel(logits, sampling_tensors.top_ps,
-                                        sampling_tensors.top_ks)
+            logits = _apply_top_p_top_k_with_new_kernel(
+                logits, sampling_tensors.top_ps, sampling_tensors.top_ks)
 
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
@@ -212,10 +213,14 @@ def _apply_top_p_top_k_with_new_kernel(
     do_top_p = True
     do_top_k = True
     softmax_res = logits.softmax(dim=-1)
-    logit_dst = torch.full(logits.shape, -float("inf"), device=logits.device, dtype=logits.dtype)
+    logit_dst = torch.full(logits.shape,
+                           -float("inf"),
+                           device=logits.device,
+                           dtype=logits.dtype)
     max_top_k = top_ks.max().item()
-    topk.top_k(logits, softmax_res, logit_dst, do_top_k, max_top_k, top_ks.to(logits.device),
-               do_top_p, top_ps.type(torch.float32).to(logits.device))
+    topk.top_k(logits, softmax_res, logit_dst, do_top_k, max_top_k,
+               top_ks.to(logits.device), do_top_p,
+               top_ps.type(torch.float32).to(logits.device))
     return logit_dst
 
 
