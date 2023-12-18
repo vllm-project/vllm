@@ -159,7 +159,7 @@ class EngineArgs:
         parser.add_argument('--gpu-memory-utilization',
                             type=float,
                             default=EngineArgs.gpu_memory_utilization,
-                            help='the percentage of GPU memory to be used for'
+                            help='the percentage of GPU memory to be used for '
                             'the model executor')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
