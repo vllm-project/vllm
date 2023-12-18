@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <stdio.h>
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include "../dispatch_utils.h"
 
 template <typename T, int BLOCK_SIZE, int BLOCKS_PER_SEQ>
 __global__ void topk_stage1(const T *__restrict src, T *tmp_log_probs,
@@ -29,8 +31,10 @@ __global__ void topk_stage1(const T *__restrict src, T *tmp_log_probs,
       batch_id * BLOCKS_PER_SEQ * max_top_k + block_lane * k;
 
   TopK<T> partial;
-  const bool IS_FP16 = std::is_same<T, half>::value;
-  const T MAX_T_VAL = (IS_FP16) ? HALF_FLT_MAX : FLT_MAX;
+  const bool IS_FP16 = std::is_same<T, at::Half>::value;
+  // const T MAX_T_VAL = (IS_FP16) ? HALF_FLT_MAX : FLT_MAX;
+  const T MAX_T_VAL = HALF_FLT_MAX;
+
 
   for (int elem_id = tid + block_lane * BLOCK_SIZE; elem_id < vocab_size;
        elem_id += BLOCK_SIZE * BLOCKS_PER_SEQ) {
@@ -54,7 +58,9 @@ __global__ void topk_stage1(const T *__restrict src, T *tmp_log_probs,
       const int index = tmp_topk_buf_index + ite;
       topk_tmp_id_buf[index] = total.p;
       topk_tmp_val_buf[index] = total.u;
-      tmp_log_probs[total.p] = -MAX_T_VAL;
+      if (total.p >= 0) {
+        tmp_log_probs[total.p] = -MAX_T_VAL;
+      }
     }
     __syncthreads();
   }
@@ -65,8 +71,9 @@ __global__ void topk_stage2(const int *__restrict topk_tmp_id_buf,
                             T *topk_tmp_val_buf, const T *src, T *dst,
                             const int max_top_k, const int *top_ks,
                             const float *top_ps, const int vocab_size) {
-  const bool IS_FP16 = std::is_same<T, half>::value;
-  const T MAX_T_VAL = (IS_FP16) ? HALF_FLT_MAX : FLT_MAX;
+  const bool IS_FP16 = std::is_same<T, at::Half>::value;
+  // const T MAX_T_VAL = (IS_FP16) ? HALF_FLT_MAX : FLT_MAX;
+  const T MAX_T_VAL = HALF_FLT_MAX;
   const int tid = threadIdx.x;
   const int batch_id = blockIdx.x;
 
@@ -153,7 +160,6 @@ void invokeBatchTopKSampling(void *workspace, size_t &workspace_size,
   default:
     break;
   }
-  // cudaDeviceSynchronize();
 }
 
 template <typename T>
@@ -175,12 +181,10 @@ void top_k_cuda(const T *src, const T *softmax_src, T *dst, const int max_top_k,
 
   cudaFree(workspace);
 }
+
 void top_k(const torch::Tensor src, const torch::Tensor softmax_src,
            torch::Tensor dst, bool top_k, int max_top_k, torch::Tensor top_ks,
            bool top_p, torch::Tensor top_ps) {
-  float *src_ptr = reinterpret_cast<float *>(src.data_ptr());
-  float *softmax_src_ptr = reinterpret_cast<float *>(softmax_src.data_ptr());
-  float *dst_ptr = reinterpret_cast<float *>(dst.data_ptr());
   int *top_ks_ptr = nullptr;
   float *top_ps_ptr = nullptr;
   auto shape = src.sizes();
@@ -188,14 +192,23 @@ void top_k(const torch::Tensor src, const torch::Tensor softmax_src,
   unsigned int batch_size = src.sizes()[0];
   unsigned int vocab_size = shape[shape_len - 1];
   if (top_k) {
-    top_ks_ptr = reinterpret_cast<int *>(top_ks.data_ptr());
+    top_ks_ptr = top_ks.data_ptr<int>();
   } else {
     max_top_k = 1024;
   }
   if (top_p) {
-    top_ps_ptr = reinterpret_cast<float *>(top_ps.data_ptr());
+    top_ps_ptr = top_ps.data_ptr<float>();
   }
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  top_k_cuda(src_ptr, softmax_src_ptr, dst_ptr, max_top_k, top_ks_ptr,
-             top_ps_ptr, batch_size, vocab_size, stream);
+  VLLM_DISPATCH_FLOATING_TYPES(
+    src.scalar_type(),
+    "run top_k_cuda",
+    ([&] {
+        top_k_cuda(src.data_ptr<scalar_t>(),
+                   softmax_src.data_ptr<scalar_t>(),
+                   dst.data_ptr<scalar_t>(),
+                   max_top_k, top_ks_ptr,
+                   top_ps_ptr, batch_size, vocab_size, stream);
+    })
+  );
 }

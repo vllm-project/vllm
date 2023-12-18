@@ -361,7 +361,7 @@ class ModelRunner:
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         vocab_size = self.model_config.get_vocab_size()
-        sampling_params = SamplingParams(top_p=0.99, top_k=vocab_size - 1)
+        sampling_params = SamplingParams(top_p=0.99, top_k=1024)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
 

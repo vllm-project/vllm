@@ -74,6 +74,7 @@ class Sampler(nn.Module):
         logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
 
         if do_top_p_top_k:
+            # new kernel changes logits from arbitrary float16/bfloat16 to float32
             logits = _apply_top_p_top_k_with_new_kernel(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
 
@@ -211,10 +212,10 @@ def _apply_top_p_top_k_with_new_kernel(
     do_top_p = True
     do_top_k = True
     softmax_res = logits.softmax(dim=-1)
-    logit_dst = torch.full(logits.shape, -float("inf"), device=logits.device)
+    logit_dst = torch.full(logits.shape, -float("inf"), device=logits.device, dtype=logits.dtype)
     max_top_k = 0
     if top_ps:
-        p = torch.tensor(top_ps, dtype=logits.dtype, device=logits.device)
+        p = torch.tensor(top_ps, dtype=torch.float32, device=logits.device)
     else:
         p = torch.Tensor()
         do_top_p = False

@@ -4,7 +4,9 @@
 #include <float.h>
 #include <iostream>
 #include <type_traits>
-static const float HALF_FLT_MAX = 65504.F;
+#include <torch/extension.h>
+
+static const float HALF_FLT_MAX = 65504;
 #define FINAL_MASK 0xffffffff
 
 #define checkErrors(val) check((val), #val, __FILE__, __LINE__)
@@ -12,7 +14,8 @@ static const float HALF_FLT_MAX = 65504.F;
 template<typename T>
 struct TopK {
     int p = -1;
-    T   u = -((std::is_same<T, half>::value) ? HALF_FLT_MAX : FLT_MAX);
+    // T   u = -((std::is_same<T, at::Half>::value) ? HALF_FLT_MAX : FLT_MAX);
+    T u = -HALF_FLT_MAX;
 
     __device__ __forceinline__ void insert(T elem, int elem_id)
     {
@@ -24,7 +27,8 @@ struct TopK {
 
     __device__ __forceinline__ void init()
     {
-        u = -((std::is_same<T, half>::value) ? HALF_FLT_MAX : FLT_MAX);
+        // u = -((std::is_same<T, at::Half>::value) ? HALF_FLT_MAX : FLT_MAX);
+        u = -HALF_FLT_MAX;
         p = -1;
     }
 };
