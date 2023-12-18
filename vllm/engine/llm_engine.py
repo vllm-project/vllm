@@ -1,34 +1,43 @@
-import copy
 import time
 from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
 
+import msgspec
+
+from vllm.anyscale.shm.msgspec_shm import RayEvent, SharedMsgspecBufferWithEvent, SharedMemoryManager
+from vllm.anyscale.lora.utils import LoRARequest
+from vllm.anyscale.tokenization import TransformersTokenizer, RayTokenizerPool
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, LoadConfig, SpeculativeConfig,
+                         LoRAConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import record_metrics
-from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
+from vllm.engine.ray_utils import RayWorker, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupOutput,
-                           SequenceOutput, SequenceStatus)
-from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               get_tokenizer)
+                           SequenceGroupMetadata, SequenceOutputs,
+                           SequenceGroupOutputs, SequenceStatus,
+                           ExecuteModelData, SequenceGroupMetadataDelta,
+                           DraftTargetWorkerMetrics)
+from vllm.transformers_utils.tokenizer import detokenize_incrementally
 from vllm.utils import Counter
+from vllm.worker.base_worker import BaseLoraWorker
+from vllm.anyscale.profiler_utils import TorchProfiler
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy, NodeAffinitySchedulingStrategy
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
+    from vllm.worker.worker import Worker  # pylint: disable=ungrouped-imports
 
 logger = init_logger(__name__)
 
 _LOGGING_INTERVAL_SEC = 5
+SHARED_MEMORY_BUFFER_SIZE = int(5e+7)  # 50 MB
 
 
 class LLMEngine:
@@ -66,6 +75,9 @@ class LLMEngine:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        load_config: LoadConfig,
+        speculative_config: SpeculativeConfig,
+        lora_config: Optional[LoRAConfig],
         distributed_init_method: str,
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
@@ -84,124 +96,254 @@ class LLMEngine:
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"quantization={model_config.quantization}, "
-            f"enforce_eager={model_config.enforce_eager}, "
-            f"seed={model_config.seed})")
+            f"seed={model_config.seed}")
+
+        if load_config is not None:
+            logger.info(
+                "Try to initializing the model with"
+                f" s3://{load_config.s3_bucket}/{load_config.s3_prefix}")
+
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
         self.cache_config = cache_config
+        assert self.cache_config.sliding_window == getattr(
+            self.model_config.hf_config, "sliding_window", None)
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.load_config = load_config
+        self.lora_config = lora_config
+        self.speculative_config = speculative_config
         self.log_stats = log_stats
         self._verify_args()
 
-        self.tokenizer = get_tokenizer(
-            model_config.tokenizer,
-            tokenizer_mode=model_config.tokenizer_mode,
-            trust_remote_code=model_config.trust_remote_code,
-            tokenizer_revision=model_config.tokenizer_revision,
-            revision=model_config.revision)
         self.seq_counter = Counter()
+        self._init_tokenizer()
+
+        self.shared_mem_manager = None
+        self.shared_mem_event = None
+        self.shared_mem_engine_to_worker = None
+        self.shared_mem_worker_to_engine = None
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
-            self._init_workers_ray(placement_group)
+            additional_ray_args = {}
+            if self.parallel_config.ray_workers_use_nsight:
+                logger.info("Configuring Ray workers to use nsight.")
+                additional_ray_args = {"runtime_env": {"nsight": "default"}}
+
+            self._init_workers_ray(placement_group, **additional_ray_args)
+            runtime_contexts = self._run_workers("get_runtime_context",
+                                                 get_all_outputs=True)
+            # If engine and all workers are on the same node,
+            # we can use shared memory.
+            if (not self.parallel_config.disable_shared_memory
+                    and all(runtime_context["node_id"] ==
+                            ray.get_runtime_context().get_node_id()
+                            for runtime_context in runtime_contexts)):
+                logger.info("Using shared memory for communication between "
+                            "engine and workers.")
+                self.shared_mem_manager = SharedMemoryManager()
+                self.shared_mem_manager.start()  # pylint: disable=consider-using-with
+                # Reusing the same event for both buffers is fine, as there's
+                # no situation in which we'd only want to wake up one buffer.
+                self.shared_mem_event = RayEvent.options(
+                    num_cpus=0,
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=ray.get_runtime_context().get_node_id(),
+                        soft=False)).remote()
+                self.shared_mem_engine_to_worker = SharedMsgspecBufferWithEvent(
+                    size=SHARED_MEMORY_BUFFER_SIZE,
+                    manager=self.shared_mem_manager,
+                    encoder_init_fn=msgspec.msgpack.Encoder,
+                    decoder_init_fn=lambda: msgspec.msgpack.Decoder(type=List[
+                        SamplerOutput]),
+                    ray_event=self.shared_mem_event,
+                )
+                self.shared_mem_worker_to_engine = SharedMsgspecBufferWithEvent(
+                    size=SHARED_MEMORY_BUFFER_SIZE,
+                    manager=self.shared_mem_manager,
+                    encoder_init_fn=msgspec.msgpack.Encoder,
+                    decoder_init_fn=lambda: msgspec.msgpack.Decoder(type=List[
+                        SamplerOutput]),
+                    ray_event=self.shared_mem_event,
+                )
+                logger.info(
+                    "Engine shared memory input buffer id: "
+                    f"{self.shared_mem_engine_to_worker.participant_id}")
+                logger.info(
+                    "Engine shared memory output buffer id: "
+                    f"{self.shared_mem_worker_to_engine.participant_id}")
         else:
             self._init_workers(distributed_init_method)
+
+        # Make sure the tokenizer actors are alive
+        self.tokenizer.ping()
 
         # Profile the memory usage and initialize the cache.
         self._init_cache()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config)
+        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+
+        self._exceute_model_futures = None
+        if self._uses_shared_memory:
+            self._exceute_model_futures = self._run_workers(
+                "execute_model_shared_memory",
+                get_all_outputs=True,
+                wait_for_workers=False,
+                shared_memory_input=self.shared_mem_engine_to_worker,
+                shared_memory_output=self.shared_mem_worker_to_engine,
+                participant_id=self.shared_mem_engine_to_worker.participant_id)
 
         # Logging.
         self.last_logging_time = 0.0
+        self.last_stats: Tuple[float, dict] = None
         # List of (timestamp, num_tokens)
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
+        self.num_started_tasks = 0
+        self.num_finished_tasks = 0
+        self.num_aborted_tasks = 0
+        self.num_iterations = 0
 
-    def _init_workers(self, distributed_init_method: str):
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
+        self._last_draft_target_worker_metrics: Optional[
+            DraftTargetWorkerMetrics] = None
+
+        self._profiler = TorchProfiler()
+
+    @property
+    def _uses_shared_memory(self) -> bool:
+        return self.shared_mem_engine_to_worker is not None
+
+    def _init_tokenizer(self, **kwargs):
+        init_kwargs = dict(
+            enable_lora=bool(self.lora_config),
+            max_num_seqs=self.scheduler_config.max_num_seqs,
+            max_input_length=None,
+            tokenizer_mode=self.model_config.tokenizer_mode,
+            trust_remote_code=self.model_config.trust_remote_code,
+            revision=self.model_config.tokenizer_revision)
+        init_kwargs.update(kwargs)
+        if self.parallel_config.num_tokenizer_actors > 0:
+            ray_actor_options = (self.parallel_config.tokenizer_actor_options
+                                 or {
+                                     "num_cpus": 0
+                                 })
+            ray_actor_options[
+                "scheduling_strategy"] = NodeAffinitySchedulingStrategy(
+                    node_id=ray.get_runtime_context().get_node_id(),
+                    soft=False)
+
+            self.tokenizer: RayTokenizerPool = RayTokenizerPool(
+                self.model_config.tokenizer,
+                num_actors=self.parallel_config.num_tokenizer_actors,
+                ray_actor_options=ray_actor_options,
+                **init_kwargs)
+        else:
+            self.tokenizer: TransformersTokenizer = TransformersTokenizer(
+                self.model_config.tokenizer, **init_kwargs)
+
+    def _create_worker(
+            self, rank: Optional[int],
+            distributed_init_method: Optional[str]) -> BaseLoraWorker:
+        # Lazy import the Worker classes to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
+        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.multi_step_worker import MultiStepWorker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.single_tp_worker import SingleTpWorker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.draft_target_worker import DraftTargetWorker  # pylint: disable=import-outside-toplevel
 
-        assert self.parallel_config.world_size == 1, (
-            "Ray is required if parallel_config.world_size > 1.")
+        if not self.speculative_config:
+            return Worker(
+                self.model_config,
+                self.parallel_config,
+                self.scheduler_config,
+                rank,
+                distributed_init_method,
+                load_config=self.load_config,
+                lora_config=self.lora_config,
+            )
 
-        self.workers: List[Worker] = []
-        worker = Worker(
+        target_worker = Worker(
             self.model_config,
             self.parallel_config,
-            self.scheduler_config,
-            0,
+            self.speculative_config.create_target_scheduler_config(
+                self.scheduler_config),
+            rank,
             distributed_init_method,
+            load_config=self.load_config,
+            lora_config=self.lora_config,
         )
-        self.workers.append(worker)
+
+        draft_worker = MultiStepWorker(
+            self.speculative_config.draft_model_config,
+            self.speculative_config.draft_parallel_config,
+            self.speculative_config.create_draft_scheduler_config(
+                self.scheduler_config),
+            rank,
+            distributed_init_method,
+            load_config=self.load_config,
+            lora_config=self.lora_config,
+        )
+        draft_worker = SingleTpWorker.maybe_wrap_worker(
+            draft_worker, self.speculative_config.draft_parallel_config,
+            self.parallel_config)
+        return DraftTargetWorker.from_workers(draft_worker, target_worker)
+
+    def _init_workers(self, distributed_init_method: str):
+        assert self.parallel_config.world_size == 1, (
+            "Ray is required if parallel_config.world_size > 1.")
+        rank = 0
+
+        self.workers: List[BaseLoraWorker] = [
+            self._create_worker(rank, distributed_init_method)
+        ]
         self._run_workers(
             "init_model",
             get_all_outputs=True,
-        )
-        self._run_workers(
-            "load_model",
-            get_all_outputs=True,
-            max_concurrent_workers=self.parallel_config.
-            max_parallel_loading_workers,
         )
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
 
-        self.workers: List[Worker] = []
+        self.workers: List[BaseLoraWorker] = []
         for bundle in placement_group.bundle_specs:
             if not bundle.get("GPU", 0):
                 continue
-            if self.parallel_config.tensor_parallel_size == 1:
-                num_gpus = self.cache_config.gpu_memory_utilization
-            else:
-                num_gpus = 1
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=num_gpus,
+                num_gpus=1,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
                 **ray_remote_kwargs,
-            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
+            )(RayWorker).remote(self.model_config.trust_remote_code)
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
         init_torch_dist_process_group(self.workers, backend="nccl")
-        model_config = copy.deepcopy(self.model_config)
-        parallel_config = copy.deepcopy(self.parallel_config)
-        scheduler_config = copy.deepcopy(self.scheduler_config)
-        self._run_workers("init_worker",
-                          get_all_outputs=True,
-                          worker_init_fn=lambda: Worker(
-                              model_config,
-                              parallel_config,
-                              scheduler_config,
-                              None,
-                              None,
-                          ))
+
+        self._run_workers(
+            "init_worker",
+            get_all_outputs=True,
+            worker_init_fn=partial(self._create_worker,
+                                   rank=None,
+                                   distributed_init_method=None),
+        )
         self._run_workers(
             "init_model",
             get_all_outputs=True,
-        )
-        self._run_workers(
-            "load_model",
-            get_all_outputs=True,
-            max_concurrent_workers=self.parallel_config.
-            max_parallel_loading_workers,
         )
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
+        if self.lora_config:
+            self.lora_config.verify_with_model_config(self.model_config)
+            self.lora_config.verify_with_scheduler_config(
+                self.scheduler_config)
 
     def _init_cache(self) -> None:
         """Profiles the memory usage and initializes the KV cache."""
@@ -241,9 +383,6 @@ class LLMEngine:
 
         # Initialize the cache.
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
-        # Warm up the model. This includes capturing the model into CUDA graph
-        # if enforce_eager is False.
-        self._run_workers("warm_up_model")
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
@@ -261,6 +400,20 @@ class LLMEngine:
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
+    def encode_request(
+        self,
+        request_id: str,  # pylint: disable=unused-argument
+        prompt: Optional[str],
+        prompt_token_ids: Optional[List[int]] = None,
+        lora_request: Optional[LoRARequest] = None,
+    ):
+        if prompt_token_ids is None:
+            assert prompt is not None
+            prompt_token_ids = self.tokenizer.encode(request_id=request_id,
+                                                     prompt=prompt,
+                                                     lora_request=lora_request)
+        return prompt_token_ids
+
     def add_request(
         self,
         request_id: str,
@@ -268,6 +421,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -285,23 +439,31 @@ class LLMEngine:
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
         """
+        if lora_request is not None and not self.lora_config:
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
         if arrival_time is None:
             arrival_time = time.monotonic()
-        if prompt_token_ids is None:
-            assert prompt is not None
-            prompt_token_ids = self.tokenizer.encode(prompt)
+        prompt_token_ids = self.encode_request(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            lora_request=lora_request)
 
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
-        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
+        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
+                       lora_request)
 
         # Create the sequence group.
-        seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time)
+        seq_group = SequenceGroup(request_id, [seq],
+                                  sampling_params, arrival_time,
+                                  time.perf_counter(), lora_request)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
+        self.num_started_tasks += 1
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
@@ -309,7 +471,7 @@ class LLMEngine:
         Args:
             request_id: The ID(s) of the request to abort.
         """
-        self.scheduler.abort_seq_group(request_id)
+        self.num_aborted_tasks += self.scheduler.abort_seq_group(request_id)
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
@@ -325,60 +487,116 @@ class LLMEngine:
 
     def _schedule(
         self
-    ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs,
-               List[RequestOutput]]:
+    ) -> Tuple[List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]],
+               SchedulerOutputs, List[RequestOutput]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         return seq_group_metadata_list, scheduler_outputs, [
             RequestOutput.from_seq_group(seq_group)
             for seq_group in scheduler_outputs.ignored_seq_groups
         ]
 
-    def _check_beam_search_early_stopping(
-        self,
-        early_stopping: Union[bool, str],
-        sampling_params: SamplingParams,
-        best_running_seq: Sequence,
-        current_worst_seq: Sequence,
-    ) -> bool:
-        assert sampling_params.use_beam_search
-        length_penalty = sampling_params.length_penalty
-        if early_stopping is True:
-            return True
+    # def _check_beam_search_early_stopping(
+    #     self,
+    #     early_stopping: Union[bool, str],
+    #     sampling_params: SamplingParams,
+    #     best_running_seq: Sequence,
+    #     current_worst_seq: Sequence,
+    # ) -> bool:
+    #     assert sampling_params.use_beam_search
+    #     length_penalty = sampling_params.length_penalty
+    #     if early_stopping is True:
+    #         return True
 
-        current_worst_score = (current_worst_seq.get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id))
-        if early_stopping is False:
-            highest_attainable_score = (best_running_seq.get_beam_search_score(
-                length_penalty=length_penalty,
-                eos_token_id=self.tokenizer.eos_token_id))
-        else:
-            assert early_stopping == "never"
-            if length_penalty > 0.0:
-                # If length_penalty > 0.0, beam search will prefer longer
-                # sequences. The highest attainable score calculation is
-                # based on the longest possible sequence length in this case.
-                max_possible_length = max(
-                    best_running_seq.get_prompt_len() +
-                    sampling_params.max_tokens,
-                    self.scheduler_config.max_model_len)
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=self.tokenizer.eos_token_id,
-                        seq_len=max_possible_length))
-            else:
-                # Otherwise, beam search will prefer shorter sequences. The
-                # highest attainable score calculation is based on the current
-                # sequence length.
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=self.tokenizer.eos_token_id))
-        return current_worst_score >= highest_attainable_score
+    #     current_worst_score = (current_worst_seq.get_beam_search_score(
+    #         length_penalty=length_penalty,
+    #         eos_token_id=self.tokenizer.get_lora_tokenizer(
+    #             current_worst_seq.lora_request).eos_token_id))
+    #     if early_stopping is False:
+    #         highest_attainable_score = (
+    # best_running_seq.get_beam_search_score(
+    #             length_penalty=length_penalty,
+    #             eos_token_id=self.tokenizer.get_lora_tokenizer(
+    #                 best_running_seq.lora_request).eos_token_id))
+    #     else:
+    #         assert early_stopping == "never"
+    #         if length_penalty > 0.0:
+    #             # If length_penalty > 0.0, beam search will prefer longer
+    #             # sequences. The highest attainable score calculation is
+    #             # based on the longest possible sequence length in this case.
+    #             max_possible_length = max(
+    #                 best_running_seq.get_prompt_len() +
+    #                 sampling_params.max_tokens,
+    #                 self.scheduler_config.max_model_len)
+    #             highest_attainable_score = (
+    #                 best_running_seq.get_beam_search_score(
+    #                     length_penalty=length_penalty,
+    #                     eos_token_id=self.tokenizer.get_lora_tokenizer(
+    #                         best_running_seq.lora_request).eos_token_id,
+    #                     seq_len=max_possible_length))
+    #         else:
+    #             # Otherwise, beam search will prefer shorter sequences. The
+    #             # highest attainable score calculation is based on the current
+    #             # sequence length.
+    #             highest_attainable_score = (
+    #                 best_running_seq.get_beam_search_score(
+    #                     length_penalty=length_penalty,
+    #                     eos_token_id=self.tokenizer.get_lora_tokenizer(
+    #                         best_running_seq.lora_request).eos_token_id))
+    #     return current_worst_score >= highest_attainable_score
+
+    def _process_spec_decode_sequence_group_outputs(
+            self, seq_group: SequenceGroup,
+            outputs: List[SequenceGroupOutputs]) -> None:
+        """Process sequence group outputs when speculative decoding is enabled.
+
+        This serves the same purpose as _process_sequence_group_outputs except
+        without any of the beam search logic.
+        """
+        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        assert len(seqs) == 1, ("Beam search not supported in speculative "
+                                "decoding.")
+        seq = seqs[0]
+
+        # Since there's only one sequence per sequence group, we can take the
+        # first sample.
+        samples = [outputs[step].samples[0] for step in range(len(outputs))]
+
+        # Draft target worker pads all outputs with -1 to have same length.
+        output_token_ids = [
+            sample.output_token for sample in samples
+            if sample.output_token != -1
+        ]
+        output_logprobs = [sample.logprobs for sample in samples]
+
+        # Truncate to max_tokens if necessary.
+        remaining_tokens = seq_group.sampling_params.max_tokens - (
+            seq.get_output_len() + len(output_token_ids))
+        if remaining_tokens < 0:
+            output_token_ids = output_token_ids[:remaining_tokens]
+            output_logprobs = output_logprobs[:remaining_tokens]
+
+        # Truncate any tokens after EOS. This is required as spec decode
+        # generates tokens in fixed blocks, which may go beyond the EOS token.
+        if not seq_group.sampling_params.ignore_eos:
+            eos_token_id = self.tokenizer.get_lora_tokenizer(
+                seq.lora_request).eos_token_id
+            # Avoiding .index calls as exception throwing in the happy path
+            # is expensive.
+            for i in range(len(output_token_ids)):
+                if output_token_ids[i] == eos_token_id:
+                    output_token_ids = output_token_ids[:i + 1]
+                    output_logprobs = output_logprobs[:i + 1]
+                    break
+
+        seq.append_token_ids(output_token_ids, output_logprobs)
+
+        self._decode_sequence(seq, seq_group.sampling_params)
+        self._check_stop(seq, seq_group.sampling_params)
+        if seq.is_finished():
+            self.scheduler.free_seq(seq)
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutput) -> None:
+                                        outputs: SequenceGroupOutputs) -> None:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
@@ -399,7 +617,7 @@ class LLMEngine:
 
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
-            child_samples: List[SequenceOutput] = parent_child_dict[
+            child_samples: List[SequenceOutputs] = parent_child_dict[
                 parent.seq_id]
             if len(child_samples) == 0:
                 # This parent sequence has no children samples. Remove
@@ -451,7 +669,7 @@ class LLMEngine:
         # Select the child sequences to keep in the sequence group.
         selected_child_seqs = []
         unselected_child_seqs = []
-        beam_width = seq_group.sampling_params.best_of
+        beam_width = seq_group.sampling_params.actual_best_of
         length_penalty = seq_group.sampling_params.length_penalty
 
         # Select the newly finished sequences with the highest scores
@@ -465,7 +683,8 @@ class LLMEngine:
         # Sort the finished sequences by their scores.
         all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id),
+            eos_token_id=self.tokenizer.get_lora_tokenizer(x[0].lora_request
+                                                           ).eos_token_id),
                                reverse=True)
         for seq, parent, is_new in all_finished_seqs[:beam_width]:
             if is_new:
@@ -493,7 +712,8 @@ class LLMEngine:
         # Sort the running sequences by their scores.
         running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id),
+            eos_token_id=self.tokenizer.get_lora_tokenizer(x[0].lora_request
+                                                           ).eos_token_id),
                                 reverse=True)
 
         # Check if we can stop the beam search.
@@ -549,12 +769,35 @@ class LLMEngine:
                 self.scheduler.free_seq(seq)
 
     def _process_model_outputs(
-            self, output: SamplerOutput,
+            self, output: List[SamplerOutput],
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         # Update the scheduled sequence groups with the model outputs.
+        now = time.time()
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-        for seq_group, outputs in zip(scheduled_seq_groups, output):
-            self._process_sequence_group_outputs(seq_group, outputs)
+
+        # Organize list of sampler output by sequence group.
+        output_by_sequence_group = [[] for _ in scheduled_seq_groups]
+        for step in output:
+            for i, sequence_group_output in enumerate(step):
+                output_by_sequence_group[i].append(sequence_group_output)
+
+        # combine all samples for zipping
+        for i, (seq_group, outputs) in enumerate(
+                zip(scheduled_seq_groups, output_by_sequence_group)):
+            # Chunked prefill groups are not generation tokens. Their
+            # outputs are ignored. For seq_group finished chunked
+            # prefilling, it will be considered as prompting.
+            if i < scheduler_outputs.num_chunked_prefill_groups:
+                continue
+            if seq_group.first_token_time is None:
+                seq_group.first_token_time = now
+
+            if self.speculative_config:
+                self._process_spec_decode_sequence_group_outputs(
+                    seq_group, outputs)
+            else:
+                assert len(outputs) == 1
+                self._process_sequence_group_outputs(seq_group, outputs[0])
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
@@ -565,14 +808,27 @@ class LLMEngine:
                           scheduler_outputs.ignored_seq_groups):
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
+            self.num_finished_tasks += int(request_output.finished)
+
+        # Write logits to request outputs if present in sampler outputs.
+        for i, step in enumerate(output):
+            if step and step.logits is not None:
+                request_outputs[i].logits = step.logits
+
+        # If worker metrics are provided, store locally.
+        if (self.speculative_config and output
+                and output[0].draft_target_worker_metrics is not None):
+            self._last_draft_target_worker_metrics = output[
+                0].draft_target_worker_metrics
 
         if self.log_stats:
             # Log the system stats.
-            self._log_system_stats(scheduler_outputs.prompt_run,
+            self._log_system_stats(scheduler_outputs.num_prompt_groups,
                                    scheduler_outputs.num_batched_tokens)
+        self.num_iterations += 1
         return request_outputs
 
-    def step(self) -> List[RequestOutput]:
+    def step(self, return_logits: bool = False) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
 
         This function performs one decoding iteration of the engine. It first
@@ -580,21 +836,42 @@ class LLMEngine:
         token blocks to be swapped in/out/copy. Then, it executes the model
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
+
+        Args:
+            return_logits: Whether to return the logits from the model for
+                quality evaluation purposes.
         """
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
         if scheduler_outputs.is_empty():
             return ignored
 
-        # Execute the model.
-        output = self._run_workers(
-            "execute_model",
+        data = ExecuteModelData(
             seq_group_metadata_list=seq_group_metadata_list,
+            finished_request_ids_list=list(
+                scheduler_outputs.done_seq_group_ids),
             blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
+            num_preallocated_slots=scheduler_outputs.num_preallocated_slots,
+            return_logits=return_logits,
         )
+        # Execute the model.
+        now = time.perf_counter()
+        output = self._run_workers("execute_model",
+                                   data,
+                                   use_shared_memory=self._uses_shared_memory)
+        logger.debug(f"model execution takes{time.perf_counter() - now}")
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        outputs = self._process_model_outputs(output, scheduler_outputs)
+
+        if self._uses_shared_memory:
+            if not outputs or all(out.finished for out in outputs):
+                self.shared_mem_engine_to_worker.clear()
+                self.shared_mem_worker_to_engine.clear()
+                self.shared_mem_engine_to_worker.put_to_sleep(block=False)
+                self.shared_mem_worker_to_engine.put_to_sleep(block=False)
+
+        return outputs
 
     def _log_system_stats(
         self,
@@ -608,8 +885,8 @@ class LLMEngine:
         else:
             self.num_generation_tokens.append((now, num_batched_tokens))
 
-        should_log = now - self.last_logging_time >= _LOGGING_INTERVAL_SEC
-        if not should_log:
+        elapsed_time = now - self.last_logging_time
+        if elapsed_time < _LOGGING_INTERVAL_SEC:
             return
 
         # Discard the old stats.
@@ -648,16 +925,6 @@ class LLMEngine:
         else:
             cpu_cache_usage = 0.0
 
-        record_metrics(
-            avg_prompt_throughput=avg_prompt_throughput,
-            avg_generation_throughput=avg_generation_throughput,
-            scheduler_running=len(self.scheduler.running),
-            scheduler_swapped=len(self.scheduler.swapped),
-            scheduler_waiting=len(self.scheduler.waiting),
-            gpu_cache_usage=gpu_cache_usage,
-            cpu_cache_usage=cpu_cache_usage,
-        )
-
         logger.info("Avg prompt throughput: "
                     f"{avg_prompt_throughput:.1f} tokens/s, "
                     "Avg generation throughput: "
@@ -669,38 +936,73 @@ class LLMEngine:
                     f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
         self.last_logging_time = now
 
-    def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
-        """Decodes the new token for a sequence."""
-        (new_tokens, new_output_text, prefix_offset,
-         read_offset) = detokenize_incrementally(
-             self.tokenizer,
-             all_input_ids=seq.get_token_ids(),
-             prev_tokens=seq.tokens,
-             prefix_offset=seq.prefix_offset,
-             read_offset=seq.read_offset,
-             skip_special_tokens=prms.skip_special_tokens,
-             spaces_between_special_tokens=prms.spaces_between_special_tokens,
-         )
-        if seq.tokens is None:
-            seq.tokens = new_tokens
-        else:
-            seq.tokens.extend(new_tokens)
-        seq.prefix_offset = prefix_offset
-        seq.read_offset = read_offset
-        seq.output_text += new_output_text
+        self._record_system_stats(avg_prompt_throughput,
+                                  avg_generation_throughput, gpu_cache_usage,
+                                  cpu_cache_usage)
+
+        if self._last_draft_target_worker_metrics is not None:
+            metrics = self._last_draft_target_worker_metrics
+            logger.info(
+                "Speculative metrics: "
+                f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
+                f"System efficiency: {metrics.system_efficiency:.3f}, "
+                f"Number of speculative tokens: {metrics.num_spec_tokens}, "
+                f"Number of accepted tokens: {metrics.accepted_tokens}, "
+                f"Number of draft tokens tokens: {metrics.draft_tokens}, "
+                f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
+
+    def _record_system_stats(self, avg_prompt_throughput: float,
+                             avg_generation_throughput: float,
+                             gpu_cache_usage: float,
+                             cpu_cache_usage: float) -> Tuple[float, dict]:
+        self.last_stats = (self.last_logging_time, {
+            "avg_prompt_throughput": avg_prompt_throughput,
+            "avg_generation_throughput": avg_generation_throughput,
+            "gpu_cache_usage": gpu_cache_usage,
+            "cpu_cache_usage": cpu_cache_usage,
+        })
+        return self.last_stats
+
+    def _decode_sequence(self, seq: Sequence,
+                         sampling_params: SamplingParams) -> None:
+        """Decodes new token(s) for a sequence."""
+        unseen_token_ids = seq.get_new_token_ids()
+        token_ids = seq.get_token_ids()[:-len(unseen_token_ids)]
+
+        for new_token_id in unseen_token_ids:
+            token_ids.append(new_token_id)
+
+            (new_tokens, new_output_text, prefix_offset,
+             read_offset) = detokenize_incrementally(
+                 self.tokenizer.get_lora_tokenizer(seq.lora_request),
+                 all_input_ids=token_ids,
+                 prev_tokens=seq.tokens,
+                 prefix_offset=seq.prefix_offset,
+                 read_offset=seq.read_offset,
+                 skip_special_tokens=sampling_params.skip_special_tokens,
+                 spaces_between_special_tokens=sampling_params.
+                 spaces_between_special_tokens,
+             )
+            if seq.tokens is None:
+                seq.tokens = new_tokens
+            else:
+                seq.tokens.extend(new_tokens)
+            seq.prefix_offset = prefix_offset
+            seq.read_offset = read_offset
+            seq.output_text += new_output_text
 
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:
         """Stop the finished sequences."""
         for stop_str in sampling_params.stop:
             if seq.output_text.endswith(stop_str):
-                if not sampling_params.include_stop_str_in_output:
-                    # Truncate the output text so that the stop string is
-                    # not included in the output.
-                    seq.output_text = seq.output_text[:-len(stop_str)]
+                # Truncate the output text so that the stop string is
+                # not included in the output.
+                seq.output_text = seq.output_text[:-len(stop_str)]
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
-        if seq.get_last_token_id() in sampling_params.stop_token_ids:
+        if set(seq.get_new_token_ids()).intersection(
+                sampling_params.stop_token_ids):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
@@ -710,63 +1012,146 @@ class LLMEngine:
             return
 
         # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
+        if seq.get_output_len() >= sampling_params.max_tokens:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
         # Check if the sequence has generated the EOS token.
         if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == self.tokenizer.eos_token_id):
+                and self.tokenizer.get_lora_tokenizer(
+                    seq.lora_request).eos_token_id in seq.get_new_token_ids()):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
-
-    def _run_workers_in_batch(
-        self,
-        workers,
-        method: str,
-        *args,
-        **kwargs,
-    ):
-        all_outputs = []
-        for worker in workers:
-            if self.parallel_config.worker_use_ray:
-                executor = partial(worker.execute_method.remote, method)
-            else:
-                executor = getattr(worker, method)
-
-            output = executor(*args, **kwargs)
-            all_outputs.append(output)
-        if self.parallel_config.worker_use_ray:
-            all_outputs = ray.get(all_outputs)
-        return all_outputs
 
     def _run_workers(
         self,
         method: str,
         *args,
         get_all_outputs: bool = False,
-        max_concurrent_workers: Optional[int] = None,
+        wait_for_workers: bool = True,
+        use_shared_memory: bool = False,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
-        all_outputs = []
-        if max_concurrent_workers:
-            work_groups = [
-                self.workers[i:i + max_concurrent_workers]
-                for i in range(0, len(self.workers), max_concurrent_workers)
-            ]
+        if use_shared_memory:
+            try:
+                logger.debug(f"Set data to shared memory: {args[0]}")
+                self.shared_mem_engine_to_worker.set_data(args[0])
+            except RuntimeError:
+                # Raise underlying exception
+                ray.get(self._exceute_model_futures, timeout=5)
+                raise
+            logger.debug("Waiting for incoming data...")
+            self.shared_mem_worker_to_engine.wait_for_incoming_data()
+            try:
+                output = self.shared_mem_worker_to_engine.get_data()
+            except RuntimeError:
+                # Raise underlying exception
+                ray.get(self._exceute_model_futures, timeout=5)
+                raise
+            logger.debug(f"Got data {output}")
+            self.shared_mem_worker_to_engine.clear()
+            return output
         else:
-            work_groups = [self.workers]
+            all_outputs = []
+            start = time.time()
 
-        for workers in work_groups:
-            all_outputs.extend(
-                self._run_workers_in_batch(workers, method, *args, **kwargs))
+            for worker in self.workers:
+                if self.parallel_config.worker_use_ray:
+                    executor = partial(worker.execute_method.remote, method)
+                else:
+                    executor = getattr(worker, method)
 
-        if get_all_outputs:
-            return all_outputs
+                output = executor(*args, **kwargs)
+                all_outputs.append(output)
 
-        # Make sure all workers have the same results.
-        output = all_outputs[0]
-        for other_output in all_outputs[1:]:
-            assert output == other_output
-        return output
+            if self.parallel_config.worker_use_ray:
+                if wait_for_workers:
+                    all_outputs = ray.get(all_outputs)
+
+            end = time.time()
+
+            if method == "init_model":
+                logger.info("{} used {:.3f} seconds".format(
+                    method, end - start))
+
+            if get_all_outputs:
+                return all_outputs
+
+            # Make sure all workers have the same results.
+            output = all_outputs[0]
+            if wait_for_workers:
+                for other_output in all_outputs[1:]:
+                    assert output == other_output
+            return output
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
+        return self._run_workers(
+            "add_lora",
+            lora_request=lora_request,
+        )
+
+    def remove_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self._run_workers(
+            "remove_lora",
+            lora_id=lora_id,
+        )
+
+    def list_loras(self) -> List[int]:
+        return self._run_workers("list_loras")
+
+    def get_metadata_cache_len(self) -> int:
+        return self._run_workers("get_metadata_cache_len", )
+
+    def _check_if_any_actor_is_dead(self):
+        workers = (self.workers
+                   or []) + (self.tokenizer.tokenizer_actors if isinstance(
+                       self.tokenizer, RayTokenizerPool) else [])
+        if workers:
+            dead_actors = []
+            for actor in workers:
+                actor_state = ray.state.actors(actor._ray_actor_id.hex())  # pylint: disable=protected-access
+                if actor_state["State"] == "DEAD":
+                    dead_actors.append(actor)
+            if dead_actors:
+                raise RuntimeError("At least one Worker is dead. "
+                                   f"Dead Workers: {dead_actors}. ")
+
+    def check_health(self) -> None:
+        if not self.parallel_config.worker_use_ray:
+            return
+
+        self._check_if_any_actor_is_dead()
+        if self._exceute_model_futures:
+            ready, _ = ray.wait(self._exceute_model_futures, timeout=0)
+            if ready:
+                # Raise any exception
+                ray.get(ready, timeout=1)
+                raise RuntimeError("At least one Worker is dead.")
+
+    def __del__(self):
+        if getattr(self, "shared_mem_manager", None) is not None:
+            self.shared_mem_manager.shutdown()
+
+    def start_profile(self, profile_ray_workers: bool, **kwargs):
+        """Start profiling. Can optionally run profiling in Ray workers.
+        """
+        self._profiler.start_profile(**kwargs)
+        if profile_ray_workers:
+            if not self.parallel_config.worker_use_ray:
+                raise ValueError(
+                    "Cannot profile ray workers: "
+                    f" worker_use_ray={self.parallel_config.worker_use_ray:}")
+
+            if not self.parallel_config.disable_shared_memory:
+                raise ValueError("Cannot profile ray workers: shared memory "
+                                 "must be disabled")
+            self._run_workers("start_profile", **kwargs)
+
+    def stop_profile(self, profile_ray_workers: bool):
+        if self.parallel_config.worker_use_ray and profile_ray_workers:
+            self._run_workers("stop_profile")
+
+        self._profiler.stop_profile()

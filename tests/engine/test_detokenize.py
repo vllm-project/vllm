@@ -1,13 +1,23 @@
+
+import os
 import pytest
 
+from functools import partial
 from transformers import AutoTokenizer
+from typing import Callable, List, Dict
+from unittest.mock import MagicMock
 
+from vllm.anyscale.tokenization import TransformersTokenizer
+from vllm.engine.llm_engine import LLMEngine
+from vllm.sampling_params import SamplingParams
+from vllm.sequence import Sequence
 from vllm.transformers_utils.tokenizer import detokenize_incrementally
 
 TRUTH = [
-    "Hello here, this is a simple test",  # noqa: E501
-    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be used in production environments, where inference and serving",  # noqa: E501
-    "我很感谢你的热情"  # noqa: E501
+    # pylint: disable=line-too-long
+    "Hello here, this is a simple test",
+    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be used in production environments, where inference and serving",
+    "我很感谢你的热情"
 ]
 TOKENIZERS = [
     "facebook/opt-125m",
@@ -45,6 +55,8 @@ def _run_incremental_decode(tokenizer, all_input_ids,
     return decoded_text
 
 
+@pytest.mark.skipif("HUGGING_FACE_HUB_TOKEN" not in os.environ,
+                    reason="requires HF token")
 @pytest.mark.parametrize("truth", TRUTH)
 @pytest.mark.parametrize("tokenizer_id", TOKENIZERS)
 @pytest.mark.parametrize("skip_special_tokens", (True, False))
@@ -60,3 +72,76 @@ def test_decode_streaming(tokenizer_id, truth, skip_special_tokens):
         tokenizer, all_input_ids, skip_special_tokens=skip_special_tokens)
 
     assert decoded_text == truth
+
+
+@pytest.mark.skipif("HUGGING_FACE_HUB_TOKEN" not in os.environ,
+                    reason="requires HF token")
+@pytest.mark.parametrize("complete_sequence", TRUTH)
+@pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
+@pytest.mark.parametrize("skip_special_tokens", [True, False])
+def test_decode_sequence_works_with_multiple_tokens(
+        complete_sequence_token_ids: List[int],
+        dummy_logprobs: List[Dict[int, float]], decode_sequence: Callable,
+        skip_special_tokens: bool):
+    """Verify LLMEngine can decode sequences with >1 new tokens per step.
+    """
+    sampling_params = SamplingParams(skip_special_tokens=skip_special_tokens)
+
+    # Run sequentially.
+    seq = create_empty_sequence()
+    for new_token, logprob in zip(complete_sequence_token_ids, dummy_logprobs):
+        seq.append_token_ids([new_token], [logprob])
+        decode_sequence(seq, sampling_params)
+    sequential_result = seq.output_text
+
+    # Run in batch.
+    seq = create_empty_sequence()
+    seq.append_token_ids(complete_sequence_token_ids, dummy_logprobs)
+    decode_sequence(seq, sampling_params)
+    batch_result = seq.output_text
+
+    assert sequential_result == batch_result
+
+
+@pytest.fixture(name="dummy_logprobs")
+def create_dummy_logprobs(
+        complete_sequence_token_ids: List[int]) -> List[Dict[int, float]]:
+    return list({token_id: 0.0} for token_id in complete_sequence_token_ids)
+
+
+@pytest.fixture(name="decode_sequence")
+def create_decode_sequence(tokenizer_name: str) -> Callable:
+    init_kwargs = dict(
+        enable_lora=False,
+        max_num_seqs=100,
+        max_input_length=None,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        revision=None,
+    )
+
+    self = MagicMock()
+    self.tokenizer = TransformersTokenizer(
+        tokenizer_name,
+        **init_kwargs,
+    )
+
+    decode_sequence = partial(LLMEngine._decode_sequence, self)  # pylint: disable=protected-access
+    return decode_sequence
+
+
+@pytest.fixture(name="complete_sequence_token_ids")
+def create_complete_sequence_token_ids(complete_sequence: str,
+                                       tokenizer_name: str) -> List[int]:
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    complete_sequence_token_ids = tokenizer(complete_sequence)["input_ids"]
+    return complete_sequence_token_ids
+
+
+def create_empty_sequence():
+    return Sequence(
+        seq_id=0,
+        prompt="",
+        prompt_token_ids=[],
+        block_size=16,
+    )

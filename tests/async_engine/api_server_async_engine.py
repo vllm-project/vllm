@@ -14,13 +14,14 @@ app = vllm.entrypoints.api_server.app
 
 class AsyncLLMEngineWithStats(AsyncLLMEngine):
 
+    # pylint: disable=redefined-outer-name
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._num_aborts = 0
 
     async def abort(self, request_id: str) -> None:
-        await super().abort(request_id)
         self._num_aborts += 1
+        await super().abort(request_id)
 
     def testing_stats(self) -> Dict[str, Any]:
         return {"num_aborted_requests": self._num_aborts}

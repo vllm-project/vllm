@@ -1,3 +1,4 @@
+
 import pytest
 
 from vllm.engine.async_llm_engine import RequestTracker
@@ -64,7 +65,13 @@ def test_request_tracker():
     stream_5 = tracker.add_request("5")
     assert tracker.new_requests_event.flag
     tracker.process_request_output(
-        RequestOutput("2", "output", [], [], [], finished=True))
+        RequestOutput("2",
+                      "output", [], [], [],
+                      finished=True,
+                      arrival_time=0.0,
+                      first_scheduled_time=0.0,
+                      first_token_time=0.0,
+                      time_in_queue=0.0))
     new, finished = tracker.get_new_and_finished_requests()
     assert not tracker.new_requests_event.flag
     assert len(finished) == 1

@@ -1,3 +1,4 @@
+
 from typing import List, Tuple
 
 import pytest
@@ -12,6 +13,7 @@ def create_kv_caches(
     head_size: int,
     dtype: torch.dtype,
     seed: int,
+    flash_style: bool = False,
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -19,6 +21,8 @@ def create_kv_caches(
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
+    if flash_style:
+        key_cache_shape = (num_blocks, block_size, num_heads, head_size)
     key_caches = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
@@ -28,6 +32,8 @@ def create_kv_caches(
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
+    if flash_style:
+        value_cache_shape = (num_blocks, block_size, num_heads, head_size)
     value_caches = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape,

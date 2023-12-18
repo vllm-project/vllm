@@ -1,39 +1,42 @@
-import os
+
+import gc
 from typing import List, Optional, Tuple
 
 import pytest
+import ray
 import torch
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
+from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-_TEST_PROMPTS = ["prompts/example.txt"]
-_LONG_PROMPTS = ["prompts/summary.txt"]
+_TEST_PROMPTS = [
+    # pylint: disable=line-too-long
+    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
+    "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
+    "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
+    "Describe the basic components of a neural network and how it can be trained.",
+    "Write a short story about a robot that dreams for the first time.",
+    "Analyze the impact of the COVID-19 pandemic on global economic structures and future business models.",
+    "Explain the cultural significance of the Mona Lisa painting, and how its perception might vary in Western versus Eastern societies.",
+    "Translate the following English sentence into Japanese, French, and Swahili: 'The early bird catches the worm.'",
+]
 
 
-def _read_prompts(filename: str) -> str:
-    prompts = []
-    with open(filename, "r") as f:
-        prompt = f.readline()
-        prompts.append(prompt)
-    return prompts
+def cleanup():
+    # Revert to torch default after vllm modifications
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.set_default_dtype(torch.float32)
+    destroy_model_parallel()
+    gc.collect()
+    torch.cuda.empty_cache()
+    ray.shutdown()
 
 
 @pytest.fixture
 def example_prompts() -> List[str]:
-    prompts = []
-    for filename in _TEST_PROMPTS:
-        prompts += _read_prompts(os.path.join("tests", filename))
-    return prompts
-
-
-@pytest.fixture
-def example_long_prompts() -> List[str]:
-    prompts = []
-    for filename in _LONG_PROMPTS:
-        prompts += _read_prompts(os.path.join("tests", filename))
-    return prompts
+    return _TEST_PROMPTS
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -57,7 +60,8 @@ class HfRunner:
             model_name,
             torch_dtype=torch_dtype,
             trust_remote_code=True,
-        ).cuda()
+            device_map={"": 0},
+        )
         if tokenizer_name is None:
             tokenizer_name = model_name
         self.tokenizer = get_tokenizer(tokenizer_name, trust_remote_code=True)
@@ -97,27 +101,6 @@ class HfRunner:
             outputs[i] = (output_ids[0], output_str[0])
         return outputs
 
-    def generate_beam_search(
-        self,
-        prompts: List[str],
-        beam_width: int,
-        max_tokens: int,
-    ) -> List[Tuple[List[int], str]]:
-        outputs = self.generate(prompts,
-                                do_sample=False,
-                                max_new_tokens=max_tokens,
-                                num_beams=beam_width,
-                                num_return_sequences=beam_width)
-        for i in range(len(outputs)):
-            output_ids, output_str = outputs[i]
-            for j in range(len(output_ids)):
-                output_ids[j] = [
-                    x for x in output_ids[j]
-                    if x != self.tokenizer.pad_token_id
-                ]
-            outputs[i] = (output_ids, output_str)
-        return outputs
-
     def generate_greedy_logprobs(
         self,
         prompts: List[str],
@@ -154,7 +137,8 @@ class HfRunner:
 
 @pytest.fixture
 def hf_runner():
-    return HfRunner
+    yield HfRunner
+    cleanup()
 
 
 class VllmRunner:
@@ -164,6 +148,16 @@ class VllmRunner:
         model_name: str,
         tokenizer_name: Optional[str] = None,
         dtype: str = "half",
+        enable_cuda_graph: bool = False,
+        cuda_graph_max_context_len: int = 5000,
+        cuda_graph_cache_size: int = 10,
+        tensor_parallel_size: int = 1,
+        flash_style: bool = False,
+        max_chunked_prefill_len: int = -1,
+        max_num_prompt_seqs: int = 1000,
+        max_num_batched_tokens: int = 4096,
+        worker_use_ray: bool = False,
+        input_padding_size: int = 8,
     ) -> None:
         self.model = LLM(
             model=model_name,
@@ -171,12 +165,23 @@ class VllmRunner:
             trust_remote_code=True,
             dtype=dtype,
             swap_space=0,
-        )
+            enable_cuda_graph=enable_cuda_graph,
+            cuda_graph_max_context_len=cuda_graph_max_context_len,
+            cuda_graph_cache_size=cuda_graph_cache_size,
+            tensor_parallel_size=tensor_parallel_size,
+            flash_style=flash_style,
+            block_size=32,
+            max_chunked_prefill_len=max_chunked_prefill_len,
+            max_num_prompt_seqs=max_num_prompt_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+            worker_use_ray=worker_use_ray,
+            input_padding_size=input_padding_size)
 
     def generate(
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
+        return_output_only: bool = False,
     ) -> List[Tuple[List[int], str]]:
         req_outputs = self.model.generate(prompts,
                                           sampling_params=sampling_params)
@@ -189,8 +194,12 @@ class VllmRunner:
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = sample.token_ids
-                req_sample_output_ids.append(prompt_ids + output_ids)
-                req_sample_output_strs.append(prompt_str + output_str)
+                if return_output_only:
+                    req_sample_output_ids.append(output_ids)
+                    req_sample_output_strs.append(output_str)
+                else:
+                    req_sample_output_ids.append(prompt_ids + output_ids)
+                    req_sample_output_strs.append(prompt_str + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
@@ -204,20 +213,29 @@ class VllmRunner:
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
 
-    def generate_beam_search(
-        self,
-        prompts: List[str],
-        beam_width: int,
-        max_tokens: int,
-    ) -> List[Tuple[List[int], str]]:
-        beam_search_params = SamplingParams(n=beam_width,
-                                            use_beam_search=True,
-                                            temperature=0.0,
-                                            max_tokens=max_tokens)
-        outputs = self.generate(prompts, beam_search_params)
-        return outputs
-
 
 @pytest.fixture
 def vllm_runner():
-    return VllmRunner
+    yield VllmRunner
+    cleanup()
+
+
+@pytest.fixture
+def setup_cuda_graph(model_name="facebook/opt-125m", cache_size=8):
+    vllm_model = VllmRunner(model_name,
+                            dtype="half",
+                            enable_cuda_graph=True,
+                            cuda_graph_max_context_len=64,
+                            cuda_graph_cache_size=cache_size)
+    nn_model = vllm_model.model.llm_engine.workers[0].model
+    cuda_graph = vllm_model.model.llm_engine.workers[0].captured_model
+    worker = vllm_model.model.llm_engine.workers[0]
+    yield vllm_model, nn_model, cuda_graph, worker
+    del vllm_model
+    del nn_model
+    del cuda_graph
+    del worker
+    destroy_model_parallel()
+    gc.collect()
+    torch.cuda.empty_cache()
+    ray.shutdown()

@@ -2,9 +2,11 @@ import asyncio
 import time
 from functools import partial
 from typing import (Any, Dict, Iterable, List, Optional, Set, Tuple, Type,
-                    Union, AsyncIterator)
+                    Union)
 
+from vllm.anyscale.lora.utils import LoRARequest
 from vllm.config import ModelConfig
+from vllm.sequence import ExecuteModelData
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_cluster, ray
@@ -183,49 +185,152 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
+        logger.debug("Running async step...")
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
         if scheduler_outputs.is_empty():
             return ignored
 
-        # Execute the model.
-        output = await self._run_workers_async(
-            "execute_model",
+        data = ExecuteModelData(
             seq_group_metadata_list=seq_group_metadata_list,
+            finished_request_ids_list=list(
+                scheduler_outputs.done_seq_group_ids),
             blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
+            num_preallocated_slots=scheduler_outputs.num_preallocated_slots,
         )
 
-        return self._process_model_outputs(output, scheduler_outputs) + ignored
+        # Execute the model.
+        output = await self._run_workers_async(
+            "execute_model",
+            data,
+            use_shared_memory=self.shared_mem_engine_to_worker is not None)
+
+        outputs = self._process_model_outputs(output, scheduler_outputs)
+
+        if self.shared_mem_engine_to_worker is not None:
+            if not outputs or all(out.finished for out in outputs):
+                logger.debug("Putting shm event to sleep")
+                self.shared_mem_engine_to_worker.clear()
+                self.shared_mem_worker_to_engine.clear()
+                self.shared_mem_engine_to_worker.put_to_sleep(block=False)
+                self.shared_mem_worker_to_engine.put_to_sleep(block=False)
+
+        logger.debug("Async step finished")
+
+        return outputs
+
+    async def encode_request_async(
+        self,
+        request_id: str,  # pylint: disable=unused-argument
+        prompt: Optional[str],
+        prompt_token_ids: Optional[List[int]] = None,
+        lora_request: Optional[LoRARequest] = None,
+    ):
+        if prompt_token_ids is None:
+            assert prompt is not None
+            prompt_token_ids = await self.tokenizer.encode_async(
+                request_id=request_id,
+                prompt=prompt,
+                lora_request=lora_request)
+        return prompt_token_ids
+
+    async def add_request_async(
+        self,
+        request_id: str,
+        prompt: Optional[str],
+        sampling_params: SamplingParams,
+        prompt_token_ids: Optional[List[int]] = None,
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> None:
+        if lora_request is not None and not self.lora_config:
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
+        if arrival_time is None:
+            arrival_time = time.time()
+        prompt_token_ids = await self.encode_request_async(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            lora_request=lora_request)
+
+        return self.add_request(
+            request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+        )
 
     async def _run_workers_async(
         self,
         method: str,
         *args,
         get_all_outputs: bool = False,
+        wait_for_workers: bool = True,
+        use_shared_memory: bool = False,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
-        coros = []
-        for worker in self.workers:
-            if self.parallel_config.worker_use_ray:
-                coros.append(
-                    worker.execute_method.remote(method, *args, **kwargs))
-            else:
-                executor = getattr(worker, method)
-                coros.append(asyncio.get_event_loop().run_in_executor(
-                    None, partial(executor, *args, **kwargs)))
+        if use_shared_memory:
+            try:
+                logger.debug(f"Set data to shared memory: {args[0]}")
+                self.shared_mem_engine_to_worker.set_data(args[0])
+            except RuntimeError:
+                # Raise underlying exception
+                await asyncio.wait_for(self._exceute_model_futures, timeout=5)
+                raise
+            logger.debug("Waiting for incoming data...")
+            await self.shared_mem_worker_to_engine.wait_for_incoming_data_async(
+            )
+            try:
+                output = self.shared_mem_worker_to_engine.get_data()
+            except RuntimeError:
+                # Raise underlying exception
+                await asyncio.wait_for(self._exceute_model_futures, timeout=5)
+                raise
+            logger.debug(f"Got data {output}")
+            self.shared_mem_worker_to_engine.clear()
+            return output
+        else:
+            coros = []
+            for worker in self.workers:
+                if self.parallel_config.worker_use_ray:
+                    coros.append(
+                        worker.execute_method.remote(method, *args, **kwargs))
+                else:
+                    executor = getattr(worker, method)
+                    coros.append(asyncio.get_event_loop().run_in_executor(
+                        None, partial(executor, *args, **kwargs)))
 
-        all_outputs = await asyncio.gather(*coros)
+            if wait_for_workers:
+                all_outputs = await asyncio.gather(*coros)
 
-        if get_all_outputs:
-            return all_outputs
+            if get_all_outputs:
+                return all_outputs
 
-        # Make sure all workers have the same results.
-        output = all_outputs[0]
-        for other_output in all_outputs[1:]:
-            assert output == other_output
-        return output
+            # Make sure all workers have the same results.
+            output = all_outputs[0]
+            if wait_for_workers:
+                for other_output in all_outputs[1:]:
+                    assert output == other_output
+            return output
+
+    async def check_health_async(self):
+        if not self.parallel_config.worker_use_ray:
+            return
+
+        self._check_if_any_actor_is_dead()
+        if self._exceute_model_futures:
+            ready, _ = await asyncio.wait(self._exceute_model_futures,
+                                          timeout=0,
+                                          return_when=asyncio.FIRST_COMPLETED)
+            if ready:
+                # Raise any exception
+                await asyncio.wait_for(ready, timeout=1)
+                raise RuntimeError("At least one Worker is dead.")
 
 
 class AsyncLLMEngine:
@@ -281,6 +386,11 @@ class AsyncLLMEngine:
         return (self.background_loop is not None
                 and not self.background_loop.done())
 
+    @property
+    def is_stopped(self) -> bool:
+        return (self.background_loop is not None
+                and self.background_loop.done())
+
     def start_background_loop(self) -> None:
         """Start the background loop."""
         if self.is_running:
@@ -301,16 +411,7 @@ class AsyncLLMEngine:
         elif self.worker_use_ray:
             engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
         else:
-            # FIXME(woosuk): This is a bit hacky. Be careful when changing the
-            # order of the arguments.
-            cache_config = args[1]
-            parallel_config = args[2]
-            if parallel_config.tensor_parallel_size == 1:
-                num_gpus = cache_config.gpu_memory_utilization
-            else:
-                num_gpus = 1
-            engine_class = ray.remote(num_gpus=num_gpus)(
-                self._engine_class).remote
+            engine_class = ray.remote(num_gpus=1)(self._engine_class).remote
         return engine_class(*args, **kwargs)
 
     async def engine_step(self) -> bool:
@@ -325,9 +426,14 @@ class AsyncLLMEngine:
             # Add the request into the vLLM engine's waiting queue.
             # TODO: Maybe add add_request_batch to reduce Ray overhead
             if self.engine_use_ray:
-                await self.engine.add_request.remote(**new_request)
+                resp = await self.engine.add_request.remote(**new_request)
             else:
-                self.engine.add_request(**new_request)
+                resp = await self.engine.add_request_async(**new_request)
+            if isinstance(resp, Exception):
+                request_id = new_request["request_id"]
+                self._request_tracker.propagate_exception(
+                    resp, request_id=request_id)
+                self._abort(request_id)
 
         if finished_requests:
             await self._engine_abort(finished_requests)
@@ -366,6 +472,7 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
     ) -> AsyncStream:
         if self.log_requests:
             shortened_prompt = prompt
@@ -379,7 +486,8 @@ class AsyncLLMEngine:
             logger.info(f"Received request {request_id}: "
                         f"prompt: {shortened_prompt!r}, "
                         f"sampling params: {sampling_params}, "
-                        f"prompt token ids: {shortened_token_ids}.")
+                        f"prompt token ids: {shortened_token_ids}, "
+                        f"lora_request: {lora_request}.")
 
         if not self.is_running:
             if self.start_engine_loop:
@@ -391,22 +499,32 @@ class AsyncLLMEngine:
                     "error that caused the background loop to stop "
                     "(AsyncEngineDeadError).")
 
+        if arrival_time is None:
+            arrival_time = time.time()
+        prompt_token_ids = await self.engine.encode_request_async(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            lora_request=lora_request)
+
         stream = self._request_tracker.add_request(
             request_id,
             prompt=prompt,
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
-            arrival_time=arrival_time)
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+        )
 
         return stream
 
     async def generate(
-        self,
-        prompt: Optional[str],
-        sampling_params: SamplingParams,
-        request_id: str,
-        prompt_token_ids: Optional[List[int]] = None
-    ) -> AsyncIterator[RequestOutput]:
+            self,
+            prompt: Optional[str],
+            sampling_params: SamplingParams,
+            request_id: str,
+            prompt_token_ids: Optional[List[int]] = None,
+            lora_request: Optional[LoRARequest] = None) -> RequestOutput:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -430,11 +548,14 @@ class AsyncLLMEngine:
         arrival_time = time.monotonic()
 
         try:
-            stream = await self.add_request(request_id,
-                                            prompt,
-                                            sampling_params,
-                                            prompt_token_ids=prompt_token_ids,
-                                            arrival_time=arrival_time)
+            stream = await self.add_request(
+                request_id,
+                prompt,
+                sampling_params,
+                prompt_token_ids=prompt_token_ids,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+            )
 
             async for request_output in stream:
                 yield request_output
@@ -462,7 +583,10 @@ class AsyncLLMEngine:
 
         return self._abort(request_id)
 
-    def _abort(self, request_id: str) -> None:
+    def _abort(self,
+               request_id: str,
+               *,
+               verbose: Optional[bool] = None) -> None:
         """Abort a request.
 
         Abort a submitted request. If the request is finished or not found,
@@ -471,8 +595,9 @@ class AsyncLLMEngine:
         Args:
             request_id: The unique id of the request.
         """
-        self._request_tracker.abort_request(request_id,
-                                            verbose=self.log_requests)
+        self._request_tracker.abort_request(
+            request_id,
+            verbose=self.log_requests if verbose is None else verbose)
 
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
@@ -503,3 +628,18 @@ class AsyncLLMEngine:
                      max_log_len=engine_args.max_log_len,
                      start_engine_loop=start_engine_loop)
         return engine
+
+    async def check_health(self):
+        t = time.perf_counter()
+        logger.debug("Starting health check...")
+        if self.is_stopped:
+            raise RuntimeError("Background loop is stopped.")
+
+        if self.engine_use_ray:
+            try:
+                await self.engine.check_health.remote()
+            except ray.exceptions.RayActorError as e:
+                raise RuntimeError("Engine is dead.") from e
+        else:
+            await self.engine.check_health_async()
+        logger.debug(f"Health check took {time.perf_counter()-t}s")

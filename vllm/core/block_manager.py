@@ -1,13 +1,11 @@
 """A block manager that manages token blocks."""
+from typing import Dict, List, Optional, Set
+from collections import defaultdict
 import enum
-from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-
-# Mapping: logical block number -> physical block.
-BlockTable = List[PhysicalTokenBlock]
 
 
 class BlockAllocator:
@@ -29,7 +27,7 @@ class BlockAllocator:
         self.num_blocks = num_blocks
 
         # Initialize the free blocks.
-        self.free_blocks: BlockTable = []
+        self.free_blocks: List[PhysicalTokenBlock] = []
         for i in range(num_blocks):
             block = PhysicalTokenBlock(device=device,
                                        block_number=i,
@@ -52,6 +50,10 @@ class BlockAllocator:
 
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
+
+
+# Mapping: logical block number -> physical block.
+BlockTable = List[PhysicalTokenBlock]
 
 
 class AllocStatus(enum.Enum):
@@ -140,44 +142,115 @@ class BlockSpaceManager:
         for seq in seq_group.get_seqs():
             self.block_tables[seq.seq_id] = block_table.copy()
 
-    def can_append_slot(self, seq_group: SequenceGroup) -> bool:
-        # Simple heuristic: If there is at least one free block
-        # for each sequence, we can append.
-        num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
-        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
-        return num_seqs <= num_free_gpu_blocks
+    def can_append_slots(self,
+                         seq_group: SequenceGroup,
+                         num_preallocated_slots: int = 0) -> bool:
+        """Determine whether there is enough space to append new slots to the
+        running sequences in the sequence group.
 
-    def append_slot(self, seq: Sequence) -> Optional[Tuple[int, int]]:
-        """Allocate a physical slot for a new token."""
-        logical_blocks = seq.logical_token_blocks
-        block_table = self.block_tables[seq.seq_id]
+        Args:
+            seq_group: The sequence group whose running sequences will be used
+                in the determination.
+            num_preallocated_slots: The number of slots beyond the sequence
+                length that will be allocated. Used when a worker emits more
+                than one token per scheduler invocation.
+        """
+        running_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        max_num_new_blocks = self._get_num_new_blocks_required_to_append(
+            running_seqs, num_preallocated_slots)
+        return max_num_new_blocks <= self.gpu_allocator.get_num_free_blocks()
 
-        if len(block_table) < len(logical_blocks):
-            if (self.block_sliding_window
-                    and len(block_table) >= self.block_sliding_window):
-                # re-use a block
-                block_table.append(block_table[len(block_table) %
-                                               self.block_sliding_window])
-            else:
-                # The sequence has a new logical block.
-                # Allocate a new physical block.
-                block = self.gpu_allocator.allocate()
-                block_table.append(block)
-                return None
+    def _get_num_new_blocks_required_to_append(
+            self, seqs: List[Sequence], num_preallocated_slots: int) -> int:
+        """Calculate the number of new blocks required to append new tokens.
 
-        # We want to append the token to the last physical block.
-        last_block = block_table[-1]
-        assert last_block.device == Device.GPU
-        if last_block.ref_count == 1:
-            # Not shared with other sequences. Appendable.
-            return None
-        else:
-            # The last block is shared with other sequences.
+        Args:
+            seqs: The list of sequences to be used in the calculation.
+            num_preallocated_slots: The number of slots beyond the sequence
+                length that will be allocated. Used when a worker emits more
+                than one token per scheduler invocation.
+
+        """
+        max_num_new_slots_per_seq = [
+            seq.get_num_unprocessed_token_ids() + num_preallocated_slots
+            for seq in seqs
+        ]
+
+        # For simplicity, we assume each new slot consumes a new block (either
+        # by COW or new allocation). This is the worst case --  a better
+        # heuristic could be used.
+        max_num_new_blocks = sum(max_num_new_slots_per_seq)
+        return max_num_new_blocks
+
+    def append_slots(self,
+                     seq: Sequence,
+                     num_preallocated_slots: int = 0) -> Dict[int, List[int]]:
+        """Allocate physical slots for new tokens.
+
+        Args:
+            seq: The sequence that needs allocation to store new tokens.
+            num_preallocated_slots: The number of slots beyond the sequence
+                length that will be allocated. Used when a worker emits more
+                than one token per scheduler invocation.
+        """
+        seq.ensure_num_empty_slots(num_preallocated_slots)
+
+        num_new_blocks = 0
+        while len(self.block_tables[seq.seq_id]) < len(
+                seq.logical_token_blocks):
+            self._append_block(self.block_tables[seq.seq_id])
+            num_new_blocks += 1
+
+        # Even if no new blocks were added, make sure the last block is
+        # appendable.
+        num_blocks_to_check_appendable = max(num_new_blocks, 1)
+        return self._ensure_last_blocks_are_appendable(
+            self.block_tables[seq.seq_id], num_blocks_to_check_appendable)
+
+    def _append_block(self, block_table: BlockTable) -> None:
+        """Append a block to the block table. May allocate a new block or re-use
+        a block when configured with a sliding window.
+        """
+        if (self.block_sliding_window
+                and len(block_table) >= self.block_sliding_window):
+            # re-use a block
+            block_table.append(block_table[len(block_table) %
+                                           self.block_sliding_window])
+            return
+
+        # The sequence has a new logical block.
+        # Allocate a new physical block.
+        block = self.gpu_allocator.allocate()
+        block_table.append(block)
+
+    def _ensure_last_blocks_are_appendable(
+            self, block_table: BlockTable,
+            num_blocks_to_check: int) -> Dict[int, List[int]]:
+        """Ensure the last blocks in the block table are appendable, e.g. if the
+        blocks are owned by a single sequence.
+
+        The blocks which are not appendable are replaced with new blocks. The
+        copy-on-write source and destination block numbers are then returned.
+        """
+        cow_src_dst = defaultdict(list)
+        for i in range(
+                len(block_table) - num_blocks_to_check, len(block_table)):
+            # We want to check if a token can be appended to this block.
+            block = block_table[i]
+            assert block.device == Device.GPU
+            if block.ref_count == 1:
+                # Not shared with other sequences. Appendable.
+                continue
+
+            # The block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
             new_block = self.gpu_allocator.allocate()
-            block_table[-1] = new_block
-            self.gpu_allocator.free(last_block)
-            return last_block.block_number, new_block.block_number
+            block_table[i] = new_block
+            self.gpu_allocator.free(block)
+
+            cow_src_dst[block.block_number].append(new_block.block_number)
+
+        return dict(cow_src_dst)
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
@@ -198,14 +271,20 @@ class BlockSpaceManager:
             blocks.update(self.block_tables[seq.seq_id])
         return list(blocks)
 
-    def can_swap_in(self, seq_group: SequenceGroup) -> bool:
-        blocks = self._get_physical_blocks(seq_group)
-        num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
-        num_free_blocks = self.gpu_allocator.get_num_free_blocks()
+    def can_swap_in(self,
+                    seq_group: SequenceGroup,
+                    num_preallocated_slots: int = 0) -> bool:
         # NOTE: Conservatively, we assume that every sequence will allocate
-        # at least one free block right after the swap-in.
+        # at least one free block per new slot right after the swap-in.
         # NOTE: This should match the logic in can_append_slot().
-        num_required_blocks = len(blocks) + num_swapped_seqs
+        swapped_seqs = seq_group.get_seqs(status=SequenceStatus.SWAPPED)
+        max_num_new_blocks = self._get_num_new_blocks_required_to_append(
+            swapped_seqs, num_preallocated_slots)
+
+        blocks = self._get_physical_blocks(seq_group)
+
+        num_required_blocks = len(blocks) + max_num_new_blocks
+        num_free_blocks = self.gpu_allocator.get_num_free_blocks()
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
@@ -276,6 +355,10 @@ class BlockSpaceManager:
         block_table = self.block_tables[seq.seq_id]
         self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]
+
+        # Sequence tracks which tokens have been saved to KV.
+        # Clear it as the physical block data may be overwritten.
+        seq.reset_processed_tokens()
 
     def reset(self) -> None:
         for block_table in self.block_tables.values():

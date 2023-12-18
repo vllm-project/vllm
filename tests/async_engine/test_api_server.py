@@ -1,3 +1,4 @@
+
 import subprocess
 import sys
 import time
@@ -24,14 +25,16 @@ def _query_server(prompt: str) -> dict:
 def api_server():
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
+    # pylint: disable=consider-using-with
     uvicorn_process = subprocess.Popen([
         sys.executable, "-u",
-        str(script_path), "--model", "facebook/opt-125m"
+        str(script_path), "--model", "facebook/opt-125m", "--worker-use-ray"
     ])
     yield
     uvicorn_process.terminate()
 
 
+# pylint: disable=redefined-outer-name, unused-argument
 def test_api_server(api_server):
     """
     Run the API server and test it.
@@ -47,10 +50,11 @@ def test_api_server(api_server):
         prompts = ["Hello world"] * 1
         result = None
         while not result:
+            # pylint: disable=bare-except
             try:
-                for _ in pool.map(_query_server, prompts):
+                for result in pool.map(_query_server, prompts):
                     break
-            except Exception:
+            except:
                 time.sleep(1)
 
         # Actual tests start here
@@ -58,8 +62,9 @@ def test_api_server(api_server):
         for result in pool.map(_query_server, prompts):
             assert result
 
-        num_aborted_requests = requests.get(
-            "http://localhost:8000/stats").json()["num_aborted_requests"]
+        # check stats
+        metadata = requests.get("http://localhost:8000/stats").json()
+        num_aborted_requests = metadata["num_aborted_requests"]
         assert num_aborted_requests == 0
 
         # Try with 100 prompts
@@ -69,13 +74,15 @@ def test_api_server(api_server):
 
         # Cancel requests
         pool.map_async(_query_server, prompts)
-        time.sleep(0.01)
+        time.sleep(0.001)
         pool.terminate()
         pool.join()
+        time.sleep(0.1)
 
-        # check cancellation stats
-        num_aborted_requests = requests.get(
-            "http://localhost:8000/stats").json()["num_aborted_requests"]
+        # check stats
+        metadata = requests.get("http://localhost:8000/stats").json()
+        num_aborted_requests = metadata["num_aborted_requests"]
+        last_num_aborted_requests = num_aborted_requests
         assert num_aborted_requests > 0
 
     # check that server still runs after cancellations
@@ -84,3 +91,8 @@ def test_api_server(api_server):
         prompts = ["Hello world"] * 100
         for result in pool.map(_query_server, prompts):
             assert result
+
+    # check stats
+    metadata = requests.get("http://localhost:8000/stats").json()
+    num_aborted_requests = metadata["num_aborted_requests"]
+    assert num_aborted_requests == last_num_aborted_requests

@@ -1,3 +1,4 @@
+
 import asyncio
 from dataclasses import dataclass
 
@@ -25,6 +26,9 @@ class MockEngine:
         return [RequestOutput(
             request_id=self.request_id)] if self.request_id else []
 
+    async def encode_request_async(self, *args, **kwargs):
+        pass
+
     def generate(self, request_id):
         self.request_id = request_id
 
@@ -34,6 +38,10 @@ class MockEngine:
     def add_request(self, **kwargs):
         del kwargs  # Unused
         self.add_request_calls += 1
+
+    async def add_request_async(self, **kwargs):
+        self.add_request_calls += 1
+        return
 
     def abort_request(self, request_id):
         del request_id  # Unused

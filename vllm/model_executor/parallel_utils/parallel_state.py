@@ -2,7 +2,9 @@
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-"""Tensor and pipeline parallel groups."""
+"""Model and data parallel groups."""
+
+import contextlib
 
 import torch
 
@@ -83,8 +85,19 @@ def initialize_model_parallel(
             _PIPELINE_GLOBAL_RANKS = ranks
 
 
+@contextlib.contextmanager
+def patch_tensor_parallel_group(group):
+    old_group = get_tensor_model_parallel_group()
+    global _TENSOR_MODEL_PARALLEL_GROUP
+    _TENSOR_MODEL_PARALLEL_GROUP = group
+    try:
+        yield
+    finally:
+        _TENSOR_MODEL_PARALLEL_GROUP = old_group
+
+
 def model_parallel_is_initialized():
-    """Check if tensor and pipeline parallel groups are initialized."""
+    """Check if model and data parallel groups are initialized."""
     return (_TENSOR_MODEL_PARALLEL_GROUP is not None
             and _PIPELINE_MODEL_PARALLEL_GROUP is not None)
 

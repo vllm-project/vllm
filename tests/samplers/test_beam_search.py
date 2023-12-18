@@ -1,7 +1,3 @@
-"""Compare the outputs of HF and vLLM when using beam search.
-
-Run `pytest tests/samplers/test_beam_search.py --forked`.
-"""
 import pytest
 
 # FIXME(zhuohan): The test can not pass if we:
@@ -11,6 +7,9 @@ import pytest
 MAX_TOKENS = [128]
 BEAM_WIDTHS = [4]
 MODELS = ["facebook/opt-125m"]
+
+pytest.skip("ANYSCALE skip test as beam search is removed.",
+            allow_module_level=True)
 
 
 @pytest.mark.parametrize("model", MODELS)

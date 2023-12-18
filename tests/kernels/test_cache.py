@@ -1,7 +1,11 @@
+
 import random
+
+from typing import Tuple
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from vllm._C import cache_ops
 
@@ -11,9 +15,19 @@ NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
-NUM_BLOCKS = [1024, 36000]  # Arbitrary values for testing
+# Upstream also have 36000, but we don't have enough VRAM in CI
+NUM_BLOCKS = [1024]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
+PADDINGS = [8, 16, 0]
+
+
+def pad_key_value(key: torch.Tensor, value: torch.Tensor,
+                  pad_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    if pad_size == 0:
+        return key, value
+    return F.pad(key, (0, 0, 0, 0, 0, pad_size)),\
+        F.pad(value, (0, 0, 0, 0, 0, pad_size))
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -88,6 +102,7 @@ def test_copy_blocks(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("padding", PADDINGS)
 @torch.inference_mode()
 def test_reshape_and_cache(
     kv_cache_factory,
@@ -98,6 +113,7 @@ def test_reshape_and_cache(
     num_blocks: int,
     dtype: torch.dtype,
     seed: int,
+    padding: int,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -125,10 +141,12 @@ def test_reshape_and_cache(
     # Clone the KV caches.
     cloned_key_cache = key_cache.clone()
     cloned_value_cache = value_cache.clone()
+    num_tokens = torch.tensor([num_tokens], dtype=torch.long, device="cuda")
 
+    padded_key, padded_value = pad_key_value(key, value, padding)
     # Call the reshape_and_cache kernel.
-    cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                slot_mapping)
+    cache_ops.reshape_and_cache(padded_key, padded_value, key_cache,
+                                value_cache, slot_mapping, num_tokens)
 
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
@@ -141,6 +159,79 @@ def test_reshape_and_cache(
         block_offset = block_offsets[i]
         cloned_key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
+
+    assert torch.allclose(key_cache, cloned_key_cache)
+    assert torch.allclose(value_cache, cloned_value_cache)
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("padding", PADDINGS)
+@torch.inference_mode()
+def test_reshape_and_cache_flash(
+    kv_cache_factory,
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    padding: int,
+) -> None:
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    # Create a random slot mapping.
+    num_slots = block_size * num_blocks
+    slot_mapping = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
+
+    qkv = torch.randn(num_tokens,
+                      3,
+                      num_heads,
+                      head_size,
+                      dtype=dtype,
+                      device='cuda')
+    _, key, value = qkv.unbind(dim=1)
+
+    # Create the KV caches.
+    key_caches, value_caches = kv_cache_factory(num_blocks,
+                                                block_size,
+                                                1,
+                                                num_heads,
+                                                head_size,
+                                                dtype,
+                                                seed,
+                                                flash_style=True)
+    key_cache, value_cache = key_caches[0], value_caches[0]
+
+    # Clone the KV caches.
+    cloned_key_cache = key_cache.clone()
+    cloned_value_cache = value_cache.clone()
+    num_tokens = torch.tensor([num_tokens], dtype=torch.long, device="cuda")
+
+    padded_key, padded_value = pad_key_value(key, value, padding)
+    # Call the reshape_and_cache kernel.
+    cache_ops.reshape_and_cache_flash(padded_key, padded_value, key_cache,
+                                      value_cache, slot_mapping, num_tokens)
+
+    # Run the reference implementation.
+    block_indicies = torch.div(slot_mapping, block_size, rounding_mode='floor')
+    block_indicies = block_indicies.cpu().tolist()
+    block_offsets = slot_mapping % block_size
+    block_offsets = block_offsets.cpu().tolist()
+    for i in range(num_tokens):
+        block_idx = block_indicies[i]
+        block_offset = block_offsets[i]
+        cloned_key_cache[block_idx, block_offset, :, :] = key[i]
+        cloned_value_cache[block_idx, block_offset, :, :] = value[i]
 
     assert torch.allclose(key_cache, cloned_key_cache)
     assert torch.allclose(value_cache, cloned_value_cache)

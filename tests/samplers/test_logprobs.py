@@ -1,6 +1,3 @@
-import pytest
-import torch
-
 from vllm import SamplingParams
 
 MODELS = ["facebook/opt-125m"]
