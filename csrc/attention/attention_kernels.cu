@@ -445,8 +445,8 @@ template<
   int HEAD_SIZE,
   int BLOCK_SIZE,
   int NUM_THREADS,
-  bool ENABLE_QUANT = false,
-  int PARTITION_SIZE = 0>
+  int PARTITION_SIZE,
+  bool ENABLE_QUANT = false>
 __global__ void paged_attention_v2_kernel(
   float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
   float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
@@ -758,7 +758,7 @@ void paged_attention_v1(
 }
 
 #define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                                  \
-  vllm::paged_attention_v2_kernel<T, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT, PARTITION_SIZE>      \
+  vllm::paged_attention_v2_kernel<T, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, PARTITION_SIZE, ENABLE_QUANT>      \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     exp_sums_ptr,                                                                             \
     max_logits_ptr,                                                                           \
