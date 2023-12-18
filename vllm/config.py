@@ -112,13 +112,13 @@ class ModelConfig:
         supported_load_format = [
             "auto", "pt", "safetensors", "npcache", "dummy"
         ]
-        rocm_not_supported_load_format = ["safetensors"]
+        rocm_not_supported_load_format = []
         if load_format not in supported_load_format:
             raise ValueError(
                 f"Unknown load format: {self.load_format}. Must be one of "
                 "'auto', 'pt', 'safetensors', 'npcache', or 'dummy'.")
         if is_hip():
-            if load_format in ["safetensors"]:
+            if load_format in rocm_not_supported_load_format:
                 rocm_supported_load_format = [
                     f for f in supported_load_format
                     if (f not in rocm_not_supported_load_format)
@@ -149,7 +149,7 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = ["awq", "gptq", "squeezellm"]
-        rocm_not_supported_quantization = ["awq", "gptq"]
+        rocm_not_supported_quantization = ["awq"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
