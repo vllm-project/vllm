@@ -5,15 +5,12 @@ from vllm import topk
 
 batch_size = 100
 vocab_size = 50000
-TOPK_TEST = [
-    [32 for _ in range(batch_size)],
-    [64 for _ in range(batch_size)]]
-TOPS_TEST = [
-    [0.3 for _ in range(batch_size)],
-    [0.7 for _ in range(batch_size)],
-    [0.9 for _ in range(batch_size)]]
+TOPK_TEST = [[32 for _ in range(batch_size)], [64 for _ in range(batch_size)]]
+TOPS_TEST = [[0.7 for _ in range(batch_size)],
+             [0.9 for _ in range(batch_size)]]
 INPUTS_TEST = [torch.randn(batch_size, vocab_size, device="cuda:0")]
 DTYPE_TEST = [torch.float32, torch.float16, torch.bfloat16]
+
 
 def _apply_top_p_top_k_with_new_kernel(
     logits: torch.Tensor,
@@ -23,7 +20,10 @@ def _apply_top_p_top_k_with_new_kernel(
     do_top_p = True
     do_top_k = True
     softmax_res = logits.softmax(dim=-1, dtype=logits.dtype)
-    logit_dst = torch.full(logits.shape, -float("inf"), device=logits.device, dtype=logits.dtype)
+    logit_dst = torch.full(logits.shape,
+                           -float("inf"),
+                           device=logits.device,
+                           dtype=logits.dtype)
     max_top_k = 0
     if top_ps:
         p = torch.tensor(top_ps, device=logits.device)
@@ -81,8 +81,8 @@ def test_topk_kernel(inputs, topps, topks, data_type):
     end = torch.cuda.Event(enable_timing=True)
     start.record()
     pre = torch.cuda.max_memory_allocated(device="cuda:0")
-    logit_with_new_kernel = _apply_top_p_top_k_with_new_kernel(INPUT, TOPS_TEST[0],
-                                       TOPK_TEST[0])
+    logit_with_new_kernel = _apply_top_p_top_k_with_new_kernel(
+        INPUT, TOPS_TEST[0], TOPK_TEST[0])
     aft = torch.cuda.max_memory_allocated(device="cuda:0")
     end.record()
     torch.cuda.synchronize()
@@ -93,7 +93,8 @@ def test_topk_kernel(inputs, topps, topks, data_type):
     end = torch.cuda.Event(enable_timing=True)
     start.record()
     pre = torch.cuda.max_memory_allocated(device="cuda:0")
-    logit_with_old_kernel = _apply_top_p_top_k(INPUT, TOPS_TEST[0], TOPK_TEST[0])
+    logit_with_old_kernel = _apply_top_p_top_k(INPUT, TOPS_TEST[0],
+                                               TOPK_TEST[0])
     aft = torch.cuda.max_memory_allocated(device="cuda:0")
     end.record()
     torch.cuda.synchronize()
@@ -104,6 +105,7 @@ def test_topk_kernel(inputs, topps, topks, data_type):
     lold_sorted = logit_with_old_kernel.sort(dim=-1, descending=True)[0]
 
     assert torch.allclose(lnew_sorted, lold_sorted)
+
 
 if __name__ == "__main__":
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
