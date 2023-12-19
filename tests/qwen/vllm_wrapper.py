@@ -106,7 +106,7 @@ class vLLMWrapper:
                model_dir: str,
                trust_remote_code: bool = True,
                tensor_parallel_size: int = 1,
-               gpu_memory_utilization: float = 0.98,
+               gpu_memory_utilization: float = 0.90,
                dtype: str = "bfloat16",
                **kwargs):
 

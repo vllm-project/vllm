@@ -76,7 +76,7 @@ class GPTQConfig(QuantizationConfig):
 
     def get_min_capability(self) -> int:
         # The GPTQ kernel only supports Turing or newer GPUs.
-        return 75
+        return 70
 
     @staticmethod
     def get_config_filenames() -> List[str]:
