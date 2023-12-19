@@ -12,11 +12,13 @@ from lark.lexer import Token, LexerState, PatternStr, PatternRE
 from lark.exceptions import UnexpectedCharacters, UnexpectedToken
 
 
-
+######################
+# Fix Lark Speed Issue
+######################
+"""
+https://github.com/lark-parser/lark/issues/1142#issuecomment-1863209804
+"""
 class FastParserState(ParserState):
-    """
-    https://github.com/lark-parser/lark/issues/1142#issuecomment-1863209804
-    """
     copy_memo = {}
 
     def __copy__(self):
@@ -54,6 +56,9 @@ class FastInteractiveParser(InteractiveParser):
             copy(self.parser_state),
             copy(self.lexer_thread),
         )
+######################
+######################
+######################
 
 
 def get_partial_pattern_validator(pattern):
@@ -252,7 +257,7 @@ class NextTokenValidator:
 
     Interface:
     - step_seq(new_seq): Append a sequence, update internal states
-    - property valid_token_set: The valid set of tokens within the vocabulary that can occure next
+    - property valid_token_str_set: The valid set of vocabulary tokens strings which can occur next
     """
     def __init__(
             self,
@@ -265,7 +270,6 @@ class NextTokenValidator:
             grammar=grammar,
             start=grammar_start
         )
-        self.tokenizer = tokenizer
         self.token_trie = TokenTrie(tokenizer)
 
         if num_threads is None:
@@ -275,16 +279,16 @@ class NextTokenValidator:
         self.parser.step_seq(new_seq)
 
     @property
-    def valid_token_set(self):
+    def valid_token_str_set(self):
         """
         Generate the set of valid tokens given the current sequence
 
         1) Push all first level token prefixes to the stack
         2) for each token in the stack, validate against the parser
-          - if valid, add all children to the stack
+          - if valid, add all children to the stack for later processing
           - if valid AND a token, add to valid_token_set
         """
-        valid_token_set = set()
+        valid_token_str_set = set()
         token_prefix_stack = collections.deque([""])
         while token_prefix_stack:
             token_prefix = token_prefix_stack.pop()
@@ -293,19 +297,19 @@ class NextTokenValidator:
                 if self.parser.is_valid_next_seq(child_token_prefix):
                     token_prefix_stack.append(child_token_prefix)
                     if self.token_trie.is_token(child_token_prefix):
-                        valid_token_set.add(child_token_prefix)
+                        valid_token_str_set.add(child_token_prefix)
 
-        return valid_token_set
+        return valid_token_str_set
 
     @property
     def valid_token_id_set(self):
         """
-        get valid token id based on self.valid_token_set
-        note that some tokens correspond to multiple IDs
+        get valid token id based on self.valid_token_str_set
+        note that some token strings correspond to multiple token IDs
         """
         return set.union(*[
             self.token_trie.token_to_id_set[tok]
-            for tok in self.valid_token_set
+            for tok in self.valid_token_str_set
         ])
 
 
@@ -317,9 +321,7 @@ def test_next_token_validator_simple():
     tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
     ntv = NextTokenValidator(tokenizer, hello_grammar, "value")
 
-    assert  ntv.valid_token_set == {'wo', 'hell', 'h', 'he', 'hel', 'world', 'wor', 'w', 'hello'}
-
-    import pdb;pdb.set_trace()
+    assert ntv.valid_token_str_set == {'wo', 'hell', 'h', 'he', 'hel', 'world', 'wor', 'w', 'hello'}
     assert ntv.valid_token_id_set == {265, 809, 107, 2805, 21558, 28727, 13436, 22493, 9471}
 
 
@@ -343,8 +345,6 @@ def test_token_trie_sanity_hf_tokenizer():
     all_subprefixes = set()
     for pfx in all_prefixes:
         all_subprefixes |= toktrie.get_next_level_token_prefixes(pfx)
-
-    import pdb;pdb.set_trace()
 
     # these should have varying length because some tokens don't have level-2 prefixes
     assert len(set([len(spfx) for spfx in all_subprefixes])) > 1
@@ -417,15 +417,15 @@ def profile_predictor():
     profile.enable()
     #####
 
-    valid_toks = ntv.valid_token_set
+    valid_toks = ntv.valid_token_str_set
     ntv.step_seq("h")
-    valid_toks = ntv.valid_token_set
+    valid_toks = ntv.valid_token_str_set
     ntv.step_seq("e")
-    valid_toks = ntv.valid_token_set
+    valid_toks = ntv.valid_token_str_set
     ntv.step_seq("l")
-    valid_toks = ntv.valid_token_set
+    valid_toks = ntv.valid_token_str_set
     ntv.step_seq("l")
-    valid_toks = ntv.valid_token_set
+    valid_toks = ntv.valid_token_str_set
     ntv.step_seq("o")
 
     #####
