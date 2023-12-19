@@ -1,3 +1,4 @@
+import collections
 from copy import deepcopy, copy
 import functools
 import os
@@ -119,6 +120,9 @@ class InteractivePredictiveLALRParser:
 
         self.sequence_history = ""
 
+        # initiate
+        self.step_seq("")
+
     def _accepts(self):
         if self.sequence_history not in self._accepts_cache:
             accepted_terminals = self.interactive_parser.accepts()
@@ -189,14 +193,17 @@ class InteractivePredictiveLALRParser:
 
 
 class TokenTrie:
-    def __init__(self, tokenizer):
+    IS_TOKEN = (None, "is complete token")
+
+    def __init__(self, tokenizer, legal_chars: Optional[set[str]] = None):
         """
         Trie structure for efficiently finding tokens which are suffixes of other sequences
         """
         self.norm_vocab = {}
         for token_id in tokenizer.vocab.values():
             norm_token = tokenizer.decode([tokenizer.bos_token_id, token_id])[len(tokenizer.bos_token):]
-            self.norm_vocab[norm_token] = token_id
+            if legal_chars is None or all([char in legal_chars for char in norm_token]):
+                self.norm_vocab[norm_token] = token_id
 
         self.trie = {}
         for word in self.norm_vocab:
@@ -205,41 +212,126 @@ class TokenTrie:
                 if char not in current_dict:
                     current_dict[char] = {}
                 current_dict = current_dict[char]
-            current_dict['is_complete_token'] = True
+            current_dict[self.IS_TOKEN] = True
 
-    def get_next_level_token_prefixes(self, subprefix: str, legal_chars: Optional[set[str]] = None):
+    def get_next_level_token_prefixes(self, subprefix: str, _node=None):
         """
         Traverse the trie starting from a specified subprefix to identify all child nodes that represent
         the longest possible strings without omitting any nodes that contain complete tokens.
         """
-        def _traverse(node, current_prefix):
-            # Base case: if the current node is a complete token or has multiple branches
-            if 'is_complete_token' in node or len(node) > 1:
-                next_level_prefixes.add(current_prefix)
-                return
+        # if not first level of recursion, and at a branching point or is a token, or return self
+        if _node is not None and (len(_node) > 1 or self.IS_TOKEN in _node):
+            return {subprefix}
 
-            # Recursive case: continue traversal
-            for char, next_node in node.items():
-                if char != 'is_complete_token':
-                    _traverse(next_node, current_prefix + char)
+        # get the current node if at the first level of recursion
+        if _node is None:
+            _node = self.trie
+            for char in subprefix:
+                if char not in _node:
+                    return set()
+                _node = _node[char]
 
-        # Start from the node corresponding to the subprefix
-        current_node = self.trie
-        for char in subprefix:
-            if char not in current_node:
-                return []  # Subprefix not in trie
-            current_node = current_node[char]
+        # Single child, need to go deeper
+        results = set()
+        for char, next_node in _node.items():
+            if char != self.IS_TOKEN:
+                results |= self.get_next_level_token_prefixes(subprefix + char, _node=next_node)
+        return results
 
-        next_level_prefixes = set()
-        # Filter children based on legal_chars if provided
-        children = current_node.items() if not legal_chars else ((char, node) for char, node in current_node.items() if char in legal_chars)
+    def is_token(self, seq):
+        return seq in self.norm_vocab
 
-        # Traverse for each child
-        for char, child_node in children:
-            _traverse(child_node, subprefix + char)
 
-        return list(next_level_prefixes)
+class NextTokenValidator:
+    """
+    Given a grammar and a tokenset, construct a parser and token trie.
 
+    Interface:
+    - step_seq(new_seq): Append a sequence, update internal states
+    - property valid_token_set: The valid set of tokens within the vocabulary that can occure next
+    """
+    def __init__(
+            self,
+            tokenizer,
+            grammar: str,
+            grammar_start: str = "start",
+            num_threads: Optional[int] = None
+    ):
+        self.parser = InteractivePredictiveLALRParser(
+            grammar=grammar,
+            start=grammar_start
+        )
+        self.tokenizer = tokenizer
+        self.token_trie = TokenTrie(tokenizer)
+
+        if num_threads is None:
+            self.num_threads = os.cpu_count() // 2
+
+    def step_seq(self, new_seq):
+        self.parser.step_seq(new_seq)
+
+    @property
+    def valid_token_set(self):
+        """
+        Generate the set of valid tokens given the current sequence
+
+        1) Push all first level token prefixes to the stack
+        2) for each token in the stack, validate against the parser
+          - if valid, add all children to the stack
+          - if valid AND a token, add to valid_token_set
+        """
+        valid_token_set = set()
+        token_prefix_stack = collections.deque([""])
+        while token_prefix_stack:
+            print(len(token_prefix_stack))
+            token_prefix = token_prefix_stack.pop()
+            for child_token_prefix in self.token_trie.get_next_level_token_prefixes(token_prefix):
+                # TODO: Handle EOS token by passing None
+                if self.parser.is_valid_next_seq(child_token_prefix):
+                    token_prefix_stack.append(child_token_prefix)
+                    if self.token_trie.is_token(child_token_prefix):
+                        valid_token_set.add(child_token_prefix)
+
+        return valid_token_set
+
+
+
+def test_next_token_validator_simple():
+    grammar = """
+    ?value: "hello" | "world"
+    """
+    tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+    ntv = NextTokenValidator(tokenizer, json_grammar, "value")
+
+    valid_toks = ntv.valid_token_set
+    assert valid_tokns == {'wo', 'hell', 'h', 'he', 'hel', 'world', 'wor', 'w', 'hello'}
+
+
+def test_token_trie_sanity_hf_tokenizer():
+    """Ensure token trie produces the same number of N 3 letter tokens"""
+    tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+    toktrie = TokenTrie(tokenizer)
+
+    all_prefixes = toktrie.get_next_level_token_prefixes("")
+
+    # every token should be composable from a single unique char, so they will all be len of 1
+    assert all([len(p) == 1 for p in all_prefixes])
+
+    # every token should have one of these prefixes as a start character
+    assert all([
+        t[0] in all_prefixes
+        for t in toktrie.norm_vocab
+    ])
+
+    # construct the set of next level prefixes
+    all_subprefixes = set()
+    for pfx in all_prefixes:
+        all_subprefixes |= toktrie.get_next_level_token_prefixes(pfx)
+
+    import pdb;pdb.set_trace()
+
+    # these should have varying length because some tokens don't have level-2 prefixes
+    assert len(set([len(spfx) for spfx in all_subprefixes])) > 1
 
 
 def test_simple_sequence(parser):
@@ -273,7 +365,7 @@ def test_valid_next_tokens(parser):
 
 def main():
     # Usage
-    ebnf_grammar = """
+    json_grammar = """
     ?value: dict
           | list
           | string
@@ -295,12 +387,15 @@ def main():
     %ignore WS
     """
 
-    parser = InteractivePredictiveLALRParser(ebnf_grammar, 'value')
+    parser = InteractivePredictiveLALRParser(json_grammar, 'value')
     test_valid_next_tokens(parser)
 
 
 if __name__ == "__main__":
-    main()
+    import transformers
+    test_next_token_validator()
+    import sys
+    sys.exit()
 
     profile = True
     if profile:
@@ -318,3 +413,5 @@ if __name__ == "__main__":
         ps = pstats.Stats(profile, stream=s).sort_stats(sortby)
         ps.print_stats()
         print(s.getvalue())
+    else:
+        main()
