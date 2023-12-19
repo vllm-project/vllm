@@ -1,4 +1,5 @@
 import copy
+import os
 import time
 from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
@@ -105,6 +106,10 @@ class LLMEngine:
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
+            # Disable Ray usage stats collection.
+            ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
+            if ray_usage != "1":
+                os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
             self._init_workers_ray(placement_group)
         else:
             self._init_workers(distributed_init_method)
