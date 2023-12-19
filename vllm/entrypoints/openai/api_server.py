@@ -472,6 +472,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     request_id = f"cmpl-{random_uuid()}"
 
     use_token_ids = False
+    is_single_prompt = True
     if isinstance(request.prompt, list):
         if len(request.prompt) == 0:
             return create_error_response(HTTPStatus.BAD_REQUEST,
@@ -481,20 +482,46 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             use_token_ids = True
             prompt = request.prompt
         elif isinstance(first_element, (str, list)):
-            # TODO: handles multiple prompt case in list[list[int]]
             if len(request.prompt) > 1:
-                return create_error_response(
-                    HTTPStatus.BAD_REQUEST,
-                    "multiple prompts in a batch is not currently supported")
-            use_token_ids = not isinstance(first_element, str)
-            prompt = request.prompt[0]
+                is_single_prompt = False
+                use_token_ids = any([not isinstance(element, str) for element in request.prompt])
+                prompt = list(request.prompt)
+            else:
+                use_token_ids = any([not isinstance(element, str) for element in request.prompt])
+                prompt = request.prompt[0]
+        else:
+            return create_error_response(
+                HTTPStatus.BAD_REQUEST,
+                "prompt should be a list of strings or a list of list of tokens")
     else:
         prompt = request.prompt
 
-    if use_token_ids:
-        _, error_check_ret = await check_length(request, prompt_ids=prompt)
+    if is_single_prompt:
+        if use_token_ids:
+            _, error_check_ret = await check_length(request, prompt_ids=prompt)
+        else:
+            token_ids, error_check_ret = await check_length(request, prompt=prompt)
     else:
-        token_ids, error_check_ret = await check_length(request, prompt=prompt)
+        token_ids = []
+        error_checks = []
+        if use_token_ids:
+            for prompt_i in prompt:
+                _, error_check_ret = await check_length(request, prompt_ids=prompt_i)
+                error_checks.append(error_check_ret)
+        else:
+            for prompt_i in prompt:
+                token_id_i, error_check_ret_i = await check_length(request, prompt=prompt_i)
+                token_ids.append(token_id_i)
+                error_checks.append(error_check_ret_i)
+
+        error_check_any = any([error_check is not None for error_check in error_checks])
+        if error_check_any:
+            error_check_ret = None
+            for error_check in error_checks:
+                if error_check is not None:
+                    error_check_ret = error_check
+                    break
+
     if error_check_ret is not None:
         return error_check_ret
 
@@ -525,14 +552,29 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
-    if use_token_ids:
-        result_generator = engine.generate(None,
-                                           sampling_params,
-                                           request_id,
-                                           prompt_token_ids=prompt)
+    if is_single_prompt:
+        if use_token_ids:
+            result_generator = engine.generate(None,
+                                               sampling_params,
+                                               request_id,
+                                               prompt_token_ids=prompt)
+        else:
+            result_generator = engine.generate(prompt, sampling_params, request_id,
+                                               token_ids)
     else:
-        result_generator = engine.generate(prompt, sampling_params, request_id,
-                                           token_ids)
+        # Add to exec queue all tasks
+        results_cache = []
+
+        if use_token_ids:
+            for pidx, token_id_list in enumerate(token_ids):
+                sub_request_id = request_id + f"_{pidx + 1}"
+                results_generator = engine.add_request(sub_request_id, None, sampling_params, token_ids[pidx])
+                results_cache.append(results_generator)
+        else:
+            for pidx, prmpt in enumerate(prompt):
+                sub_request_id = request_id + f"_{pidx + 1}"
+                results_generator = engine.add_request(sub_request_id, prmpt, sampling_params, token_ids[pidx])
+                results_cache.append(results_generator)
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
     # results. In addition, we do not stream the results when use beam search.
@@ -633,84 +675,202 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
     # Streaming response
     if stream:
+        # TODO: Implement streaming batched requests.
+        if not is_single_prompt:
+            return create_error_response(
+                HTTPStatus.BAD_REQUEST,
+                "Streaming batched requests is not supported",
+            )
+
         return StreamingResponse(completion_stream_generator(),
                                  media_type="text/event-stream")
 
     # Non-streaming response
-    final_res: RequestOutput = None
-    async for res in result_generator:
-        if await raw_request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await engine.abort(request_id)
-            return create_error_response(HTTPStatus.BAD_REQUEST,
-                                         "Client disconnected")
-        final_res = res
-    assert final_res is not None
-    choices = []
-    prompt_token_ids = final_res.prompt_token_ids
-    prompt_logprobs = final_res.prompt_logprobs
-    prompt_text = final_res.prompt
-    for output in final_res.outputs:
-        if request.logprobs is not None:
-            if not echo_without_generation:
-                token_ids = output.token_ids
-                top_logprobs = output.logprobs
-                if request.echo:
-                    token_ids = prompt_token_ids + token_ids
-                    top_logprobs = prompt_logprobs + top_logprobs
+    # Single prompt
+    if is_single_prompt:
+        final_res: RequestOutput = None
+        async for res in result_generator:
+            if await raw_request.is_disconnected():
+                # Abort the request if the client disconnects.
+                await engine.abort(request_id)
+                return create_error_response(HTTPStatus.BAD_REQUEST,
+                                             "Client disconnected")
+            final_res = res
+        assert final_res is not None
+
+        choices = []
+        prompt_token_ids = final_res.prompt_token_ids
+        prompt_logprobs = final_res.prompt_logprobs
+        prompt_text = final_res.prompt
+        for output in final_res.outputs:
+            if request.logprobs is not None:
+                if not echo_without_generation:
+                    token_ids = output.token_ids
+                    top_logprobs = output.logprobs
+                    if request.echo:
+                        token_ids = prompt_token_ids + token_ids
+                        top_logprobs = prompt_logprobs + top_logprobs
+                else:
+                    token_ids = prompt_token_ids
+                    top_logprobs = prompt_logprobs
+
+                logprobs = create_logprobs(token_ids=token_ids, top_logprobs=top_logprobs, num_output_top_logprobs=request.logprobs
+                )
             else:
-                token_ids = prompt_token_ids
-                top_logprobs = prompt_logprobs
-            logprobs = create_logprobs(
-                token_ids=token_ids,
-                top_logprobs=top_logprobs,
-                num_output_top_logprobs=request.logprobs,
+                logprobs = None
+
+            if not echo_without_generation:
+                output_text = output.text
+                if request.echo:
+                    output_text = prompt_text + output_text
+            else:
+                output_text = prompt_text
+
+            choice_data = CompletionResponseChoice(
+                index=output.index,
+                text=output_text,
+                logprobs=logprobs,
+                finish_reason=output.finish_reason,
             )
-        else:
-            logprobs = None
-        if not echo_without_generation:
-            output_text = output.text
-            if request.echo:
-                output_text = prompt_text + output_text
-        else:
-            output_text = prompt_text
-        choice_data = CompletionResponseChoice(
-            index=output.index,
-            text=output_text,
-            logprobs=logprobs,
-            finish_reason=output.finish_reason,
+            choices.append(choice_data)
+
+        num_prompt_tokens = len(final_res.prompt_token_ids)
+        num_generated_tokens = sum(
+            len(output.token_ids) for output in final_res.outputs)
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            completion_tokens=num_generated_tokens,
+            total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        choices.append(choice_data)
+        response = CompletionResponse(
+            id=request_id,
+            created=created_time,
+            model=model_name,
+            choices=choices,
+            usage=usage,
+        )
 
-    num_prompt_tokens = len(final_res.prompt_token_ids)
-    num_generated_tokens = sum(
-        len(output.token_ids) for output in final_res.outputs)
-    usage = UsageInfo(
-        prompt_tokens=num_prompt_tokens,
-        completion_tokens=num_generated_tokens,
-        total_tokens=num_prompt_tokens + num_generated_tokens,
-    )
-    response = CompletionResponse(
-        id=request_id,
-        created=created_time,
-        model=model_name,
-        choices=choices,
-        usage=usage,
-    )
+        if request.stream:
+            # When user requests streaming but we don't stream, we still need to
+            # return a streaming response with a single event.
+            response_json = response.json(ensure_ascii=False)
 
-    if request.stream:
-        # When user requests streaming but we don't stream, we still need to
-        # return a streaming response with a single event.
-        response_json = response.json(ensure_ascii=False)
+            async def fake_stream_generator() -> AsyncGenerator[str, None]:
+                yield f"data: {response_json}\n\n"
+                yield "data: [DONE]\n\n"
 
-        async def fake_stream_generator() -> AsyncGenerator[str, None]:
-            yield f"data: {response_json}\n\n"
-            yield "data: [DONE]\n\n"
+            return StreamingResponse(fake_stream_generator(),
+                                     media_type="text/event-stream")
 
-        return StreamingResponse(fake_stream_generator(),
-                                 media_type="text/event-stream")
+        return response
 
-    return response
+    # Batched requests
+    else:
+        final_results: List[Optional[RequestOutput]] = [None for _ in range(len(prompt))]
+        finished = [False for _ in range(len(prompt))]
+        results_cache = [await x for x in results_cache]  # Await all tasks
+
+        while True:
+            if await raw_request.is_disconnected():
+                # Abort the request if the client disconnects.
+                for pidx in range(len(prompt)):
+                    sub_request_id = request_id + f"_{pidx + 1}"
+                    await engine.abort(sub_request_id)
+                return create_error_response(HTTPStatus.BAD_REQUEST,
+                                             "Client disconnected")
+            for idx in range(len(prompt)):
+                if not finished[idx]:
+                    gen = results_cache[idx]
+
+                    if gen.finished:
+                        async for request_output in gen:
+                            final_results[idx] = request_output
+                        finished[idx] = True
+
+            if all(finished):
+                break
+
+        assert len(final_results) == len(prompt)
+
+        # Prepare response
+        batch_response: List[CompletionResponse] = []
+        batch_stream_response: List[StreamingResponse] = []
+
+        for final_res in final_results:
+            choices = []
+            prompt_token_ids = final_res.prompt_token_ids
+            prompt_logprobs = final_res.prompt_logprobs
+            prompt_text = final_res.prompt
+            for output in final_res.outputs:
+                if request.logprobs is not None:
+                    if not echo_without_generation:
+                        token_ids = output.token_ids
+                        top_logprobs = output.logprobs
+                        if request.echo:
+                            token_ids = prompt_token_ids + token_ids
+                            top_logprobs = prompt_logprobs + top_logprobs
+                    else:
+                        token_ids = prompt_token_ids
+                        top_logprobs = prompt_logprobs
+
+                    logprobs = create_logprobs(
+                        token_ids=token_ids,
+                        top_logprobs=top_logprobs,
+                    num_output_top_logprobs=request.logprobs,
+                    )
+                else:
+                    logprobs = None
+
+                if not echo_without_generation:
+                    output_text = output.text
+                    if request.echo:
+                        output_text = prompt_text + output_text
+                else:
+                    output_text = prompt_text
+
+                choice_data = CompletionResponseChoice(
+                    index=output.index,
+                    text=output_text,
+                    logprobs=logprobs,
+                    finish_reason=output.finish_reason,
+                )
+                choices.append(choice_data)
+
+            num_prompt_tokens = len(final_res.prompt_token_ids)
+            num_generated_tokens = sum(
+                len(output.token_ids) for output in final_res.outputs)
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=num_generated_tokens,
+                total_tokens=num_prompt_tokens + num_generated_tokens,
+            )
+            response = CompletionResponse(
+                id=request_id,
+                created=created_time,
+                model=model_name,
+                choices=choices,
+                usage=usage,
+            )
+
+            if request.stream:
+                # When user requests streaming but we don't stream, we still need to
+                # return a streaming response with a single event.
+                response_json = response.json(ensure_ascii=False)
+
+                async def fake_stream_generator() -> AsyncGenerator[str, None]:
+                    yield f"data: {response_json}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                stream_response = StreamingResponse(fake_stream_generator(), media_type="text/event-stream")
+                batch_stream_response.append(stream_response)
+
+            else:
+                batch_response.append(response)
+
+        if len(batch_response) > 0:
+            return batch_response
+        else:
+            return batch_stream_response
 
 
 if __name__ == "__main__":
