@@ -21,8 +21,6 @@ try:
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
             self.worker = None
-            self.encoder = pickle.dumps
-            self.decoder = pickle.loads
 
         def init_worker(self, worker_init_fn):
             self.worker = worker_init_fn()
@@ -35,7 +33,6 @@ try:
             return executor(*args, **kwargs)
 
         def execute_model_compiled_dag_remote(self, args):
-            # args = self.decoder.decode(args)
             args = pickle.loads(args)
             output = self.execute_model(
                 args.seq_group_metadata_list,

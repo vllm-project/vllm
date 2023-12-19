@@ -356,9 +356,10 @@ class ParallelConfig:
 
         if self.use_ray_compiled_dag:
             assert self.worker_use_ray, (
-                "worker_use_ray has to be False "
-                "although use_ray_compiled_dag is True. "
-                "Set worker_use_ray=True to use use_ray_compiled_dag."
+                "worker_use_ray has to be True in order to use "
+                "use_ray_compiled_dag config. "
+                f"use_ray_compiled_dag={self.use_ray_compiled_dag} "
+                f"worker_use_ray={self.worker_use_ray}"
             )
 
 

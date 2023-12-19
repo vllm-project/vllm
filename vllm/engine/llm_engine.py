@@ -738,7 +738,6 @@ class LLMEngine:
         self,
         workers,
         method: str,
-        
         *args,
         **kwargs,
     ):
@@ -817,9 +816,8 @@ class LLMEngine:
         output_channels = self.forward_dag.execute(data)
         try:
             # TODO(sang): Is it necessary to check all outputs
-            # are the same? It requires 4X unnecessary deserialization.
+            # are the same? It requires 3X unnecessary deserialization.
             all_outputs = [pickle.loads(chan.begin_read()) for chan in output_channels]
-            # output = self.decoder.decode(all_outputs[0])
             output = all_outputs[0]
             for other_output in all_outputs[1:]:
                 assert output == other_output
@@ -828,4 +826,3 @@ class LLMEngine:
             # Has to call end_read in order to reuse the DAG.
             for chan in output_channels:
                 chan.end_read()
-        return output
