@@ -258,6 +258,8 @@ __global__ void __launch_bounds__(512, 1)
     }
     tmp_out[idx - start] = downcast<P>(tmp);
   }
+  // Maybe TODO: replace this with per-block release-acquire
+  // can save about 1-2us (not a lot though)
   end_sync<ngpus>(sg, meta, rank);
 
   // stage 2: allgather
