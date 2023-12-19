@@ -57,27 +57,6 @@ class FastInteractiveParser(InteractiveParser):
 #########################################################################
 
 
-def get_partial_pattern_validator(pattern):
-    """
-    Accepts a pattern object, either lark.lexer.PatternStr or lark.lexer.PatternRE
-    Returns a function which validates a partial string
-
-    e.g. for PatternRE "abc*", returns true for "a", "ab", "abc", "abcccc"
-    """
-    if isinstance(pattern, PatternRE):
-        compiled_pattern = regex.compile(pattern.value)
-        return (
-            lambda seq: compiled_pattern.fullmatch(seq, partial=True) is not None
-        )
-    elif isinstance(pattern, PatternStr):
-        base_str = pattern.value
-        return (
-            lambda seq: base_str.startswith(seq)
-        )
-    else:
-        raise TypeError(f"Invalid pattern type: {type(pattern)}")
-
-
 class InteractivePredictiveLALRParser:
     """
     Parser which consumes an EBNF grammar and provides helpers to determine allowable language model tokens
@@ -106,7 +85,7 @@ class InteractivePredictiveLALRParser:
         )
 
         self.partial_seq_validator = {
-            term.name: get_partial_pattern_validator(term.pattern)
+            term.name: self._get_partial_pattern_validator(term.pattern)
             for term in self.parser.terminals
         }
 
@@ -123,6 +102,28 @@ class InteractivePredictiveLALRParser:
 
         # initiate
         self.step_seq("")
+
+    @staticmethod
+    def _get_partial_pattern_validator(pattern):
+        """
+        Accepts a pattern object, either lark.lexer.PatternStr or lark.lexer.PatternRE
+        Returns a function which validates a partial string
+
+        e.g. for PatternRE "abc*", returns true for "a", "ab", "abc", "abcccc"
+        """
+        if isinstance(pattern, PatternRE):
+            compiled_pattern = regex.compile(pattern.value)
+            return (
+                lambda seq: compiled_pattern.fullmatch(seq, partial=True) is not None
+            )
+        elif isinstance(pattern, PatternStr):
+            base_str = pattern.value
+            return (
+                lambda seq: base_str.startswith(seq)
+            )
+        else:
+            raise TypeError(f"Invalid pattern type: {type(pattern)}")
+
 
     def _accepts(self):
         if self.sequence_history not in self._accepts_cache:
@@ -372,14 +373,19 @@ def test_generate_json_randomly_via_logit_processor():
 
     sample_from_logits = lambda lgts: np.random.choice(len(lgts), p=np.exp(lgts)/np.sum(np.exp(lgts)))
 
+    np.random.seed = 42
+    import time
+    start = time.time()
     token_ids = []
     for _ in range(20):
         logits = logit_processor(
             token_ids=token_ids,
-            logits=np.random.uniform(-10, 10, len(tokenizer.vocab))
+            logits=np.random.uniform(-10, 10, len(tokenizer.vocab),)
         )
         new_token_id = sample_from_logits(logits)
         token_ids.append(new_token_id)
+
+    print("duration", time.time() - start)
 
     import pdb;pdb.set_trace()
 
