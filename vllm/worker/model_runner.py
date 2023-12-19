@@ -252,6 +252,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         prompt_lens: List[int],
+        device: str,
     ) -> SamplingMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
@@ -299,9 +300,9 @@ class ModelRunner:
 
         selected_token_indices = torch.tensor(selected_token_indices,
                                               dtype=torch.long,
-                                              device="cuda")
+                                              device=device)
         categorized_sample_indices = {
-            t: torch.tensor(seq_ids, dtype=torch.int, device="cuda")
+            t: torch.tensor(seq_ids, dtype=torch.int, device=device)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -334,8 +335,6 @@ class ModelRunner:
         else:
             inputs = self._prepare_decode(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
-        sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                 input_metadata.prompt_lens)
 
         # Execute the model.
         if input_metadata.use_cuda_graph:
@@ -350,6 +349,9 @@ class ModelRunner:
             input_metadata=input_metadata,
         )
 
+        sampling_metadata = self._prepare_sample(seq_group_metadata_list,
+                                                 input_metadata.prompt_lens,
+                                                 input_tokens.device)
         # Sample the next token.
         output = self.model.sample(
             hidden_states=hidden_states,
