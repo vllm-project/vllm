@@ -1,7 +1,6 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/serve/openai_api_server.py
 
-# Support for batched offline completion
 # Copyright (C) 2023 NVIDIA
 # SPDX-License-Identifier: Apache-2.0
 
@@ -570,7 +569,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         results_cache = []
 
         if use_token_ids:
-            for pidx, token_id_list in enumerate(token_ids):
+            for pidx, _ in enumerate(token_ids):
                 sub_request_id = request_id + f"_{pidx + 1}"
                 results_generator = engine.add_request(sub_request_id, None, sampling_params, token_ids[pidx])
                 results_cache.append(results_generator)
@@ -861,7 +860,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 # return a streaming response with a single event.
                 response_json = response.json(ensure_ascii=False)
 
-                async def fake_stream_generator() -> AsyncGenerator[str, None]:
+                async def fake_stream_generator(response_json=response_json) -> AsyncGenerator[str, None]:
                     yield f"data: {response_json}\n\n"
                     yield "data: [DONE]\n\n"
 
