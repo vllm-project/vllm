@@ -408,7 +408,7 @@ class ModelRunner:
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
-        if not self.model_config.disable_fast_allreduce:
+        if not self.parallel_config.disable_fast_allreduce:
             comm_op.init_fast_ar()
         comm_op.begin_capture()
         # NOTE: Capturing the largest batch size first may help reduce the

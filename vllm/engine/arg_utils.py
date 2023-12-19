@@ -35,7 +35,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
-    disable_fast_allreduce = False
+    disable_fast_allreduce: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
