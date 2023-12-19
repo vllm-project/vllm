@@ -1,6 +1,10 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/serve/openai_api_server.py
 
+# Support for batched offline completion
+# Copyright (C) 2023 NVIDIA
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import asyncio
 import codecs
