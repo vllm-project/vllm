@@ -1,23 +1,24 @@
 import copy
 import time
 from functools import partial
-from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union, Dict
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import record_metrics
-from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
+from vllm.engine.ray_utils import RayWorkerVllm, RayCompiledWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupOutput,
-                           SequenceOutput, SequenceStatus)
+                           SequenceOutput, SequenceStatus, ExecuteModelData)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
+import pickle
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -86,6 +87,7 @@ class LLMEngine:
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"seed={model_config.seed})")
+        logger.info(f"SANG-TODO compiled DAG? {parallel_config.worker_use_ray_compiled_dag}")
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
@@ -105,9 +107,15 @@ class LLMEngine:
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
+            # print("SANG-TODO initializing workers...")
             self._init_workers_ray(placement_group)
+            # print("SANG-TODO initializing workers done...")
         else:
             self._init_workers(distributed_init_method)
+        if self.parallel_config.worker_use_ray_compiled_dag:
+            # print("SANG-TODO compiling dag done...")
+            self.forward_dag = self._init_dag()
+            # print("SANG-TODO compiling dag...")
 
         # Profile the memory usage and initialize the cache.
         self._init_cache()
@@ -121,6 +129,9 @@ class LLMEngine:
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
+        if self.parallel_config.worker_use_ray_compiled_dag:
+            self.encoder = pickle.dumps
+            self.decoder = pickle.loads
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -585,14 +596,25 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
 
+        # SANG-TODO enable it.
         # Execute the model.
-        output = self._run_workers(
-            "execute_model",
-            seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
-            blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
-            blocks_to_copy=scheduler_outputs.blocks_to_copy,
-        )
+        # print("SANG-TODO executing model via ray")
+        if not self.parallel_config.worker_use_ray_compiled_dag:
+            output = self._run_workers(
+                "execute_model",
+                seq_group_metadata_list=seq_group_metadata_list,
+                blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+                blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+                blocks_to_copy=scheduler_outputs.blocks_to_copy,
+            )
+        else:
+            print("SANG-TODO executing dag...")
+            output = self._execute_model_dag(
+                seq_group_metadata_list=seq_group_metadata_list,
+                blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+                blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+                blocks_to_copy=scheduler_outputs.blocks_to_copy,
+            )
 
         return self._process_model_outputs(output, scheduler_outputs)
 
@@ -724,6 +746,7 @@ class LLMEngine:
         self,
         workers,
         method: str,
+        
         *args,
         **kwargs,
     ):
@@ -740,33 +763,105 @@ class LLMEngine:
             all_outputs = ray.get(all_outputs)
         return all_outputs
 
+    # def _run_workers(
+    #     self,
+    #     method: str,
+    #     *args,
+    #     get_all_outputs: bool = False,
+    #     max_concurrent_workers: Optional[int] = None,
+    #     **kwargs,
+    # ) -> Any:
+    #     """Runs the given method on all workers."""
+    #     all_outputs = []
+    #     if max_concurrent_workers:
+    #         work_groups = [
+    #             self.workers[i:i + max_concurrent_workers]
+    #             for i in range(0, len(self.workers), max_concurrent_workers)
+    #         ]
+    #     else:
+    #         work_groups = [self.workers]
+
+    #     for workers in work_groups:
+    #         all_outputs.extend(
+    #             self._run_workers_in_batch(workers, method, *args, **kwargs))
+
+    #     if get_all_outputs:
+    #         return all_outputs
+
+    #     # Make sure all workers have the same results.
+    #     output = all_outputs[0]
+    #     for other_output in all_outputs[1:]:
+    #         assert output == other_output
+    #     return output
+
     def _run_workers(
         self,
         method: str,
         *args,
         get_all_outputs: bool = False,
-        max_concurrent_workers: Optional[int] = None,
+        max_concurrent_workers: bool = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
         all_outputs = []
-        if max_concurrent_workers:
-            work_groups = [
-                self.workers[i:i + max_concurrent_workers]
-                for i in range(0, len(self.workers), max_concurrent_workers)
-            ]
-        else:
-            work_groups = [self.workers]
-
-        for workers in work_groups:
-            all_outputs.extend(
-                self._run_workers_in_batch(workers, method, *args, **kwargs))
-
+        for worker in self.workers:
+            if self.parallel_config.worker_use_ray:
+                executor = partial(worker.execute_method.remote, method)
+            else:
+                executor = getattr(worker, method)
+            output = executor(*args, **kwargs)
+            all_outputs.append(output)
+        if self.parallel_config.worker_use_ray:
+            all_outputs = ray.get(all_outputs)
         if get_all_outputs:
             return all_outputs
-
         # Make sure all workers have the same results.
         output = all_outputs[0]
         for other_output in all_outputs[1:]:
             assert output == other_output
+        return output
+
+    def _init_dag(self):
+        from ray.dag import MultiOutputNode, InputNode
+        assert self.parallel_config.worker_use_ray
+        assert self.parallel_config.worker_use_ray_compiled_dag
+
+        all_outputs = []
+        with InputNode() as input_data:
+            forward_dag = MultiOutputNode([
+                worker.execute_model_remote.bind(
+                    input_data
+                ) for worker in self.workers])
+        return forward_dag.experimental_compile()
+
+    def _execute_model_dag(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> Any:
+        """Runs the given method on all workers using static DAG APIs."""
+        data = ExecuteModelData(
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+        )
+        # data = self.encoder.encode(data)
+        data = pickle.dumps(data)
+        # print("SANG-TODO executing model")
+        output_channels = self.forward_dag.execute(data)
+        try:
+            # TODO(sang): Is it necessary to check all outputs
+            # are the same? It requires 4X unnecessary deserialization.
+            all_outputs = [pickle.loads(chan.begin_read()) for chan in output_channels]
+            # output = self.decoder.decode(all_outputs[0])
+            output = all_outputs[0]
+            for other_output in all_outputs[1:]:
+                assert output == other_output
+            return output
+        finally:
+            for chan in output_channels:
+                chan.end_read()
         return output

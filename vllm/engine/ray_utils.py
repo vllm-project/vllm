@@ -3,6 +3,8 @@ from typing import Optional, Tuple, TYPE_CHECKING
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import get_open_port, is_hip
+from vllm.sequence import SamplerOutput, ExecuteModelData
+import pickle
 
 logger = init_logger(__name__)
 
@@ -19,6 +21,8 @@ try:
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
             self.worker = None
+            self.encoder = pickle.dumps
+            self.decoder = pickle.loads
 
         def init_worker(self, worker_init_fn):
             self.worker = worker_init_fn()
@@ -27,8 +31,47 @@ try:
             return getattr(self.worker, name)
 
         def execute_method(self, method, *args, **kwargs):
+            print(f"SANG-TODO {method} args: {args} kwargs: {kwargs}")
             executor = getattr(self, method)
             return executor(*args, **kwargs)
+
+        def execute_model_remote(self, args):
+            print("SANG-TODO execute_model_remote executed")
+            # args = self.decoder.decode(args)
+            args = pickle.loads(args)
+            print(f"SANG-TODO args: {args}")
+            output = self.execute_model(
+                args.seq_group_metadata_list,
+                args.blocks_to_swap_in,
+                args.blocks_to_swap_out,
+                args.blocks_to_copy,
+            )
+            print("SANG-TODO execute_model_remote finished")
+            # output = self.encoder.encode(output)
+            output = pickle.dumps(output)
+            return output
+
+    
+    class RayCompiledWorkerVllm(RayWorkerVllm):
+        def __init__(self, init_cached_hf_modules: bool = False):
+            super().__init__(init_cached_hf_modules=init_cached_hf_modules)
+
+        def execute_model_remote(self, args):
+            print("SANG-TODO execute_model_remote executed")
+            # args = self.decoder.decode(args)
+            args = pickle.loads(args)
+            print(f"SANG-TODO args: {args}")
+            output = self.execute_model(
+                args.seq_group_metadata_list,
+                args.blocks_to_swap_in,
+                args.blocks_to_swap_out,
+                args.blocks_to_copy,
+            )
+            print("SANG-TODO execute_model_remote finished")
+            # output = self.encoder.encode(output)
+            output = pickle.dumps(output)
+            return output
+
 
 except ImportError as e:
     logger.warning(f"Failed to import Ray with {e!r}. "

@@ -62,6 +62,7 @@ class Worker:
             os.getenv("RANK", "-1"))
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         self.device = torch.device(f"cuda:{local_rank}")
+        print(f"SANG-TODO device is cuda:{local_rank}")
         if self.rank < 0:
             raise ValueError("Invalid or unspecified rank.")
         torch.cuda.set_device(self.device)
@@ -155,7 +156,7 @@ class Worker:
         # If there is no input, we don't need to execute the model.
         if not seq_group_metadata_list:
             return {}
-
+        print("SANG-TODO runner.execute_model")
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache)
         return output

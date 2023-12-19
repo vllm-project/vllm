@@ -411,3 +411,10 @@ class SequenceGroupOutput:
 # For each sequence group, we generate a list of SequenceOutput object,
 # each of which contains one possible candidate for the next token.
 SamplerOutput = List[SequenceGroupOutput]
+
+
+class ExecuteModelData:
+    seq_group_metadata_list: List[SequenceGroupMetadata]
+    blocks_to_swap_in: Dict[int, int]
+    blocks_to_swap_out: Dict[int, int]
+    blocks_to_copy: Dict[int, List[int]]

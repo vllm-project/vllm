@@ -336,19 +336,23 @@ class ModelRunner:
             input_tokens, input_positions, input_metadata = inputs
         sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                  input_metadata.prompt_lens)
-
+        print("SANG-TODO execute_model 2")
         # Execute the model.
         if input_metadata.use_cuda_graph:
+            print("SANG-TODO execute_model 2 cuda graph")
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
+            print("SANG-TODO execute_model 2 no cuda graph")
             model_executable = self.model
+        print("SANG-TODO finding hidden states")
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
+        print("SANG-TODO finding hidden states done")
 
         # Sample the next token.
         output = self.model.sample(

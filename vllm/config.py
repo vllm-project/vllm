@@ -339,11 +339,13 @@ class ParallelConfig:
         tensor_parallel_size: int,
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
+        worker_use_ray_compiled_dag: bool = True,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
+        self.worker_use_ray_compiled_dag = worker_use_ray_compiled_dag
 
         self.world_size = pipeline_parallel_size * tensor_parallel_size
         if self.world_size > 1:
