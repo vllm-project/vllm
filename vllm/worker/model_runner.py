@@ -545,7 +545,7 @@ def _make_tensor_with_pad(x: List[List[int]],
     return torch.tensor(padded_x,
                         dtype=dtype,
                         device=device,
-                        pin_memory=pin_memory)
+                        pin_memory=pin_memory and str(device) == "cpu")
 
 
 def _get_graph_batch_size(batch_size: int) -> int:
