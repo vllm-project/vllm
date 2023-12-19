@@ -169,7 +169,7 @@ __device__ __forceinline__ void end_sync(const RankSignals &sg,
 
   // Only the last completing block can perform the end synchronization
   // This can ensures when the final busy wait ends, all ranks must have
-  // finished reading each other's buffer, and the kernel can exit.
+  // finished reading each other's buffer.
   if (num == gridDim.x - 1) {
     if (threadIdx.x == 32) {
       // reset in a different warp
@@ -180,6 +180,8 @@ __device__ __forceinline__ void end_sync(const RankSignals &sg,
       // Latency = 1 p2p write
       sg.signals[threadIdx.x]->end.data[rank] = 255;
     }
+    // if this is the final sync, only one block needs it
+    // because kernel exit can serve as sync
     if constexpr (final_sync) {
       if (threadIdx.x == 0) {
         while (meta->sg.end.flag != FLAG)
@@ -294,9 +296,12 @@ __global__ void __launch_bounds__(512, 1)
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
-  // do the actual reduction
   auto tmp_out = get_tmp_buf<P>(sg.signals[rank]);
   constexpr int hg = ngpus / 2;
+  // Actually not quite half butterfly. 
+  // This is an all-to-all within each group containing half of the ranks
+  // followed by cross-group add. Equivalent to half butterfly when there
+  // are 4 GPUs, a common case for PCIe cards like T4 and A10. 
   P *ptrs[hg];
   {
     int start = rank - rank % hg;
@@ -340,10 +345,10 @@ class FastAllreduce {
   std::vector<void *> ipc_handles_;
 
   /**
-   * meta is a pointer to device metadata and acutual data.
+   * meta is a pointer to device metadata and temporary buffer for allreduce.
    *
    * There's a total of sizeof(Metadata) of prefix before the actual data,
-   * so meta + 1 points to actual allreduce buffer.
+   * so meta + 1 points to actual temporary buffer.
    */
   FastAllreduce(Metadata *meta, const cudaIpcMemHandle_t *handles,
                 const std::vector<int64_t> &offsets, int rank,
