@@ -235,6 +235,7 @@ vllm_extension = CUDAExtension(
         "cxx": CXX_FLAGS,
         "nvcc": NVCC_FLAGS,
     },
+    libraries=["cuda"]
 )
 ext_modules.append(vllm_extension)
 
