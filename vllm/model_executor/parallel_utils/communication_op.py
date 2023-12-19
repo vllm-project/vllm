@@ -1,12 +1,9 @@
 import torch
 
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_group,
-    get_tensor_model_parallel_rank
-)
+    get_tensor_model_parallel_world_size, get_tensor_model_parallel_group,
+    get_tensor_model_parallel_rank)
 from vllm.model_executor.parallel_utils.fast_allreduce import FastAllreduce
-
 
 fa_handle = None
 is_capturing = False
@@ -50,7 +47,7 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor):
                 return torch.empty_like(input_)
 
     torch.distributed.all_reduce(input_,
-                                group=get_tensor_model_parallel_group())
+                                 group=get_tensor_model_parallel_group())
     return input_
 
 

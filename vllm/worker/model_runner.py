@@ -407,8 +407,9 @@ class ModelRunner:
         slot_mapping.fill_(_PAD_SLOT_ID)
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
-        
-        comm_op.init_fast_ar()
+
+        if not self.model_config.disable_fast_allreduce:
+            comm_op.init_fast_ar()
         comm_op.begin_capture()
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.

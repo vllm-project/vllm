@@ -19,19 +19,23 @@ initialize_model_parallel(world_size)
 
 test_count = 8
 if rank == 0:
-    test_sizes = [random.randint(1024, 2048*1024) for i in range(test_count)]
+    test_sizes = [random.randint(1024, 2048 * 1024) for i in range(test_count)]
     for i, v in enumerate(test_sizes):
-        test_sizes[i] -= test_sizes[i] % 8
+        test_sizes[i] -= v % 8
 else:
     test_sizes = [0] * test_count
 dist.broadcast_object_list(test_sizes, src=0)
 
 
-def test_fast_ar(sz: int, dtype):    
+def test_fast_ar(sz: int, dtype):
     fa = FastAllreduce(rank, world_size)
     # use integers so result matches NCCL exactly
-    inp1 = torch.ones(sz, dtype=dtype, device=torch.cuda.current_device()) * random.randint(1, 32)
-    inp2 = torch.ones(sz, dtype=dtype, device=torch.cuda.current_device()) * random.randint(1, 32)
+    inp1 = torch.ones(sz, dtype=dtype,
+                      device=torch.cuda.current_device()) * random.randint(
+                          1, 32)
+    inp2 = torch.ones(sz, dtype=dtype,
+                      device=torch.cuda.current_device()) * random.randint(
+                          1, 32)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -53,7 +57,9 @@ def test_fast_ar(sz: int, dtype):
 def test_manual_registration():
     sz = 1024
     fa = FastAllreduce(rank, world_size)
-    inp = torch.ones(sz, dtype=torch.float32, device=torch.cuda.current_device())
+    inp = torch.ones(sz,
+                     dtype=torch.float32,
+                     device=torch.cuda.current_device())
     fa.register_buffer(inp)
     out = fa.all_reduce(inp)
     assert torch.allclose(out, inp * world_size)

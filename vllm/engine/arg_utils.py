@@ -35,6 +35,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
+    disable_fast_allreduce = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -200,6 +201,10 @@ class EngineArgs:
                             help='maximum context length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode.')
+        parser.add_argument('--disable_fast_allreduce',
+                            type=int,
+                            default=EngineArgs.disable_fast_allreduce,
+                            help='See ParallelConfig')
         return parser
 
     @classmethod
