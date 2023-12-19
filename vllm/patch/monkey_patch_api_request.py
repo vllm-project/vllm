@@ -94,14 +94,14 @@ def reset_default_request(request):
     if not request.stop and not request.stop_token_ids:
         print("Set default stop")
         _stop = get_conversation_stop(conv)
-        print(_stop)
+        # print(_stop)
         if _stop:
             request.stop = _stop
         _stop_token_ids = get_conversation_stop_token_ids(conv)
-        print(_stop_token_ids)
+        # print(_stop_token_ids)
         if _stop_token_ids:
             request.stop_token_ids = list(_stop_token_ids)
-    print("end")
+    # print("end")
 
 
 async def patch_get_gen_prompt(request) -> str:
