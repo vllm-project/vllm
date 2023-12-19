@@ -487,15 +487,20 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         elif isinstance(first_element, (str, list)):
             if len(request.prompt) > 1:
                 is_single_prompt = False
-                use_token_ids = any([not isinstance(element, str) for element in request.prompt])
+                use_token_ids = any([
+                    not isinstance(element, str) for element in request.prompt
+                ])
                 prompt = list(request.prompt)
             else:
-                use_token_ids = any([not isinstance(element, str) for element in request.prompt])
+                use_token_ids = any([
+                    not isinstance(element, str) for element in request.prompt
+                ])
                 prompt = request.prompt[0]
         else:
             return create_error_response(
                 HTTPStatus.BAD_REQUEST,
-                "prompt should be a list of strings or a list of list of tokens")
+                "prompt should be a list of strings or a list of list of tokens"
+            )
     else:
         prompt = request.prompt
 
@@ -503,21 +508,25 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         if use_token_ids:
             _, error_check_ret = await check_length(request, prompt_ids=prompt)
         else:
-            token_ids, error_check_ret = await check_length(request, prompt=prompt)
+            token_ids, error_check_ret = await check_length(request,
+                                                            prompt=prompt)
     else:
         token_ids = []
         error_checks = []
         if use_token_ids:
             for prompt_i in prompt:
-                _, error_check_ret = await check_length(request, prompt_ids=prompt_i)
+                _, error_check_ret = await check_length(request,
+                                                        prompt_ids=prompt_i)
                 error_checks.append(error_check_ret)
         else:
             for prompt_i in prompt:
-                token_id_i, error_check_ret_i = await check_length(request, prompt=prompt_i)
+                token_id_i, error_check_ret_i = await check_length(
+                    request, prompt=prompt_i)
                 token_ids.append(token_id_i)
                 error_checks.append(error_check_ret_i)
 
-        error_check_any = any([error_check is not None for error_check in error_checks])
+        error_check_any = any(
+            [error_check is not None for error_check in error_checks])
         if error_check_any:
             error_check_ret = None
             for error_check in error_checks:
@@ -562,8 +571,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                                                request_id,
                                                prompt_token_ids=prompt)
         else:
-            result_generator = engine.generate(prompt, sampling_params, request_id,
-                                               token_ids)
+            result_generator = engine.generate(prompt, sampling_params,
+                                               request_id, token_ids)
     else:
         # Add to exec queue all tasks
         results_cache = []
@@ -571,12 +580,16 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         if use_token_ids:
             for pidx, _ in enumerate(token_ids):
                 sub_request_id = request_id + f"_{pidx + 1}"
-                results_generator = engine.add_request(sub_request_id, None, sampling_params, token_ids[pidx])
+                results_generator = engine.add_request(sub_request_id, None,
+                                                       sampling_params,
+                                                       token_ids[pidx])
                 results_cache.append(results_generator)
         else:
             for pidx, prmpt in enumerate(prompt):
                 sub_request_id = request_id + f"_{pidx + 1}"
-                results_generator = engine.add_request(sub_request_id, prmpt, sampling_params, token_ids[pidx])
+                results_generator = engine.add_request(sub_request_id, prmpt,
+                                                       sampling_params,
+                                                       token_ids[pidx])
                 results_cache.append(results_generator)
 
     # Similar to the OpenAI API, when n != best_of, we do not stream the
@@ -717,8 +730,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                     token_ids = prompt_token_ids
                     top_logprobs = prompt_logprobs
 
-                logprobs = create_logprobs(token_ids=token_ids, top_logprobs=top_logprobs, num_output_top_logprobs=request.logprobs
-                )
+                logprobs = create_logprobs(
+                    token_ids=token_ids,
+                    top_logprobs=top_logprobs,
+                    num_output_top_logprobs=request.logprobs)
             else:
                 logprobs = None
 
@@ -769,7 +784,9 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
     # Batched requests
     else:
-        final_results: List[Optional[RequestOutput]] = [None for _ in range(len(prompt))]
+        final_results: List[Optional[RequestOutput]] = [
+            None for _ in range(len(prompt))
+        ]
         finished = [False for _ in range(len(prompt))]
         results_cache = [await x for x in results_cache]  # Await all tasks
 
@@ -819,7 +836,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                     logprobs = create_logprobs(
                         token_ids=token_ids,
                         top_logprobs=top_logprobs,
-                    num_output_top_logprobs=request.logprobs,
+                        num_output_top_logprobs=request.logprobs,
                     )
                 else:
                     logprobs = None
@@ -860,11 +877,14 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 # return a streaming response with a single event.
                 response_json = response.json(ensure_ascii=False)
 
-                async def fake_stream_generator(response_json=response_json) -> AsyncGenerator[str, None]:
+                async def fake_stream_generator(
+                        response_json=response_json
+                ) -> AsyncGenerator[str, None]:
                     yield f"data: {response_json}\n\n"
                     yield "data: [DONE]\n\n"
 
-                stream_response = StreamingResponse(fake_stream_generator(), media_type="text/event-stream")
+                stream_response = StreamingResponse(
+                    fake_stream_generator(), media_type="text/event-stream")
                 batch_stream_response.append(stream_response)
 
             else:
