@@ -73,6 +73,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--ssl-keyfile", type=str, default=None)
+    parser.add_argument("--ssl-certfile", type=str, default=None)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
@@ -83,4 +85,6 @@ if __name__ == "__main__":
                 host=args.host,
                 port=args.port,
                 log_level="debug",
-                timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
+                timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+                ssl_keyfile=args.ssl_keyfile,
+                ssl_certfile=args.ssl_certfile)

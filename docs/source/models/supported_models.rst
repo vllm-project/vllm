@@ -23,6 +23,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`ChatGLMModel`
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
+  * - :code:`DeciLMForCausalLM`
+    - DeciLM
+    - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
   * - :code:`BloomForCausalLM`
     - BLOOM, BLOOMZ, BLOOMChat
     - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
@@ -60,8 +63,8 @@ Alongside each architecture, we include some popular models that use it.
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.
   * - :code:`PhiForCausalLM`
-    - Phi-1.5
-    - :code:`microsoft/phi-1_5`, etc.
+    - Phi
+    - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
