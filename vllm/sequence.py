@@ -414,7 +414,14 @@ SamplerOutput = List[SequenceGroupOutput]
 
 
 class ExecuteModelData:
-    seq_group_metadata_list: List[SequenceGroupMetadata]
-    blocks_to_swap_in: Dict[int, int]
-    blocks_to_swap_out: Dict[int, int]
-    blocks_to_copy: Dict[int, List[int]]
+    def __init__(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+    ):
+        self.seq_group_metadata_list = seq_group_metadata_list
+        self.blocks_to_swap_in = blocks_to_swap_in
+        self.blocks_to_swap_out = blocks_to_swap_out
+        self.blocks_to_copy = blocks_to_copy

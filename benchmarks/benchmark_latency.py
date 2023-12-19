@@ -24,6 +24,7 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
+        use_ray_compiled_dag=args.use_ray_compiled_dag
     )
 
     sampling_params = SamplingParams(
@@ -127,5 +128,9 @@ if __name__ == '__main__':
             'path to save the pytorch profiler output. Can be visualized '
             'with ui.perfetto.dev or Tensorboard.'
         ))
+    parser.add_argument(
+        '--use-ray-compiled-dag',
+        action='store_true',
+        help='Use an experimental ray compiled DAG API')
     args = parser.parse_args()
     main(args)

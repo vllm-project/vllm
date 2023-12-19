@@ -8,7 +8,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import record_metrics
-from vllm.engine.ray_utils import RayWorkerVllm, RayCompiledWorkerVllm, initialize_cluster, ray
+from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -87,7 +87,6 @@ class LLMEngine:
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"seed={model_config.seed})")
-        logger.info(f"SANG-TODO compiled DAG? {parallel_config.worker_use_ray_compiled_dag}")
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
@@ -107,15 +106,9 @@ class LLMEngine:
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
-            # print("SANG-TODO initializing workers...")
             self._init_workers_ray(placement_group)
-            # print("SANG-TODO initializing workers done...")
         else:
             self._init_workers(distributed_init_method)
-        if self.parallel_config.worker_use_ray_compiled_dag:
-            # print("SANG-TODO compiling dag done...")
-            self.forward_dag = self._init_dag()
-            # print("SANG-TODO compiling dag...")
 
         # Profile the memory usage and initialize the cache.
         self._init_cache()
@@ -129,9 +122,11 @@ class LLMEngine:
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
-        if self.parallel_config.worker_use_ray_compiled_dag:
-            self.encoder = pickle.dumps
-            self.decoder = pickle.loads
+        if self.parallel_config.use_ray_compiled_dag:
+            # NOTE: TODO(sang): Right now, after this method,
+            # the actor cannot receive new actor calls.
+            # It is planned to be fixed.
+            self.forward_dag = self._compiled_dag_init_dag()
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -596,10 +591,8 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             return ignored
 
-        # SANG-TODO enable it.
         # Execute the model.
-        # print("SANG-TODO executing model via ray")
-        if not self.parallel_config.worker_use_ray_compiled_dag:
+        if not self.parallel_config.use_ray_compiled_dag:
             output = self._run_workers(
                 "execute_model",
                 seq_group_metadata_list=seq_group_metadata_list,
@@ -608,8 +601,7 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
             )
         else:
-            print("SANG-TODO executing dag...")
-            output = self._execute_model_dag(
+            output = self._execute_model_compiled_dag(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
                 blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
@@ -763,78 +755,51 @@ class LLMEngine:
             all_outputs = ray.get(all_outputs)
         return all_outputs
 
-    # def _run_workers(
-    #     self,
-    #     method: str,
-    #     *args,
-    #     get_all_outputs: bool = False,
-    #     max_concurrent_workers: Optional[int] = None,
-    #     **kwargs,
-    # ) -> Any:
-    #     """Runs the given method on all workers."""
-    #     all_outputs = []
-    #     if max_concurrent_workers:
-    #         work_groups = [
-    #             self.workers[i:i + max_concurrent_workers]
-    #             for i in range(0, len(self.workers), max_concurrent_workers)
-    #         ]
-    #     else:
-    #         work_groups = [self.workers]
-
-    #     for workers in work_groups:
-    #         all_outputs.extend(
-    #             self._run_workers_in_batch(workers, method, *args, **kwargs))
-
-    #     if get_all_outputs:
-    #         return all_outputs
-
-    #     # Make sure all workers have the same results.
-    #     output = all_outputs[0]
-    #     for other_output in all_outputs[1:]:
-    #         assert output == other_output
-    #     return output
-
     def _run_workers(
         self,
         method: str,
         *args,
         get_all_outputs: bool = False,
-        max_concurrent_workers: bool = None,
+        max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
         all_outputs = []
-        for worker in self.workers:
-            if self.parallel_config.worker_use_ray:
-                executor = partial(worker.execute_method.remote, method)
-            else:
-                executor = getattr(worker, method)
-            output = executor(*args, **kwargs)
-            all_outputs.append(output)
-        if self.parallel_config.worker_use_ray:
-            all_outputs = ray.get(all_outputs)
+        if max_concurrent_workers:
+            work_groups = [
+                self.workers[i:i + max_concurrent_workers]
+                for i in range(0, len(self.workers), max_concurrent_workers)
+            ]
+        else:
+            work_groups = [self.workers]
+
+        for workers in work_groups:
+            all_outputs.extend(
+                self._run_workers_in_batch(workers, method, *args, **kwargs))
+
         if get_all_outputs:
             return all_outputs
+
         # Make sure all workers have the same results.
         output = all_outputs[0]
         for other_output in all_outputs[1:]:
             assert output == other_output
         return output
 
-    def _init_dag(self):
+    def _compiled_dag_init_dag(self):
         from ray.dag import MultiOutputNode, InputNode
         assert self.parallel_config.worker_use_ray
-        assert self.parallel_config.worker_use_ray_compiled_dag
+        assert self.parallel_config.use_ray_compiled_dag
 
         all_outputs = []
         with InputNode() as input_data:
             forward_dag = MultiOutputNode([
-                worker.execute_model_remote.bind(
+                worker.execute_model_compiled_dag_remote.bind(
                     input_data
                 ) for worker in self.workers])
         return forward_dag.experimental_compile()
 
-    def _execute_model_dag(
+    def _execute_model_compiled_dag(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         blocks_to_swap_in: Dict[int, int],
@@ -848,9 +813,7 @@ class LLMEngine:
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
         )
-        # data = self.encoder.encode(data)
         data = pickle.dumps(data)
-        # print("SANG-TODO executing model")
         output_channels = self.forward_dag.execute(data)
         try:
             # TODO(sang): Is it necessary to check all outputs
@@ -862,6 +825,7 @@ class LLMEngine:
                 assert output == other_output
             return output
         finally:
+            # Has to call end_read in order to reuse the DAG.
             for chan in output_channels:
                 chan.end_read()
         return output

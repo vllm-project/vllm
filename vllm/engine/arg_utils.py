@@ -20,7 +20,7 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = True
-    worker_use_ray_compiled_dag: bool = True
+    use_ray_compiled_dag: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -230,6 +230,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
+                                         self.use_ray_compiled_dag,
                                          self.max_parallel_loading_workers)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,

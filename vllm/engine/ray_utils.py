@@ -31,44 +31,18 @@ try:
             return getattr(self.worker, name)
 
         def execute_method(self, method, *args, **kwargs):
-            print(f"SANG-TODO {method} args: {args} kwargs: {kwargs}")
             executor = getattr(self, method)
             return executor(*args, **kwargs)
 
-        def execute_model_remote(self, args):
-            print("SANG-TODO execute_model_remote executed")
+        def execute_model_compiled_dag_remote(self, args):
             # args = self.decoder.decode(args)
             args = pickle.loads(args)
-            print(f"SANG-TODO args: {args}")
             output = self.execute_model(
                 args.seq_group_metadata_list,
                 args.blocks_to_swap_in,
                 args.blocks_to_swap_out,
                 args.blocks_to_copy,
             )
-            print("SANG-TODO execute_model_remote finished")
-            # output = self.encoder.encode(output)
-            output = pickle.dumps(output)
-            return output
-
-    
-    class RayCompiledWorkerVllm(RayWorkerVllm):
-        def __init__(self, init_cached_hf_modules: bool = False):
-            super().__init__(init_cached_hf_modules=init_cached_hf_modules)
-
-        def execute_model_remote(self, args):
-            print("SANG-TODO execute_model_remote executed")
-            # args = self.decoder.decode(args)
-            args = pickle.loads(args)
-            print(f"SANG-TODO args: {args}")
-            output = self.execute_model(
-                args.seq_group_metadata_list,
-                args.blocks_to_swap_in,
-                args.blocks_to_swap_out,
-                args.blocks_to_copy,
-            )
-            print("SANG-TODO execute_model_remote finished")
-            # output = self.encoder.encode(output)
             output = pickle.dumps(output)
             return output
 
