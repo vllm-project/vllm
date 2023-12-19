@@ -1,12 +1,11 @@
 from vllm.patch.monkey_patch_api_request import patch_api_server;patch_api_server()
 from vllm.entrypoints.openai.api_server import AsyncEngineArgs, AsyncLLMEngine, TIMEOUT_KEEP_ALIVE, CORSMiddleware, \
-    logger, app, get_tokenizer, argparse, asyncio, uvicorn
+    logger, app, get_tokenizer, load_chat_template, add_global_metrics_labels, argparse, asyncio, uvicorn
 from vllm.entrypoints.openai import api_server
 import json
 
-
 if __name__ == "__main__":
-    
+
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser.add_argument("--host",
@@ -33,8 +32,21 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="The model name used in the API. If not "
-                        "specified, the model name will be the same as "
-                        "the huggingface name.")
+                             "specified, the model name will be the same as "
+                             "the huggingface name.")
+
+    parser.add_argument("--chat-template",
+                        type=str,
+                        default=None,
+                        help="The file path to the chat template, "
+                             "or the template in single-line form "
+                             "for the specified model")
+    parser.add_argument("--response-role",
+                        type=str,
+                        default="assistant",
+                        help="The role name to return if "
+                             "`request.add_generation_prompt=true`.")
+
     parser.add_argument("--default-model-template",
                         type=str,
                         default=None,
@@ -58,6 +70,8 @@ if __name__ == "__main__":
     else:
         served_model = args.model
 
+    response_role = args.response_role
+
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     engine_model_config = asyncio.run(engine.get_model_config())
@@ -65,9 +79,10 @@ if __name__ == "__main__":
     max_model_len = engine_model_config.max_model_len
 
     # A separate tokenizer to map token IDs to strings.
-    tokenizer = get_tokenizer(engine_args.tokenizer,
-                              tokenizer_mode=engine_args.tokenizer_mode,
-                              trust_remote_code=engine_args.trust_remote_code)
+    tokenizer = get_tokenizer(
+        engine_model_config.tokenizer,
+        tokenizer_mode=engine_model_config.tokenizer_mode,
+        trust_remote_code=engine_model_config.trust_remote_code)
     # set global
     api_server.parser = parser
     api_server.args = args
@@ -76,7 +91,12 @@ if __name__ == "__main__":
     api_server.engine = engine
     api_server.max_model_len = max_model_len
     api_server.tokenizer = tokenizer
-    
+
+    load_chat_template(args, tokenizer)
+
+    # Register labels for metrics
+    add_global_metrics_labels(model_name=engine_args.model)
+
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,
