@@ -78,7 +78,6 @@ class Sampler(nn.Module):
             # new kernel changes logits from arbitrary float16/bfloat16 to float32
             logits = _apply_top_p_top_k_with_new_kernel(
                 logits, sampling_tensors.top_ps, sampling_tensors.top_ks)
-
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
 
@@ -212,15 +211,17 @@ def _apply_top_p_top_k_with_new_kernel(
 ) -> torch.Tensor:
     do_top_p = True
     do_top_k = True
-    softmax_res = logits.softmax(dim=-1)
+    softmax_res = logits.softmax(dim=-1, dtype=logits.dtype)
     logit_dst = torch.full(logits.shape,
                            -float("inf"),
                            device=logits.device,
                            dtype=logits.dtype)
+
+    top_ks = top_ks.to(logits.device).clamp(1, 1024)
+    top_ps = top_ps.type(torch.float32).to(logits.device).clamp(0, 1)
     max_top_k = top_ks.max().item()
-    topk.top_k(logits, softmax_res, logit_dst, do_top_k, max_top_k,
-               top_ks.to(logits.device), do_top_p,
-               top_ps.type(torch.float32).to(logits.device))
+    topk.top_k(logits, softmax_res, logit_dst, do_top_k, max_top_k, top_ks,
+               do_top_p, top_ps)
     return logit_dst
 
 
