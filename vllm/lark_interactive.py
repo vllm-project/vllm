@@ -156,7 +156,7 @@ class InteractivePredictiveLALRParser:
         self._update_candidate_terminals()
 
         if not self.valid_next_terminals:
-            raise ValueError(f"Invalid continuation for `{self.sequence_history}` `{sequence}`")
+            raise ValueError(f"Invalid continuation for `{self.sequence_history}` `{new_seq}`")
 
     def _append_to_sequence(self, new_seq: str):
         """Set the complete sequences value in the lexer and base"""
@@ -204,6 +204,10 @@ class TokenTrie:
             norm_token = tokenizer.decode([tokenizer.bos_token_id, token_id])[len(tokenizer.bos_token):]
             if legal_chars is None or all([char in legal_chars for char in norm_token]):
                 self.norm_vocab[norm_token] = token_id
+
+        self.token_to_id_set = collections.defaultdict(set)
+        for token_str, token_id in self.norm_vocab.items():
+            self.token_to_id_set[token_str].add(token_id)
 
         self.trie = {}
         for word in self.norm_vocab:
@@ -283,7 +287,6 @@ class NextTokenValidator:
         valid_token_set = set()
         token_prefix_stack = collections.deque([""])
         while token_prefix_stack:
-            print(len(token_prefix_stack))
             token_prefix = token_prefix_stack.pop()
             for child_token_prefix in self.token_trie.get_next_level_token_prefixes(token_prefix):
                 # TODO: Handle EOS token by passing None
@@ -294,17 +297,30 @@ class NextTokenValidator:
 
         return valid_token_set
 
+    @property
+    def valid_token_id_set(self):
+        """
+        get valid token id based on self.valid_token_set
+        note that some tokens correspond to multiple IDs
+        """
+        return set.union(*[
+            self.token_trie.token_to_id_set[tok]
+            for tok in self.valid_token_set
+        ])
+
 
 
 def test_next_token_validator_simple():
-    grammar = """
+    hello_grammar = """
     ?value: "hello" | "world"
     """
     tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
-    ntv = NextTokenValidator(tokenizer, json_grammar, "value")
+    ntv = NextTokenValidator(tokenizer, hello_grammar, "value")
 
-    valid_toks = ntv.valid_token_set
-    assert valid_tokns == {'wo', 'hell', 'h', 'he', 'hel', 'world', 'wor', 'w', 'hello'}
+    assert  ntv.valid_token_set == {'wo', 'hell', 'h', 'he', 'hel', 'world', 'wor', 'w', 'hello'}
+
+    import pdb;pdb.set_trace()
+    assert ntv.valid_token_id_set == {265, 809, 107, 2805, 21558, 28727, 13436, 22493, 9471}
 
 
 def test_token_trie_sanity_hf_tokenizer():
@@ -344,27 +360,6 @@ def test_simple_sequence(parser):
 
 
 def test_valid_next_tokens(parser):
-    # random complicated json file courtesy of https://github.com/simdjson/simdjson/issues/1316#issue-748663718
-    complex_json_file = '{"$schema": "http://json-schema.org/draft-04/schema#", "additionalProperties": false, "properties": {"nc:Vehicle": {"description": "A conveyance designed to carry an operator, passengers and/or cargo, over land.", "oneOf": [{"$ref": "#/definitions/nc:VehicleType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:VehicleType"}}]}, "nc:VehicleAxleQuantity": {"description": "A count of common axles of rotation of one or more wheels of a vehicle, whether power driven or freely rotating.", "oneOf": [{"$ref": "#/definitions/niem-xs:nonNegativeInteger"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:nonNegativeInteger"}}]}, "nc:VehicleMSRPAmount": {"description": "A manufacturer\'s suggested retail price of a vehicle; a price at which a manufacturer recommends a vehicle be sold.", "oneOf": [{"$ref": "#/definitions/nc:AmountType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:AmountType"}}]}, "nc:Amount": {"description": "An amount of money.", "oneOf": [{"$ref": "#/definitions/niem-xs:decimal"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:decimal"}}]}, "nc:Currency": {"description": "A data concept for a unit of money or exchange.", "oneOf": [{"anyOf": [{"$ref": "#/properties/nc:CurrencyCode"}]}, {"type": "array", "items": {"anyOf": [{"$ref": "#/properties/nc:CurrencyCode"}]}}]}, "nc:CurrencyCode": {"description": "A unit of money or exchange.", "oneOf": [{"$ref": "#/definitions/iso_4217:CurrencyCodeType"}, {"type": "array", "items": {"$ref": "#/definitions/iso_4217:CurrencyCodeType"}}]}, "nc:VehicleIdentification": {"description": "A unique identification for a specific vehicle.", "oneOf": [{"$ref": "#/definitions/nc:IdentificationType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:IdentificationType"}}]}, "nc:IdentificationID": {"description": "An identifier.", "oneOf": [{"$ref": "#/definitions/niem-xs:string"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:string"}}]}}, "definitions": {"nc:VehicleType": {"description": "A data type for a conveyance designed to carry an operator, passengers and/or cargo, over land.", "allOf": [{"$ref": "#/definitions/nc:ConveyanceType"}, {"type": "object", "properties": {"nc:VehicleAxleQuantity": {"$ref": "#/properties/nc:VehicleAxleQuantity"}, "nc:VehicleIdentification": {"$ref": "#/properties/nc:VehicleIdentification"}, "nc:VehicleMSRPAmount": {"$ref": "#/properties/nc:VehicleMSRPAmount"}}}]}, "nc:ConveyanceType": {"description": "A data type for a means of transport from place to place.", "allOf": [{"$ref": "#/definitions/_base"}, {"$ref": "#/definitions/nc:ItemType"}, {"type": "object", "properties": {}}]}, "nc:ItemType": {"description": "A data type for an article or thing.", "allOf": [{"$ref": "#/definitions/_base"}, {"type": "object", "properties": {}}]}, "nc:AmountType": {"description": "A data type for an amount of money.", "type": "object", "properties": {"nc:Amount": {"$ref": "#/properties/nc:Amount"}, "nc:Currency": {"$ref": "#/properties/nc:Currency"}}}, "iso_4217:CurrencyCodeType": {"description": "A data type for a currency that qualifies a monetary amount.", "oneOf": [{"$ref": "#/definitions/iso_4217:CurrencyCodeSimpleType"}, {"type": "object", "properties": {"rdf:value": {"$ref": "#/definitions/iso_4217:CurrencyCodeSimpleType"}}}]}, "iso_4217:CurrencyCodeSimpleType": {"type": "string", "description": "A data type for a currency that qualifies a monetary amount.", "oneOf": [{"enum": ["EUR"], "description": "Euro"}, {"enum": ["GBP"], "description": "Pound Sterling"}, {"enum": ["USD"], "description": "US Dollar"}]}, "nc:IdentificationType": {"description": "A data type for a representation of an identity.", "type": "object", "properties": {"nc:IdentificationID": {"$ref": "#/properties/nc:IdentificationID"}}}, "niem-xs:decimal": {"description": "A data type for arbitrary precision decimal numbers.", "type": "number"}, "niem-xs:nonNegativeInteger": {"description": "A data type for an integer with a minimum value of 0.", "type": "number"}, "niem-xs:string": {"description": "A data type for character strings in XML.", "type": "string"}, "_base": {"type": "object", "patternProperties": {"^ism:.*": {"type": "string"}, "^ntk:.*": {"type": "string"}}, "properties": {"@id": {"format": "uriref"}, "@base": {"format": "uriref"}}}}}'
-
-    test_chars_per_iter = 1000
-    unicode_chars = [chr(i) for i in range(test_chars_per_iter)]
-
-    import time
-    start = time.time()
-    for char in complex_json_file:
-        parser.step_seq(char)
-        for ch in unicode_chars:
-            parser.is_valid_next_seq(ch)
-
-    print("took",
-          (time.time() - start) /  (len(complex_json_file)),
-          "seconds per step with",
-          test_chars_per_iter, "characters in vocabulary")
-
-
-def main():
-    # Usage
     json_grammar = """
     ?value: dict
           | list
@@ -388,16 +383,73 @@ def main():
     """
 
     parser = InteractivePredictiveLALRParser(json_grammar, 'value')
-    test_valid_next_tokens(parser)
+    # random complicated json file courtesy of https://github.com/simdjson/simdjson/issues/1316#issue-748663718
+    complex_json_file = '{"$schema": "http://json-schema.org/draft-04/schema#", "additionalProperties": false, "properties": {"nc:Vehicle": {"description": "A conveyance designed to carry an operator, passengers and/or cargo, over land.", "oneOf": [{"$ref": "#/definitions/nc:VehicleType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:VehicleType"}}]}, "nc:VehicleAxleQuantity": {"description": "A count of common axles of rotation of one or more wheels of a vehicle, whether power driven or freely rotating.", "oneOf": [{"$ref": "#/definitions/niem-xs:nonNegativeInteger"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:nonNegativeInteger"}}]}, "nc:VehicleMSRPAmount": {"description": "A manufacturer\'s suggested retail price of a vehicle; a price at which a manufacturer recommends a vehicle be sold.", "oneOf": [{"$ref": "#/definitions/nc:AmountType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:AmountType"}}]}, "nc:Amount": {"description": "An amount of money.", "oneOf": [{"$ref": "#/definitions/niem-xs:decimal"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:decimal"}}]}, "nc:Currency": {"description": "A data concept for a unit of money or exchange.", "oneOf": [{"anyOf": [{"$ref": "#/properties/nc:CurrencyCode"}]}, {"type": "array", "items": {"anyOf": [{"$ref": "#/properties/nc:CurrencyCode"}]}}]}, "nc:CurrencyCode": {"description": "A unit of money or exchange.", "oneOf": [{"$ref": "#/definitions/iso_4217:CurrencyCodeType"}, {"type": "array", "items": {"$ref": "#/definitions/iso_4217:CurrencyCodeType"}}]}, "nc:VehicleIdentification": {"description": "A unique identification for a specific vehicle.", "oneOf": [{"$ref": "#/definitions/nc:IdentificationType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:IdentificationType"}}]}, "nc:IdentificationID": {"description": "An identifier.", "oneOf": [{"$ref": "#/definitions/niem-xs:string"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:string"}}]}}, "definitions": {"nc:VehicleType": {"description": "A data type for a conveyance designed to carry an operator, passengers and/or cargo, over land.", "allOf": [{"$ref": "#/definitions/nc:ConveyanceType"}, {"type": "object", "properties": {"nc:VehicleAxleQuantity": {"$ref": "#/properties/nc:VehicleAxleQuantity"}, "nc:VehicleIdentification": {"$ref": "#/properties/nc:VehicleIdentification"}, "nc:VehicleMSRPAmount": {"$ref": "#/properties/nc:VehicleMSRPAmount"}}}]}, "nc:ConveyanceType": {"description": "A data type for a means of transport from place to place.", "allOf": [{"$ref": "#/definitions/_base"}, {"$ref": "#/definitions/nc:ItemType"}, {"type": "object", "properties": {}}]}, "nc:ItemType": {"description": "A data type for an article or thing.", "allOf": [{"$ref": "#/definitions/_base"}, {"type": "object", "properties": {}}]}, "nc:AmountType": {"description": "A data type for an amount of money.", "type": "object", "properties": {"nc:Amount": {"$ref": "#/properties/nc:Amount"}, "nc:Currency": {"$ref": "#/properties/nc:Currency"}}}, "iso_4217:CurrencyCodeType": {"description": "A data type for a currency that qualifies a monetary amount.", "oneOf": [{"$ref": "#/definitions/iso_4217:CurrencyCodeSimpleType"}, {"type": "object", "properties": {"rdf:value": {"$ref": "#/definitions/iso_4217:CurrencyCodeSimpleType"}}}]}, "iso_4217:CurrencyCodeSimpleType": {"type": "string", "description": "A data type for a currency that qualifies a monetary amount.", "oneOf": [{"enum": ["EUR"], "description": "Euro"}, {"enum": ["GBP"], "description": "Pound Sterling"}, {"enum": ["USD"], "description": "US Dollar"}]}, "nc:IdentificationType": {"description": "A data type for a representation of an identity.", "type": "object", "properties": {"nc:IdentificationID": {"$ref": "#/properties/nc:IdentificationID"}}}, "niem-xs:decimal": {"description": "A data type for arbitrary precision decimal numbers.", "type": "number"}, "niem-xs:nonNegativeInteger": {"description": "A data type for an integer with a minimum value of 0.", "type": "number"}, "niem-xs:string": {"description": "A data type for character strings in XML.", "type": "string"}, "_base": {"type": "object", "patternProperties": {"^ism:.*": {"type": "string"}, "^ntk:.*": {"type": "string"}}, "properties": {"@id": {"format": "uriref"}, "@base": {"format": "uriref"}}}}}'
+
+    test_chars_per_iter = 1000
+    unicode_chars = [chr(i) for i in range(test_chars_per_iter)]
+
+    import time
+    start = time.time()
+    for char in complex_json_file:
+        parser.step_seq(char)
+        for ch in unicode_chars:
+            parser.is_valid_next_seq(ch)
+
+    print("took",
+          (time.time() - start) /  (len(complex_json_file)),
+          "seconds per step with",
+          test_chars_per_iter, "characters in vocabulary")
+
+
+
+def profile_predictor():
+    import pstats
+    from io import StringIO
+    import cProfile
+    hello_grammar = """
+    ?value: "hello" | "world"
+    """
+    tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+    ntv = NextTokenValidator(tokenizer, hello_grammar, "value")
+
+    profile = cProfile.Profile()
+    profile.enable()
+    #####
+
+    valid_toks = ntv.valid_token_set
+    ntv.step_seq("h")
+    valid_toks = ntv.valid_token_set
+    ntv.step_seq("e")
+    valid_toks = ntv.valid_token_set
+    ntv.step_seq("l")
+    valid_toks = ntv.valid_token_set
+    ntv.step_seq("l")
+    valid_toks = ntv.valid_token_set
+    ntv.step_seq("o")
+
+    #####
+    profile.disable()
+
+    # Sorting the statistics by cumulative time
+    s = StringIO()
+    sortby = 'cumulative'
+    ps = pstats.Stats(profile, stream=s).sort_stats(sortby)
+    ps.print_stats()
+    print(s.getvalue())
+
+
+
+def main():
+    test_next_token_validator_simple()
+    profile_predictor()
+
 
 
 if __name__ == "__main__":
     import transformers
-    test_next_token_validator()
-    import sys
-    sys.exit()
 
-    profile = True
+    profile = False
     if profile:
         import cProfile
         import pstats
