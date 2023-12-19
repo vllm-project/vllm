@@ -1,9 +1,8 @@
-import socket
 from typing import Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.utils import get_open_port, is_hip
 
 logger = init_logger(__name__)
 
@@ -41,12 +40,6 @@ except ImportError as e:
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
-
-
-def get_open_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
 
 
 def initialize_cluster(

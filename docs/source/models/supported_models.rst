@@ -60,8 +60,8 @@ Alongside each architecture, we include some popular models that use it.
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.
   * - :code:`PhiForCausalLM`
-    - Phi-1.5
-    - :code:`microsoft/phi-1_5`, etc.
+    - Phi
+    - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
@@ -74,8 +74,7 @@ Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for in
 Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ project.
 
 .. note::
-    Currently, the ROCm version of vLLM does not support Mixtral.
-    Additionally, it only supports Mistral for context lengths up to 4096.
+    Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
 .. tip::
     The easiest way to check if your model is supported is to run the program below:
