@@ -220,7 +220,8 @@ class ModelRunner:
                                              device=device)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
-                                    device=device)
+                                    device=device,
+                                    pin_memory=use_captured_graph)
 
         if use_captured_graph:
             # The shape of graph_block_tables is
@@ -229,7 +230,7 @@ class ModelRunner:
             for i, block_table in enumerate(block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.from_numpy(input_block_tables).to(device)
+            block_tables = torch.tensor(input_block_tables, device=device)
         else:
             block_tables = _make_tensor_with_pad(
                 block_tables,
@@ -297,11 +298,16 @@ class ModelRunner:
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
 
-        selected_token_indices = torch.tensor(selected_token_indices,
-                                              dtype=torch.long,
-                                              device="cuda")
+        def async_h2d(data: list, dtype):
+            t = torch.tensor(data, dtype=dtype, pin_memory=True)
+            return t.to(device="cuda", non_blocking=True)
+
+        selected_token_indices = async_h2d(
+            selected_token_indices,
+            dtype=torch.long,
+        )
         categorized_sample_indices = {
-            t: torch.tensor(seq_ids, dtype=torch.int, device="cuda")
+            t: async_h2d(seq_ids, dtype=torch.int)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -334,8 +340,6 @@ class ModelRunner:
         else:
             inputs = self._prepare_decode(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
-        sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                 input_metadata.prompt_lens)
 
         # Execute the model.
         if input_metadata.use_cuda_graph:
@@ -349,6 +353,9 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
+
+        sampling_metadata = self._prepare_sample(seq_group_metadata_list,
+                                                 input_metadata.prompt_lens)
 
         # Sample the next token.
         output = self.model.sample(
@@ -502,11 +509,14 @@ class CUDAGraphRunner:
         del kv_caches
 
         # Copy the input tensors to the input buffers.
-        self.input_buffers["input_ids"].copy_(input_ids)
-        self.input_buffers["positions"].copy_(positions)
-        self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping)
-        self.input_buffers["context_lens"].copy_(input_metadata.context_lens)
-        self.input_buffers["block_tables"].copy_(input_metadata.block_tables)
+        self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
+        self.input_buffers["positions"].copy_(positions, non_blocking=True)
+        self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping,
+                                                 non_blocking=True)
+        self.input_buffers["context_lens"].copy_(input_metadata.context_lens,
+                                                 non_blocking=True)
+        self.input_buffers["block_tables"].copy_(input_metadata.block_tables,
+                                                 non_blocking=True)
 
         # Run the graph.
         self.graph.replay()
@@ -531,7 +541,10 @@ def _make_tensor_with_pad(
     device: Union[str, torch.device] = "cuda",
 ) -> torch.Tensor:
     padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
-    return torch.tensor(padded_x, dtype=dtype, device=device)
+    return torch.tensor(padded_x,
+                        dtype=dtype,
+                        device=device,
+                        pin_memory=device == 'cpu')
 
 
 def _get_graph_batch_size(batch_size: int) -> int:
