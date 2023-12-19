@@ -262,11 +262,13 @@ class NextTokenValidator:
             grammar_start: str = "start",
             num_threads: Optional[int] = None
     ):
+        self.tokenizer = tokenizer
+        self.token_trie = TokenTrie(tokenizer)
+
         self.parser = InteractivePredictiveLALRParser(
             grammar=grammar,
             start=grammar_start
         )
-        self.token_trie = TokenTrie(tokenizer)
 
         # TODO: threading
         if num_threads is None:
@@ -308,6 +310,78 @@ class NextTokenValidator:
             self.token_trie.token_to_id_set[tok]
             for tok in self.valid_token_str_set
         ])
+
+
+class GrammarLogitProcessor(NextTokenValidator):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.generation_token_ids = []
+        self.generation_text = ""
+
+    def __call__(self, token_ids, logits):
+
+        # ensure integrity
+        assert token_ids[:len(self.generation_token_ids)] == self.generation_token_ids
+        self.generation_token_ids = token_ids
+
+        # step forward
+        all_text = self.tokenizer.decode(token_ids)
+        new_text = all_text[len(self.generation_text):]
+        self.generation_text = all_text
+        self.step_seq(new_text)
+
+        # get valid token IDs and modify logits
+        valid_token_ids = self.valid_token_id_set
+        logits = [
+            logit_val if tok_id in valid_token_ids else -float("inf")
+            for tok_id, logit_val in zip(sorted(self.tokenizer.vocab.values()), logits)
+        ]
+        return logits
+
+
+def test_generate_json_randomly_via_logit_processor():
+    json_grammar = """
+    ?value: dict
+          | list
+          | string
+          | SIGNED_NUMBER      -> number
+          | "true"             -> true
+          | "false"            -> false
+          | "null"             -> null
+
+    list : "[" [value ("," value)*] "]"
+
+    dict : "{" [pair ("," pair)*] "}"
+    pair : string ":" value
+
+    string : ESCAPED_STRING
+
+    %import common.ESCAPED_STRING
+    %import common.SIGNED_NUMBER
+    %import common.WS
+    #%ignore WS  # we don't ignore whitespace because that makes the json uninteresting
+    """
+    tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+
+    logit_processor = GrammarLogitProcessor(
+        tokenizer,
+        json_grammar,
+        grammar_start="value"
+    )
+
+    sample_from_logits = lambda lgts: np.random.choice(len(lgts), p=np.exp(lgts)/np.sum(np.exp(lgts)))
+
+    token_ids = []
+    for _ in range(20):
+        logits = logit_processor(
+            token_ids=token_ids,
+            logits=np.random.uniform(-10, 10, len(tokenizer.vocab))
+        )
+        new_token_id = sample_from_logits(logits)
+        token_ids.append(new_token_id)
+
+    import pdb;pdb.set_trace()
 
 
 def test_next_token_validator_simple():
@@ -355,7 +429,7 @@ def test_simple_sequence(parser):
         print("valid terms:", parser.valid_next_terminals)
 
 
-def test_valid_next_tokens(parser):
+def test_valid_next_tokens():
     json_grammar = """
     ?value: dict
           | list
@@ -437,13 +511,12 @@ def profile_predictor():
 
 
 def main():
-    test_next_token_validator_simple()
-    profile_predictor()
-
+    test_generate_json_randomly_via_logit_processor()
 
 
 if __name__ == "__main__":
     import transformers
+    import numpy as np
 
     profile = False
     if profile:
