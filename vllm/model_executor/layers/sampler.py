@@ -58,7 +58,17 @@ class Sampler(nn.Module):
              do_min_p) = SamplingTensors.from_sampling_metadata(
                  sampling_metadata, vocab_size, logits.device, logits.dtype)
 
-        torch.cuda.current_stream().wait_stream(self._copy_stream)
+        current_stream = torch.cuda.current_stream()
+        current_stream.wait_stream(self._copy_stream)
+        sampling_tensors.temperatures.record_stream(current_stream)
+        sampling_tensors.top_ps.record_stream(current_stream)
+        sampling_tensors.top_ks.record_stream(current_stream)
+        sampling_tensors.min_ps.record_stream(current_stream)
+        sampling_tensors.presence_penalties.record_stream(current_stream)
+        sampling_tensors.frequency_penalties.record_stream(current_stream)
+        sampling_tensors.repetition_penalties.record_stream(current_stream)
+        sampling_tensors.prompt_tokens.record_stream(current_stream)
+        sampling_tensors.output_tokens.record_stream(current_stream)
 
         # Apply presence and frequency penalties.
         if do_penalties:
