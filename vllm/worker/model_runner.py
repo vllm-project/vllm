@@ -1,5 +1,6 @@
 import time
 from typing import Dict, List, Tuple, Union
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -367,21 +368,23 @@ class ModelRunner:
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
         # Prepare input tensors.
-        image_features = None
+        extra_kwargs = {}
         if is_prompt:
             inputs = self._prepare_prompt(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
 
-            image_features = []
-            for seq_group_metadata in seq_group_metadata_list:
-                extra_data = seq_group_metadata.seq_data[list(
-                    seq_group_metadata.seq_data.keys())[0]].extra_data
-                if extra_data is not None and 'image_features' in extra_data:
-                    image_features.append(
-                        extra_data.get('image_features', None))
-                else:
-                    image_features.append(None)
-
+            # Collect extra data for each prompt from seq_group_metadata_list. e.g. image pixel values, image features
+            if input_tokens.shape[1] > 1:
+                extra_kwargs = defaultdict(
+                    lambda: [None for _ in range(input_tokens.shape[0])])
+                # Not in the stage of  generation with cache
+                for i, seq_group_metadata in enumerate(
+                        seq_group_metadata_list):
+                    extra_data = seq_group_metadata.seq_data[list(
+                        seq_group_metadata.seq_data.keys())[0]].extra_data
+                    if extra_data is not None:
+                        for key, v in extra_data.items():
+                            extra_kwargs[key][i] = v
         else:
             inputs = self._prepare_decode(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
@@ -394,13 +397,11 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
-        hidden_states = model_executable(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=kv_caches,
-            input_metadata=input_metadata,
-            image_features=image_features,
-        )
+        hidden_states = model_executable(input_ids=input_tokens,
+                                         positions=input_positions,
+                                         kv_caches=kv_caches,
+                                         input_metadata=input_metadata,
+                                         **extra_kwargs)
 
         # Sample the next token.
         output = self.model.sample(
@@ -546,6 +547,7 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
         input_metadata: InputMetadata,
+        **kwargs,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
         del kv_caches
@@ -556,6 +558,13 @@ class CUDAGraphRunner:
         self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping)
         self.input_buffers["context_lens"].copy_(input_metadata.context_lens)
         self.input_buffers["block_tables"].copy_(input_metadata.block_tables)
+        for key, value in kwargs.items():
+            # Hack, Only surrport values that do not change the graph.
+            #   The image_features is only used to substitute the input_ids and won't change the graph.
+            if self.input_buffers.get(key, None) is not None:
+                self.input_buffers[key].copy_(value)
+            else:
+                self.input_buffers[key] = value
 
         # Run the graph.
         self.graph.replay()

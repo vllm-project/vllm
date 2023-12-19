@@ -109,7 +109,13 @@ class Sequence:
         prompt_token_ids: The token IDs of the prompt.
         block_size: The block size of the sequence. Should be the same as the
             block size used by the block manager and cache engine.
-        extra_data: Extra data for the multimodality models.
+        extra_data: Extra data for the multimodality models. This data will be
+            sent directly to the model.forward. e.g if three Sequence has 
+            extra_data = {'pix': [1,2] } 
+            extra_data = {'pix': [1], 'text': 'str'} 
+            extra_data = None
+            this will call model.forward(...,
+                pix=[[1,2], [1], None], text=[None, 'str', None])
     """
 
     def __init__(

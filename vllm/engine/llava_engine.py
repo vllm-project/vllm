@@ -52,13 +52,17 @@ class LLaVAEngine(LLMEngine):
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
+        # process images
+        extra_data = None
         if images is not None and len(images) > 0:
             pixel_values = self.image_processor(
                 images, return_tensors="pt")['pixel_values']
+            extra_data = {'pixel_values': pixel_values}
         else:
             pixel_values = None
 
-        # prepare prompt. expand image token and extract image features
+        # Check the validation of the imput. And expand each image token to the
+        # number of tokens per image. So the scheduler can allocate proper resources.
         num_workers = len(self.workers)
         # random select a worker
         worker = self.workers[np.random.randint(num_workers)]
@@ -71,12 +75,9 @@ class LLaVAEngine(LLMEngine):
                                         pixel_values)
         if self.parallel_config.worker_use_ray:
             outputs = ray.get(outputs)
-        processed_token_ids, image_features = outputs
+        processed_token_ids = outputs
         prompt_token_ids = processed_token_ids.tolist()
-        if image_features is not None:
-            extra_data = {'image_features': image_features}
-        else:
-            extra_data = None
+
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
