@@ -1,4 +1,5 @@
 import time
+import os
 
 # Import placement group APIs.
 from ray.util.placement_group import (
@@ -11,13 +12,52 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 # Initialize Ray.
 import ray
 
-# Create a single node Ray cluster with 2 CPUs and 2 GPUs.
-ray.init(num_cpus=2, num_gpus=1)
+@ray.remote
+class NormalActor:
+    def __init__(self, index):
+        self.index = index
+        pass
 
-# Reserve a placement group of 1 bundle that reserves 1 CPU and 1 GPU.
-pg = placement_group([{"CPU": 1}, {"CPU": 1}, {"GPU": 1}])
+    def log_message(self):
+        print("NormalActor", self.index, os.getpid())
 
-ray.get(pg.ready())
+@ray.remote
+class AllocationActor:
+    def __init__(self, pg):
+        self.placement_group = pg
+        self.a2 = NormalActor.options(
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=pg,
+                placement_group_bundle_index=1,
+            )
+        ).remote(1)
+        self.a3 = NormalActor.options(
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=pg,
+                placement_group_bundle_index=2,
+            )
+        ).remote(2)
 
-# You can look at placement group states using this API.
-print(placement_group_table(pg))
+    def log_message(self):
+        print("AllocationActor", os.getpid())
+        self.a2.log_message.remote()
+        self.a3.log_message.remote()
+
+
+def main():
+    # Create a single node Ray cluster with 2 CPUs and 2 GPUs.
+    ray.init(num_cpus=2, num_gpus=1)
+
+    # Reserve a placement group of 1 bundle that reserves 1 CPU and 1 GPU.
+    pg = placement_group([{"CPU": 1}, {"CPU": 1}, {"GPU": 1}])
+
+    ray.get(pg.ready())
+    a1 = AllocationActor.options(
+        scheduling_strategy=PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_bundle_index=0,
+        )
+    ).remote(pg)
+
+    ray.get(a1.log_message.remote())
+
