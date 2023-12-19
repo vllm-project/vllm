@@ -55,11 +55,6 @@ class FastInteractiveParser(InteractiveParser):
         )
 
 
-@functools.lru_cache(10000)
-def check_pattern_partial_match(compiled_pattern, seq):
-    return
-
-
 def get_partial_pattern_validator(pattern):
     """
     Accepts a pattern object, either lark.lexer.PatternStr or lark.lexer.PatternRE
@@ -73,8 +68,9 @@ def get_partial_pattern_validator(pattern):
             lambda seq: compiled_pattern.fullmatch(seq, partial=True) is not None
         )
     elif isinstance(pattern, PatternStr):
+        base_str = pattern.value
         return (
-            lambda seq: pattern.value.startswith(seq)
+            lambda seq: base_str.startswith(seq)
         )
     else:
         raise TypeError(f"Invalid pattern type: {type(pattern)}")
@@ -107,7 +103,6 @@ class InteractivePredictiveLALRParser:
             base_interactive_parser.lexer_thread
         )
 
-
         self.partial_seq_validator = {
             term.name: get_partial_pattern_validator(term.pattern)
             for term in self.parser.terminals
@@ -137,7 +132,7 @@ class InteractivePredictiveLALRParser:
         """
         return self.sequence_history[self.last_terminal_pos:]
 
-    def step_seq(self, sequence: str):
+    def step_seq(self, new_seq: str):
         """
         Append sequence to parser and apply state updates
         - Append the sequence to the canonical self.sequence_history
@@ -145,25 +140,24 @@ class InteractivePredictiveLALRParser:
         - Update the character position of the last complete terminal
         - Update the set of candidate terminals
         """
-        new_seq = self.sequence_history + sequence
-        self.interactive_parser.lexer_thread.state.text = new_seq
+        self._append_to_sequence(new_seq)
+
         try:
             self.interactive_parser.exhaust_lexer()
         except UnexpectedCharacters as e:
             self.last_terminal_pos = e.pos_in_stream
         else:
-            self.last_terminal_pos = len(new_seq)
+            self.last_terminal_pos = len(self.sequence_history)
 
         self._update_candidate_terminals()
 
         if not self.valid_next_terminals:
             raise ValueError(f"Invalid continuation for `{self.sequence_history}` `{sequence}`")
 
-    def _update_sequence(self, full_sequence: str):
+    def _append_to_sequence(self, new_seq: str):
         """Set the complete sequences value in the lexer and base"""
-        assert self.full_sequence.startswith(self.sequence_history)
-        self.interactive_parser.lexer_thread.state.text = full_sequence
-        self.sequence_history = full_sequence
+        self.sequence_history += new_seq
+        self.interactive_parser.lexer_thread.state.text = self.sequence_history
 
     def _update_candidate_terminals(self):
         """
@@ -188,18 +182,10 @@ class InteractivePredictiveLALRParser:
         if new_seq is None:
             return "$END" in self.valid_next_terminals
         for term in self.valid_next_terminals:
-            if term == "$END":
-                continue
-            if self.partial_seq_validator[term](self.terminal_partial_seq + new_seq):
-                return True
+            if term != "$END":
+                if self.partial_seq_validator[term](self.terminal_partial_seq + new_seq):
+                    return True
         return False
-
-
-    def get_valid_next_tokens(self, token_trie):
-        valid_node_stack = []
-        for term in self.valid_next_terminals:
-            import pdb;pdb.set_trace()
-
 
 
 def test_simple_sequence(parser):
@@ -215,7 +201,8 @@ def test_valid_next_tokens(parser):
     # random complicated json file courtesy of https://github.com/simdjson/simdjson/issues/1316#issue-748663718
     complex_json_file = '{"$schema": "http://json-schema.org/draft-04/schema#", "additionalProperties": false, "properties": {"nc:Vehicle": {"description": "A conveyance designed to carry an operator, passengers and/or cargo, over land.", "oneOf": [{"$ref": "#/definitions/nc:VehicleType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:VehicleType"}}]}, "nc:VehicleAxleQuantity": {"description": "A count of common axles of rotation of one or more wheels of a vehicle, whether power driven or freely rotating.", "oneOf": [{"$ref": "#/definitions/niem-xs:nonNegativeInteger"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:nonNegativeInteger"}}]}, "nc:VehicleMSRPAmount": {"description": "A manufacturer\'s suggested retail price of a vehicle; a price at which a manufacturer recommends a vehicle be sold.", "oneOf": [{"$ref": "#/definitions/nc:AmountType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:AmountType"}}]}, "nc:Amount": {"description": "An amount of money.", "oneOf": [{"$ref": "#/definitions/niem-xs:decimal"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:decimal"}}]}, "nc:Currency": {"description": "A data concept for a unit of money or exchange.", "oneOf": [{"anyOf": [{"$ref": "#/properties/nc:CurrencyCode"}]}, {"type": "array", "items": {"anyOf": [{"$ref": "#/properties/nc:CurrencyCode"}]}}]}, "nc:CurrencyCode": {"description": "A unit of money or exchange.", "oneOf": [{"$ref": "#/definitions/iso_4217:CurrencyCodeType"}, {"type": "array", "items": {"$ref": "#/definitions/iso_4217:CurrencyCodeType"}}]}, "nc:VehicleIdentification": {"description": "A unique identification for a specific vehicle.", "oneOf": [{"$ref": "#/definitions/nc:IdentificationType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:IdentificationType"}}]}, "nc:IdentificationID": {"description": "An identifier.", "oneOf": [{"$ref": "#/definitions/niem-xs:string"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:string"}}]}}, "definitions": {"nc:VehicleType": {"description": "A data type for a conveyance designed to carry an operator, passengers and/or cargo, over land.", "allOf": [{"$ref": "#/definitions/nc:ConveyanceType"}, {"type": "object", "properties": {"nc:VehicleAxleQuantity": {"$ref": "#/properties/nc:VehicleAxleQuantity"}, "nc:VehicleIdentification": {"$ref": "#/properties/nc:VehicleIdentification"}, "nc:VehicleMSRPAmount": {"$ref": "#/properties/nc:VehicleMSRPAmount"}}}]}, "nc:ConveyanceType": {"description": "A data type for a means of transport from place to place.", "allOf": [{"$ref": "#/definitions/_base"}, {"$ref": "#/definitions/nc:ItemType"}, {"type": "object", "properties": {}}]}, "nc:ItemType": {"description": "A data type for an article or thing.", "allOf": [{"$ref": "#/definitions/_base"}, {"type": "object", "properties": {}}]}, "nc:AmountType": {"description": "A data type for an amount of money.", "type": "object", "properties": {"nc:Amount": {"$ref": "#/properties/nc:Amount"}, "nc:Currency": {"$ref": "#/properties/nc:Currency"}}}, "iso_4217:CurrencyCodeType": {"description": "A data type for a currency that qualifies a monetary amount.", "oneOf": [{"$ref": "#/definitions/iso_4217:CurrencyCodeSimpleType"}, {"type": "object", "properties": {"rdf:value": {"$ref": "#/definitions/iso_4217:CurrencyCodeSimpleType"}}}]}, "iso_4217:CurrencyCodeSimpleType": {"type": "string", "description": "A data type for a currency that qualifies a monetary amount.", "oneOf": [{"enum": ["EUR"], "description": "Euro"}, {"enum": ["GBP"], "description": "Pound Sterling"}, {"enum": ["USD"], "description": "US Dollar"}]}, "nc:IdentificationType": {"description": "A data type for a representation of an identity.", "type": "object", "properties": {"nc:IdentificationID": {"$ref": "#/properties/nc:IdentificationID"}}}, "niem-xs:decimal": {"description": "A data type for arbitrary precision decimal numbers.", "type": "number"}, "niem-xs:nonNegativeInteger": {"description": "A data type for an integer with a minimum value of 0.", "type": "number"}, "niem-xs:string": {"description": "A data type for character strings in XML.", "type": "string"}, "_base": {"type": "object", "patternProperties": {"^ism:.*": {"type": "string"}, "^ntk:.*": {"type": "string"}}, "properties": {"@id": {"format": "uriref"}, "@base": {"format": "uriref"}}}}}'
 
-    unicode_chars = [chr(i) for i in range(256)]
+    test_chars_per_iter = 1000
+    unicode_chars = [chr(i) for i in range(test_chars_per_iter)]
 
     import time
     start = time.time()
@@ -224,7 +211,10 @@ def test_valid_next_tokens(parser):
         for ch in unicode_chars:
             parser.is_valid_next_seq(ch)
 
-    print("took", time.time() - start, "seconds to process", len(complex_json_file), "characters")
+    print("took",
+          (time.time() - start) /  (len(complex_json_file)),
+          "seconds per step with",
+          test_chars_per_iter, "characters in vocabulary")
 
 
 def main():
