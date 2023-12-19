@@ -1,6 +1,5 @@
 import collections
 from copy import deepcopy, copy
-import functools
 import os
 import regex
 from typing import Optional
@@ -12,12 +11,10 @@ from lark.lexer import Token, LexerState, PatternStr, PatternRE
 from lark.exceptions import UnexpectedCharacters, UnexpectedToken
 
 
-######################
+#########################################################################
 # Fix Lark Speed Issue
-######################
-"""
-https://github.com/lark-parser/lark/issues/1142#issuecomment-1863209804
-"""
+# https://github.com/lark-parser/lark/issues/1142#issuecomment-1863209804
+#########################################################################
 class FastParserState(ParserState):
     copy_memo = {}
 
@@ -56,9 +53,8 @@ class FastInteractiveParser(InteractiveParser):
             copy(self.parser_state),
             copy(self.lexer_thread),
         )
-######################
-######################
-######################
+#########################################################################
+#########################################################################
 
 
 def get_partial_pattern_validator(pattern):
@@ -272,6 +268,7 @@ class NextTokenValidator:
         )
         self.token_trie = TokenTrie(tokenizer)
 
+        # TODO: threading
         if num_threads is None:
             self.num_threads = os.cpu_count() // 2
 
@@ -311,7 +308,6 @@ class NextTokenValidator:
             self.token_trie.token_to_id_set[tok]
             for tok in self.valid_token_str_set
         ])
-
 
 
 def test_next_token_validator_simple():
