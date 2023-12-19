@@ -17,6 +17,8 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response
+from lmformatenforcer.integrations.vllm import build_vllm_logits_processor
+from lmformatenforcer import JsonSchemaParser, RegexParser
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -522,6 +524,21 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             skip_special_tokens=request.skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
+
+        formatters = []
+        if request.regex_format:
+            regex_formater = build_vllm_logits_processor(
+                tokenizer, RegexParser(request.regex_format))
+            formatters.append(regex_formater)
+
+        if request.json_format:
+            json_formater = build_vllm_logits_processor(
+                tokenizer,
+                JsonSchemaParser(request.json_format if isinstance(
+                    request.json_format, str) else None))
+            formatters.append(json_formater)
+
+        sampling_params.logits_processors = formatters
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 

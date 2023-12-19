@@ -106,6 +106,8 @@ class CompletionRequest(BaseModel):
     spaces_between_special_tokens: Optional[bool] = True
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    json_format: Union[bool, str, None] = None
+    regex_format: Union[str, None] = None
 
 
 class LogProbs(BaseModel):
