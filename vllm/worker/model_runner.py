@@ -305,11 +305,9 @@ class ModelRunner:
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
 
-        selected_token_indices = async_h2d(
-            selected_token_indices,
-            dtype=torch.long,
-            pin_memory=not self.in_wsl
-        )
+        selected_token_indices = async_h2d(selected_token_indices,
+                                           dtype=torch.long,
+                                           pin_memory=not self.in_wsl)
         categorized_sample_indices = {
             t: async_h2d(seq_ids, dtype=torch.int, pin_memory=not self.in_wsl)
             for t, seq_ids in categorized_sample_indices.items()
@@ -537,14 +535,12 @@ def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     return x + [pad] * (max_len - len(x))
 
 
-def _make_tensor_with_pad(
-    x: List[List[int]],
-    max_len: int,
-    pad: int,
-    dtype: torch.dtype,
-    device: Union[str, torch.device] = "cuda",
-    pin_memory=False
-) -> torch.Tensor:
+def _make_tensor_with_pad(x: List[List[int]],
+                          max_len: int,
+                          pad: int,
+                          dtype: torch.dtype,
+                          device: Union[str, torch.device] = "cuda",
+                          pin_memory=False) -> torch.Tensor:
     padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
     return torch.tensor(padded_x,
                         dtype=dtype,
