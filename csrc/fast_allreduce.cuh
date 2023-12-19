@@ -335,7 +335,7 @@ class FastAllreduce {
   std::unordered_map<void *, RankData *> buffers_;
   Metadata *meta_;
 
-  RankData *d_rank_data_base_, *d_rank_data_end_;
+  RankData *d_rank_data_start_, *d_rank_data_base_, *d_rank_data_end_;
   std::vector<void *> graph_unreg_buffers_;
   std::vector<void *> ipc_handles_;
 
@@ -367,7 +367,8 @@ class FastAllreduce {
       sg_.signals[i] = &rank_meta->sg;
     }
     size_t rank_data_sz = 16 * 1024 * 1024;
-    CUDACHECK(cudaMalloc(&d_rank_data_base_, rank_data_sz));
+    CUDACHECK(cudaMalloc(&d_rank_data_start_, rank_data_sz));
+    d_rank_data_base_ = d_rank_data_start_;
     d_rank_data_end_ = d_rank_data_base_ + rank_data_sz / sizeof(RankData);
   }
 
@@ -498,6 +499,7 @@ class FastAllreduce {
     for (auto ptr : ipc_handles_) {
       CUDACHECK(cudaIpcCloseMemHandle(ptr));
     }
+    CUDACHECK(cudaFree(d_rank_data_start_));
   }
 };
 
