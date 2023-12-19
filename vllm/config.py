@@ -359,9 +359,7 @@ class ParallelConfig:
                 "worker_use_ray has to be True in order to use "
                 "use_ray_compiled_dag config. "
                 f"use_ray_compiled_dag={self.use_ray_compiled_dag} "
-                f"worker_use_ray={self.worker_use_ray}"
-            )
-
+                f"worker_use_ray={self.worker_use_ray}")
 
     def _verify_args(self) -> None:
         if self.pipeline_parallel_size > 1:

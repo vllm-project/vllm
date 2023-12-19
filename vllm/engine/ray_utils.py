@@ -3,7 +3,6 @@ from typing import Optional, Tuple, TYPE_CHECKING
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import get_open_port, is_hip
-from vllm.sequence import SamplerOutput, ExecuteModelData
 import pickle
 
 logger = init_logger(__name__)
@@ -42,7 +41,6 @@ try:
             )
             output = pickle.dumps(output)
             return output
-
 
 except ImportError as e:
     logger.warning(f"Failed to import Ray with {e!r}. "

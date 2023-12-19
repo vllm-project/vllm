@@ -414,6 +414,7 @@ SamplerOutput = List[SequenceGroupOutput]
 
 
 class ExecuteModelData:
+
     def __init__(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],

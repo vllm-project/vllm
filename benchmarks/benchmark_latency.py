@@ -16,16 +16,14 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(
-        model=args.model,
-        tokenizer=args.tokenizer,
-        quantization=args.quantization,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        enforce_eager=args.enforce_eager,
-        use_ray_compiled_dag=args.use_ray_compiled_dag
-    )
+    llm = LLM(model=args.model,
+              tokenizer=args.tokenizer,
+              quantization=args.quantization,
+              tensor_parallel_size=args.tensor_parallel_size,
+              trust_remote_code=args.trust_remote_code,
+              dtype=args.dtype,
+              enforce_eager=args.enforce_eager,
+              use_ray_compiled_dag=args.use_ray_compiled_dag)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -66,7 +64,9 @@ def main(args: argparse.Namespace):
     if args.profile:
         profile_dir = args.profile_result_dir
         if not profile_dir:
-            profile_dir = Path(".") / "vllm_benchmark_result" / f"latency_result_{time.time()}"
+            profile_dir = Path(
+                "."
+            ) / "vllm_benchmark_result" / f"latency_result_{time.time()}"
         print(f"Profiling (results will be saved to '{profile_dir}')...")
         run_to_completion(profile_dir=args.profile_result_dir)
         return
@@ -124,13 +124,10 @@ if __name__ == '__main__':
         '--profile-result-dir',
         type=str,
         default=None,
-        help=(
-            'path to save the pytorch profiler output. Can be visualized '
-            'with ui.perfetto.dev or Tensorboard.'
-        ))
-    parser.add_argument(
-        '--use-ray-compiled-dag',
-        action='store_true',
-        help='Use an experimental ray compiled DAG API')
+        help=('path to save the pytorch profiler output. Can be visualized '
+              'with ui.perfetto.dev or Tensorboard.'))
+    parser.add_argument('--use-ray-compiled-dag',
+                        action='store_true',
+                        help='Use an experimental ray compiled DAG API')
     args = parser.parse_args()
     main(args)

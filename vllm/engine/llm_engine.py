@@ -790,12 +790,11 @@ class LLMEngine:
         assert self.parallel_config.worker_use_ray
         assert self.parallel_config.use_ray_compiled_dag
 
-        all_outputs = []
         with InputNode() as input_data:
             forward_dag = MultiOutputNode([
-                worker.execute_model_compiled_dag_remote.bind(
-                    input_data
-                ) for worker in self.workers])
+                worker.execute_model_compiled_dag_remote.bind(input_data)
+                for worker in self.workers
+            ])
         return forward_dag.experimental_compile()
 
     def _execute_model_compiled_dag(
@@ -817,7 +816,9 @@ class LLMEngine:
         try:
             # TODO(sang): Is it necessary to check all outputs
             # are the same? It requires 3X unnecessary deserialization.
-            all_outputs = [pickle.loads(chan.begin_read()) for chan in output_channels]
+            all_outputs = [
+                pickle.loads(chan.begin_read()) for chan in output_channels
+            ]
             output = all_outputs[0]
             for other_output in all_outputs[1:]:
                 assert output == other_output
