@@ -1,3 +1,7 @@
+from copy import deepcopy, copy
+import functools
+import os
+import regex
 from typing import Optional
 
 from lark import Lark
@@ -6,10 +10,6 @@ from lark.parsers.lalr_parser_state import ParserState
 from lark.lexer import Token, LexerState, PatternStr, PatternRE
 from lark.exceptions import UnexpectedCharacters, UnexpectedToken
 
-import regex
-
-from copy import deepcopy, copy
-import functools
 
 
 class FastParserState(ParserState):
@@ -81,8 +81,8 @@ class InteractivePredictiveLALRParser:
     Parser which consumes an EBNF grammar and provides helpers to determine allowable language model tokens
 
     Interfaces:
-    - step_seq(sequence): Update the parser with a new sequence to append
-    - is_valid_next_seq(sequence): Determine whether a candidate sequence is valid
+    - step_seq(new_seq): Update the parser with a new sequence to append
+    - is_valid_next_seq(new_seq): Determine whether a candidate sequence is valid
 
     Core components for terminal level, and sub-terminal level processing:
     - 1) Lark LALR parser: Applies state transitions, determining set of valid next-terminals
@@ -186,6 +186,60 @@ class InteractivePredictiveLALRParser:
                 if self.partial_seq_validator[term](self.terminal_partial_seq + new_seq):
                     return True
         return False
+
+
+class TokenTrie:
+    def __init__(self, tokenizer):
+        """
+        Trie structure for efficiently finding tokens which are suffixes of other sequences
+        """
+        self.norm_vocab = {}
+        for token_id in tokenizer.vocab.values():
+            norm_token = tokenizer.decode([tokenizer.bos_token_id, token_id])[len(tokenizer.bos_token):]
+            self.norm_vocab[norm_token] = token_id
+
+        self.trie = {}
+        for word in self.norm_vocab:
+            current_dict = self.trie
+            for char in word:
+                if char not in current_dict:
+                    current_dict[char] = {}
+                current_dict = current_dict[char]
+            current_dict['is_complete_token'] = True
+
+    def get_next_level_token_prefixes(self, subprefix: str, legal_chars: Optional[set[str]] = None):
+        """
+        Traverse the trie starting from a specified subprefix to identify all child nodes that represent
+        the longest possible strings without omitting any nodes that contain complete tokens.
+        """
+        def _traverse(node, current_prefix):
+            # Base case: if the current node is a complete token or has multiple branches
+            if 'is_complete_token' in node or len(node) > 1:
+                next_level_prefixes.add(current_prefix)
+                return
+
+            # Recursive case: continue traversal
+            for char, next_node in node.items():
+                if char != 'is_complete_token':
+                    _traverse(next_node, current_prefix + char)
+
+        # Start from the node corresponding to the subprefix
+        current_node = self.trie
+        for char in subprefix:
+            if char not in current_node:
+                return []  # Subprefix not in trie
+            current_node = current_node[char]
+
+        next_level_prefixes = set()
+        # Filter children based on legal_chars if provided
+        children = current_node.items() if not legal_chars else ((char, node) for char, node in current_node.items() if char in legal_chars)
+
+        # Traverse for each child
+        for char, child_node in children:
+            _traverse(child_node, subprefix + char)
+
+        return list(next_level_prefixes)
+
 
 
 def test_simple_sequence(parser):
