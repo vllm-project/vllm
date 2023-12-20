@@ -40,7 +40,7 @@ class SamplingMetadata:
         self.categorized_sample_indices = categorized_sample_indices
         self.perform_sampling = perform_sampling
 
-        self.num_prompts = len(prompt_lens)
+        self.num_prompts = len(prompt_lens) if prompt_lens is not None else -1
 
     def __repr__(self) -> str:
         return (

@@ -409,7 +409,7 @@ class ModelRunner:
                 *py_data["selected_token_indices_size"],
                 dtype=torch.long,
                 device="cuda")
-
+            broadcast(selected_token_indices, src=0)
             input_metadata = InputMetadata(
                 is_prompt=py_data["is_prompt"],
                 slot_mapping=slot_mapping,
