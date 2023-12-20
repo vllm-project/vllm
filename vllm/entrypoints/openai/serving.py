@@ -76,9 +76,8 @@ class OpenAIToolsPrompter:
                     request.messages = text_inject + request.messages
                 elif isinstance(request.messages,
                                 List) and len(request.messages) >= 1:
-                    request.messages[0][
-                        "content"] = text_inject + request.messages[0][
-                            "content"]
+                    request.messages[
+                        0].content = text_inject + request.messages[0].content
 
 
 class PromptCapture:
@@ -248,7 +247,7 @@ class OpenAIServing:
         if request.add_generation_prompt:
             return self.response_role
         else:
-            return request.messages[-1]["role"]
+            return request.messages[-1].role
 
     async def chat_completion_stream_generator(
             self, request: ChatCompletionRequest,
@@ -275,11 +274,11 @@ class OpenAIServing:
         # Send response to echo the input portion of the last message
         if request.echo:
             last_msg_content = ""
-            if request.messages and isinstance(
-                    request.messages, list) and request.messages[-1].get(
-                        "content") and request.messages[-1].get(
-                            "role") == role:
-                last_msg_content = request.messages[-1]["content"]
+            if request.messages and \
+                    isinstance(request.messages, list) and \
+                    request.messages[-1].content and \
+                    request.messages[-1].role == role:
+                last_msg_content = request.messages[-1].content
             if last_msg_content:
                 for i in range(request.n):
                     choice_data = ChatCompletionResponseStreamChoice(
@@ -497,11 +496,11 @@ class OpenAIServing:
 
         if request.echo:
             last_msg_content = ""
-            if request.messages and isinstance(
-                    request.messages, list) and request.messages[-1].get(
-                        "content") and request.messages[-1].get(
-                            "role") == role:
-                last_msg_content = request.messages[-1]["content"]
+            if request.messages and \
+                    isinstance(request.messages, list) and \
+                    request.messages[-1].content and \
+                    request.messages[-1].role == role:
+                last_msg_content = request.messages[-1].content
 
             for choice in choices:
                 full_message = last_msg_content + choice.message.content

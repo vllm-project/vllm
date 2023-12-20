@@ -52,6 +52,17 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class FunctionCall(BaseModel):
+    name: str
+    arguments: str
+
+
+class ToolCallsMessage(BaseModel):
+    id: str
+    type: str
+    function: FunctionCall
+
+
 class ChatCompletionFunctionDef(BaseModel):
     name: str
     description: str
@@ -64,9 +75,37 @@ class ChatCompletionToolParam(BaseModel):
     function: ChatCompletionFunctionDef = None
 
 
+class ChatCompletionSystemMessage(BaseModel):
+    role: str
+    content: str
+    name: Optional[str] = None
+
+
+class ChatCompletionUserMessage(BaseModel):
+    content: Union[str, List[str]]
+    role: str
+    name: Optional[str] = None
+
+
+class ChatCompletionAssistantMessage(BaseModel):
+    content: Optional[str] = None
+    role: str
+    name: Optional[str] = None
+    tool_calls: Optional[List[ToolCallsMessage]] = None
+
+
+class ChatCompletionToolMessage(BaseModel):
+    content: str
+    role: str
+    tool_call_id: str
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: Union[str, List[Dict[str, str]]]
+    messages: Union[str, List[ChatCompletionSystemMessage],
+                    List[ChatCompletionUserMessage],
+                    List[ChatCompletionAssistantMessage],
+                    List[ChatCompletionToolMessage]]
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -159,17 +198,6 @@ class CompletionStreamResponse(BaseModel):
     model: str
     choices: List[CompletionResponseStreamChoice]
     usage: Optional[UsageInfo]
-
-
-class FunctionCall(BaseModel):
-    name: str
-    arguments: str
-
-
-class ToolCallsMessage(BaseModel):
-    id: str
-    type: str
-    function: FunctionCall
 
 
 class ChatMessage(BaseModel):
