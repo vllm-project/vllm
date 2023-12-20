@@ -53,8 +53,8 @@ class Sampler(nn.Module):
         # Prepare sampling tensors with pinned memory to avoid
         # blocking.
         (sampling_tensors, do_penalties, do_top_p_top_k,
-            do_min_p) = SamplingTensors.from_sampling_metadata(
-                sampling_metadata, vocab_size, logits.device, logits.dtype)
+         do_min_p) = SamplingTensors.from_sampling_metadata(
+             sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         # Apply presence and frequency penalties.
         if do_penalties:
