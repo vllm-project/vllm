@@ -305,11 +305,11 @@ class ModelRunner:
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
 
-        selected_token_indices = async_h2d(selected_token_indices,
+        selected_token_indices = _async_h2d(selected_token_indices,
                                            dtype=torch.long,
                                            pin_memory=not self.in_wsl)
         categorized_sample_indices = {
-            t: async_h2d(seq_ids, dtype=torch.int, pin_memory=not self.in_wsl)
+            t: _async_h2d(seq_ids, dtype=torch.int, pin_memory=not self.in_wsl)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
