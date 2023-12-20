@@ -30,7 +30,6 @@ class Sampler(nn.Module):
     def __init__(self, vocab_size: int) -> None:
         super().__init__()
         self.vocab_size = vocab_size
-        self._copy_stream: torch.cuda.Stream = torch.cuda.Stream()
 
     def forward(
         self,
@@ -51,14 +50,10 @@ class Sampler(nn.Module):
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
 
-        # Prepare sampling tensors in another stream to overlap
-        # CPU<->GPU data transfer with GPU computation in forward pass.
-        with torch.cuda.stream(self._copy_stream):
-            (sampling_tensors, do_penalties, do_top_p_top_k,
-             do_min_p) = SamplingTensors.from_sampling_metadata(
-                 sampling_metadata, vocab_size, logits.device, logits.dtype)
-
-        torch.cuda.current_stream().wait_stream(self._copy_stream)
+        # Prepare sampling tensors with pinned memory to avoid blocking.
+        (sampling_tensors, do_penalties, do_top_p_top_k,
+         do_min_p) = SamplingTensors.from_sampling_metadata(
+             sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         # Apply presence and frequency penalties.
         if do_penalties:
