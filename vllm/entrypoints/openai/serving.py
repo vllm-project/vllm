@@ -93,7 +93,6 @@ class PromptCapture:
         calls_list = self.content.split(prompter.func_call_token())
         self.calls_list = []
         for v_call in calls_list:
-            print(v_call)
             if len(v_call):
                 try:
                     call_dict = json.loads(v_call)
@@ -357,7 +356,7 @@ class OpenAIServing:
                                         index=i,
                                         delta=DeltaMessage(
                                             content=None,
-                                            tool_calls=tool_call),
+                                            tool_calls=[tool_call]),
                                         finish_reason="tool_calls")
                                     chunk = ChatCompletionStreamResponse(
                                         id=request_id,
@@ -854,7 +853,6 @@ class OpenAIServing:
                             code=status_code.value).json(ensure_ascii=False)
 
     async def _check_model(self, request) -> Optional[ErrorResponse]:
-        return
         if request.model == self.served_model:
             return
         return self.create_error_response(

@@ -203,7 +203,7 @@ class ToolCallsDelta(BaseModel):
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
-    tool_calls: Optional[ToolCallsDelta] = None
+    tool_calls: Optional[List[ToolCallsDelta]] = None
 
 
 class ChatCompletionResponseStreamChoice(BaseModel):

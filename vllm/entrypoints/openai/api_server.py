@@ -24,6 +24,7 @@ openai_serving: OpenAIServing = None
 logger = init_logger(__name__)
 app = fastapi.FastAPI()
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
@@ -86,10 +87,12 @@ app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 async def validation_exception_handler(_, exc):
     return openai_serving.create_error_response(message=str(exc))
 
+
 @app.get("/health")
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
+
 
 @app.get("/v1/models")
 async def show_available_models():
@@ -97,19 +100,25 @@ async def show_available_models():
     return JSONResponse(content=models.dict())
     pass
 
+
 @app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
-    generator = await openai_serving.create_chat_completion(request, raw_request)
+async def create_chat_completion(request: ChatCompletionRequest,
+                                 raw_request: Request):
+    generator = await openai_serving.create_chat_completion(
+        request, raw_request)
     if request.stream and not isinstance(generator, ErrorResponse):
-        return StreamingResponse(content=generator, media_type="text/event-stream")
+        return StreamingResponse(content=generator,
+                                 media_type="text/event-stream")
     else:
         return JSONResponse(content=generator.dict())
+
 
 @app.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
     generator = await openai_serving.create_completion(request, raw_request)
     if request.stream and not isinstance(generator, ErrorResponse):
-        return StreamingResponse(content=generator, media_type="text/event-stream")
+        return StreamingResponse(content=generator,
+                                 media_type="text/event-stream")
     else:
         return JSONResponse(content=generator.dict())
 
@@ -136,8 +145,10 @@ if __name__ == "__main__":
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     enable_tools = True
 
-    openai_tools_prompter = OpenAIToolsPrompter() if args.enable_api_tools else None
-    openai_serving = OpenAIServing(engine, served_model, args.response_role, args.chat_template, openai_tools_prompter)
+    openai_tools_prompter = OpenAIToolsPrompter(
+    ) if args.enable_api_tools else None
+    openai_serving = OpenAIServing(engine, served_model, args.response_role,
+                                   args.chat_template, openai_tools_prompter)
 
     # Register labels for metrics
     add_global_metrics_labels(model_name=engine_args.model)
