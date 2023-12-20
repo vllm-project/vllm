@@ -541,7 +541,7 @@ def _make_tensor_with_pad(
     pad: int,
     dtype: torch.dtype,
     device: Union[str, torch.device] = "cuda",
-    pin_memory=False,
+    pin_memory: bool = False,
 ) -> torch.Tensor:
     padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
     return torch.tensor(padded_x,
