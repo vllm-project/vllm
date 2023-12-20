@@ -220,11 +220,25 @@ class TokenTrie:
                 current_dict = current_dict[char]
             current_dict[self.IS_TOKEN] = True
 
-    def get_next_level_token_prefixes(self, subprefix: str, _node=None):
+        self._next_level_token_prefixes_cache = {}
+
+    def get_next_level_token_prefixes(self, subprefix: str):
+        if subprefix not in self._next_level_token_prefixes_cache:
+            self._next_level_token_prefixes_cache[subprefix] = (
+                self.get_next_level_token_prefixes_uncached(subprefix)
+            )
+        return self._next_level_token_prefixes_cache[subprefix]
+
+    def get_next_level_token_prefixes_uncached(self, subprefix: str, _node=None):
         """
         Traverse the trie starting from a specified subprefix to identify all child nodes that represent
         the longest possible strings without omitting any nodes that contain complete tokens.
         """
+        # cache
+        if _node is None:
+            if subprefix in self._next_level_token_prefixes_cache:
+                return self._next_level_token_prefixes_cache[subprefix]
+
         # if not first level of recursion, and at a branching point or is a token, or return self
         if _node is not None and (len(_node) > 1 or self.IS_TOKEN in _node):
             return {subprefix}
@@ -241,7 +255,11 @@ class TokenTrie:
         results = set()
         for char, next_node in _node.items():
             if char != self.IS_TOKEN:
-                results |= self.get_next_level_token_prefixes(subprefix + char, _node=next_node)
+                results |= self.get_next_level_token_prefixes_uncached(
+                    subprefix + char,
+                    _node=next_node
+                )
+
         return results
 
     def is_token(self, seq):
