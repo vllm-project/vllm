@@ -228,13 +228,15 @@ vllm_extension_sources = [
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
 
-vllm_extension = CUDAExtension(name="vllm._C",
-                               sources=vllm_extension_sources,
-                               extra_compile_args={
-                                   "cxx": CXX_FLAGS,
-                                   "nvcc": NVCC_FLAGS,
-                               },
-                               libraries=["cuda"])
+vllm_extension = CUDAExtension(
+    name="vllm._C",
+    sources=vllm_extension_sources,
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+    libraries=["cuda"],
+)
 ext_modules.append(vllm_extension)
 
 
