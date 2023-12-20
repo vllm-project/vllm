@@ -129,17 +129,23 @@ class CacheEngine:
                 event = self.events[i]
                 event.record(stream=self.cache_stream)
 
-    def swap_in(self, src_block_numbers: List[int], dst_block_numbers: List[int]) -> None:
-        self._swap(self.cpu_cache, self.gpu_cache, src_block_numbers, dst_block_numbers)
+    def swap_in(self, src_block_numbers: List[int],
+                dst_block_numbers: List[int]) -> None:
+        self._swap(self.cpu_cache, self.gpu_cache, src_block_numbers,
+                   dst_block_numbers)
 
-    def swap_out(self, src_block_numbers: List[int], dst_block_numbers: List[int]) -> None:
-        self._swap(self.gpu_cache, self.cpu_cache, src_block_numbers, dst_block_numbers)
+    def swap_out(self, src_block_numbers: List[int],
+                 dst_block_numbers: List[int]) -> None:
+        self._swap(self.gpu_cache, self.cpu_cache, src_block_numbers,
+                   dst_block_numbers)
 
-    def copy(self, src_block_numbers: List[int], dst_block_numbers: List[int]) -> None:
+    def copy(self, src_block_numbers: List[int],
+             dst_block_numbers: List[int]) -> None:
         key_caches = [key_cache for key_cache, _ in self.gpu_cache]
         value_caches = [value_cache for _, value_cache in self.gpu_cache]
         # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
-        cache_ops.copy_blocks(key_caches, value_caches, src_block_numbers, dst_block_numbers)
+        cache_ops.copy_blocks(key_caches, value_caches, src_block_numbers,
+                              dst_block_numbers)
 
     @staticmethod
     def get_cache_block_size(

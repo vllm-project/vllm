@@ -9,13 +9,13 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast,
-    broadcast_object_list)
+    broadcast, broadcast_object_list)
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
+
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -46,7 +46,7 @@ class Worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
         self.model_runner = ModelRunner(model_config, parallel_config,
-                                        scheduler_config)
+                                        scheduler_config, is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None
@@ -160,7 +160,7 @@ class Worker:
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
-    ) -> SamplerOutput:
+    ) -> Optional[SamplerOutput]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             assert blocks_to_swap_in is not None
@@ -176,8 +176,10 @@ class Worker:
             for src, dst_list in blocks_to_copy.items():
                 copy_src.extend([src] * len(dst_list))
                 copy_dst.extend(dst_list)
-            swapping_block_numbers = [swap_in_src, swap_in_dst, swap_out_src,
-                                      swap_out_dst, copy_src, copy_dst]
+            swapping_block_numbers = [
+                swap_in_src, swap_in_dst, swap_out_src, swap_out_dst, copy_src,
+                copy_dst
+            ]
             broadcast_object_list(swapping_block_numbers, src=0)
         else:
             swapping_block_numbers = [None] * 6

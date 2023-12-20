@@ -1,7 +1,8 @@
 import copy
 from collections import defaultdict
 import time
-from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Union)
+from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
+                    Union)
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -635,14 +636,12 @@ class LLMEngine:
         # Execute the model.
         all_outputs = self._run_workers(
             "execute_model",
-            seq_group_metadata_list=seq_group_metadata_list,
             driver_kwargs={
                 "seq_group_metadata_list": seq_group_metadata_list,
                 "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
                 "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                 "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-            }
-        )
+            })
 
         # The outputs from all the workers are the same, so we just use the
         # first one from the driver worker.
@@ -801,8 +800,8 @@ class LLMEngine:
             driver_kwargs = kwargs
 
         # Start the driver worker after all the ray workers.
-        driver_worker_output = getattr(self.driver_worker, method)(
-            *driver_args, **driver_kwargs)
+        driver_worker_output = getattr(self.driver_worker,
+                                       method)(*driver_args, **driver_kwargs)
 
         # Get the results of the ray workers.
         if self.workers:

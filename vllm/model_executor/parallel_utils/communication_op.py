@@ -58,6 +58,7 @@ def broadcast(input_, src=0):
     torch.distributed.broadcast(input_, src=src)
     return input_
 
+
 def broadcast_object_list(obj_list, src=0):
     """Broadcast the input object list."""
     world_size = torch.distributed.get_world_size
