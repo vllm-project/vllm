@@ -334,12 +334,14 @@ class ParallelConfig:
         disable_fast_allreduce: Only applicable if enforce_eage is False and using tensor parallelism. Whether to disable fast allreduce path
     """
 
-    def __init__(self,
-                 pipeline_parallel_size: int,
-                 tensor_parallel_size: int,
-                 worker_use_ray: bool,
-                 max_parallel_loading_workers: Optional[int] = None,
-                 disable_fast_allreduce=False) -> None:
+    def __init__(
+        self,
+        pipeline_parallel_size: int,
+        tensor_parallel_size: int,
+        worker_use_ray: bool,
+        max_parallel_loading_workers: Optional[int] = None,
+        disable_fast_allreduce: bool = False,
+    ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
