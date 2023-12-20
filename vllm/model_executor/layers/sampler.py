@@ -50,8 +50,7 @@ class Sampler(nn.Module):
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
 
-        # Prepare sampling tensors with pinned memory to avoid
-        # blocking.
+        # Prepare sampling tensors with pinned memory to avoid blocking.
         (sampling_tensors, do_penalties, do_top_p_top_k,
          do_min_p) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
