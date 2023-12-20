@@ -1,7 +1,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -52,6 +52,18 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class ChatCompletionFunctionDef(BaseModel):
+    name: str
+    description: str
+    parameters: Optional[Any] = None
+    # See : https://json-schema.org/understanding-json-schema/reference/object
+
+
+class ChatCompletionToolParam(BaseModel):
+    type: str = "function"
+    function: ChatCompletionFunctionDef = None
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: Union[str, List[Dict[str, str]]]
@@ -77,6 +89,8 @@ class ChatCompletionRequest(BaseModel):
     echo: Optional[bool] = False
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    tools: Optional[List[ChatCompletionToolParam]] = None
+    tool_choice: Optional[str] = None
 
 
 class CompletionRequest(BaseModel):
@@ -147,15 +161,27 @@ class CompletionStreamResponse(BaseModel):
     usage: Optional[UsageInfo]
 
 
+class FunctionCall(BaseModel):
+    name: str
+    arguments: str
+
+
+class ToolCallsMessage(BaseModel):
+    id: str
+    type: str
+    function: FunctionCall
+
+
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Optional[str] = None
+    tool_calls: Optional[List[ToolCallsMessage]] = None
 
 
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -167,15 +193,23 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo
 
 
+class ToolCallsDelta(BaseModel):
+    index: int
+    id: str
+    type: str
+    function: FunctionCall
+
+
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    tool_calls: Optional[ToolCallsDelta] = None
 
 
 class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):

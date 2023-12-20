@@ -15,7 +15,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import add_global_metrics_labels
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest, ErrorResponse
-from vllm.entrypoints.openai.serving import OpenAIServing
+from vllm.entrypoints.openai.serving import OpenAIServing, OpenAIToolsPrompter
 from vllm.logger import init_logger
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -56,6 +56,10 @@ def parse_args():
                         help="The file path to the chat template, "
                         "or the template in single-line form "
                         "for the specified model")
+    parser.add_argument("--enable-api-tools",
+                        action="store_true",
+                        help="Enable OpenAI-like tools API "
+                        "(only function calls are currently supported)")
     parser.add_argument("--response-role",
                         type=str,
                         default="assistant",
@@ -130,8 +134,10 @@ if __name__ == "__main__":
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
+    enable_tools = True
 
-    openai_serving = OpenAIServing(engine, served_model, args.response_role, args.chat_template)
+    openai_tools_prompter = OpenAIToolsPrompter() if args.enable_api_tools else None
+    openai_serving = OpenAIServing(engine, served_model, args.response_role, args.chat_template, openai_tools_prompter)
 
     # Register labels for metrics
     add_global_metrics_labels(model_name=engine_args.model)
