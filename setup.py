@@ -237,6 +237,24 @@ vllm_extension = CUDAExtension(
 )
 ext_modules.append(vllm_extension)
 
+autogptq_extentions = [
+    CUDAExtension(
+        "autogptq_cuda_64",
+        [
+            "csrc/quantization/gptq/autogptq_cuda_64.cpp",
+            "csrc/quantization/gptq//autogptq_cuda_kernel_64.cu"
+        ]
+    ),
+    CUDAExtension(
+        "autogptq_cuda_256",
+        [
+            "csrc/quantization/gptq/autogptq_cuda_256.cpp",
+            "csrc/quantization/gptq/autogptq_cuda_kernel_256.cu"
+        ]
+    )
+]
+ext_modules.extend(autogptq_extentions)
+
 
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
