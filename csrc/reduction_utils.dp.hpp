@@ -26,7 +26,7 @@ template<typename T>
 __inline__ T warpReduceSum(T val,const sycl::nd_item<3> &item_ct1) {
 #pragma unroll
   for (int mask = 16; mask > 0; mask >>= 1)
-    val += dpct::experimental::permute_sub_group_by_xor(0xffffffff, item_ct1.get_sub_group(), val, mask, 32) 
+    val += dpct::experimental::permute_sub_group_by_xor(0xffffffff, item_ct1.get_sub_group(), val, mask, 32); 
     //val += __shfl_xor_sync(0xffffffff, val, mask, 32);
   return val;
 }
