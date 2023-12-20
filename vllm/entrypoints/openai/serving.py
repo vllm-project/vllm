@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, LogProbs,
     ModelCard, ModelList, ModelPermission, UsageInfo, ChatCompletionToolParam,
-    ToolCallsDelta, ToolCallsMessage, FunctionCall, ErrorResponse)
+    ToolCallsDelta, ToolCallsMessage, FunctionCall, ChatCompletionAssistantMessage, ErrorResponse)
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -42,6 +42,12 @@ class OpenAIToolsPrompter:
     @classmethod
     def func_call_token(cls) -> str:
         return "!function_call:"
+
+    def to_ChatContent(self, tool_calls: [ToolCallsMessage]) -> str:
+        text = ""
+        for call in tool_calls:
+            text += call.function.name + " was called with arguments : " + str(call.function.arguments) + "\n"
+        return text
 
     def inject_prompt(self, request: ChatCompletionRequest):
         """ Tested with :
@@ -192,6 +198,16 @@ class OpenAIServing:
 
         if self.openai_tools_prompter is not None:
             self.openai_tools_prompter.inject_prompt(request)
+
+            # FIXME : As on dec 2023, the tokenizer only accept "role" and "content" attributes.
+            # FIXME : So we manually copy other attributes into "content" when needed.
+            for m in request.messages:
+                if isinstance(m, ChatCompletionAssistantMessage):
+                    if m.tool_calls is not None:
+                        if m.content is None:
+                            m.content = self.openai_tools_prompter.to_ChatContent(m.tool_calls)
+                        else:
+                            m.content += "\n" + self.openai_tools_prompter.to_ChatContent(m.tool_calls)
 
         try:
             prompt = self.tokenizer.apply_chat_template(
