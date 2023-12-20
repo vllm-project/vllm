@@ -12,7 +12,9 @@
 void swap_blocks(
   torch::Tensor& src,
   torch::Tensor& dst,
-  const std::map<int64_t, int64_t>& block_mapping) {
+  const std::vector<int64_t>& src_block_numbers,
+  const std::vector<int64_t>& dst_block_numbers) {
+  assert(src_block_numbers.size() == dst_block_numbers.size());
   torch::Device src_device = src.device();
   torch::Device dst_device = dst.device();
   cudaMemcpyKind memcpy_type;
@@ -35,9 +37,9 @@ void swap_blocks(
   const int64_t block_size_in_bytes = src.element_size() * src[0].numel();
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // NOTE(woosuk): This can be slow if the number of blocks is large.
-  for (const auto& pair : block_mapping) {
-    int64_t src_block_number = pair.first;
-    int64_t dst_block_number = pair.second;
+  for (int64_t i = 0; i < src_block_numbers.size(); ++i) {
+    int64_t src_block_number = src_block_numbers[i];
+    int64_t dst_block_number = dst_block_numbers[i];
     int64_t src_offset = src_block_number * block_size_in_bytes;
     int64_t dst_offset = dst_block_number * block_size_in_bytes;
     cudaMemcpyAsync(
@@ -85,7 +87,8 @@ __global__ void copy_blocks_kernel(
 void copy_blocks(
   std::vector<torch::Tensor>& key_caches,
   std::vector<torch::Tensor>& value_caches,
-  const std::map<int64_t, std::vector<int64_t>>& block_mapping) {
+  const std::vector<int64_t>& src_block_numbers,
+  const std::vector<int64_t>& dst_block_numbers) {
   int num_layers = key_caches.size();
   TORCH_CHECK(num_layers == value_caches.size());
   if (num_layers == 0) {
@@ -104,12 +107,10 @@ void copy_blocks(
   }
   // Create block mapping array.
   std::vector<int64_t> block_mapping_vec;
-  for (const auto& pair : block_mapping) {
-    int64_t src_block_number = pair.first;
-    for (int64_t dst_block_number : pair.second) {
-      block_mapping_vec.push_back(src_block_number);
-      block_mapping_vec.push_back(dst_block_number);
-    }
+  assert(src_block_numbers.size() == dst_block_numbers.size());
+  for (int i = 0; i < src_block_numbers.size(); ++i) {
+    block_mapping_vec.push_back(src_block_numbers[i]);
+    block_mapping_vec.push_back(dst_block_numbers[i]);
   }
   int64_t* block_mapping_array = block_mapping_vec.data();
   int num_pairs = block_mapping_vec.size() / 2;
@@ -252,12 +253,12 @@ __global__ void gather_cached_kv_kernel(
     for (int i = threadIdx.x; i < num_tokens; i += blockDim.x) {
       const int tgt_key_idx = token_idx * key_stride + i;
       const int tgt_value_idx = token_idx * value_stride + i;
-  
+
       const int head_idx = i / head_size;
       const int head_offset = i % head_size;
       const int x_idx = head_offset / x;  // the offset of the [head_size/x] dimension
       const int x_offset = head_offset % x;
-  
+
       const int src_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
                               + head_idx * (head_size / x) * block_size * x
                               + x_idx * block_size * x

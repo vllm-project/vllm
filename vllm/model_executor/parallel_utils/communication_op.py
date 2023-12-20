@@ -45,3 +45,26 @@ def tensor_model_parallel_all_gather(input_, dim=-1):
                                           (world_size * input_size[dim], ) +
                                           input_size[dim + 1:])
     return output_tensor
+
+
+def broadcast(input_, src=0):
+    """Broadcast the input tensor."""
+    world_size = torch.distributed.get_world_size
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        assert src == 0, "Invalid src rank"
+        return input_
+    # Broadcast.
+    torch.distributed.broadcast(input_, src=src)
+    return input_
+
+def broadcast_object_list(obj_list, src=0):
+    """Broadcast the input object list."""
+    world_size = torch.distributed.get_world_size
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        assert src == 0, "Invalid src rank"
+        return obj_list
+    # Broadcast.
+    torch.distributed.broadcast_object_list(obj_list, src=src)
+    return obj_list

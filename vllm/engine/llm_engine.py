@@ -1,9 +1,7 @@
 import copy
 from collections import defaultdict
-import os
 import time
-from functools import partial
-from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Union)
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -22,7 +20,6 @@ from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
 from vllm.utils import Counter, set_cuda_visible_devices, get_open_port, get_ip
 
 if ray:
-    from ray.air.util.torch_dist import init_torch_dist_process_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 if TYPE_CHECKING:
@@ -138,6 +135,7 @@ class LLMEngine:
             0,
             0,
             distributed_init_method,
+            is_driver_worker=True,
         )
         self._run_workers("init_model")
         self._run_workers("load_model")
@@ -241,6 +239,7 @@ class LLMEngine:
             driver_local_rank,
             driver_rank,
             distributed_init_method,
+            is_driver_worker=True,
         )
 
         self._run_workers("init_model")
@@ -637,9 +636,12 @@ class LLMEngine:
         all_outputs = self._run_workers(
             "execute_model",
             seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
-            blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
-            blocks_to_copy=scheduler_outputs.blocks_to_copy,
+            driver_kwargs={
+                "seq_group_metadata_list": seq_group_metadata_list,
+                "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
+                "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
+                "blocks_to_copy": scheduler_outputs.blocks_to_copy,
+            }
         )
 
         # The outputs from all the workers are the same, so we just use the
@@ -776,6 +778,8 @@ class LLMEngine:
         self,
         method: str,
         *args,
+        driver_args: Optional[List[Any]] = None,
+        driver_kwargs: Optional[Dict[str, Any]] = None,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
@@ -791,9 +795,14 @@ class LLMEngine:
             for worker in self.workers
         ]
 
+        if driver_args is None:
+            driver_args = args
+        if driver_kwargs is None:
+            driver_kwargs = kwargs
+
         # Start the driver worker after all the ray workers.
-        driver_worker_output = getattr(self.driver_worker, method)(*args,
-                                                                   **kwargs)
+        driver_worker_output = getattr(self.driver_worker, method)(
+            *driver_args, **driver_kwargs)
 
         # Get the results of the ray workers.
         if self.workers:
