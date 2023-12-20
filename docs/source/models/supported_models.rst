@@ -93,7 +93,7 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
     If vLLM successfully generates text, it indicates that your model is supported.
 
 .. tip::
-    To use models from `ModelScope <www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
+    To use models from `ModelScope <https://www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
 
     .. code-block:: shell
 
