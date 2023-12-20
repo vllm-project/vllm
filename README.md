@@ -54,6 +54,7 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - Baichuan & Baichuan2 (`baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.)
 - BLOOM (`bigscience/bloom`, `bigscience/bloomz`, etc.)
 - ChatGLM (`THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.)
+- DeciLM (`Deci/DeciLM-7B`, `Deci/DeciLM-7B-instruct`, etc.)
 - Falcon (`tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc.)
 - GPT-2 (`gpt2`, `gpt2-xl`, etc.)
 - GPT BigCode (`bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, etc.)
