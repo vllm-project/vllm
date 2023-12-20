@@ -12,7 +12,7 @@ from lark.exceptions import UnexpectedCharacters, UnexpectedToken
 
 
 #########################################################################
-# Fix Lark Speed Issue
+# Fix Lark Interactive LALR Parser Speed Issue
 # https://github.com/lark-parser/lark/issues/1142#issuecomment-1863209804
 #########################################################################
 class FastParserState(ParserState):
@@ -28,7 +28,7 @@ class FastParserState(ParserState):
 
         new_instance = type(self)(
             self.parse_conf,
-            self.lexer, # XXX copy
+            self.lexer,
             copy(self.state_stack),
             new_value_stack,
         )
@@ -38,6 +38,7 @@ class FastParserState(ParserState):
 
 
 class FastInteractiveParser(InteractiveParser):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.parser_state = FastParserState(
@@ -81,8 +82,7 @@ class InteractivePredictiveLALRParser:
         self.interactive_parser = FastInteractiveParser(
             base_interactive_parser.parser,
             base_interactive_parser.parser_state,
-            base_interactive_parser.lexer_thread
-        )
+            base_interactive_parser.lexer_thread)
 
         self.partial_seq_validator = {
             term.name: self._get_partial_pattern_validator(term.pattern)
@@ -113,17 +113,13 @@ class InteractivePredictiveLALRParser:
         """
         if isinstance(pattern, PatternRE):
             compiled_pattern = regex.compile(pattern.value)
-            return (
-                lambda seq: compiled_pattern.fullmatch(seq, partial=True) is not None
-            )
+            return (lambda seq: compiled_pattern.fullmatch(seq, partial=True)
+                    is not None)
         elif isinstance(pattern, PatternStr):
             base_str = pattern.value
-            return (
-                lambda seq: base_str.startswith(seq)
-            )
+            return (lambda seq: base_str.startswith(seq))
         else:
             raise TypeError(f"Invalid pattern type: {type(pattern)}")
-
 
     def _accepts(self):
         if self.sequence_history not in self._accepts_cache:
@@ -158,7 +154,9 @@ class InteractivePredictiveLALRParser:
         self._update_candidate_terminals()
 
         if not self.valid_next_terminals:
-            raise ValueError(f"Invalid continuation for `{self.sequence_history}` `{new_seq}`")
+            raise ValueError(
+                f"Invalid continuation for `{self.sequence_history}` `{new_seq}`"
+            )
 
     def _append_to_sequence(self, new_seq: str):
         """Set the complete sequences value in the lexer and base"""
@@ -189,7 +187,8 @@ class InteractivePredictiveLALRParser:
             return "$END" in self.valid_next_terminals
         for term in self.valid_next_terminals:
             if term != "$END":
-                if self.partial_seq_validator[term](self.terminal_partial_seq + new_seq):
+                full_terminal_candidate = self.terminal_partial_seq + new_seq
+                if self.partial_seq_validator[term](full_terminal_candidate):
                     return True
         return False
 
@@ -203,8 +202,10 @@ class TokenTrie:
         """
         self.norm_vocab = {}
         for token_id in tokenizer.vocab.values():
-            norm_token = tokenizer.decode([tokenizer.bos_token_id, token_id])[len(tokenizer.bos_token):]
-            if legal_chars is None or all([char in legal_chars for char in norm_token]):
+            bos_len = len(tokenizer.bos_token)
+            norm_token = tokenizer.decode([tokenizer.bos_token_id, token_id])[bos_len:]
+            if legal_chars is None or all(
+                    [char in legal_chars for char in norm_token]):
                 self.norm_vocab[norm_token] = token_id
 
         self.token_to_id_set = collections.defaultdict(set)
@@ -274,20 +275,16 @@ class NextTokenValidator:
     - step_seq(new_seq): Append a sequence, update internal states
     - property valid_token_str_set: The valid set of vocabulary tokens strings which can occur next
     """
-    def __init__(
-            self,
-            tokenizer,
-            grammar: str,
-            grammar_start: str = "start",
-            num_threads: Optional[int] = None
-    ):
+    def __init__(self,
+                 tokenizer,
+                 grammar: str,
+                 grammar_start: str = "start",
+                 num_threads: Optional[int] = None):
         self.tokenizer = tokenizer
         self.token_trie = TokenTrie(tokenizer)
 
-        self.parser = InteractivePredictiveLALRParser(
-            grammar=grammar,
-            start=grammar_start
-        )
+        self.parser = InteractivePredictiveLALRParser(grammar=grammar,
+                                                      start=grammar_start)
 
         # TODO: threading
         if num_threads is None:
@@ -331,7 +328,10 @@ class NextTokenValidator:
         ])
 
 
-class GrammarLogitProcessor(NextTokenValidator):
+class GrammarLogitsProcessor(NextTokenValidator):
+    """
+    Apply NextTokenValidator in __call__ and set excluded tokens logits to -inf
+    """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -339,7 +339,6 @@ class GrammarLogitProcessor(NextTokenValidator):
         self.generation_text = ""
 
     def __call__(self, token_ids, logits):
-
         # ensure integrity
         assert token_ids[:len(self.generation_token_ids)] == self.generation_token_ids
         self.generation_token_ids = token_ids
@@ -357,206 +356,3 @@ class GrammarLogitProcessor(NextTokenValidator):
             for tok_id, logit_val in zip(sorted(self.tokenizer.vocab.values()), logits)
         ]
         return logits
-
-
-def test_generate_json_randomly_via_logit_processor():
-    json_grammar = """
-    ?value: dict
-          | list
-          | string
-          | SIGNED_NUMBER      -> number
-          | "true"             -> true
-          | "false"            -> false
-          | "null"             -> null
-
-    list : "[" [value ("," value)*] "]"
-
-    dict : "{" [pair ("," pair)*] "}"
-    pair : string ":" value
-
-    string : ESCAPED_STRING
-
-    %import common.ESCAPED_STRING
-    %import common.SIGNED_NUMBER
-    %import common.WS
-    #%ignore WS  # we don't ignore whitespace because that makes the json uninteresting
-    """
-    tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
-
-    logit_processor = GrammarLogitProcessor(
-        tokenizer,
-        json_grammar,
-        grammar_start="value"
-    )
-
-    sample_from_logits = lambda lgts: np.random.choice(len(lgts), p=np.exp(lgts)/np.sum(np.exp(lgts)))
-
-    np.random.seed = 42
-    import time
-    start = time.time()
-    token_ids = []
-    for _ in range(20):
-        logits = logit_processor(
-            token_ids=token_ids,
-            logits=np.random.uniform(-10, 10, len(tokenizer.vocab),)
-        )
-        new_token_id = sample_from_logits(logits)
-        token_ids.append(new_token_id)
-
-    print("duration", time.time() - start)
-
-    import pdb;pdb.set_trace()
-
-
-def test_next_token_validator_simple():
-    hello_grammar = """
-    ?value: "hello" | "world"
-    """
-    tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
-    ntv = NextTokenValidator(tokenizer, hello_grammar, "value")
-
-    assert ntv.valid_token_str_set == {'wo', 'hell', 'h', 'he', 'hel', 'world', 'wor', 'w', 'hello'}
-    assert ntv.valid_token_id_set == {265, 809, 107, 2805, 21558, 28727, 13436, 22493, 9471}
-
-
-def test_token_trie_sanity_hf_tokenizer():
-    """Ensure token trie produces the same number of N 3 letter tokens"""
-    tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
-    toktrie = TokenTrie(tokenizer)
-
-    all_prefixes = toktrie.get_next_level_token_prefixes("")
-
-    # every token should be composable from a single unique char, so they will all be len of 1
-    assert all([len(p) == 1 for p in all_prefixes])
-
-    # every token should have one of these prefixes as a start character
-    assert all([
-        t[0] in all_prefixes
-        for t in toktrie.norm_vocab
-    ])
-
-    # construct the set of next level prefixes
-    all_subprefixes = set()
-    for pfx in all_prefixes:
-        all_subprefixes |= toktrie.get_next_level_token_prefixes(pfx)
-
-    # these should have varying length because some tokens don't have level-2 prefixes
-    assert len(set([len(spfx) for spfx in all_subprefixes])) > 1
-
-
-def test_simple_sequence(parser):
-    for token in ['{', '"', 'k', 'ey', '":', '"val', 'ue', '"']:
-        print("full:", parser.sequence_history)
-        print("adding", token)
-        parser.step_seq(token)
-        print("partial:", parser.terminal_partial_seq)
-        print("valid terms:", parser.valid_next_terminals)
-
-
-def test_valid_next_tokens():
-    json_grammar = """
-    ?value: dict
-          | list
-          | string
-          | SIGNED_NUMBER      -> number
-          | "true"             -> true
-          | "false"            -> false
-          | "null"             -> null
-
-    list : "[" [value ("," value)*] "]"
-
-    dict : "{" [pair ("," pair)*] "}"
-    pair : string ":" value
-
-    string : ESCAPED_STRING
-
-    %import common.ESCAPED_STRING
-    %import common.SIGNED_NUMBER
-    %import common.WS
-    %ignore WS
-    """
-
-    parser = InteractivePredictiveLALRParser(json_grammar, 'value')
-    # random complicated json file courtesy of https://github.com/simdjson/simdjson/issues/1316#issue-748663718
-    complex_json_file = '{"$schema": "http://json-schema.org/draft-04/schema#", "additionalProperties": false, "properties": {"nc:Vehicle": {"description": "A conveyance designed to carry an operator, passengers and/or cargo, over land.", "oneOf": [{"$ref": "#/definitions/nc:VehicleType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:VehicleType"}}]}, "nc:VehicleAxleQuantity": {"description": "A count of common axles of rotation of one or more wheels of a vehicle, whether power driven or freely rotating.", "oneOf": [{"$ref": "#/definitions/niem-xs:nonNegativeInteger"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:nonNegativeInteger"}}]}, "nc:VehicleMSRPAmount": {"description": "A manufacturer\'s suggested retail price of a vehicle; a price at which a manufacturer recommends a vehicle be sold.", "oneOf": [{"$ref": "#/definitions/nc:AmountType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:AmountType"}}]}, "nc:Amount": {"description": "An amount of money.", "oneOf": [{"$ref": "#/definitions/niem-xs:decimal"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:decimal"}}]}, "nc:Currency": {"description": "A data concept for a unit of money or exchange.", "oneOf": [{"anyOf": [{"$ref": "#/properties/nc:CurrencyCode"}]}, {"type": "array", "items": {"anyOf": [{"$ref": "#/properties/nc:CurrencyCode"}]}}]}, "nc:CurrencyCode": {"description": "A unit of money or exchange.", "oneOf": [{"$ref": "#/definitions/iso_4217:CurrencyCodeType"}, {"type": "array", "items": {"$ref": "#/definitions/iso_4217:CurrencyCodeType"}}]}, "nc:VehicleIdentification": {"description": "A unique identification for a specific vehicle.", "oneOf": [{"$ref": "#/definitions/nc:IdentificationType"}, {"type": "array", "items": {"$ref": "#/definitions/nc:IdentificationType"}}]}, "nc:IdentificationID": {"description": "An identifier.", "oneOf": [{"$ref": "#/definitions/niem-xs:string"}, {"type": "array", "items": {"$ref": "#/definitions/niem-xs:string"}}]}}, "definitions": {"nc:VehicleType": {"description": "A data type for a conveyance designed to carry an operator, passengers and/or cargo, over land.", "allOf": [{"$ref": "#/definitions/nc:ConveyanceType"}, {"type": "object", "properties": {"nc:VehicleAxleQuantity": {"$ref": "#/properties/nc:VehicleAxleQuantity"}, "nc:VehicleIdentification": {"$ref": "#/properties/nc:VehicleIdentification"}, "nc:VehicleMSRPAmount": {"$ref": "#/properties/nc:VehicleMSRPAmount"}}}]}, "nc:ConveyanceType": {"description": "A data type for a means of transport from place to place.", "allOf": [{"$ref": "#/definitions/_base"}, {"$ref": "#/definitions/nc:ItemType"}, {"type": "object", "properties": {}}]}, "nc:ItemType": {"description": "A data type for an article or thing.", "allOf": [{"$ref": "#/definitions/_base"}, {"type": "object", "properties": {}}]}, "nc:AmountType": {"description": "A data type for an amount of money.", "type": "object", "properties": {"nc:Amount": {"$ref": "#/properties/nc:Amount"}, "nc:Currency": {"$ref": "#/properties/nc:Currency"}}}, "iso_4217:CurrencyCodeType": {"description": "A data type for a currency that qualifies a monetary amount.", "oneOf": [{"$ref": "#/definitions/iso_4217:CurrencyCodeSimpleType"}, {"type": "object", "properties": {"rdf:value": {"$ref": "#/definitions/iso_4217:CurrencyCodeSimpleType"}}}]}, "iso_4217:CurrencyCodeSimpleType": {"type": "string", "description": "A data type for a currency that qualifies a monetary amount.", "oneOf": [{"enum": ["EUR"], "description": "Euro"}, {"enum": ["GBP"], "description": "Pound Sterling"}, {"enum": ["USD"], "description": "US Dollar"}]}, "nc:IdentificationType": {"description": "A data type for a representation of an identity.", "type": "object", "properties": {"nc:IdentificationID": {"$ref": "#/properties/nc:IdentificationID"}}}, "niem-xs:decimal": {"description": "A data type for arbitrary precision decimal numbers.", "type": "number"}, "niem-xs:nonNegativeInteger": {"description": "A data type for an integer with a minimum value of 0.", "type": "number"}, "niem-xs:string": {"description": "A data type for character strings in XML.", "type": "string"}, "_base": {"type": "object", "patternProperties": {"^ism:.*": {"type": "string"}, "^ntk:.*": {"type": "string"}}, "properties": {"@id": {"format": "uriref"}, "@base": {"format": "uriref"}}}}}'
-
-    test_chars_per_iter = 1000
-    unicode_chars = [chr(i) for i in range(test_chars_per_iter)]
-
-    import time
-    start = time.time()
-    for char in complex_json_file:
-        parser.step_seq(char)
-        for ch in unicode_chars:
-            parser.is_valid_next_seq(ch)
-
-    print("took",
-          (time.time() - start) /  (len(complex_json_file)),
-          "seconds per step with",
-          test_chars_per_iter, "characters in vocabulary")
-
-
-
-def profile_predictor():
-    import pstats
-    from io import StringIO
-    import cProfile
-    hello_grammar = """
-    ?value: "hello" | "world"
-    """
-    tokenizer = transformers.AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
-    ntv = NextTokenValidator(tokenizer, hello_grammar, "value")
-
-    profile = cProfile.Profile()
-    profile.enable()
-    #####
-
-    valid_toks = ntv.valid_token_str_set
-    ntv.step_seq("h")
-    valid_toks = ntv.valid_token_str_set
-    ntv.step_seq("e")
-    valid_toks = ntv.valid_token_str_set
-    ntv.step_seq("l")
-    valid_toks = ntv.valid_token_str_set
-    ntv.step_seq("l")
-    valid_toks = ntv.valid_token_str_set
-    ntv.step_seq("o")
-
-    #####
-    profile.disable()
-
-    # Sorting the statistics by cumulative time
-    s = StringIO()
-    sortby = 'cumulative'
-    ps = pstats.Stats(profile, stream=s).sort_stats(sortby)
-    ps.print_stats()
-    print(s.getvalue())
-
-
-
-def main():
-    test_generate_json_randomly_via_logit_processor()
-
-
-if __name__ == "__main__":
-    import transformers
-    import numpy as np
-
-    profile = False
-    if profile:
-        import cProfile
-        import pstats
-        from io import StringIO
-        profile = cProfile.Profile()
-        profile.enable()
-        main()
-        profile.disable()
-
-        # Sorting the statistics by cumulative time
-        s = StringIO()
-        sortby = 'cumulative'
-        ps = pstats.Stats(profile, stream=s).sort_stats(sortby)
-        ps.print_stats()
-        print(s.getvalue())
-    else:
-        main()

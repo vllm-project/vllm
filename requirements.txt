@@ -12,3 +12,4 @@ fastapi
 uvicorn[standard]
 pydantic == 1.10.13  # Required for OpenAI server.
 aioprometheus[starlette]
+lark == 1.1.8  # Required for Grammars
