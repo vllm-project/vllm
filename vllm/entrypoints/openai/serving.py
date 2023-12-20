@@ -44,34 +44,32 @@ class OpenAIToolsPrompter:
     def inject_prompt(self, request: ChatCompletionRequest):
         """ Tested with :
                 https://huggingface.co/mlabonne/NeuralHermes-2.5-Mistral-7B/discussions/3 """
-        if request.tool_choice is not None and request.tools is not None:
-            if request.tool_choice == "auto":
-                tools_list: [ChatCompletionToolParam] = request.tools
-                if len(tools_list):
-                    text_inject = ( "Your task is to call a function when needed. "
-                                    "You will be provided with a list of functions. "
-                                    "\n\nAvailable functions:\n")
-                    for tool in tools_list:
-                        if tool.type == "function":
-                            text_inject += "\n" + tool.function.name
-                            if tool.function.description is not None:
-                                text_inject += " - " + tool.function.description
-                            if tool.function.parameters is not None:
-                                schema = json.dumps(tool.function.parameters, indent=4)
-                                text_inject += f"```\njsonschema\n{schema}\n```"
-                    text_inject += (f"\nTo call a function, the response must start by"
-                                    f"\"{self.func_call_token()} followed by a json like this: "
-                                    f"{{\"call\": \"function_name\", \"params\": {{\"arg1\": \"value1\"}}}}.\n"
-                                    "If you cannot call a function due to lack of information, "
-                                    "do not make a function call and ask the user for additional details."
-                                    f"If you can call a function, you don't explain anything, just do the call. "
-                                    f"You only call functions when it's needed and when the description matches with the user input. "
-                                    f"After a function call, the response must terminate immediately.\n\n")
-                    if isinstance(request.messages, str):
-                        request.messages = text_inject + request.messages
-                    elif isinstance(request.messages, List):
-                        if len(request.messages) >= 1:
-                            request.messages[0]["content"] = text_inject + request.messages[0]["content"]
+        if request.tool_choice is not None and request.tools is not None and request.tool_choice == "auto":
+            tools_list: [ChatCompletionToolParam] = request.tools
+            if len(tools_list):
+                text_inject = ( "Your task is to call a function when needed. "
+                                "You will be provided with a list of functions. "
+                                "\n\nAvailable functions:\n")
+                for tool in tools_list:
+                    if tool.type == "function":
+                        text_inject += "\n" + tool.function.name
+                        if tool.function.description is not None:
+                            text_inject += " - " + tool.function.description
+                        if tool.function.parameters is not None:
+                            schema = json.dumps(tool.function.parameters, indent=4)
+                            text_inject += f"```\njsonschema\n{schema}\n```"
+                text_inject += (f"\nTo call a function, the response must start by"
+                                f"\"{self.func_call_token()} followed by a json like this: "
+                                f"{{\"call\": \"function_name\", \"params\": {{\"arg1\": \"value1\"}}}}.\n"
+                                "If you cannot call a function due to lack of information, "
+                                "do not make a function call and ask the user for additional details."
+                                f"If you can call a function, you don't explain anything, just do the call. "
+                                f"You only call functions when it's needed and when the description matches with the user input. "
+                                f"After a function call, the response must terminate immediately.\n\n")
+                if isinstance(request.messages, str):
+                    request.messages = text_inject + request.messages
+                elif isinstance(request.messages, List) and len(request.messages) >= 1:
+                    request.messages[0]["content"] = text_inject + request.messages[0]["content"]
 
 class PromptCapture:
     def __init__(self):
@@ -90,7 +88,7 @@ class PromptCapture:
                     call_dict = json.loads(v_call)
                     if "call" in call_dict:
                         self.calls_list.append(call_dict)
-                except json.decoder.JSONDecodeError as exc:
+                except json.decoder.JSONDecodeError:
                     # Simply ignore invalid functions calls...
                     pass
 
@@ -306,9 +304,10 @@ class OpenAIServing:
                             current_capture.is_function_call or \
                             current_capture.content.startswith(OpenAIToolsPrompter.func_call_token_pre()):
                         current_capture.content += output.text[len(current_capture.content):]
-                        if len(current_capture.content) >= OpenAIToolsPrompter.func_call_token_size() and not current_capture.is_function_call:
-                            if current_capture.content.startswith(OpenAIToolsPrompter.func_call_token()):
-                                current_capture.is_function_call = True
+                        if len(current_capture.content) >= OpenAIToolsPrompter.func_call_token_size() and \
+                                not current_capture.is_function_call and \
+                                current_capture.content.startswith(OpenAIToolsPrompter.func_call_token()):
+                            current_capture.is_function_call = True
                         if current_capture.is_function_call:
                             if output.finish_reason is None:
                                 pass
@@ -796,6 +795,7 @@ class OpenAIServing:
         yield ErrorResponse(message=message, type=err_type, code=status_code.value).json(ensure_ascii=False)
 
     async def _check_model(self, request) -> Optional[ErrorResponse]:
+        return
         if request.model == self.served_model:
             return
         return self.create_error_response(message=f"The model `{request.model}` does not exist.",
