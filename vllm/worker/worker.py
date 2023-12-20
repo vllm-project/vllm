@@ -28,12 +28,14 @@ class Worker:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        rank: Optional[int] = None,
-        distributed_init_method: Optional[str] = None,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
 
@@ -57,13 +59,7 @@ class Worker:
 
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        # Env vars will be set by Ray.
-        self.rank = self.rank if self.rank is not None else int(
-            os.getenv("RANK", "-1"))
-        local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        self.device = torch.device(f"cuda:{local_rank}")
-        if self.rank < 0:
-            raise ValueError("Invalid or unspecified rank.")
+        self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
@@ -125,14 +121,9 @@ class Worker:
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    @torch.inference_mode()
-    def execute_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-    ) -> SamplerOutput:
+    def cache_swap(self, blocks_to_swap_in: Dict[int, int],
+                   blocks_to_swap_out: Dict[int, int],
+                   blocks_to_copy: Dict[int, List[int]]) -> None:
         # Issue cache operations.
         issued_cache_op = False
         if blocks_to_swap_in:
@@ -152,6 +143,17 @@ class Worker:
         if cache_events is not None:
             for event in cache_events:
                 event.wait()
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> SamplerOutput:
+        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+
         # If there is no input, we don't need to execute the model.
         if not seq_group_metadata_list:
             return {}

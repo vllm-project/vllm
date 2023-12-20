@@ -49,7 +49,7 @@ def main():
     print(ray.cluster_resources())
 
     # Reserve a placement group of 1 bundle that reserves 1 CPU and 1 GPU.
-    pg = placement_group([{"CPU": 1}, {"CPU": 1}, {"GPU": 1, "CPU": 0, "__internal_head__": 1e-5}])
+    pg = placement_group([{"CPU": 1}, {"CPU": 1}, {"GPU": 1, "CPU": 0, "node:__internal_head__": 1e-2}])
 
     ray.get(pg.ready())
     a1 = ray.remote(num_cpus=1)(AllocationActor).options(
@@ -60,5 +60,6 @@ def main():
     ).remote(pg)
 
     ray.get(a1.log_message.remote())
+    print(ray.available_resources())
 
 main()
