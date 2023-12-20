@@ -10,7 +10,7 @@ int get_device_attribute(int attribute, int device_id)
         device = device_id;
     }
     
-    return dpct::dev_mgr::instance().get_device(device).get_local_mem_size()
+    return dpct::dev_mgr::instance().get_device(device).get_local_mem_size();
     //cudaDeviceGetAttribute(&value, static_cast<int>(attribute), device);
     //return value;
 }
