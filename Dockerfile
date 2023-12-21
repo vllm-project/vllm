@@ -65,8 +65,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
 FROM vllm-base AS vllm
-COPY vllm vllm
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
+COPY vllm vllm
 
 EXPOSE 8000
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
@@ -77,7 +77,7 @@ FROM vllm-base AS vllm-openai
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate
 
-COPY vllm vllm
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
+COPY vllm vllm
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
