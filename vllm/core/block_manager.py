@@ -103,7 +103,7 @@ class BlockSpaceManager:
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
-        seq = seq_group.get_seqs()[0]
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = len(seq.logical_token_blocks)
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
@@ -122,7 +122,7 @@ class BlockSpaceManager:
     def allocate(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same
         # prompt.
-        seq = seq_group.get_seqs()[0]
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
 
         # Allocate new physical token blocks that will store the prompt tokens.
         block_table: BlockTable = []
@@ -137,7 +137,7 @@ class BlockSpaceManager:
             block_table.append(block)
 
         # Assign the block table for each sequence.
-        for seq in seq_group.get_seqs():
+        for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:

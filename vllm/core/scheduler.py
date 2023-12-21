@@ -139,15 +139,17 @@ class Scheduler:
             while self.waiting:
                 seq_group = self.waiting[0]
 
-                assert seq_group.num_seqs() == 1, (
+                waiting_seqs = seq_group.get_seqs(
+                    status=SequenceStatus.WAITING)
+                assert len(waiting_seqs) == 1, (
                     "Waiting sequence group should have only one prompt "
                     "sequence.")
-                num_prompt_tokens = seq_group.get_seqs()[0].get_len()
+                num_prompt_tokens = waiting_seqs[0].get_len()
                 if num_prompt_tokens > self.prompt_limit:
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         f" and exceeds limit of {self.prompt_limit}")
-                    for seq in seq_group.get_seqs():
+                    for seq in waiting_seqs:
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
                     self.waiting.pop(0)
@@ -161,7 +163,7 @@ class Scheduler:
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         f" and exceeds the capacity of block_manager")
-                    for seq in seq_group.get_seqs():
+                    for seq in waiting_seqs:
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
                     self.waiting.pop(0)
@@ -317,7 +319,7 @@ class Scheduler:
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
-        for seq in seq_group.get_seqs():
+        for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 
     def _append_slot(
