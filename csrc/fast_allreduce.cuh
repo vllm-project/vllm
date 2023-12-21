@@ -38,7 +38,7 @@ struct Metadata {
 static_assert(offsetof(Metadata, counter) == 128);
 static_assert(sizeof(Metadata) == 256);
 
-struct __align__(16) RankData { void *__restrict__ ptrs[8]; };
+struct __align__(16) RankData { const void *__restrict__ ptrs[8]; };
 
 struct RankSignals {
   volatile Signal *signals[8];
@@ -198,24 +198,34 @@ __device__ __forceinline__ void end_sync(const RankSignals &sg,
   }
 }
 
+template <typename P, int ngpus, typename A>
+DINLINE P packed_reduce(const P *ptrs[], int idx) {
+  A tmp = upcast(ptrs[0][idx]);
+#pragma unroll
+  for (int i = 1; i < ngpus; i++) {
+    packed_assign_add(tmp, upcast(ptrs[i][idx]));
+  }
+  return downcast<P>(tmp);
+}
+
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_1stage(RankData *_dp, RankSignals sg,
                                volatile Metadata *meta, T *__restrict__ result,
                                int rank, int size) {
-  auto dp = *_dp;
+  using P = typename packed_t<T>::P;
+  using A = typename packed_t<T>::A;
+  const P *ptrs[ngpus];
+#pragma unroll
+  for (int i = 0; i < ngpus; i++) {
+    int target = (rank + i) % ngpus;
+    ptrs[i] = (P *)_dp->ptrs[target];
+  }
   start_sync<ngpus>(sg, meta, rank);
   // do the actual reduction
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
-    using P = typename packed_t<T>::P;
-    using A = typename packed_t<T>::A;
-    A tmp = upcast(((P *)dp.ptrs[0])[idx]);
-#pragma unroll
-    for (int i = 1; i < ngpus; i++) {
-      packed_assign_add(tmp, upcast(((P *)dp.ptrs[i])[idx]));
-    }
-    ((P *)result)[idx] = downcast<P>(tmp);
+    ((P *)result)[idx] = packed_reduce<P, ngpus, A>(ptrs, idx);
   }
   end_sync<ngpus, true>(sg, meta, rank);
 }
@@ -230,9 +240,6 @@ __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_2stage(RankData *_dp, RankSignals sg,
                                volatile Metadata *meta, T *__restrict__ result,
                                int rank, int size) {
-  auto dp = *_dp;
-  start_sync<ngpus>(sg, meta, rank);
-
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
@@ -240,23 +247,19 @@ __global__ void __launch_bounds__(512, 1)
   int part = size / ngpus;
   int start = rank * part;
   int end = rank == ngpus - 1 ? size : start + part;
-  P *ptrs[ngpus];
+  const P *ptrs[ngpus];
   P *tmps[ngpus];
 #pragma unroll
   for (int i = 0; i < ngpus; i++) {
     int target = (rank + i) % ngpus;
-    ptrs[i] = (P *)dp.ptrs[target];
+    ptrs[i] = (const P *)_dp->ptrs[target];
     tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }
   auto tmp_out = tmps[0];
+  start_sync<ngpus>(sg, meta, rank);
   // stage 1: reduce scatter
   for (int idx = start + tid; idx < end; idx += stride) {
-    A tmp = upcast(ptrs[0][idx]);
-#pragma unroll
-    for (int i = 1; i < ngpus; i++) {
-      packed_assign_add(tmp, upcast(ptrs[i][idx]));
-    }
-    tmp_out[idx - start] = downcast<P>(tmp);
+    tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
   }
   // Maybe TODO: replace this with per-block release-acquire
   // can save about 1-2us (not a lot though)
@@ -266,7 +269,7 @@ __global__ void __launch_bounds__(512, 1)
   for (int idx = tid; idx < part; idx += stride) {
 #pragma unroll
     for (int i = 0; i < ngpus; i++) {
-      int dst_idx = i * part + idx;
+      int dst_idx = ((rank + i) % ngpus) * part + idx;
       ((P *)result)[dst_idx] = tmps[i][idx];
     }
   }
@@ -291,9 +294,6 @@ __global__ void __launch_bounds__(512, 1)
                                        volatile Metadata *meta,
                                        T *__restrict__ result, int rank,
                                        int size) {
-  auto dp = *_dp;
-  start_sync<ngpus>(sg, meta, rank);
-
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
@@ -304,23 +304,18 @@ __global__ void __launch_bounds__(512, 1)
   // This is an all-to-all within each group containing half of the ranks
   // followed by cross-group add. Equivalent to half butterfly when there
   // are 4 GPUs, a common case for PCIe cards like T4 and A10.
-  P *ptrs[hg];
+  const P *ptrs[hg];
   {
     int start = rank - rank % hg;
 #pragma unroll
     for (int i = 0; i < hg; i++) {
-      ptrs[i] = (P *)dp.ptrs[i + start];
+      ptrs[i] = (const P *)_dp->ptrs[i + start];
     }
   }
+  start_sync<ngpus>(sg, meta, rank);
   for (int idx = tid; idx < size; idx += stride) {
-    A tmp = {0.0f, 0.0f};
-#pragma unroll
-    for (int i = 0; i < hg; i++) {
-      packed_assign_add(tmp, upcast(ptrs[i][idx]));
-    }
-    tmp_out[idx] = downcast<P>(tmp);
+    tmp_out[idx] = packed_reduce<P, hg, A>(ptrs, idx);
   }
-
   end_sync<ngpus>(sg, meta, rank);
 
   auto src = get_tmp_buf<P>(sg.signals[(ngpus - 1) - rank % ngpus]);
@@ -514,7 +509,7 @@ class FastAllreduce {
           (world_size_ <= 8 && bytes < 256 * 1024)) { \
         KL(ngpus, cross_device_reduce_1stage);        \
       } else {                                        \
-        KL(ngpus, cross_device_reduce_1stage);        \
+        KL(ngpus, cross_device_reduce_2stage);        \
       }                                               \
     } else {                                          \
       KL(ngpus, cross_device_reduce_half_butterfly);  \
@@ -543,5 +538,6 @@ class FastAllreduce {
     }
   }
 };
-
+template void FastAllreduce::allreduce<half>(cudaStream_t, half *, half *, int,
+                                             int, int);
 }  // namespace vllm

@@ -31,7 +31,7 @@
   } while (0)
 
 __global__ void dummy_kernel() {
-  for (int i = 0; i < 500; i++) __nanosleep(1000000);  // 500ms
+  for (int i = 0; i < 100; i++) __nanosleep(1000000);  // 100ms
 }
 
 template <typename T>
@@ -201,6 +201,15 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   convert_data<T><<<108, 1024, 0, stream>>>(self_data, result, nccl_result,
                                             my_result, data_size);
   CUDACHECK(cudaStreamSynchronize(stream));
+
+  for (unsigned long j = 0; j < data_size; j++) {
+    auto diff = abs(nccl_result[j] - my_result[j]);
+    if (diff >= 1e-2) {
+      printf("Rank %d: Verification mismatch at %lld: %f != (my) %f\n", myRank,
+             j, nccl_result[j], my_result[j]);
+      break;
+    }
+  }
 
   long double nccl_diffs = 0.0;
   long double my_diffs = 0.0;
