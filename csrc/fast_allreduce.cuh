@@ -300,10 +300,10 @@ __global__ void __launch_bounds__(512, 1)
   using A = typename packed_t<T>::A;
   auto tmp_out = get_tmp_buf<P>(sg.signals[rank]);
   constexpr int hg = ngpus / 2;
-  // Actually not quite half butterfly. 
+  // Actually not quite half butterfly.
   // This is an all-to-all within each group containing half of the ranks
   // followed by cross-group add. Equivalent to half butterfly when there
-  // are 4 GPUs, a common case for PCIe cards like T4 and A10. 
+  // are 4 GPUs, a common case for PCIe cards like T4 and A10.
   P *ptrs[hg];
   {
     int start = rank - rank % hg;
@@ -342,7 +342,8 @@ class FastAllreduce {
   std::unordered_map<void *, RankData *> buffers_;
   Metadata *meta_;
 
-  RankData *d_rank_data_start_, *d_rank_data_base_, *d_rank_data_end_;
+  // stores the registered device pointers from all ranks
+  RankData *d_rank_data_base_, *d_rank_data_end_;
   std::vector<void *> graph_unreg_buffers_;
   std::vector<void *> ipc_handles_;
 
@@ -351,14 +352,20 @@ class FastAllreduce {
    *
    * There's a total of sizeof(Metadata) of prefix before the actual data,
    * so meta + 1 points to actual temporary buffer.
+   *
+   * note: this class does not own any device memory. Any required buffers
+   * are passed in from the constructor
    */
-  FastAllreduce(Metadata *meta, const cudaIpcMemHandle_t *handles,
+  FastAllreduce(Metadata *meta, void *rank_data, size_t rank_data_sz,
+                const cudaIpcMemHandle_t *handles,
                 const std::vector<int64_t> &offsets, int rank,
                 bool full_nvlink = true)
       : rank_(rank),
         world_size_(offsets.size()),
+        full_nvlink_(full_nvlink),
         meta_(meta),
-        full_nvlink_(full_nvlink) {
+        d_rank_data_base_(reinterpret_cast<RankData *>(rank_data)),
+        d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
     for (int i = 0; i < world_size_; i++) {
       Metadata *rank_meta;
       if (i != rank_) {
@@ -373,10 +380,28 @@ class FastAllreduce {
       }
       sg_.signals[i] = &rank_meta->sg;
     }
-    size_t rank_data_sz = 16 * 1024 * 1024;
-    CUDACHECK(cudaMalloc(&d_rank_data_start_, rank_data_sz));
-    d_rank_data_base_ = d_rank_data_start_;
-    d_rank_data_end_ = d_rank_data_base_ + rank_data_sz / sizeof(RankData);
+  }
+
+  std::pair<std::vector<uint8_t>, std::vector<int64_t>>
+  get_graph_buffer_ipc_meta() {
+    auto num_buffers = graph_unreg_buffers_.size();
+    auto handle_sz = sizeof(cudaIpcMemHandle_t);
+    std::vector<uint8_t> handles(handle_sz * num_buffers, 0);
+    std::vector<int64_t> offsets(num_buffers);
+    for (int i = 0; i < num_buffers; i++) {
+      auto ptr = graph_unreg_buffers_[i];
+      void *base_ptr;
+      // note: must share the base address of each allocation, or we get wrong
+      // address
+      if (cuPointerGetAttribute(&base_ptr,
+                                CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+                                (CUdeviceptr)ptr) != CUDA_SUCCESS)
+        throw std::runtime_error("failed to get pointer attr");
+      CUDACHECK(cudaIpcGetMemHandle(
+          (cudaIpcMemHandle_t *)&handles[i * handle_sz], base_ptr));
+      offsets[i] = ((char *)ptr) - ((char *)base_ptr);
+    }
+    return std::make_pair(handles, offsets);
   }
 
   void check_rank_data_capacity(size_t num = 1) {
@@ -409,14 +434,22 @@ class FastAllreduce {
     buffers_[self] = d_data;
   }
 
+  // note: when registering graph buffers, we intentionally choose to not
+  // deduplicate the addresses. That means if the allocator reuses some
+  // addresses, they will be registered again. This is to account for the remote
+  // possibility of different allocation patterns between ranks. For example,
+  // rank 1 may get the same input address for the second allreduce, but rank 2
+  // got a different address. IPC handles have internal reference counting
+  // mechanism so overhead should be small.
   void register_graph_buffers(
       const std::vector<std::string> &handles,
       const std::vector<std::vector<int64_t>> &offsets) {
-    auto sz = graph_unreg_buffers_.size();
-    check_rank_data_capacity(sz);
-    for (int i = 0; i < sz; i++) {
+    auto num_buffers = graph_unreg_buffers_.size();
+    check_rank_data_capacity(num_buffers);
+    std::vector<RankData> rank_data(num_buffers);
+    for (int i = 0; i < num_buffers; i++) {
       auto self_ptr = graph_unreg_buffers_[i];
-      RankData rd;
+      auto &rd = rank_data[i];
       for (int j = 0; j < world_size_; j++) {
         if (j != rank_) {
           char *handle;
@@ -432,9 +465,11 @@ class FastAllreduce {
           rd.ptrs[j] = self_ptr;
         }
       }
-      CUDACHECK(cudaMemcpy(d_rank_data_base_++, &rd, sizeof(RankData),
-                           cudaMemcpyHostToDevice));
     }
+    CUDACHECK(cudaMemcpy(d_rank_data_base_, rank_data.data(),
+                         sizeof(RankData) * num_buffers,
+                         cudaMemcpyHostToDevice));
+    d_rank_data_base_ += num_buffers;
     graph_unreg_buffers_.clear();
   }
 
@@ -479,7 +514,7 @@ class FastAllreduce {
           (world_size_ <= 8 && bytes < 256 * 1024)) { \
         KL(ngpus, cross_device_reduce_1stage);        \
       } else {                                        \
-        KL(ngpus, cross_device_reduce_2stage);        \
+        KL(ngpus, cross_device_reduce_1stage);        \
       }                                               \
     } else {                                          \
       KL(ngpus, cross_device_reduce_half_butterfly);  \
@@ -506,7 +541,6 @@ class FastAllreduce {
     for (auto ptr : ipc_handles_) {
       CUDACHECK(cudaIpcCloseMemHandle(ptr));
     }
-    CUDACHECK(cudaFree(d_rank_data_start_));
   }
 };
 

@@ -101,8 +101,12 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
                          MPI_BYTE, data_handles, sizeof(cudaIpcMemHandle_t),
                          MPI_BYTE, MPI_COMM_WORLD));
 
+  void *rank_data;
+  size_t rank_data_sz = 16 * 1024 * 1024;
+  CUDACHECK(cudaMalloc(&rank_data, rank_data_sz));
   std::vector<int64_t> offsets(nRanks, 0);
-  vllm::FastAllreduce fa(buffer, data_handles, offsets, myRank);
+  vllm::FastAllreduce fa(buffer, rank_data, rank_data_sz, data_handles, offsets,
+                         myRank);
   auto *self_data =
       reinterpret_cast<T *>(reinterpret_cast<char *>(buffer) +
                             sizeof(vllm::Metadata) + data_size * sizeof(T));
@@ -208,9 +212,15 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
     std::cout << "average abs diffs: nccl: " << nccl_diffs / data_size
               << " me: " << my_diffs / data_size << std::endl;
 
-  // cudaFree(result);
-  // CUDACHECK(cudaStreamDestroy(stream));
+  CUDACHECK(cudaFree(result));
+  CUDACHECK(cudaFree(self_data_copy));
+  CUDACHECK(cudaFree(rank_data));
+  CUDACHECK(cudaFree(buffer));
   CUDACHECK(cudaFree(states));
+  CUDACHECK(cudaFreeHost(verification_buffer));
+  CUDACHECK(cudaFreeHost(nccl_result));
+  CUDACHECK(cudaFreeHost(my_result));
+  CUDACHECK(cudaStreamDestroy(stream));
 }
 
 int main(int argc, char **argv) {
@@ -233,7 +243,7 @@ int main(int argc, char **argv) {
   //   }
   // }
   for (int sz = 512; sz <= (4 << 20); sz *= 2) {
-    run<half>(myRank, nRanks, comm, 512, 36, sz);
+    run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 50);
   }
 
   cudaProfilerStop();

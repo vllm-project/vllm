@@ -28,16 +28,21 @@ def full_nvlink(rank, world_size):
 
 class FastAllreduce:
 
+    # max_size: max supported allreduce size
     def __init__(self, rank, world_size, max_size=8192 * 1024) -> None:
+        # buffers memory are owned by this Python class and passed to C++
         self.meta = torch.zeros(fast_ar.meta_size() + max_size,
                                 dtype=torch.uint8,
-                                device=rank)
+                                device="cuda")
+        self.rank_data = torch.empty(16 * 1024 * 1024,
+                                     dtype=torch.uint8,
+                                     device="cuda")
         self.max_size = max_size
         self.world_size = world_size
         handles, offsets = self._get_ipc_meta(self.meta)
         self.full_nvlink = full_nvlink(rank, world_size)
-        self._ptr = fast_ar.prepare_buffer(self.meta.data_ptr(), handles,
-                                           offsets, rank, self.full_nvlink)
+        self._ptr = fast_ar.init_fast_ar(self.meta, self.rank_data, handles,
+                                         offsets, rank, self.full_nvlink)
         self.fast_cond = self.full_nvlink or world_size <= 2
         self.is_capturing = False
 

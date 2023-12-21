@@ -92,9 +92,10 @@ void gptq_shuffle(
 
 
 using fptr_t = uint64_t;
-fptr_t prepare_buffer(fptr_t ptr, const std::vector<std::string> &handles,
-                        const std::vector<int64_t> &offsets, int rank,
-                        bool full_nvlink);
+fptr_t init_fast_ar(torch::Tensor &meta, torch::Tensor &rank_data,
+                    const std::vector<std::string> &handles,
+                    const std::vector<int64_t> &offsets, int rank,
+                    bool full_nvlink);
 void allreduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out);
 void dispose(fptr_t _fa);
 int meta_size();

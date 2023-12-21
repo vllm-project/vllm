@@ -83,7 +83,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "Gets the specified device attribute.");
 
   pybind11::module fast_ar = m.def_submodule("fast_ar", "fast allreduce");
-  fast_ar.def("prepare_buffer", &prepare_buffer, "prepare_buffer");
+  fast_ar.def("init_fast_ar", &init_fast_ar, "init_fast_ar");
   fast_ar.def("allreduce", &allreduce, "allreduce");
   fast_ar.def("dispose", &dispose, "dispose");
   fast_ar.def("meta_size", &meta_size, "meta_size");

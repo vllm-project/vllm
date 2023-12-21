@@ -9,9 +9,10 @@
 using fptr_t = uint64_t;
 static_assert(sizeof(void *) == sizeof(fptr_t));
 
-fptr_t prepare_buffer(fptr_t ptr, const std::vector<std::string> &handles,
-                      const std::vector<int64_t> &offsets, int rank,
-                      bool full_nvlink) {
+fptr_t init_fast_ar(torch::Tensor &meta, torch::Tensor &rank_data,
+                    const std::vector<std::string> &handles,
+                    const std::vector<int64_t> &offsets, int rank,
+                    bool full_nvlink) {
   int world_size = offsets.size();
   if (world_size > 8)
     throw std::invalid_argument("world size > 8 is not supported");
@@ -28,8 +29,8 @@ fptr_t prepare_buffer(fptr_t ptr, const std::vector<std::string> &handles,
     std::memcpy(&ipc_handles[i], handles[i].data(), sizeof(cudaIpcMemHandle_t));
   }
   return (fptr_t) new vllm::FastAllreduce(
-      reinterpret_cast<vllm::Metadata *>(ptr), ipc_handles, offsets, rank,
-      full_nvlink);
+      reinterpret_cast<vllm::Metadata *>(meta.data_ptr()), rank_data.data_ptr(),
+      rank_data.numel(), ipc_handles, offsets, rank, full_nvlink);
 }
 
 void allreduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out) {
@@ -81,23 +82,7 @@ void register_buffer(fptr_t _fa, torch::Tensor &t,
 std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
     fptr_t _fa) {
   auto fa = reinterpret_cast<vllm::FastAllreduce *>(_fa);
-  auto sz = fa->graph_unreg_buffers_.size();
-  auto handle_sz = sizeof(cudaIpcMemHandle_t);
-  std::vector<uint8_t> handles(handle_sz * sz, 0);
-  std::vector<int64_t> offsets(sz);
-  for (int i = 0; i < sz; i++) {
-    auto ptr = fa->graph_unreg_buffers_[i];
-    void *base_ptr;
-    // note: must share the base address of each allocation, or we get wrong address
-    auto _err = cuPointerGetAttribute(
-        &base_ptr, CU_POINTER_ATTRIBUTE_RANGE_START_ADDR, (CUdeviceptr)ptr);
-    if (_err != CUDA_SUCCESS)
-      throw std::runtime_error("failed to get pointer attr");
-    CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t *)&handles[i * handle_sz],
-                                  base_ptr));
-    offsets[i] = ((char *)ptr) - ((char *)base_ptr);
-  }
-  return std::make_pair(handles, offsets);
+  return fa->get_graph_buffer_ipc_meta();
 }
 
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string> &handles,
