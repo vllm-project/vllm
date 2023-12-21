@@ -15,7 +15,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, LogProbs,
     ModelCard, ModelList, ModelPermission, UsageInfo, ChatCompletionToolParam,
     ToolCallsDelta, ToolCallsMessage, FunctionCall,
-    ChatCompletionAssistantMessage, ErrorResponse)
+    ChatCompletionAssistantMessage, ChatCompletionToolMessage, ErrorResponse)
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -44,12 +44,19 @@ class OpenAIToolsPrompter:
     def func_call_token(cls) -> str:
         return "!function_call:"
 
-    def to_ChatContent(self, tool_calls: [ToolCallsMessage]) -> str:
+    def content_from_assistant(self, message: ChatCompletionAssistantMessage) -> str:
         text = ""
-        for call in tool_calls:
-            text += call.function.name + " was called with arguments : " + str(
+        for call in message.tool_calls:
+            text += call.id + " was called with arguments : " + str(
                 call.function.arguments) + "\n"
-        return text
+        if message.content is None:
+            return text
+        else:
+            return message.content + "\n" + text
+
+
+    def content_from_tool(self, message: ChatCompletionToolMessage) -> str:
+        return message.tool_call_id + " -> " + message.content
 
     def inject_prompt(self, request: ChatCompletionRequest):
         """ Tested with :
@@ -206,12 +213,10 @@ class OpenAIServing:
             for m in request.messages:
                 if isinstance(m, ChatCompletionAssistantMessage
                               ) and m.tool_calls is not None:
-                    if m.content is None:
-                        m.content = self.openai_tools_prompter.to_ChatContent(
-                            m.tool_calls)
-                    else:
-                        m.content += "\n" + self.openai_tools_prompter.to_ChatContent(
-                            m.tool_calls)
+                    m.content = self.openai_tools_prompter.content_from_assistant(m)
+                elif isinstance(m, ChatCompletionToolMessage
+                                ) and m.tool_call_id is not None:
+                    m.content = self.openai_tools_prompter.content_from_tool(m)
 
         try:
             prompt = self.tokenizer.apply_chat_template(
@@ -222,6 +227,8 @@ class OpenAIServing:
             logger.error(
                 f"Error in applying chat template from request: {str(e)}")
             return self.create_error_response(str(e))
+
+        # logger.info(prompt)  # print current prompt
 
         token_ids, error_check_ret = await self._check_length(request,
                                                               prompt=prompt)

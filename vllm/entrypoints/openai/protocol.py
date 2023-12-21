@@ -76,36 +76,37 @@ class ChatCompletionToolParam(BaseModel):
 
 
 class ChatCompletionSystemMessage(BaseModel):
-    role: str
+    role: Literal["system"]
     content: str
     name: Optional[str] = None
 
 
 class ChatCompletionUserMessage(BaseModel):
+    role: Literal["user"]
     content: Union[str, List[str]]
-    role: str
     name: Optional[str] = None
 
 
 class ChatCompletionAssistantMessage(BaseModel):
+    role: Literal["assistant"]
     content: Optional[str] = None
-    role: str
     name: Optional[str] = None
     tool_calls: Optional[List[ToolCallsMessage]] = None
 
 
 class ChatCompletionToolMessage(BaseModel):
+    role: Literal["tool"]
     content: str
-    role: str
     tool_call_id: str
 
 
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: Union[str, List[ChatCompletionSystemMessage],
-                    List[ChatCompletionUserMessage],
-                    List[ChatCompletionAssistantMessage],
-                    List[ChatCompletionToolMessage]]
+    messages: List[Union[ChatCompletionToolMessage,
+                         ChatCompletionAssistantMessage,
+                         ChatCompletionUserMessage,
+                         ChatCompletionSystemMessage
+                         ]]
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
