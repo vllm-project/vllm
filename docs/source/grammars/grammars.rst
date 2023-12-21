@@ -56,6 +56,7 @@ Performance
 -----------
 
 For a simple JSON grammar, on the authors mid-end laptop using codeLlama-7b's vocabulary, generation occurred at ~10 validated logit sets per second. However performance was improved dramatically from the baseline with a few tweaks to ~400/s. These tweaks include
+
 - Optimizing the grammar increased performance by ~10x
 - Constraining legal characters increased performance by ~4x
 
