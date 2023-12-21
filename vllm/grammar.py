@@ -77,6 +77,7 @@ class InteractivePredictiveLALRParser:
             regex=True,  # use `regex` not `re`
             start=start,
             parser='lalr',
+            cache=True,  # results in 2-3x faster loading
         )
         base_interactive_parser = self.parser.parse_interactive()
         self.interactive_parser = FastInteractiveParser(
@@ -91,17 +92,13 @@ class InteractivePredictiveLALRParser:
 
         self._ignored_terms = set(self.parser.lexer_conf.ignore)
 
-        # for processing terminals interactively
-        self.last_terminal_pos = 0
-        self.valid_next_terminals = None
-
         # for calculating `accepts()` efficiently
         self._accepts_cache = {}
 
         self.sequence_history = ""
 
-        # initiate
-        self.step_seq("")
+        # for processing terminals interactively
+        self.valid_next_terminals = {"": self._accepts() | self._ignored_terms}
 
     @staticmethod
     def _get_partial_pattern_validator(pattern):
@@ -127,13 +124,6 @@ class InteractivePredictiveLALRParser:
             self._accepts_cache[self.sequence_history] = accepted_terminals
         return self._accepts_cache[self.sequence_history]
 
-    @property
-    def terminal_partial_seq(self):
-        """
-        Return the incomplete subsequence which will eventually comprise a terminal
-        """
-        return self.sequence_history[self.last_terminal_pos:]
-
     def step_seq(self, new_seq: str):
         """
         Append sequence to parser and apply state updates
@@ -142,21 +132,30 @@ class InteractivePredictiveLALRParser:
         - Update the character position of the last complete terminal
         - Update the set of candidate terminals
         """
-        self._append_to_sequence(new_seq)
+        for char in new_seq:
+            self._append_to_sequence(char)
 
-        try:
-            self.interactive_parser.exhaust_lexer()
-        except UnexpectedCharacters as e:
-            self.last_terminal_pos = e.pos_in_stream
-        else:
-            self.last_terminal_pos = len(self.sequence_history)
+            filter_candidate_terminals = True
+            try:
+                self.interactive_parser.exhaust_lexer()
+            except UnexpectedCharacters as e:
+                pass
+            except UnexpectedToken as e:
+                filter_candidate_terminals = False
 
-        self._update_candidate_terminals()
+            self.valid_next_terminals = {
+                (incomplete_seq + char): term
+                for incomplete_seq, term in self.valid_next_terminals.items()
+            }
+            self.valid_next_terminals[""] = self._accepts() | self._ignored_terms
 
-        if not self.valid_next_terminals:
-            raise ValueError(
-                f"Invalid continuation for `{self.sequence_history}` `{new_seq}`"
-            )
+            if filter_candidate_terminals:
+                self._update_candidate_terminals()
+
+            if not self.valid_next_terminals:
+                raise ValueError(
+                    f"Invalid continuation for `{self.sequence_history}` `{new_seq}`"
+                )
 
     def _append_to_sequence(self, new_seq: str):
         """Set the complete sequences value in the lexer and base"""
@@ -168,14 +167,22 @@ class InteractivePredictiveLALRParser:
         Update the set of candidate terminals
         - If a new terminal is reached, get the accepted set of terminals from the parser
         - If the new sequence doesn't comprise a full terminal, filter based on partial pattern match
+
+        Handles ambiguity by allowing terminals which are potentially complete
         """
-        if not self.terminal_partial_seq:
-            self.valid_next_terminals = self._accepts() | self._ignored_terms
-        else:
-            self.valid_next_terminals = set([
-                term for term in self.valid_next_terminals
-                if self.partial_seq_validator[term](self.terminal_partial_seq)
-            ])
+        to_prune_sequences = set()
+        for incomplete_seq, terminals in self.valid_next_terminals.items():
+            if incomplete_seq != "":
+                self.valid_next_terminals[incomplete_seq] = set([
+                    term for term in self.valid_next_terminals[incomplete_seq]
+                    if term != "$END"
+                    and self.partial_seq_validator[term](incomplete_seq)
+                ])
+            if not self.valid_next_terminals[incomplete_seq]:
+                to_prune_sequences.add(incomplete_seq)
+
+        for to_prune_seq in to_prune_sequences:
+            del self.valid_next_terminals[to_prune_seq]
 
     def is_valid_next_seq(self, new_seq: Optional[str]):
         """
@@ -184,12 +191,16 @@ class InteractivePredictiveLALRParser:
         new_seq can be a string or None representing EOS
         """
         if new_seq is None:
-            return "$END" in self.valid_next_terminals
-        for term in self.valid_next_terminals:
-            if term != "$END":
-                full_terminal_candidate = self.terminal_partial_seq + new_seq
-                if self.partial_seq_validator[term](full_terminal_candidate):
-                    return True
+            return "$END" in [
+                term for terminals in self.valid_next_terminals.values()
+                for term in terminals
+            ]
+        for incomplete_seq, terminals in self.valid_next_terminals.items():
+            candidate = incomplete_seq + new_seq
+            for term in terminals:
+                if term != "$END":
+                    if self.partial_seq_validator[term](candidate):
+                        return True
         return False
 
 
@@ -200,21 +211,25 @@ class TokenTrie:
         """
         Trie structure for efficiently finding tokens which are suffixes of other sequences
         """
-        self.norm_vocab = {}
+        self.norm_vocab = collections.defaultdict(set)
         for token_id in tokenizer.vocab.values():
+            if token_id == tokenizer.eos_token_id:
+                self.norm_vocab[None].add(token_id)
+                continue
             bos_len = len(tokenizer.bos_token)
             norm_token = tokenizer.decode([tokenizer.bos_token_id, token_id])[bos_len:]
             if legal_chars is None or all(
                     [char in legal_chars for char in norm_token]):
-                self.norm_vocab[norm_token] = token_id
+                self.norm_vocab[norm_token].add(token_id)
 
-        self.token_to_id_set = collections.defaultdict(set)
-        for token_str, token_id in self.norm_vocab.items():
-            self.token_to_id_set[token_str].add(token_id)
+        # faster lookups, reduce time by 10%
+        self.norm_vocab_set = set(self.norm_vocab)
 
         self.trie = {}
         for word in self.norm_vocab:
             current_dict = self.trie
+            if word is None:
+                continue
             for char in word:
                 if char not in current_dict:
                     current_dict[char] = {}
@@ -264,7 +279,7 @@ class TokenTrie:
         return results
 
     def is_token(self, seq):
-        return seq in self.norm_vocab
+        return seq in self.norm_vocab_set
 
 
 class NextTokenValidator:
@@ -279,16 +294,13 @@ class NextTokenValidator:
                  tokenizer,
                  grammar: str,
                  grammar_start: str = "start",
-                 num_threads: Optional[int] = None):
+                 legal_chars: Optional[set[str]] = None,
+                 ):
         self.tokenizer = tokenizer
-        self.token_trie = TokenTrie(tokenizer)
+        self.token_trie = TokenTrie(tokenizer, legal_chars=legal_chars)
 
         self.parser = InteractivePredictiveLALRParser(grammar=grammar,
                                                       start=grammar_start)
-
-        # TODO: threading
-        if num_threads is None:
-            self.num_threads = os.cpu_count() // 2
 
     def step_seq(self, new_seq):
         self.parser.step_seq(new_seq)
@@ -302,13 +314,16 @@ class NextTokenValidator:
         2) for each token in the stack, validate against the parser
           - if valid, add all children to the stack for later processing
           - if valid AND a token, add to valid_token_set
+
+        TODO: this can be improved with multi-threading
         """
         valid_token_str_set = set()
+        if self.parser.is_valid_next_seq(None):
+            valid_token_str_set.add(self.tokenizer.eos_token)
         token_prefix_stack = collections.deque([""])
         while token_prefix_stack:
             token_prefix = token_prefix_stack.pop()
             for child_token_prefix in self.token_trie.get_next_level_token_prefixes(token_prefix):
-                # TODO: Handle EOS token by passing None
                 if self.parser.is_valid_next_seq(child_token_prefix):
                     token_prefix_stack.append(child_token_prefix)
                     if self.token_trie.is_token(child_token_prefix):
@@ -323,8 +338,8 @@ class NextTokenValidator:
         note that some token strings correspond to multiple token IDs
         """
         return set.union(*[
-            self.token_trie.token_to_id_set[tok]
-            for tok in self.valid_token_str_set
+            self.token_trie.norm_vocab[tok_str]
+            for tok_str in self.valid_token_str_set
         ])
 
 

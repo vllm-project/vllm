@@ -55,7 +55,55 @@ Example Lark Grammars
 Performance
 -----------
 
-Expect between 3 and 30 new tokens per second as a baseline, however performance can be improved from the baseline.
+For a simple JSON grammar, on the authors mid-end laptop using codeLlama-7b's vocabulary, generation occurred at ~10 validated logit sets per second. However performance was improved dramatically from the baseline with a few tweaks to ~400/s. These tweaks include
+- Optimizing the grammar increased performance by ~10x
+- Constraining legal characters increased performance by ~4x
+
+**Design your EBNF grammar with minimal regexp**
+
+Regexp processing is the most expensive task for GrammarLogitsProcessor. When designing your EBNF, it's better to keep your regexp short and simple if at all possible.
+
+Breaking down the following expressions ESCAPE_STRING into an expression with many faster-terminating regex resulted in an ~8x speedup:
+
+.. code-block::
+    start: value
+    ?value: dict
+          | list
+          | string
+          | signed_number      -> number
+          | "true"             -> true
+          | "false"            -> false
+          | "null"             -> null
+
+    list : "[" [value ("," value)*] "]"
+
+    dict : "{" [pair ("," pair)*] "}"
+    pair : string ":" value
+
+    string : "\"" escaped_string_char* "\""
+    escaped_string_char: STR_INNER_CHAR | ESCAPED_CHAR
+    ESCAPED_CHAR: "\\" ANY_CHAR
+    STR_INNER_CHAR: /[^\\\"]/
+    ANY_CHAR: /[.]/
+
+    signed_number: ["+"|"-"] number
+    number: float | int
+    float: int exp | decimal exp?
+    decimal: int "." int? | "." int
+    exp: ("e"|"E") signed_int
+    signed_int: ["+"|"-"] int
+    int: DIGIT+
+    DIGIT: "0".."9"
+
+    WS: /[ \t\f\r\n]/
+    %ignore WS
+
+    # old slow regex-based expressions:
+
+    # %import common.ESCAPED_STRING
+    # %import common.SIGNED_NUMBER
+    # %import common.WS
+
 
 **Constrain legal characters**
 
@@ -74,19 +122,4 @@ Expect an ~10x speedup if you constrain your generation to UTF-8, eliminating 3,
     GrammarLogitsProcessor(
         ...,
         legal_chars=set([chr(i) for i in range(256)])
-    )
-
-**Design your EBNF with minimal regexp**
-
-Regexp processing is the most expensive task for GrammarLogitsProcessor. When designing your EBNF, it's better to keep your regexp short and simple if at all possible.
-
-**Use more threads**
-
-By default ``GrammarLogitProcessor`` uses ``os.cpu_count() / 2`` threads. You may change this via
-
-.. code-block::
-
-    GrammarLogitsProcessor(
-        ...,
-        num_threads=4
     )
