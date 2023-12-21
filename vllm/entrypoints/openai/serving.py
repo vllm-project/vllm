@@ -44,7 +44,8 @@ class OpenAIToolsPrompter:
     def func_call_token(cls) -> str:
         return "!function_call:"
 
-    def content_from_assistant(self, message: ChatCompletionAssistantMessage) -> str:
+    def content_from_assistant(self,
+                               message: ChatCompletionAssistantMessage) -> str:
         text = ""
         for call in message.tool_calls:
             text += call.id + " was called with arguments : " + str(
@@ -53,7 +54,6 @@ class OpenAIToolsPrompter:
             return text
         else:
             return message.content + "\n" + text
-
 
     def content_from_tool(self, message: ChatCompletionToolMessage) -> str:
         return message.tool_call_id + " -> " + message.content
@@ -213,7 +213,8 @@ class OpenAIServing:
             for m in request.messages:
                 if isinstance(m, ChatCompletionAssistantMessage
                               ) and m.tool_calls is not None:
-                    m.content = self.openai_tools_prompter.content_from_assistant(m)
+                    m.content = self.openai_tools_prompter.content_from_assistant(
+                        m)
                 elif isinstance(m, ChatCompletionToolMessage
                                 ) and m.tool_call_id is not None:
                     m.content = self.openai_tools_prompter.content_from_tool(m)
