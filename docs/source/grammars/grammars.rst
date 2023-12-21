@@ -64,7 +64,7 @@ For a simple JSON grammar, on the authors mid-end laptop using codeLlama-7b's vo
 
 Regexp processing is the most expensive task for GrammarLogitsProcessor. When designing your EBNF, it's better to keep your regexp short and simple if at all possible.
 
-Breaking down the following expressions ESCAPE_STRING into an expression with many faster-terminating regex resulted in an ~8x speedup:
+Breaking down the following expressions ESCAPE_STRING into an expression with many faster-terminating regex resulted in an ~10x speedup:
 
 .. code-block::
 
