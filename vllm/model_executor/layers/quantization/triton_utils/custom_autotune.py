@@ -125,12 +125,11 @@ class CustomizedTritonAutoTuner(triton.KernelInterface):
                 top_k = int(len(self.configs) * top_k)
             if len(pruned_configs) > top_k:
                 est_timing = {
-                    config:
-                    self.perf_model(**self.nargs,
-                                    **kwargs,
-                                    **config.kwargs,
-                                    num_stages=config.num_stages,
-                                    num_warps=config.num_warps)
+                    config: self.perf_model(**self.nargs,
+                                            **kwargs,
+                                            **config.kwargs,
+                                            num_stages=config.num_stages,
+                                            num_warps=config.num_warps)
                     for config in pruned_configs
                 }
                 pruned_configs = sorted(est_timing.keys(),
