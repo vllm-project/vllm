@@ -35,11 +35,12 @@ ROCM_SUPPORTED_ARCHS = {"gfx908", "gfx90a", "gfx942", "gfx1100"}
 
 
 def _is_hip() -> bool:
-    return torch.version.hip is not None
+    return torch.version.hip is not None and not BUILD_CPU_ONLY
 
 
 def _is_neuron() -> bool:
     torch_neuronx_installed = True
+
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
     except (FileNotFoundError, PermissionError):
@@ -47,8 +48,13 @@ def _is_neuron() -> bool:
     return torch_neuronx_installed
 
 
+ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
+CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
+NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
+
+
 def _is_cuda() -> bool:
-    return (torch.version.cuda is not None) and not _is_neuron()
+    return (torch.version.cuda is not None) and not _is_neuron() and VLLM_TARGET_DEVICE != "cpu"
 
 
 def generate_vllm_cuda_extension():
@@ -403,7 +409,37 @@ def generate_vllm_cuda_extension():
     if _is_neuron():
         neuronxcc_version = get_neuronxcc_version()
 
-    if not _is_neuron():
+    if VLLM_TARGET_DEVICE == "cpu":
+        # Setup CPU Operations
+        BUILD_CPU_OPS = 1
+        CPU_OPS_SOURCES = []
+        if BUILD_CPU_OPS:
+            if VLLM_TARGET_DEVICE == "cpu":
+                CXX_FLAGS += ["-DVLLM_BUILD_CPU_ONLY"]
+            CXX_FLAGS += [
+                "-DVLLM_BUILD_CPU_OPS", "-Xclang", "-fopenmp", "-mavx512f", "-mavx512bf16",
+                "-mavx512vl"
+            ]
+            CPU_OPS_SOURCES += [
+                "csrc/cpu/activation_impl.cpp",
+                "csrc/cpu/attention_impl.cpp",
+                "csrc/cpu/cache_impl.cpp",
+                "csrc/cpu/layernorm_impl.cpp",
+                "csrc/cpu/pos_encoding_impl.cpp",
+            ]
+
+        vllm_extension_sources = [
+            "csrc/pybind.cpp",
+        ] + CPU_OPS_SOURCES
+        vllm_extension = torch_cpp_ext.CppExtension(
+            name="vllm._C",
+            sources=vllm_extension_sources,
+            extra_compile_args={
+                "cxx": CXX_FLAGS,
+            },
+        )
+        ext_modules.append(vllm_extension)
+    elif not _is_neuron():
         vllm_extension = CUDAExtension(
             name="vllm._C",
             sources=vllm_extension_sources,
@@ -446,8 +482,11 @@ def generate_vllm_cuda_extension():
         elif _is_neuron():
             with open(get_path("requirements-neuron.txt")) as f:
                 requirements = f.read().strip().split("\n")
-        else:
+        elif _is_cuda():
             with open(get_path("requirements.txt")) as f:
+                requirements = f.read().strip().split("\n")
+        else:
+            with open(get_path("requirements-cpu.txt")) as f:
                 requirements = f.read().strip().split("\n")
         return requirements
 

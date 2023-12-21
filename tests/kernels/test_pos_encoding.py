@@ -36,6 +36,7 @@ def test_rotary_embedding(
     head_size: int,
     rotary_dim: Optional[int],
     dtype: torch.dtype,
+    device: torch.device,
     seed: int,
     device: str,
     max_position: int = 8192,

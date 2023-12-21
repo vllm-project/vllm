@@ -47,6 +47,7 @@ def test_copy_blocks(
     block_size: int,
     num_blocks: int,
     dtype: torch.dtype,
+    device: torch.device,
     seed: int,
     kv_cache_dtype: str,
     device: str,
@@ -98,6 +99,32 @@ def test_copy_blocks(
         assert torch.allclose(value_cache, cloned_value_cache)
 
 
+@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
+@pytest.mark.parametrize("num_layers", NUM_LAYERS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", [torch.device('cpu')])
+@torch.inference_mode()
+def test_copy_blocks_cpu(
+    kv_cache_factory,
+    num_mappings: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    seed: int,
+) -> None:
+    test_copy_blocks(kv_cache_factory, num_mappings, num_layers, num_heads,
+                     head_size, block_size, num_blocks, dtype, device, seed)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -115,6 +142,7 @@ def test_reshape_and_cache(
     block_size: int,
     num_blocks: int,
     dtype: torch.dtype,
+    device: torch.device,
     seed: int,
     device: str,
 ) -> None:

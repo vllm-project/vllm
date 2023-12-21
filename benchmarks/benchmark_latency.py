@@ -23,6 +23,8 @@ def main(args: argparse.Namespace):
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
+        device=args.device,
+        swap_space=args.swap_space,
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
@@ -144,12 +146,16 @@ if __name__ == '__main__':
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda"],
+        choices=["cuda", "cpu"],
         help='device type for vLLM execution, supporting CUDA only currently.')
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',
         help="If specified, use nsight to profile ray workers",
     )
+    parser.add_argument("--swap-space",
+                        type=int,
+                        default=4,
+                        help="memory space available for CPU (GB).")
     args = parser.parse_args()
     main(args)

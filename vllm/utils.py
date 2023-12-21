@@ -33,6 +33,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 
+
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()

@@ -28,14 +28,14 @@ def test_act_and_mul(
     num_tokens: int,
     d: int,
     dtype: torch.dtype,
+    device: torch.device,
     seed: int,
-    device: str,
 ) -> None:
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
-    x = torch.randn(num_tokens, 2 * d, dtype=dtype)
+    x = torch.randn(num_tokens, 2 * d, dtype=dtype, device=device)
     layer = activation()
     out = layer(x)
     ref_out = layer._forward(x)
@@ -45,6 +45,22 @@ def test_act_and_mul(
 
 
 @pytest.mark.parametrize("activation", [FastGELU, NewGELU])
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("d", D)
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", [torch.device('cpu')])
+@torch.inference_mode()
+def test_silu_and_mul_cpu(
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    seed: int,
+) -> None:
+    test_silu_and_mul(num_tokens, d, dtype, device, seed)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)

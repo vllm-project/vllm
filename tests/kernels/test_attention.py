@@ -72,8 +72,8 @@ def ref_single_query_cached_kv_attention(
     block_size = value_cache.shape[3]
     num_seqs = query.shape[0]
 
-    block_tables = block_tables.cpu().tolist()
-    context_lens = context_lens.cpu().tolist()
+    block_tables = block_tables.cpu()
+    context_lens = context_lens.cpu()
     for i in range(num_seqs):
         q = query[i].unsqueeze(0)
         block_table = block_tables[i]
@@ -269,6 +269,34 @@ def test_paged_attention(
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
 
 
+@pytest.mark.parametrize("version", ["v1"])
+@pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize(
+    "block_size", [16]
+)  # FIXME: Currently we only use 16 due to the limitation of the YMM register number.
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", [torch.device('cpu')])
+@torch.inference_mode()
+def test_paged_attention_cpu(
+    kv_cache_factory,
+    version: str,
+    num_seqs: int,
+    num_heads: Tuple[int, int],
+    head_size: int,
+    use_alibi: bool,
+    block_size: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    seed: int,
+) -> None:
+    test_paged_attention(kv_cache_factory, version, num_seqs, num_heads,
+                         head_size, use_alibi, block_size, dtype, device, seed)
+
+
 def ref_multi_query_kv_attention(
     cu_seq_lens: List[int],
     query: torch.Tensor,
@@ -276,6 +304,7 @@ def ref_multi_query_kv_attention(
     value: torch.Tensor,
     scale: float,
     dtype: torch.dtype,
+    device: torch.device,
 ) -> torch.Tensor:
     num_seqs = len(cu_seq_lens) - 1
     ref_outputs = []
@@ -315,6 +344,7 @@ def test_multi_query_kv_attention(
     num_heads: Tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
+    device: torch.device,
     seed: int,
     device: str,
 ) -> None:
@@ -345,16 +375,24 @@ def test_multi_query_kv_attention(
         # Handle MQA and GQA
         key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
         value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
+
+    output = None
     attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
-    output = xops.memory_efficient_attention_forward(
-        query.unsqueeze(0),
-        key.unsqueeze(0),
-        value.unsqueeze(0),
-        attn_bias=attn_bias,
-        p=0.0,
-        scale=scale,
-    )
-    output = output.squeeze(0)
+    if device == torch.device("cuda"):
+        output = xops.memory_efficient_attention_forward(
+            query.unsqueeze(0),
+            key.unsqueeze(0),
+            value.unsqueeze(0),
+            attn_bias=attn_bias,
+            p=0.0,
+            scale=scale,
+        )
+        output = output.squeeze(0)
+    else:
+        output = torch.nn.functional.scaled_dot_product_attention(
+            query.transpose(0, 1), key.transpose(0, 1), value.transpose(0, 1),
+            attn_bias.materialize((1, num_tokens, num_tokens), dtype=dtype),
+            0.0).transpose(0, 1)
 
     cu_seq_lens = [0]
     for seq_len in seq_lens:

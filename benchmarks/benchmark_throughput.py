@@ -73,6 +73,7 @@ def run_vllm(
     enforce_eager: bool,
     kv_cache_dtype: str,
     device: str,
+    swap_space: int,
     enable_prefix_caching: bool,
     gpu_memory_utilization: float = 0.9,
 ) -> float:
@@ -89,6 +90,7 @@ def run_vllm(
               enforce_eager=enforce_eager,
               kv_cache_dtype=kv_cache_dtype,
               device=device,
+              swap_space=swap_space,
               enable_prefix_caching=enable_prefix_caching)
 
     # Add the requests to the engine.
@@ -115,21 +117,16 @@ def run_vllm(
     return end - start
 
 
-def run_hf(
-    requests: List[Tuple[str, int, int]],
-    model: str,
-    tokenizer: PreTrainedTokenizerBase,
-    n: int,
-    use_beam_search: bool,
-    max_batch_size: int,
-    trust_remote_code: bool,
-) -> float:
+def run_hf(requests: List[Tuple[str, int, int]], model: str,
+           tokenizer: PreTrainedTokenizerBase, n: int, use_beam_search: bool,
+           max_batch_size: int, trust_remote_code: bool) -> float:
     assert not use_beam_search
     llm = AutoModelForCausalLM.from_pretrained(
         model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
+
     llm = llm.cuda()
 
     pbar = tqdm(total=len(requests))
@@ -212,7 +209,7 @@ def main(args: argparse.Namespace):
             requests, args.model, args.tokenizer, args.quantization,
             args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
             args.trust_remote_code, args.dtype, args.max_model_len,
-            args.enforce_eager, args.kv_cache_dtype, args.device,
+            args.enforce_eager, args.kv_cache_dtype, args.device, args.swap_space,
             args.enable_prefix_caching, args.gpu_memory_utilization)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
@@ -308,12 +305,16 @@ if __name__ == "__main__":
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda"],
+        choices=["cuda", "cpu"],
         help='device type for vLLM execution, supporting CUDA only currently.')
     parser.add_argument(
         "--enable-prefix-caching",
         action='store_true',
         help="enable automatic prefix caching for vLLM backend.")
+    parser.add_argument("--swap-space",
+                        type=int,
+                        default=4,
+                        help="memory space available for CPU (GB).")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

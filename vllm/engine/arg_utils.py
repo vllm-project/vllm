@@ -308,18 +308,20 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs)
+            self.max_logprobs, self.device)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
                                    model_config.get_sliding_window(),
-                                   self.enable_prefix_caching)
+                                   self.enable_prefix_caching,
+                                   self.device == 'cpu')
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
                                          self.disable_custom_all_reduce,
-                                         self.ray_workers_use_nsight)
+                                         self.ray_workers_use_nsight,
+                                         device=self.device)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
