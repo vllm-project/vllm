@@ -66,6 +66,7 @@ Regexp processing is the most expensive task for GrammarLogitsProcessor. When de
 Breaking down the following expressions ESCAPE_STRING into an expression with many faster-terminating regex resulted in an ~8x speedup:
 
 .. code-block::
+
     start: value
     ?value: dict
           | list
@@ -103,7 +104,6 @@ Breaking down the following expressions ESCAPE_STRING into an expression with ma
     # %import common.ESCAPED_STRING
     # %import common.SIGNED_NUMBER
     # %import common.WS
-
 
 **Constrain legal characters**
 
