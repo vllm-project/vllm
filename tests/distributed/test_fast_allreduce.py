@@ -7,7 +7,7 @@ import pytest
 from tests.distributed.comm_utils import init_test_distributed_environment, multi_process_tensor_parallel
 
 random.seed(42)
-test_sizes = [random.randint(1024, 2048 * 1024) for i in range(4)]
+test_sizes = [random.randint(1024, 2048 * 1024) for i in range(8)]
 for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
 
@@ -19,12 +19,14 @@ def graph_registration(world_size, rank, distributed_init_port):
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
             fa = FastAllreduce(rank, world_size)
             # use integers so result matches NCCL exactly
-            inp1 = torch.ones(
-                sz, dtype=dtype,
-                device=torch.cuda.current_device()) * random.randint(1, 16)
-            inp2 = torch.ones(
-                sz, dtype=dtype,
-                device=torch.cuda.current_device()) * random.randint(1, 16)
+            inp1 = torch.randint(1,
+                                 16, (sz, ),
+                                 dtype=dtype,
+                                 device=torch.cuda.current_device())
+            inp2 = torch.randint(1,
+                                 16, (sz, ),
+                                 dtype=dtype,
+                                 device=torch.cuda.current_device())
             torch.cuda.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
