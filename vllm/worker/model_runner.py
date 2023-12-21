@@ -168,8 +168,9 @@ class ModelRunner:
                 position = seq_len - 1
                 input_positions.append([position])
 
-                context_len = seq_len if self.sliding_window is None else min(
-                    seq_len, self.sliding_window)
+                context_len = seq_len
+                if self.sliding_window and context_len > self.sliding_window:
+                    context_len = self.sliding_window - self.block_size + context_len % self.block_size
                 context_lens.append(context_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
