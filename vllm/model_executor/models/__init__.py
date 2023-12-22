@@ -17,6 +17,7 @@ _MODELS = {
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
+    "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
@@ -39,12 +40,14 @@ _MODELS = {
 }
 
 # Models not supported by ROCm.
-_ROCM_UNSUPPORTED_MODELS = ["MixtralForCausalLM"]
+_ROCM_UNSUPPORTED_MODELS = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
 _ROCM_PARTIALLY_SUPPORTED_MODELS = {
     "MistralForCausalLM":
+    "Sliding window attention is not yet supported in ROCm's flash attention",
+    "MixtralForCausalLM":
     "Sliding window attention is not yet supported in ROCm's flash attention",
 }
 

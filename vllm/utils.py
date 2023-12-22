@@ -1,4 +1,5 @@
 import enum
+import socket
 import uuid
 from platform import uname
 
@@ -142,3 +143,9 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
         return loop.run_in_executor(executor=None, func=p_func)
 
     return _async_wrapper
+
+
+def get_open_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]

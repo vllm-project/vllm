@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Tuple
 
 import pytest
@@ -7,21 +8,32 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-_TEST_PROMPTS = [
-    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
-    "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
-    "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
-    "Describe the basic components of a neural network and how it can be trained.",
-    "Write a short story about a robot that dreams for the first time.",
-    "Analyze the impact of the COVID-19 pandemic on global economic structures and future business models.",
-    "Explain the cultural significance of the Mona Lisa painting, and how its perception might vary in Western versus Eastern societies.",
-    "Translate the following English sentence into Japanese, French, and Swahili: 'The early bird catches the worm.'",
-]
+_TEST_PROMPTS = ["prompts/example.txt"]
+_LONG_PROMPTS = ["prompts/summary.txt"]
+
+
+def _read_prompts(filename: str) -> str:
+    prompts = []
+    with open(filename, "r") as f:
+        prompt = f.readline()
+        prompts.append(prompt)
+    return prompts
 
 
 @pytest.fixture
 def example_prompts() -> List[str]:
-    return _TEST_PROMPTS
+    prompts = []
+    for filename in _TEST_PROMPTS:
+        prompts += _read_prompts(os.path.join("tests", filename))
+    return prompts
+
+
+@pytest.fixture
+def example_long_prompts() -> List[str]:
+    prompts = []
+    for filename in _LONG_PROMPTS:
+        prompts += _read_prompts(os.path.join("tests", filename))
+    return prompts
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

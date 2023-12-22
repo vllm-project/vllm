@@ -80,6 +80,14 @@ def parse_args():
                         default="assistant",
                         help="The role name to return if "
                         "`request.add_generation_prompt=true`.")
+    parser.add_argument("--ssl-keyfile",
+                        type=str,
+                        default=None,
+                        help="The file path to the SSL key file")
+    parser.add_argument("--ssl-certfile",
+                        type=str,
+                        default=None,
+                        help="The file path to the SSL cert file")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
@@ -744,4 +752,6 @@ if __name__ == "__main__":
                 host=args.host,
                 port=args.port,
                 log_level="info",
-                timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
+                timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+                ssl_keyfile=args.ssl_keyfile,
+                ssl_certfile=args.ssl_certfile)

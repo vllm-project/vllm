@@ -94,14 +94,12 @@ class GPTJAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
-                                cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
@@ -156,7 +154,6 @@ class GPTJBlock(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -165,7 +162,6 @@ class GPTJBlock(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
         mlp_output = self.mlp(hidden_states)
         hidden_states = attn_output + mlp_output + residual
@@ -196,18 +192,15 @@ class GPTJModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
         for i in range(len(self.h)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(
                 position_ids,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
-                cache_event,
             )
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
@@ -238,10 +231,9 @@ class GPTJForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
+                                         input_metadata)
         return hidden_states
 
     def sample(
@@ -274,11 +266,18 @@ class GPTJForCausalLM(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                param = params_dict[name.replace(weight_name, param_name)]
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

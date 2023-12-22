@@ -33,6 +33,8 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+    enforce_eager: bool = False
+    max_context_len_to_capture: int = 8192
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
@@ -160,11 +162,13 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.swap_space,
                             help='CPU swap space size (GiB) per GPU')
-        parser.add_argument('--gpu-memory-utilization',
-                            type=float,
-                            default=EngineArgs.gpu_memory_utilization,
-                            help='the percentage of GPU memory to be used for'
-                            'the model executor')
+        parser.add_argument(
+            '--gpu-memory-utilization',
+            type=float,
+            default=EngineArgs.gpu_memory_utilization,
+            help='the fraction of GPU memory to be used for '
+            'the model executor, which can range from 0 to 1.'
+            'If unspecified, will use the default value of 0.9.')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
                             default=EngineArgs.max_num_batched_tokens,
@@ -185,9 +189,25 @@ class EngineArgs:
         parser.add_argument('--quantization',
                             '-q',
                             type=str,
-                            choices=['awq', 'squeezellm', None],
+                            choices=['awq', 'gptq', 'squeezellm', None],
                             default=None,
-                            help='Method used to quantize the weights')
+                            help='Method used to quantize the weights. If '
+                            'None, we first check the `quantization_config` '
+                            'attribute in the model config file. If that is '
+                            'None, we assume the model weights are not '
+                            'quantized and use `dtype` to determine the data '
+                            'type of the weights.')
+        parser.add_argument('--enforce-eager',
+                            action='store_true',
+                            help='Always use eager-mode PyTorch. If False, '
+                            'will use eager mode and CUDA graph in hybrid '
+                            'for maximal performance and flexibility.')
+        parser.add_argument('--max-context-len-to-capture',
+                            type=int,
+                            default=EngineArgs.max_context_len_to_capture,
+                            help='maximum context length covered by CUDA '
+                            'graphs. When a sequence has context length '
+                            'larger than this, we fall back to eager mode.')
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
@@ -235,7 +255,8 @@ class EngineArgs:
                                    self.download_dir, self.load_format,
                                    self.dtype, self.seed, self.revision,
                                    self.tokenizer_revision, self.max_model_len,
-                                   self.quantization)
+                                   self.quantization, self.enforce_eager,
+                                   self.max_context_len_to_capture)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space,
