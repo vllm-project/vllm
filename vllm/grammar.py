@@ -430,7 +430,7 @@ class GrammarLogitsProcessor:
         # modify logits given valid token IDs
         N = len(logits)
         mask = torch.zeros(N, dtype=torch.bool)
-        valid = torch.tensor(list(bdip.valid_token_id_set), dtype=torch.long)
+        valid = torch.tensor(list(bdip.parser.valid_token_id_set), dtype=torch.long)
         mask[valid] = True
         logits[~mask] = float('-inf')
         return logits
