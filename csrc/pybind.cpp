@@ -83,6 +83,10 @@ void reshape_and_cache_dispatch(torch::Tensor& key, torch::Tensor& value, torch:
   VLLM_DISPATCH_DEVICES(key.device(), reshape_and_cache, key, value, key_cache, value_cache, slot_mapping);
 }
 
+void moe_align_block_size(torch::Tensor &topk_ids, int num_experts, int block_size, torch::Tensor &sorted_token_ids, torch::Tensor &experts_ids, torch::Tensor &num_tokens_post_pad) {
+  VLLM_DISPATCH_DEVICES(topk_ids.device(), reshape_and_cache, topk_ids, num_experts, block_size, sorted_token_ids, experts_ids, num_tokens_post_pad);
+}
+
 #ifdef VLLM_BUILD_CPU_ONLY
 int get_device_attribute(
     int attribute,
@@ -150,7 +154,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("squeezellm_gemm", &squeezellm_gemm_dispatch, "Quantized GEMM for SqueezeLLM");
   ops.def(
     "moe_align_block_size",
-    &moe_align_block_size,
+    &moe_align_block_size_dispatch,
     "Aligning the number of tokens to be processed by each expert such that it is divisible by the block size.");
 
   // Cache ops

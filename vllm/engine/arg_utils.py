@@ -285,7 +285,7 @@ class EngineArgs:
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron"],
+                            choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
         return parser
 

@@ -411,7 +411,7 @@ class ModelRunner:
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
-        pin_memory = not self.in_wsl and not self.device_config.is_neuron
+        pin_memory = not self.in_wsl and not self.device_config.is_neuron and self.device != "cpu"
 
         max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):

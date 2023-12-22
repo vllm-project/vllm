@@ -47,30 +47,34 @@ inline torch::Tensor awq_gemm_cpu(torch::Tensor &_in_feats, torch::Tensor &_kern
   TORCH_CHECK(false, "Quantization is not supported on CPU.");
 }
 
+inline torch::Tensor gptq_gemm_cpu(torch::Tensor &a, torch::Tensor &b_q_weight,
+                         torch::Tensor &b_gptq_qzeros, torch::Tensor &b_gptq_scales,
+                         torch::Tensor &b_g_idx, bool use_exllama) {
+  TORCH_CHECK(false, "Quantization is not supported on CPU.");
+}
+
+inline torch::Tensor gptq_shuffle_cpu(torch::Tensor &q_weight, torch::Tensor &q_perm) {
+  TORCH_CHECK(false, "Quantization is not supported on CPU.");
+}
+
 inline void squeezellm_gemm_cpu(torch::Tensor &vec, torch::Tensor &mat,
                          torch::Tensor &mul, torch::Tensor &lookup_table) {
   TORCH_CHECK(false, "Quantization is not supported on CPU.");
 }
 
-torch::Tensor awq_gemm_cpu(torch::Tensor& _in_feats, torch::Tensor& _kernel,
-                         torch::Tensor& _scaling_factors, torch::Tensor& _zeros,
-                         int split_k_iters) {
-  TORCH_CHECK(false, "Quantization is not supported on CPU.");
-}
-
-void squeezellm_gemm_cpu(torch::Tensor& vec, torch::Tensor& mat,
-                         torch::Tensor& mul, torch::Tensor& lookup_table) {
-  TORCH_CHECK(false, "Quantization is not supported on CPU.");
-}
-
-torch::Tensor marlin_gemm_cpu(torch::Tensor& a, torch::Tensor& b_q_weight,
-                         torch::Tensor& b_scales, torch::Tensor& workspace,
+inline torch::Tensor marlin_gemm_cpu(torch::Tensor &a, torch::Tensor &b_q_weight,
+                         torch::Tensor &b_scales, torch::Tensor &workspace,
                          int64_t size_m, int64_t size_n, int64_t size_k) {
   TORCH_CHECK(false, "Quantization is not supported on CPU.");
 }
 
-torch::Tensor awq_dequantize_cpu(torch::Tensor& _in_feats, torch::Tensor& _kernel,
-                         torch::Tensor& _scaling_factors, torch::Tensor& _zeros,
+inline torch::Tensor awq_dequantize_cpu(torch::Tensor &_in_feats, torch::Tensor &_kernel,
+                         torch::Tensor &_scaling_factors, torch::Tensor &_zeros,
                          int split_k_iters, int thx, int thy) {
   TORCH_CHECK(false, "Quantization is not supported on CPU.");
+}
+
+inline void moe_align_block_size(torch::Tensor &topk_ids, int num_experts, int block_size,
+                         torch::Tensor &sorted_token_ids, torch::Tensor &experts_ids,
+                         torch::Tensor &num_tokens_post_pad) {
 }

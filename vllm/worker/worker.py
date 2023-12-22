@@ -233,8 +233,9 @@ class Worker:
         if num_seq_groups == 0:
             return {}
 
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.cpu_cache if self.model_config.device == torch.device('cpu') else self.gpu_cache)
+        output = self.model_runner.execute_model(
+            seq_group_metadata_list, self.cpu_cache if self.model_config.device
+            == torch.device('cpu') else self.gpu_cache)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

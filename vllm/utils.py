@@ -33,7 +33,6 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 
-
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
@@ -129,6 +128,7 @@ def is_neuron() -> bool:
 
 
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
+    from vllm._C import cuda_utils
     """Returns the maximum shared memory per thread block in bytes."""
     # NOTE: This import statement should be executed lazily since
     # the Neuron-X backend does not have the `cuda_utils` module.
