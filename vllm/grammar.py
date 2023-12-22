@@ -1,6 +1,5 @@
 import collections
 from copy import deepcopy, copy
-import os
 import regex
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -9,7 +8,7 @@ from typing import Optional, List, Set, Union
 from lark import Lark
 from lark.parsers.lalr_interactive_parser import InteractiveParser
 from lark.parsers.lalr_parser_state import ParserState
-from lark.lexer import Token, LexerState, Pattern, PatternStr, PatternRE
+from lark.lexer import Pattern, PatternStr, PatternRE
 from lark.exceptions import UnexpectedCharacters, UnexpectedToken
 
 
