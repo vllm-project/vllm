@@ -170,8 +170,6 @@ class InteractivePredictiveLALRParser:
                     f"Invalid continuation for `{self.sequence_history}` `{new_seq}`"
                 )
 
-        print(self.valid_next_terminals)
-
     def _filter_candidate_terminals(self):
         """
         Filter the set of candidate terminals
@@ -350,7 +348,6 @@ class NextTokenValidator:
         get valid token id based on self.valid_token_str_set
         note that some token strings correspond to multiple token IDs
         """
-        print(self.valid_token_str_set)
         return set.union(*[
             self.token_trie.norm_vocab[tok_str]
             for tok_str in self.valid_token_str_set
