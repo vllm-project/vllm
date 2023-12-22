@@ -360,5 +360,5 @@ def test_integration_with_vllm(vllm_runner, hf_runner):
     assert len(request_outputs) == len(prompts)
 
     for request_output in llm.generate(prompts, sampling_params=sampling_params):
-        assert len(request_output.output) == 1
-        assert request_output.output[0].text in ("hello", "world")
+        assert len(request_output.outputs) == 1
+        assert request_output.outputs[0].text in ("hello", "world")
