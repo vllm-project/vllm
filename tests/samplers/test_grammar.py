@@ -335,9 +335,12 @@ def test_integration_with_vllm(vllm_runner, hf_runner):
     model_id = "facebook/opt-125m"
     dtype = "half"
 
+    tokenizer = hf_runner(model_id, dtype=dtype).tokenizer
+    grammar = """?start: "hello" | "world" """
+
     grammar_logits_processor = GrammarLogitsProcessor(
-        hf_runner(model_id, dtype=dtype).tokenizer,
-        """?start: "hello" | "world" """
+        tokenizer,
+        grammar
     )
     sampling_params = SamplingParams(temperature=0.01,
                                      top_p=0.1,
@@ -346,9 +349,18 @@ def test_integration_with_vllm(vllm_runner, hf_runner):
     llm = LLM(model=model_id,
               max_num_batched_tokens=4096,
               tensor_parallel_size=1)
-    prompts = ["Who is the president of Jamaica?", "What is 1+1?"]
-    outputs = llm.generate(prompts, sampling_params=sampling_params)
 
-    print(outputs)
+    prompts = [
+        "Who is the president of Jamaica?",
+        "What is 1+1?",
+        "Random prompt unrelated to output",
+        "Seriously, no matter what the prompt is..."
+        "it will always follow the grammar"
+    ]
 
-    assert False
+    request_outputs = llm.generate(prompts, sampling_params=sampling_params)
+    assert len(request_outputs) == len(prompts)
+
+    for request_output in llm.generate(prompts, sampling_params=sampling_params):
+        assert len(request_output.output) == 1
+        assert request_output.output[0].text in ("hello", "world")
