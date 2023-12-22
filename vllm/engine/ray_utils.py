@@ -3,7 +3,8 @@ from typing import Optional, Tuple, TYPE_CHECKING
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import get_open_port, is_hip
-import pickle
+from vllm.sequence import ExecuteModelData
+import msgspec
 
 logger = init_logger(__name__)
 
@@ -20,6 +21,8 @@ try:
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
             self.worker = None
+            self.encoder = msgspec.msgpack.Encoder()
+            self.decoder = msgspec.msgpack.Decoder(ExecuteModelData)
 
         def init_worker(self, worker_init_fn):
             self.worker = worker_init_fn()
@@ -32,14 +35,14 @@ try:
             return executor(*args, **kwargs)
 
         def execute_model_compiled_dag_remote(self, args):
-            args = pickle.loads(args)
+            args = self.decoder.decode(args)
             output = self.execute_model(
                 args.seq_group_metadata_list,
                 args.blocks_to_swap_in,
                 args.blocks_to_swap_out,
                 args.blocks_to_copy,
             )
-            output = pickle.dumps(output)
+            output = self.encoder.encode(output)
             return output
 
 except ImportError as e:

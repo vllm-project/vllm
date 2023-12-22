@@ -18,7 +18,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
-import pickle
+import msgspec
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -127,6 +127,9 @@ class LLMEngine:
             # the actor cannot receive new actor calls.
             # It is planned to be fixed.
             self.forward_dag = self._compiled_dag_init_dag()
+
+        self.encoder = msgspec.msgpack.Encoder()
+        self.decoder = msgspec.msgpack.Decoder(SamplerOutput)
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -457,7 +460,7 @@ class LLMEngine:
         # Select the child sequences to keep in the sequence group.
         selected_child_seqs = []
         unselected_child_seqs = []
-        beam_width = seq_group.sampling_params.best_of
+        beam_width = seq_group.sampling_params.actual_best_of
         length_penalty = seq_group.sampling_params.length_penalty
 
         # Select the newly finished sequences with the highest scores
@@ -811,13 +814,13 @@ class LLMEngine:
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
         )
-        data = pickle.dumps(data)
+        data = self.encoder.encode(data)
         output_channels = self.forward_dag.execute(data)
         try:
             # TODO(sang): Is it necessary to check all outputs
             # are the same? It requires 3X unnecessary deserialization.
             all_outputs = [
-                pickle.loads(chan.begin_read()) for chan in output_channels
+                self.decoder.decode(chan.begin_read()) for chan in output_channels
             ]
             output = all_outputs[0]
             for other_output in all_outputs[1:]:

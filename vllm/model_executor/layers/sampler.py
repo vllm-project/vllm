@@ -284,9 +284,9 @@ def _random_sample(
         num_parent_seqs = len(seq_ids)
         if is_prompt:
             # Prompt phase.
-            parent_ids = [0] * sampling_params.best_of
+            parent_ids = [0] * sampling_params.actual_best_of
             next_token_ids = random_samples[
-                sample_idx, :sampling_params.best_of].tolist()
+                sample_idx, :sampling_params.actual_best_of].tolist()
         else:
             # Generation phase.
             parent_ids = list(range(num_parent_seqs))
@@ -317,7 +317,7 @@ def _beam_search_sample(
     for seq_group, is_prompt in zip(selected_seq_groups, is_prompts):
         seq_ids, sampling_params = seq_group
         num_parent_seqs = len(seq_ids)
-        beam_width = sampling_params.best_of
+        beam_width = sampling_params.actual_best_of
         seq_group_logprobs = logprobs[sample_idx:sample_idx + num_parent_seqs]
         if is_prompt:
             # Prompt phase.
@@ -406,7 +406,7 @@ def _sample(
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
                 if is_prompt:
                     _, sampling_params = seq_group
-                    max_best_of = max(max_best_of, sampling_params.best_of)
+                    max_best_of = max(max_best_of, sampling_params.actual_best_of)
             multinomial_samples = _multinomial(probs[sample_indices],
                                                max_best_of)
         elif sampling_type == SamplingType.BEAM:

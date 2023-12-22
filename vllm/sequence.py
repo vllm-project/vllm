@@ -3,6 +3,8 @@ import copy
 import enum
 from typing import Dict, List, Optional, Union
 
+import msgspec
+
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
 
@@ -47,7 +49,7 @@ class SequenceStatus(enum.Enum):
         return finish_reason
 
 
-class SequenceData:
+class SequenceData(msgspec.Struct, array_like=True, omit_defaults=True):
     """Data associated with a sequence.
 
 
@@ -60,13 +62,9 @@ class SequenceData:
         cumulative_logprob: The cumulative log probability of the output.
     """
 
-    def __init__(
-        self,
-        prompt_token_ids: List[int],
-    ) -> None:
-        self.prompt_token_ids = prompt_token_ids
-        self.output_token_ids: List[int] = []
-        self.cumulative_logprob = 0.0
+    prompt_token_ids: List[int]
+    output_token_ids: List[int] = []
+    cumulative_logprob: float = 0.0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
@@ -261,13 +259,13 @@ class SequenceGroup:
         if self.sampling_params.use_beam_search:
             # For beam search, maximally there will always be `best_of` beam
             # candidates running in the future.
-            return self.sampling_params.best_of
+            return self.sampling_params.actual_best_of
         else:
-            if self.sampling_params.best_of > self.num_seqs():
+            if self.sampling_params.actual_best_of > self.num_seqs():
                 # At prompt stage, the sequence group is not yet filled up
                 # and only have one sequence running. However, in the
                 # generation stage, we will have `best_of` sequences running.
-                return self.sampling_params.best_of
+                return self.sampling_params.actual_best_of
             # At sampling stages, return the number of actual sequences
             # that are not finished yet.
             return self.num_unfinished_seqs()
@@ -324,7 +322,7 @@ class SequenceGroup:
                 f"num_seqs={len(self.seqs_dict)})")
 
 
-class SequenceGroupMetadata:
+class SequenceGroupMetadata(msgspec.Struct, array_like=True, omit_defaults=True):
     """Metadata for a sequence group. Used to create `InputMetadata`.
 
 
@@ -337,22 +335,14 @@ class SequenceGroupMetadata:
             numbers)
     """
 
-    def __init__(
-        self,
-        request_id: str,
-        is_prompt: bool,
-        seq_data: Dict[int, SequenceData],
-        sampling_params: SamplingParams,
-        block_tables: Dict[int, List[int]],
-    ) -> None:
-        self.request_id = request_id
-        self.is_prompt = is_prompt
-        self.seq_data = seq_data
-        self.sampling_params = sampling_params
-        self.block_tables = block_tables
+    request_id: str
+    is_prompt: bool
+    seq_data: Dict[int, SequenceData]
+    sampling_params: SamplingParams
+    block_tables: Dict[int, List[int]]
 
 
-class SequenceOutput:
+class SequenceOutput(msgspec.Struct, array_like=True, omit_defaults=True):
     """The model output associated with a sequence.
 
     Args:
@@ -363,15 +353,9 @@ class SequenceOutput:
             (Token id -> logP(x_i+1 | x_0, ..., x_i))
     """
 
-    def __init__(
-        self,
-        parent_seq_id: int,
-        output_token: int,
-        logprobs: Dict[int, float],
-    ) -> None:
-        self.parent_seq_id = parent_seq_id
-        self.output_token = output_token
-        self.logprobs = logprobs
+    parent_seq_id: int
+    output_token: int
+    logprobs: Dict[int, float]
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
@@ -386,16 +370,10 @@ class SequenceOutput:
                 and self.logprobs == other.logprobs)
 
 
-class SequenceGroupOutput:
+class SequenceGroupOutput(msgspec.Struct, array_like=True, omit_defaults=True):
     """The model output associated with a sequence group."""
-
-    def __init__(
-        self,
-        samples: List[SequenceOutput],
-        prompt_logprobs: Optional[PromptLogprobs],
-    ) -> None:
-        self.samples = samples
-        self.prompt_logprobs = prompt_logprobs
+    samples: List[SequenceOutput]
+    prompt_logprobs: Optional[PromptLogprobs]
 
     def __repr__(self) -> str:
         return (f"SequenceGroupOutput(samples={self.samples}, "
@@ -410,19 +388,26 @@ class SequenceGroupOutput:
 
 # For each sequence group, we generate a list of SequenceOutput object,
 # each of which contains one possible candidate for the next token.
-SamplerOutput = List[SequenceGroupOutput]
+class SamplerOutput(msgspec.Struct, array_like=True, omit_defaults=True):
+    outputs: List[SequenceGroupOutput]
+
+    def __getitem__(self, idx: int):
+        return self.outputs[idx]
+
+    def __setitem__(self, idx: int, value):
+        self.outputs[idx] = value
+
+    def __len__(self):
+        return len(self.outputs)
+
+    def __eq__(self, other: object):
+        return isinstance(other,
+                          self.__class__) and self.outputs == other.outputs
 
 
-class ExecuteModelData:
+class ExecuteModelData(msgspec.Struct, array_like=True, omit_defaults=True):
 
-    def __init__(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-    ):
-        self.seq_group_metadata_list = seq_group_metadata_list
-        self.blocks_to_swap_in = blocks_to_swap_in
-        self.blocks_to_swap_out = blocks_to_swap_out
-        self.blocks_to_copy = blocks_to_copy
+    seq_group_metadata_list: List[SequenceGroupMetadata]
+    blocks_to_swap_in: Dict[int, int]
+    blocks_to_swap_out: Dict[int, int]
+    blocks_to_copy: Dict[int, List[int]]
