@@ -86,6 +86,7 @@ class LLMEngine:
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
+            f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -217,6 +218,7 @@ class LLMEngine:
             block_size=self.cache_config.block_size,
             gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
             cpu_swap_space=self.cache_config.swap_space_bytes,
+            cache_dtype=self.cache_config.cache_dtype,
         )
 
         # Since we use a shared centralized controller, we take the minimum

@@ -84,6 +84,7 @@ class Worker:
         block_size: int,
         gpu_memory_utilization: float,
         cpu_swap_space: int,
+        cache_dtype: torch.dtype,
     ) -> Tuple[int, int]:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
@@ -100,7 +101,7 @@ class Worker:
         peak_memory = total_gpu_memory - free_gpu_memory
 
         cache_block_size = CacheEngine.get_cache_block_size(
-            block_size, self.model_config, self.parallel_config)
+            block_size, cache_dtype, self.model_config, self.parallel_config)
         num_gpu_blocks = int(
             (total_gpu_memory * gpu_memory_utilization - peak_memory) //
             cache_block_size)

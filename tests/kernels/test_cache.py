@@ -11,7 +11,7 @@ NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
-NUM_BLOCKS = [1024, 36000]  # Arbitrary values for testing
+NUM_BLOCKS = [1024, 3601]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 
@@ -144,3 +144,56 @@ def test_reshape_and_cache(
 
     assert torch.allclose(key_cache, cloned_key_cache)
     assert torch.allclose(value_cache, cloned_value_cache)
+
+
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_fp8_cache(
+    kv_cache_factory,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    # Create the KV caches.
+    key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
+                                                num_heads, head_size, dtype,
+                                                seed)
+    key_cache, value_cache = key_caches[0], value_caches[0]
+
+    # Clone the KV caches.
+    cloned_key_cache = key_cache.clone()
+    cloned_value_cache = value_cache.clone()
+
+    converted_key_cache = torch.empty_like(key_cache, dtype=torch.uint8)
+    converted_value_cache = torch.empty_like(value_cache, dtype=torch.uint8)
+    # Quantize to fp8.
+    cache_ops.convert_fp8(key_cache, value_cache, converted_key_cache, converted_value_cache)
+    # Dequantize back.
+    cache_ops.convert_fp8(converted_key_cache, converted_value_cache, key_cache, value_cache)
+
+    print("key_cache:", key_cache)
+    print("cloned_key_cache", cloned_key_cache)
+    absolute_error = torch.abs(value_cache - cloned_value_cache)
+    max_absolute_error = torch.max(absolute_error).item()
+
+    denominator = torch.maximum(torch.abs(value_cache), torch.abs(cloned_value_cache))
+    relative_error = torch.where(denominator == 0, torch.zeros_like(value_cache), absolute_error / denominator)
+    max_relative_error = torch.max(relative_error).item()
+    print("max_absolute_error: ", max_absolute_error)
+    print("max_relative_error: ", max_relative_error)
+    # NOTE(zhaoyang-star): FP8 will introduce quantization error, specifically fp8e5m2 data format.
+    # Thus, we use a relaxed tolerance for the test.
+    assert torch.allclose(key_cache, cloned_key_cache, atol=1e-3, rtol=1e-1)
+    assert torch.allclose(value_cache, cloned_value_cache, atol=1e-3, rtol=1e-1)

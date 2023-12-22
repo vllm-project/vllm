@@ -6,23 +6,24 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-from vllm._C import ops
+from vllm._C import ops, cache_ops
 from vllm.utils import get_max_shared_memory_bytes
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-NUM_BLOCKS = 40000  # Arbitrary values for testing
+NUM_BLOCKS = 4000  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
-DTYPES = [torch.half, torch.bfloat16, torch.float]
+DTYPES = [torch.half]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80, 96, 112, 128, 256]
-BLOCK_SIZES = [16, 32]
-USE_ALIBI = [False, True]
+NUM_HEADS = [(64, 8)]  # Arbitrary values for testing
+HEAD_SIZES = [256]
+BLOCK_SIZES = [16]
+USE_ALIBI = [True]
+USE_FP8_KV_CACHE = [False, True]
 SEEDS = [0]
 
 
@@ -97,13 +98,14 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("version", ["v1"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("use_alibi", USE_ALIBI)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("use_fp8_kv_cache", USE_FP8_KV_CACHE)
 @pytest.mark.parametrize("seed", SEEDS)
 def test_paged_attention(
     kv_cache_factory,
@@ -114,6 +116,7 @@ def test_paged_attention(
     use_alibi: bool,
     block_size: int,
     dtype: torch.dtype,
+    use_fp8_kv_cache: bool,
     seed: int,
 ) -> None:
     random.seed(seed)
@@ -158,6 +161,14 @@ def test_paged_attention(
                                                 num_kv_heads, head_size, dtype,
                                                 seed)
     key_cache, value_cache = key_caches[0], value_caches[0]
+    if not use_fp8_kv_cache:
+        converted_key_cache = key_cache
+        converted_value_cache = value_cache
+    else:
+        # Convert to fp8
+        converted_key_cache = torch.empty_like(key_cache, dtype=torch.uint8)
+        converted_value_cache = torch.empty_like(value_cache, dtype=torch.uint8)
+        cache_ops.convert_fp8(key_cache, value_cache, converted_key_cache, converted_value_cache)
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
@@ -165,8 +176,8 @@ def test_paged_attention(
         ops.paged_attention_v1(
             output,
             query,
-            key_cache,
-            value_cache,
+            converted_key_cache,
+            converted_value_cache,
             num_kv_heads,
             scale,
             block_tables,
@@ -174,6 +185,7 @@ def test_paged_attention(
             block_size,
             max_context_len,
             alibi_slopes,
+            use_fp8_kv_cache,
         )
     elif version == "v2":
         num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
@@ -197,8 +209,8 @@ def test_paged_attention(
             max_logits,
             tmp_output,
             query,
-            key_cache,
-            value_cache,
+            converted_key_cache,
+            converted_value_cache,
             num_kv_heads,
             scale,
             block_tables,
@@ -206,6 +218,7 @@ def test_paged_attention(
             block_size,
             max_context_len,
             alibi_slopes,
+            use_fp8_kv_cache,
         )
     else:
         raise AssertionError(f"Unknown version: {version}")

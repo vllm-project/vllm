@@ -21,6 +21,7 @@ def main(
     use_alibi: bool,
     block_size: int,
     dtype: torch.dtype,
+    enable_fp8_kv_cache: bool,
     seed: int,
     do_profile: bool,
 ) -> None:
@@ -59,15 +60,22 @@ def main(
     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
 
     # Create the KV cache.
-    x = 16 // torch.tensor([], dtype=dtype).element_size()
+    cache_dtype = torch.uint8 if enable_fp8_kv_cache else dtype
+    x = 16 // torch.tensor([], dtype=cache_dtype).element_size()
     key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x, block_size, x)
-    key_cache = torch.empty(size=key_cache_shape, dtype=dtype, device="cuda")
-    key_cache.uniform_(-scale, scale)
+    key_cache = torch.empty(size=key_cache_shape, dtype=cache_dtype, device="cuda")
+    if not enable_fp8_kv_cache:
+        key_cache.uniform_(-scale, scale)
+    else:
+        key_cache.random_(0, 256)
     value_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size, block_size)
     value_cache = torch.empty(size=value_cache_shape,
-                              dtype=dtype,
+                              dtype=cache_dtype,
                               device="cuda")
-    value_cache.uniform_(-scale, scale)
+    if not enable_fp8_kv_cache:
+        value_cache.uniform_(-scale, scale)
+    else:
+        value_cache.random_(0, 256)
 
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
@@ -106,6 +114,7 @@ def main(
                     block_size,
                     max_context_len,
                     alibi_slopes,
+                    enable_fp8_kv_cache,
                 )
             elif version == "v2":
                 ops.paged_attention_v2(
@@ -123,6 +132,7 @@ def main(
                     block_size,
                     max_context_len,
                     alibi_slopes,
+                    enable_fp8_kv_cache,
                 )
             else:
                 raise ValueError(f"Invalid version: {version}")
@@ -166,6 +176,7 @@ if __name__ == '__main__':
                         type=str,
                         choices=["half", "bfloat16", "float"],
                         default="half")
+    parser.add_argument("--enable-fp8-kv-cache", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()
@@ -188,6 +199,7 @@ if __name__ == '__main__':
         block_size=args.block_size,
         use_alibi=args.use_alibi,
         dtype=dtype_to_torch_dtype[args.dtype],
+        enable_fp8_kv_cache = args.enable_fp8_kv_cache,
         seed=args.seed,
         do_profile=args.profile,
     )
