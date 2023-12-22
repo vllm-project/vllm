@@ -1,4 +1,5 @@
 #include "cpu_types.hpp"
+#include <omp.h>
 
 namespace {
 

@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -411,15 +412,24 @@ def generate_vllm_cuda_extension():
 
     if VLLM_TARGET_DEVICE == "cpu":
         # Setup CPU Operations
-        BUILD_CPU_OPS = 1
         CPU_OPS_SOURCES = []
-        if BUILD_CPU_OPS:
+        if True:  # BUILD_CPU_OPS:
             if VLLM_TARGET_DEVICE == "cpu":
                 CXX_FLAGS += ["-DVLLM_BUILD_CPU_ONLY"]
-            CXX_FLAGS += [
-                "-DVLLM_BUILD_CPU_OPS", "-Xclang", "-fopenmp", "-mavx512f", "-mavx512bf16",
-                "-mavx512vl"
-            ]
+
+            if sys.platform == 'darwin':
+                CXX_FLAGS += ["-Xclang", "-fopenmp"]
+                LIBS += ["omp"]
+            else:
+                CXX_FLAGS += ["-fopenmp"]
+            if platform.processor() == 'arm':
+                CXX_FLAGS += [
+                    "-DVLLM_BUILD_CPU_OPS", "-march=armv8.6-a+bf16"
+                ]
+            else:
+                CXX_FLAGS += [
+                    "-DVLLM_BUILD_CPU_OPS", "-mavx512f", "-mavx512bf16", "-mavx512vl"
+                ]
             CPU_OPS_SOURCES += [
                 "csrc/cpu/activation_impl.cpp",
                 "csrc/cpu/attention_impl.cpp",
@@ -466,7 +476,7 @@ def generate_vllm_cuda_extension():
             if neuron_version != MAIN_CUDA_VERSION:
                 neuron_version_str = neuron_version.replace(".", "")[:3]
                 version += f"+neuron{neuron_version_str}"
-        else:
+        elif _is_cuda():
             cuda_version = str(nvcc_cuda_version)
             if cuda_version != MAIN_CUDA_VERSION:
                 cuda_version_str = cuda_version.replace(".", "")[:3]
