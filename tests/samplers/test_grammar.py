@@ -1,6 +1,5 @@
 import pytest
 import numpy as np
-import random
 import json
 
 from transformers import AutoTokenizer
