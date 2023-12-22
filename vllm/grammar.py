@@ -267,9 +267,8 @@ class TokenTrie:
         the longest possible strings without omitting any nodes that contain complete tokens.
         """
         # cache
-        if _node is None:
-            if subprefix in self._next_level_token_prefixes_cache:
-                return self._next_level_token_prefixes_cache[subprefix]
+        if _node is None and subprefix in self._next_level_token_prefixes_cache:
+            return self._next_level_token_prefixes_cache[subprefix]
 
         # if not first level of recursion, and at a branching point or is a token, or return self
         if _node is not None and (len(_node) > 1 or self.IS_TOKEN in _node):
