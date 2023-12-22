@@ -71,6 +71,7 @@ def run_vllm(
     dtype: str,
     max_model_len: Optional[int],
     enforce_eager: bool,
+    use_ray_compiled_dag: bool
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -83,6 +84,7 @@ def run_vllm(
         dtype=dtype,
         max_model_len=max_model_len,
         enforce_eager=enforce_eager,
+        use_ray_compiled_dag=use_ray_compiled_dag,
     )
 
     # Add the requests to the engine.
@@ -206,7 +208,7 @@ def main(args: argparse.Namespace):
                                 args.quantization, args.tensor_parallel_size,
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
-                                args.max_model_len, args.enforce_eager)
+                                args.max_model_len, args.enforce_eager, args.use_ray_compiled_dag)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -284,6 +286,9 @@ if __name__ == "__main__":
     parser.add_argument("--enforce-eager",
                         action="store_true",
                         help="enforce eager execution")
+    parser.add_argument('--use-ray-compiled-dag',
+                        action='store_true',
+                        help='Use an experimental ray compiled DAG API')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
