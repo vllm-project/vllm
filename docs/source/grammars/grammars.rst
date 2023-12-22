@@ -57,14 +57,14 @@ Performance
 
 For a simple JSON grammar, on the authors mid-end laptop using codeLlama-7b's vocabulary, generation occurred at ~10 validated logit sets per second. However performance was improved dramatically from the baseline with a few tweaks to ~400/s. These tweaks include
 
-- Optimizing the grammar increased performance by ~10x
-- Constraining legal characters increased performance by ~4x
+- Optimizing the grammar
+- Constraining legal characters
 
 **Design your EBNF grammar with minimal regexp**
 
 Regexp processing is the most expensive task for GrammarLogitsProcessor. When designing your EBNF, it's better to keep your regexp short and simple if at all possible.
 
-Breaking down the following expressions ESCAPE_STRING into an expression with many faster-terminating regex resulted in an ~10x speedup:
+Breaking down the following expressions ESCAPE_STRING into an expression with many faster-terminating regex resulted in a dramatic speedup:
 
 .. code-block::
 
@@ -116,7 +116,7 @@ Every legal character in the alphabet must be checked against the parser by defa
 
 Likely many of these characters aren't useful in your generation.
 
-Expect an ~10x speedup if you constrain your generation to UTF-8, eliminating 3,042 unnecessary characters.
+Expect increased performance if you constrain your generation to UTF-8, eliminating 3,042 unnecessary characters.
 
 .. code-block::
 
