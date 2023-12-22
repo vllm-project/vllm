@@ -7,6 +7,9 @@ from transformers import AutoTokenizer
 from vllm.grammar import TokenTrie, NextTokenValidator, GrammarLogitsProcessor
 
 
+INTEGRATION_TEST_MODELS = ["facebook/opt-125m"]
+
+
 @pytest.fixture
 def tokenizer():
     model_id = "codellama/CodeLlama-7b-hf"
@@ -35,7 +38,7 @@ def json_grammar():
     escaped_string_char: _STR_INNER_CHAR | _ESCAPED_CHAR
     _ESCAPED_CHAR: "\\" _ANY_CHAR
     _STR_INNER_CHAR: /[^\\\"]/
-    _ANY_CHAR: /[.]/
+    _ANY_CHAR: /./
 
     signed_number: ["+"|"-"] number
     number: float | int
@@ -159,7 +162,7 @@ def test_can_generate_with_grammar(
                 example_remainder = example_remainder[len(tok):]
                 break
         else:
-            raise Exception(f"Couldn't find token to create legal output given grammar: '{example_remainder}'")
+            raise Exception(f"Couldn't find token to create legal output given grammar, remaining output: '{example_remainder}'")
 
     # EOS should be in the set of next legal tokens
     assert None in next_token_validator.valid_token_str_set
@@ -169,16 +172,17 @@ def test_json_valid_with_edge_cases(tokenizer, json_grammar):
     valid_edgecase_jsons = [
         "{\n    \"emptyObject\": {\n        \"innerEmptyObject\": {}\n    }\n}",  # empty obj
         "{\n    \"mixedArray\": [null, 123, \"text\", true, {\"key\": \"value\"}]\n}",  # mixed array
-        "{\n    \"deepArray\": [[[[[\"deep\"]]]]]\n}"  ,# deeply nested list
+        "{\n    \"deepArray\": [[[[[\"deep\"]]]]]\n}",  # deeply nested list
         "{\n    \"\": true,\n    \"regularKey\": false\n}",  # empty keys
-        "{\n    \"\u043a\u043b\u044e\u0447\": \"\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435\",\n    \"emoji\ud83d\ude42\": \"value\ud83d\ude00\"\n}",  # unicode keys
+        "{\n    \"\\u043a\\u043b\\u044e\\u0447\": \"\\u0437\\u043d\\u0430\\u0447\\u0435\\u043d\\u0438\\u0435\",\n    \"emoji\\ud83d\\ude42\": \"value\\ud83d\\ude00\"\n}",  # unicode keys
     ]
 
-    next_token_validator = NextTokenValidator(
-        tokenizer,
-        json_grammar,
-    )
+
     for example in valid_edgecase_jsons:
+        next_token_validator = NextTokenValidator(
+            tokenizer,
+            json_grammar,
+        )
         example_remainder = example
         while example_remainder:
             for tok in next_token_validator.valid_token_str_set:
@@ -189,7 +193,7 @@ def test_json_valid_with_edge_cases(tokenizer, json_grammar):
                     example_remainder = example_remainder[len(tok):]
                     break
             else:
-                raise Exception(f"Couldn't find token to create legal output given grammar: '{example_remainder}'")
+                raise Exception(f"Couldn't find token to create legal output given grammar, remaining output: '{example_remainder}'")
 
         # EOS should be in the set of next legal tokens
         assert None in next_token_validator.valid_token_str_set
@@ -205,11 +209,11 @@ def test_json_fails_with_edge_cases(tokenizer, json_grammar):
         "{\n    \"array\": [1, 2,, 3]\n}\n",  # double comma
     ]
 
-    next_token_validator = NextTokenValidator(
-        tokenizer,
-        json_grammar,
-    )
-    for example in invalid_edgecase_jsons:
+    for example in valid_edgecase_jsons:
+        next_token_validator = NextTokenValidator(
+            tokenizer,
+            json_grammar,
+        )
         example_remainder = example
         while example_remainder:
             for tok in next_token_validator.valid_token_str_set:
@@ -329,6 +333,6 @@ def test_random_grammared_generation(json_grammar, tokenizer):
         opening_tokens_bias -= 0.1
 
 
-
-def test_integration_with_vllm():
+@pytest.mark.parametrize("model_id", INTEGRATION_TEST_MODELS)
+def test_integration_with_vllm(model_id):
     assert False
