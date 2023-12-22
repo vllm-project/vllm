@@ -1,5 +1,6 @@
 import collections
 from copy import deepcopy, copy
+from dataclasses import dataclass
 import regex
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -353,30 +354,78 @@ class NextTokenValidator:
         ])
 
 
+# TODO: replace with subclass called NextTokenIDValidator to make things cleaner
+@dataclass
+class BatchDataItemParser:
+    text: str
+    token_ids: List[str]
+    parser: NextTokenValidator
+)
+
+
 class GrammarLogitsProcessor(NextTokenValidator):
     """
     Apply NextTokenValidator in __call__ and set excluded tokens logits to -inf
     """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self,
+                 tokenizer,
+                 grammar: str,
+                 grammar_start: str = "start",
+                 legal_chars: Optional[set[str]] = None,
+                 ):
+        self.tokenizer = tokenizer
+        self.grammar = grammar
+        self.grammar_start = grammar_start
+        self.legal_chars = legal_chars
 
-        self.generation_token_ids = []
-        self.generation_text = ""
+        # track multiple parsers for batch requests
+        self.batch_data_item_parsers: List[BatchDataItemParser] = []
+
+    def _new_batch_data_item_parser(self):
+        return BatchDataItemParser(
+            "",
+            [],
+            NextTokenValidator(
+                tokenizer=self.tokenizer,
+                grammar=self.grammar,
+                grammar_start=self.grammar_start,
+                legal_chars=self.legal_chars
+            )
+        )
+
+    def _get_batch_data_item_parser(self, token_ids: List[int]):
+        """
+        Get longest batch data item parser which matches the seen tokens.
+        This is generally the corresponding parser, but if there's a collision
+        their parsers are interchangable
+        """
+        for batch_data_item_parser in sorted(
+                self.batch_data_item_parsers,
+                key=lambda bdip: -len(bdip.token_ids)
+        ):
+            if token_ids[:len(bdip.token_ids)] == bdip.token_ids:
+                return bdip
+
+        # no match, make new
+        return self._new_batch_data_item_parser()
 
 
-    def _update_seen_token_ids(self, token_ids: List[int]):
-        # ensure integrity
-        assert token_ids[:len(self.generation_token_ids)] == self.generation_token_ids
-        self.generation_token_ids = token_ids
+    def _update_seen_token_ids(self, bdip: BatchDataItemParser, token_ids: List[int]):
+
+        # update batch item token tracker
+        bdip.token_ids = token_ids
 
         # step forward
         all_text = self.tokenizer.decode(token_ids)
-        new_text = all_text[len(self.generation_text):]
-        self.generation_text = all_text
-        self.step_seq(new_text)
+        new_text = all_text[len(bdip.text):]
+        bdip.text = all_text
+        bdip.parser.step_seq(new_text)
 
     def __call__(self, token_ids: List[int], logits: torch.Tensor) -> torch.Tensor:
-        self._update_seen_token_ids(token_ids)
+        # get the batch item data and parser for batch item, given provided token sequence
+        bdip = self._get_batch_data_item_parser(token_ids)
+
+        self._update_seen_token_ids(bdip, token_ids)
 
         # modify logits given valid token IDs
         N = len(logits)
