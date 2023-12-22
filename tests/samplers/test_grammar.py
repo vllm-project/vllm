@@ -222,9 +222,9 @@ def test_json_fails_with_edge_cases(tokenizer, json_grammar):
                     example_remainder = example_remainder[len(tok):]
                     break
             else:
-                return True
+                return
 
-    assert False, "Invalid json was accepted"
+    raise Exception("Invalid json was accepted")
 
 
 def test_token_trie_sanity(tokenizer):
@@ -284,8 +284,6 @@ def test_random_grammared_generation(json_grammar, tokenizer):
     # Generate JSON token-by-token with random logits until EOS is hit, then validate JSON
     # Bias logits so open syntax such that closing syntax such as ]}",
     # occur more frequently as time goes on so we don't get stuck in generation
-
-    num_repeats = 8
 
     grammar_logits_processor = GrammarLogitsProcessor(
         tokenizer,

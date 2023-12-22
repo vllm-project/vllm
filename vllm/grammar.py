@@ -145,9 +145,9 @@ class InteractivePredictiveLALRParser:
             success = False
             try:
                 self.interactive_parser.exhaust_lexer()
-            except UnexpectedCharacters as e:
+            except UnexpectedCharacters:
                 pass
-            except UnexpectedToken as e:
+            except UnexpectedToken:
                 # fall back so full token can be reprocessed
                 self.interactive_parser = self._terminal_start_parser.copy()
             else:
@@ -182,7 +182,7 @@ class InteractivePredictiveLALRParser:
         for incomplete_seq, terminals in self.valid_next_terminals.items():
             if incomplete_seq != "":
                 self.valid_next_terminals[incomplete_seq] = set([
-                    term for term in self.valid_next_terminals[incomplete_seq]
+                    term for term in terminals
                     if term != "$END"
                     and self.partial_seq_validator[term](incomplete_seq)
                 ])
@@ -206,9 +206,8 @@ class InteractivePredictiveLALRParser:
         for incomplete_seq, terminals in self.valid_next_terminals.items():
             candidate = incomplete_seq + new_seq
             for term in terminals:
-                if term != "$END":
-                    if self.partial_seq_validator[term](candidate):
-                        return True
+                if term != "$END" and self.partial_seq_validator[term](candidate):
+                    return True
         return False
 
 
@@ -399,7 +398,7 @@ class GrammarLogitsProcessor:
         This is generally the corresponding parser, but if there's a collision
         their parsers are interchangable
         """
-        for batch_data_item_parser in sorted(
+        for bdip in sorted(
                 self.batch_data_item_parsers,
                 key=lambda bdip: -len(bdip.token_ids)
         ):
