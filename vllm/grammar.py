@@ -85,6 +85,9 @@ class InteractivePredictiveLALRParser:
             base_interactive_parser.parser_state,
             base_interactive_parser.lexer_thread)
 
+        # fallback parser from start of terminal in case of ambiguous (LR(1))
+        self._terminal_start_parser = self.interactive_parser.copy()
+
         self.partial_seq_validator = {
             term.name: self._get_partial_pattern_validator(term.pattern)
             for term in self.parser.terminals
@@ -133,38 +136,45 @@ class InteractivePredictiveLALRParser:
         - Update the set of candidate terminals
         """
         for char in new_seq:
-            self._append_to_sequence(char)
 
-            filter_candidate_terminals = True
+            # update canonical sequence and lexer sequence
+            self.sequence_history += new_seq
+            self.interactive_parser.lexer_thread.state.text = self.sequence_history
+
+            success = False
             try:
                 self.interactive_parser.exhaust_lexer()
             except UnexpectedCharacters as e:
                 pass
             except UnexpectedToken as e:
-                filter_candidate_terminals = False
+                # fall back so full token can be reprocessed
+                self.interactive_parser = self._terminal_start_parser.copy()
+                self.interactive_parser.lexer_thread.state.text = self.sequence_history
+            else:
+                success = True
 
             self.valid_next_terminals = {
                 (incomplete_seq + char): term
                 for incomplete_seq, term in self.valid_next_terminals.items()
             }
-            self.valid_next_terminals[""] = self._accepts() | self._ignored_terms
 
-            if filter_candidate_terminals:
-                self._update_candidate_terminals()
+            # if successfully parsed new token, add blank state and set fallback checkpoint
+            if success:
+                self.valid_next_terminals[""] = self._accepts() | self._ignored_terms
+                self._terminal_start_parser = self.interactive_parser.copy()
+
+            self._filter_candidate_terminals()
 
             if not self.valid_next_terminals:
                 raise ValueError(
                     f"Invalid continuation for `{self.sequence_history}` `{new_seq}`"
                 )
 
-    def _append_to_sequence(self, new_seq: str):
-        """Set the complete sequences value in the lexer and base"""
-        self.sequence_history += new_seq
-        self.interactive_parser.lexer_thread.state.text = self.sequence_history
+        print(self.valid_next_terminals)
 
-    def _update_candidate_terminals(self):
+    def _filter_candidate_terminals(self):
         """
-        Update the set of candidate terminals
+        Filter the set of candidate terminals
         - If a new terminal is reached, get the accepted set of terminals from the parser
         - If the new sequence doesn't comprise a full terminal, filter based on partial pattern match
 
@@ -319,7 +329,7 @@ class NextTokenValidator:
         """
         valid_token_str_set = set()
         if self.parser.is_valid_next_seq(None):
-            valid_token_str_set.add(self.tokenizer.eos_token)
+            valid_token_str_set.add(None)
         token_prefix_stack = collections.deque([""])
         while token_prefix_stack:
             token_prefix = token_prefix_stack.pop()
@@ -353,7 +363,8 @@ class GrammarLogitsProcessor(NextTokenValidator):
         self.generation_token_ids = []
         self.generation_text = ""
 
-    def __call__(self, token_ids, logits):
+
+    def _update_seen_token_ids(self, token_ids):
         # ensure integrity
         assert token_ids[:len(self.generation_token_ids)] == self.generation_token_ids
         self.generation_token_ids = token_ids
@@ -363,6 +374,9 @@ class GrammarLogitsProcessor(NextTokenValidator):
         new_text = all_text[len(self.generation_text):]
         self.generation_text = all_text
         self.step_seq(new_text)
+
+    def __call__(self, token_ids, logits):
+        self._update_seen_token_ids(token_ids)
 
         # get valid token IDs and modify logits
         valid_token_ids = self.valid_token_id_set

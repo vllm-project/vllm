@@ -120,6 +120,7 @@ Expect an ~10x speedup if you constrain your generation to UTF-8, eliminating 3,
 .. code-block::
 
     GrammarLogitsProcessor(
-        ...,
-        legal_chars=set([chr(i) for i in range(256)])
+        tokenizer,
+        grammar,
+        legal_chars=set(map(chr, range(256))),,
     )
