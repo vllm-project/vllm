@@ -360,10 +360,10 @@ class BatchDataItemParser:
     text: str
     token_ids: List[str]
     parser: NextTokenValidator
-)
 
 
-class GrammarLogitsProcessor(NextTokenValidator):
+
+class GrammarLogitsProcessor:
     """
     Apply NextTokenValidator in __call__ and set excluded tokens logits to -inf
     """
@@ -430,7 +430,7 @@ class GrammarLogitsProcessor(NextTokenValidator):
         # modify logits given valid token IDs
         N = len(logits)
         mask = torch.zeros(N, dtype=torch.bool)
-        valid = torch.tensor(list(self.valid_token_id_set), dtype=torch.long)
+        valid = torch.tensor(list(bdip.valid_token_id_set), dtype=torch.long)
         mask[valid] = True
         logits[~mask] = float('-inf')
         return logits
