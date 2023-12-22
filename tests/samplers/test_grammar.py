@@ -5,9 +5,7 @@ import json
 from transformers import AutoTokenizer
 
 from vllm.grammar import TokenTrie, NextTokenValidator, GrammarLogitsProcessor
-
-
-INTEGRATION_TEST_MODELS = ["facebook/opt-125m"]
+from vllm import LLM, SamplingParams
 
 
 @pytest.fixture
@@ -209,7 +207,7 @@ def test_json_fails_with_edge_cases(tokenizer, json_grammar):
         "{\n    \"array\": [1, 2,, 3]\n}\n",  # double comma
     ]
 
-    for example in valid_edgecase_jsons:
+    for example in invalid_edgecase_jsons:
         next_token_validator = NextTokenValidator(
             tokenizer,
             json_grammar,
@@ -333,6 +331,24 @@ def test_random_grammared_generation(json_grammar, tokenizer):
         opening_tokens_bias -= 0.1
 
 
-@pytest.mark.parametrize("model_id", INTEGRATION_TEST_MODELS)
-def test_integration_with_vllm(model_id):
+def test_integration_with_vllm(vllm_runner, hf_runner):
+    model_id = "facebook/opt-125m"
+    dtype = "half"
+
+    grammar_logits_processor = GrammarLogitsProcessor(
+        hf_runner(model_id, dtype=dtype).tokenizer,
+        """?start: "hello" | "world" """
+    )
+    sampling_params = SamplingParams(temperature=0.01,
+                                     top_p=0.1,
+                                     max_tokens=256,
+                                     logits_processors=[grammar_logits_processor])
+    llm = LLM(model=model_id,
+              max_num_batched_tokens=4096,
+              tensor_parallel_size=1)
+    prompts = ["Who is the president of Jamaica?", "What is 1+1?"]
+    outputs = llm.generate(prompts, sampling_params=sampling_params)
+
+    print(outputs)
+
     assert False
