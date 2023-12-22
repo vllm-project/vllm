@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from vllm.lora.layers import _apply_lora, _apply_lora_packed_2slice, _apply_lora_packed_3slice
+from vllm.lora.layers import _apply_lora, _apply_lora_packed_nslice
 
 from .utils import DummyLoRAManager
 
@@ -122,19 +122,19 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
         lora_b_stacks[1][i][0] = (lora_2.lora_b * lora_2.scaling).T
 
     output = torch.zeros(k, m, device="cuda", dtype=dtype)
-    _apply_lora_packed_2slice(
+    _apply_lora_packed_nslice(
         input, lora_a_stacks, lora_b_stacks,
         torch.randint(0,
                       lora_a_stacks[0].shape[0], (len(input), ),
-                      device="cuda"), output, m // 2)
+                      device="cuda"), output, (m // 2, ))
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
 
     output[:] = 0
-    _apply_lora_packed_2slice(input, lora_a_stacks, lora_b_stacks,
+    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks,
                               torch.full((len(input), ), -1, device="cuda"),
-                              output, m // 2)
+                              output, (m // 2, ))
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -206,7 +206,7 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
         lora_b_stacks[2][i][0] = (lora_v.lora_b * lora_v.scaling).T
 
     output = torch.zeros(k, sum(qkv), device="cuda", dtype=dtype)
-    _apply_lora_packed_3slice(
+    _apply_lora_packed_nslice(
         input, lora_a_stacks, lora_b_stacks,
         torch.randint(0,
                       lora_a_stacks[0].shape[0], (len(input), ),
@@ -216,7 +216,7 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
 
     output[:] = 0
-    _apply_lora_packed_3slice(input, lora_a_stacks, lora_b_stacks,
+    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks,
                               torch.full((len(input), ), -1, device="cuda"),
                               output, (qkv[0], qkv[1]))
     assert torch.allclose(torch.zeros_like(output), output)

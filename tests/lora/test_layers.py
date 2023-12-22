@@ -8,16 +8,16 @@ import torch
 import torch.nn.functional as F
 
 from vllm.lora.layers import (
-    LoRAColumnParallelLinear,
-    LoRAMergedColumnParallelLinear2Slice,
-    LoRAQKVParallelLinear,
-    LoRAVocabParallelEmbedding,
-    LoRARowParallelLinear,
-    LoRASampler,
+    ColumnParallelLinearWithLoRA,
+    MergedColumnParallelLinearWithLoRA,
+    QKVParallelLinearWithLora,
+    VocabParallelEmbeddingWithLoRA,
+    RowParallelLinearWithLoRA,
+    SamplerWithLoRA,
     LoRAMapping,
-    LoRALayer,
+    BaseLayerWithLoRA,
 )
-from vllm.lora.models import LoRA, convert_mapping
+from vllm.lora.models import LoRALayerWeights, convert_mapping, PackedLoRALayerWeights
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -66,11 +66,11 @@ def get_random_id_to_index(num_loras: int,
 
 def populate_loras(
     id_to_index: List[Optional[int]],
-    layer: LoRALayer,
+    layer: BaseLayerWithLoRA,
     layer_weights: torch.Tensor,
     generate_embeddings_tensor: int = 0,
     repeats: int = 1,
-) -> Tuple[Dict[int, LoRA], Dict[int, List[LoRA]]]:
+) -> Tuple[Dict[int, LoRALayerWeights], Dict[int, List[LoRALayerWeights]]]:
     """This method populates the lora layers with lora weights.
 
     Args:
@@ -89,12 +89,12 @@ def populate_loras(
 
     # Dictionary that maps the lora ID to the
     # corresponding lora weights.
-    lora_dict: Dict[int, LoRA] = dict()
+    lora_dict: Dict[int, LoRALayerWeights] = dict()
 
     # Dictionary that maps the lora ID to the
     # corresponding subloras. Only useful when
     # repeats > 1.
-    sublora_dict: Dict[int, List[LoRA]] = dict()
+    sublora_dict: Dict[int, List[LoRALayerWeights]] = dict()
 
     for slot_idx, lora_id in enumerate(id_to_index):
         if lora_id is not None:
@@ -111,7 +111,8 @@ def populate_loras(
                 sublora.optimize()
                 subloras.append(sublora)
 
-            lora = LoRA.pack(subloras) if repeats > 1 else subloras[0]
+            lora = PackedLoRALayerWeights.pack(
+                subloras) if repeats > 1 else subloras[0]
 
             layer.set_lora(
                 slot_idx,
@@ -179,7 +180,7 @@ def test_embeddings(dist_init, num_loras) -> None:
         embedding = VocabParallelEmbedding(512, 256)
         embedding.weight.data = torch.rand_like(embedding.weight.data)
         embedding.weight.data[512:, :] = 0
-        lora_embedding = LoRAVocabParallelEmbedding(embedding)
+        lora_embedding = VocabParallelEmbeddingWithLoRA(embedding)
         lora_embedding.create_lora_weights(max_loras, lora_config)
 
         return embedding, lora_embedding
@@ -277,7 +278,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras) -> None:
         expanded_embedding.weight.data[:512, :] = embedding_data
         # We need to deepcopy the embedding as it will be modifed
         # in place
-        lora_embedding = LoRAVocabParallelEmbedding(
+        lora_embedding = VocabParallelEmbeddingWithLoRA(
             deepcopy(expanded_embedding))
         lora_embedding.create_lora_weights(max_loras, lora_config)
 
@@ -400,8 +401,8 @@ def test_lm_head_sampler(dist_init, num_loras) -> None:
         linear.weight.data = torch.rand_like(linear.weight.data)
         linear.weight.data[:, 32000:] = 0
         sampler = Sampler(32000 + lora_config.lora_extra_vocab_size, 32000)
-        lora_sampler = LoRASampler(sampler, 1024, linear.weight.dtype,
-                                   linear.weight.device)
+        lora_sampler = SamplerWithLoRA(sampler, 1024, linear.weight.dtype,
+                                       linear.weight.device)
         lora_sampler.create_lora_weights(max_loras, lora_config)
 
         return linear, sampler, lora_sampler
@@ -510,11 +511,11 @@ def test_linear_parallel(dist_init, num_loras, orientation) -> None:
         if orientation == "row":
             linear = RowParallelLinear(4096, 4096, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = LoRARowParallelLinear(linear)
+            lora_linear = RowParallelLinearWithLoRA(linear)
         else:
             linear = ColumnParallelLinear(4096, 4096, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = LoRAColumnParallelLinear(linear)
+            lora_linear = ColumnParallelLinearWithLoRA(linear)
         lora_linear.create_lora_weights(max_loras, lora_config)
 
         return linear, lora_linear
@@ -608,11 +609,11 @@ def test_column_parallel_packed(dist_init, num_loras, repeats) -> None:
             linear = MergedColumnParallelLinear(4096, [4096] * repeats,
                                                 bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = LoRAMergedColumnParallelLinear2Slice(linear)
+            lora_linear = MergedColumnParallelLinearWithLoRA(linear)
         else:
             linear = QKVParallelLinear(4096, 64, 32, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = LoRAQKVParallelLinear(linear)
+            lora_linear = QKVParallelLinearWithLora(linear)
 
         @dataclass
         class FakeConfig:

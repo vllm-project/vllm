@@ -1,10 +1,11 @@
 from typing import List, Optional
 
 import torch
+from vllm.utils import in_wsl
 
 
-class LoRA:
-    """A LoRA that is composed of two low rank matrixes."""
+class LoRALayerWeights:
+    """LoRA weights for a layer composed of two low rank matrixes."""
 
     def __init__(
         self,
@@ -28,29 +29,7 @@ class LoRA:
         else:
             self.scaling = scaling
 
-    @classmethod
-    def pack(cls, loras: List["LoRA"]) -> "PackedLoRA":
-        """Pack a list of LoRAs into a single LoRA.
-
-        If LoRA is None, it signifies that the submodule does not have a LoRA.
-        """
-        first_lora = next(lora for lora in loras if lora is not None)
-        for lora in loras:
-            if lora is None:
-                continue
-            lora.optimize()
-        rank = first_lora.rank
-        module_name = first_lora.module_name
-        obj = PackedLoRA(
-            module_name,
-            rank,
-            [lora.lora_alpha if lora is not None else None for lora in loras],
-            [lora.lora_a if lora is not None else None for lora in loras],
-            [lora.lora_b if lora is not None else None for lora in loras],
-            scaling=[1 if lora is not None else None for lora in loras])
-        return obj
-
-    def optimize(self) -> "LoRA":
+    def optimize(self) -> "LoRALayerWeights":
         """Optimize the LoRA by merging the scaling into lora_b."""
         if self.scaling == 1:
             return
@@ -75,8 +54,42 @@ class LoRA:
         return self.embeddings_tensor.shape[
             0] if self.embeddings_tensor is not None else 0
 
+    @classmethod
+    def create_dummy_lora_weights(
+            cls,
+            module_name: str,
+            input_dim: int,
+            output_dim: int,
+            rank: int,
+            dtype: torch.dtype,
+            device: torch.device,
+            embeddings_tensor_dim: Optional[int] = None) -> "LoRALayerWeights":
+        pin_memory = str(device) == "cpu" and not in_wsl()
+        lora_a = torch.zeros([input_dim, rank],
+                             dtype=dtype,
+                             device=device,
+                             pin_memory=pin_memory)
+        lora_b = torch.zeros([rank, output_dim],
+                             dtype=dtype,
+                             device=device,
+                             pin_memory=pin_memory)
+        embeddings_tensor = torch.rand(
+            10,
+            embeddings_tensor_dim,
+            dtype=dtype,
+            device=device,
+            pin_memory=pin_memory) if embeddings_tensor_dim else None
+        return cls(
+            module_name,
+            rank=rank,
+            lora_alpha=1,
+            lora_a=lora_a,
+            lora_b=lora_b,
+            embeddings_tensor=embeddings_tensor,
+        )
 
-class PackedLoRA(LoRA):
+
+class PackedLoRALayerWeights(LoRALayerWeights):
     """LoRA used for packed layers (eg. qkv_proj)."""
 
     def __init__(
@@ -103,7 +116,29 @@ class PackedLoRA(LoRA):
                 lora_alpha / self.rank for lora_alpha in self.lora_alphas
             ]
 
-    def optimize(self) -> "PackedLoRA":
+    @classmethod
+    def pack(cls, loras: List["LoRALayerWeights"]) -> "PackedLoRALayerWeights":
+        """Pack a list of LoRAs into a single LoRA.
+
+        If LoRA is None, it signifies that the submodule does not have a LoRA.
+        """
+        first_lora = next(lora for lora in loras if lora is not None)
+        for lora in loras:
+            if lora is None:
+                continue
+            lora.optimize()
+        rank = first_lora.rank
+        module_name = first_lora.module_name
+        obj = cls(
+            module_name,
+            rank,
+            [lora.lora_alpha if lora is not None else None for lora in loras],
+            [lora.lora_a if lora is not None else None for lora in loras],
+            [lora.lora_b if lora is not None else None for lora in loras],
+            scaling=[1 if lora is not None else None for lora in loras])
+        return obj
+
+    def optimize(self) -> "PackedLoRALayerWeights":
         """Optimize the LoRA by merging the scaling into lora_b."""
         for i in range(len(self.lora_b)):
             if self.scaling[i] == 1 or self.lora_b[i] is None:

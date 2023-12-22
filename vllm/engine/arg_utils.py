@@ -40,7 +40,7 @@ class EngineArgs:
     max_lora_rank: int = 16
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
-    max_cpu_loras: int = -1
+    max_cpu_loras: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -211,24 +211,29 @@ class EngineArgs:
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
-                            help='enable lora adapters')
+                            help='If True, enable handling of LoRA adapters.')
         parser.add_argument('--max-loras',
                             type=int,
                             default=EngineArgs.max_loras,
-                            help='max number of LoRAs in a single batch')
+                            help='Max number of LoRAs in a single batch.')
         parser.add_argument('--max-lora-rank',
                             type=int,
                             default=EngineArgs.max_lora_rank,
-                            help='max LoRA rank')
-        parser.add_argument('--lora-extra-vocab-size',
-                            type=int,
-                            default=EngineArgs.lora_extra_vocab_size,
-                            help='LoRA extra vocab size')
-        parser.add_argument('--lora-dtype',
-                            type=str,
-                            default=EngineArgs.lora_dtype,
-                            choices=['auto', 'float16', 'bfloat16', 'float32'],
-                            help='data type for LoRA')
+                            help='Max LoRA rank.')
+        parser.add_argument(
+            '--lora-extra-vocab-size',
+            type=int,
+            default=EngineArgs.lora_extra_vocab_size,
+            help=('Maximum size of extra vocabulary that can be '
+                  'present in a LoRA adapter (added to the base '
+                  'model vocabulary).'))
+        parser.add_argument(
+            '--lora-dtype',
+            type=str,
+            default=EngineArgs.lora_dtype,
+            choices=['auto', 'float16', 'bfloat16', 'float32'],
+            help=('Data type for LoRA. If auto, will default to '
+                  'base model dtype.'))
         parser.add_argument(
             '--max-cpu-loras',
             type=int,

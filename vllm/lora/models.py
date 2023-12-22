@@ -14,11 +14,13 @@ from torch import nn
 from vllm.config import LoRAConfig
 from vllm.utils import LRUCache, in_wsl
 
-from vllm.lora.layers import LoRALayer, LoRAMapping, from_layer, from_layer_sampler
-from vllm.lora.lora import LoRA
+from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, from_layer, from_layer_sampler
+from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
 
 logger = logging.getLogger(__name__)
+
+# TODO: The mappings below should be moved to individual model classes.
 
 PACKED_MODULES_CFG = {
     "qkv_proj": [
@@ -131,38 +133,6 @@ def get_lora_id():
     return _GLOBAL_LORA_ID
 
 
-def _create_dummy_lora(module_name: str,
-                       input_dim: int,
-                       output_dim: int,
-                       rank: int,
-                       dtype: torch.dtype,
-                       device: torch.device,
-                       embeddings_tensor_dim: Optional[int] = None) -> "LoRA":
-    pin_memory = str(device) == "cpu" and not in_wsl()
-    lora_a = torch.zeros([input_dim, rank],
-                         dtype=dtype,
-                         device=device,
-                         pin_memory=pin_memory)
-    lora_b = torch.zeros([rank, output_dim],
-                         dtype=dtype,
-                         device=device,
-                         pin_memory=pin_memory)
-    embeddings_tensor = torch.rand(
-        10,
-        embeddings_tensor_dim,
-        dtype=dtype,
-        device=device,
-        pin_memory=pin_memory) if embeddings_tensor_dim else None
-    return LoRA(
-        module_name,
-        rank=rank,
-        lora_alpha=1,
-        lora_a=lora_a,
-        lora_b=lora_b,
-        embeddings_tensor=embeddings_tensor,
-    )
-
-
 class LoRAModel:
     """A LoRA fine-tuned model."""
 
@@ -170,20 +140,20 @@ class LoRAModel:
         self,
         lora_model_id: int,
         rank: int,
-        loras: Dict[str, LoRA],
+        loras: Dict[str, LoRALayerWeights],
     ) -> None:
         self.id = lora_model_id
         assert (lora_model_id >
                 0), f"a valid lora id should be greater than 0, got {self.id}"
         self.rank = rank
-        self.loras: Dict[str, LoRA] = loras
+        self.loras: Dict[str, LoRALayerWeights] = loras
 
     @property
     def extra_vocab_size(self) -> int:
         return max(lora.extra_vocab_size
                    for lora in self.loras.values()) if self.loras else 0
 
-    def get_lora(self, module_name: str) -> Optional[LoRA]:
+    def get_lora(self, module_name: str) -> Optional[LoRALayerWeights]:
         """Get LoRA for a given module by name"""
         return self.loras.get(module_name, None)
 
@@ -202,7 +172,7 @@ class LoRAModel:
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and not in_wsl()
-        loras: Dict[str, LoRA] = {}
+        loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name)
             if module_name not in loras:
@@ -218,8 +188,9 @@ class LoRAModel:
                         if pin_memory:
                             lora_embeddings_tensor = (
                                 lora_embeddings_tensor.pin_memory())
-                loras[module_name] = LoRA(module_name, rank, lora_alpha, None,
-                                          None, lora_embeddings_tensor)
+                loras[module_name] = LoRALayerWeights(module_name, rank,
+                                                      lora_alpha, None, None,
+                                                      lora_embeddings_tensor)
             if is_lora_a:
                 loras[module_name].lora_a = tensor.to(device=device,
                                                       dtype=dtype).t()
@@ -241,7 +212,7 @@ class LoRAModel:
                     loras[module_name].lora_b = loras[
                         module_name].lora_b.pin_memory()
 
-        for _, lora in loras.items():
+        for lora in loras.values():
             lora.optimize()
         return cls(lora_model_id, rank, loras)
 
@@ -343,6 +314,9 @@ class LoRAModelManager:
                                               dtype=torch.long,
                                               device="cuda")
         self.offsets = []
+        # 4 is the number of indicies tensors defined above
+        # base_indices, sampler_indices, sampler_indices_padded,
+        # embeddings_indices
         self.indices_len = [None] * 4
 
         self.model: nn.Module = model
@@ -352,8 +326,9 @@ class LoRAModelManager:
         self.lora_target_modules = copy.deepcopy(lora_target_modules)
         self.packed_modules_mapping = copy.deepcopy(packed_modules_mapping)
         self.packed_modules: Dict[str, List[str]] = {}
-        self.modules: Dict[str, "LoRALayer"] = {}
+        self.modules: Dict[str, "BaseLayerWithLoRA"] = {}
         self._registered_loras: Dict[int, LoRAModel] = {}
+        # Dict instead of a Set for compatibility with LRUCache.
         self._active_loras: Dict[int, None] = {}
         self._last_mapping = None
         self._create_lora_modules()
@@ -374,6 +349,7 @@ class LoRAModelManager:
         self,
         lora_id: int,
     ) -> bool:
+        """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_loras:
             return False
         first_free_slot = next(
@@ -405,6 +381,7 @@ class LoRAModelManager:
             pass
 
     def deactivate_lora(self, lora_id: int) -> bool:
+        """Remove a LoRA from a GPU buffer."""
         if lora_id in self._active_loras:
             self._deactivate_lora(lora_id)
             self._active_loras.pop(lora_id)
@@ -412,7 +389,7 @@ class LoRAModelManager:
         return False
 
     def add_lora(self, lora: LoRAModel) -> bool:
-        """Add a LoRAModel to the manager."""
+        """Add a LoRAModel to the manager CPU cache."""
         if lora.id not in self._registered_loras:
             if len(self._registered_loras) >= self.capacity:
                 raise RuntimeError("No free LoRA slots.")
@@ -422,13 +399,13 @@ class LoRAModelManager:
         return False
 
     def remove_lora(self, lora_id: int) -> bool:
-        """Remove a LoRAModel from the manager."""
+        """Remove a LoRAModel from the manager CPU cache."""
         # TODO: should we check active lora?
         self.deactivate_lora(lora_id)
         return bool(self._registered_loras.pop(lora_id, None))
 
     # TODO see if this can be vectorized
-    def convert_mapping(self, mapping: LoRAMapping) -> None:
+    def _set_lora_mapping(self, mapping: LoRAMapping) -> None:
         (base_indices, sampler_indices, sampler_indices_padded,
          embeddings_indices,
          indices_len) = convert_mapping(mapping, self.lora_index_to_id,
@@ -444,9 +421,9 @@ class LoRAModelManager:
         # Maintain the reference
         self.indices_len[:] = indices_len
 
-    def set_row_lora_mapping(self, lora_mapping: LoRAMapping) -> None:
+    def set_lora_mapping(self, lora_mapping: LoRAMapping) -> None:
         if self._last_mapping != lora_mapping:
-            self.convert_mapping(lora_mapping)
+            self._set_lora_mapping(lora_mapping)
         self._last_mapping = lora_mapping
 
     def list_loras(self) -> Dict[int, LoRAModel]:
@@ -484,8 +461,8 @@ class LoRAModelManager:
                                    self.sampler_indices_padded,
                                    self.embeddings_indices, self.indices_len)
 
-    def register_module(self, module_name: str, module: "LoRALayer"):
-        assert isinstance(module, LoRALayer)
+    def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
+        assert isinstance(module, BaseLayerWithLoRA)
         self.modules[module_name] = module
 
     def create_dummy_lora(self, lora_id: int, rank: int) -> LoRAModel:
@@ -493,7 +470,7 @@ class LoRAModelManager:
         model = LoRAModel(lora_id, rank, {})
         for module_name, module in self.model.named_modules():
             if not self._match_target_modules(module_name) or not isinstance(
-                    module, LoRALayer):
+                    module, BaseLayerWithLoRA):
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:
@@ -509,7 +486,7 @@ class LoRAModelManager:
                                              hasattr(module.base_layer,
                                                      "embedding_dim") else
                                              module.base_layer.weight.shape[1])
-                    lora = _create_dummy_lora(
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         input_dim,
                         output_dim,
@@ -518,7 +495,7 @@ class LoRAModelManager:
                         "cpu",
                         embeddings_tensor_dim=embeddings_tensor_dim)
                 else:
-                    lora = _create_dummy_lora(
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         module.lora_a_stacked.shape[-1],
                         module.lora_b_stacked.shape[-2],
@@ -532,7 +509,7 @@ class LoRAModelManager:
                 replacements = self.packed_modules_mapping[parts[-1]]
                 subloras = []
                 for i, r in enumerate(replacements):
-                    lora = _create_dummy_lora(
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
                         module.lora_a_stacked[i].shape[-1],
                         module.lora_b_stacked[i].shape[-2],
@@ -542,7 +519,7 @@ class LoRAModelManager:
                     )
                     lora.optimize()
                     subloras.append(lora)
-                lora = LoRA.pack(subloras)
+                lora = PackedLoRALayerWeights.pack(subloras)
             model.loras[module_name] = lora
         return model
 
@@ -579,7 +556,8 @@ class LoRAModelManager:
                 if replacement_loras[i]:
                     continue
                 replacement_loras[i] = None
-            lora_model.loras[module_name] = LoRA.pack(replacement_loras)
+            lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
+                replacement_loras)
 
 
 class LoRALRUCache(LRUCache):
@@ -647,16 +625,15 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         return False
 
 
-def create_lora_adapter(
+def create_lora_manager(
         model: nn.Module,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
-        lora_config:LoRAConfig,
-        target_modules: Union[str,
-                              List[str]] = TARGET_MODULES_QKV,
-        lora_manager_cls:Type[LoRAModelManager] = LoRAModelManager, **kwargs)\
-                              -> LoRAModelManager:
+        lora_config: LoRAConfig,
+        target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
+        lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager,
+        **kwargs) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
     if not getattr(model, "supports_lora", False):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")

@@ -37,7 +37,6 @@ class SchedulerOutputs:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
         ignored_seq_groups: List[SequenceGroup],
-        lora_enabled: bool = False,
     ) -> None:
         self.scheduled_seq_groups = scheduled_seq_groups
         self.prompt_run = prompt_run
@@ -49,8 +48,8 @@ class SchedulerOutputs:
         assert not (blocks_to_swap_in and blocks_to_swap_out)
         self.ignored_seq_groups = ignored_seq_groups
 
-        if lora_enabled:
-            self.num_loras = len(set(self.lora_requests))
+        self.num_loras = len(self.lora_requests)
+        if self.num_loras > 0:
             self._sort_by_lora_ids()
 
     def is_empty(self) -> bool:
@@ -243,7 +242,6 @@ class Scheduler:
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
                     ignored_seq_groups=ignored_seq_groups,
-                    lora_enabled=self.lora_enabled,
                 )
                 return scheduler_outputs
 
@@ -334,7 +332,6 @@ class Scheduler:
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             ignored_seq_groups=[],
-            lora_enabled=self.lora_enabled,
         )
         return scheduler_outputs
 

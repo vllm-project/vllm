@@ -10,10 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.lora.worker_manager import (
-    DisabledWorkerLoRAManager,
-    LRUCacheWorkerLoRAManager,
-)
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.utils import in_wsl
@@ -77,12 +74,7 @@ class ModelRunner:
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens, vocab_size,
                 self.lora_config, self.device)
-            self.model = self.lora_manager.create_lora_adapter(self.model)
-        else:
-            self.lora_manager = DisabledWorkerLoRAManager(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens, vocab_size,
-                self.lora_config, self.device)
+            self.model = self.lora_manager.create_lora_manager(self.model)
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
@@ -409,7 +401,7 @@ class ModelRunner:
                 flat_lora_index_mapping,
                 lora_prompt_mapping,
             )
-            self.apply_loras(lora_requests, lora_mapping)
+            self.set_active_loras(lora_requests, lora_mapping)
 
         # Execute the model.
         if input_metadata.use_cuda_graph:
@@ -492,9 +484,9 @@ class ModelRunner:
     def remove_all_loras(self) -> bool:
         return self.lora_manager.remove_all_loras()
 
-    def apply_loras(self, lora_requests: List[LoRARequest],
-                    lora_mapping: LoRAMapping) -> None:
-        self.lora_manager.apply_loras(lora_requests, lora_mapping)
+    def set_active_loras(self, lora_requests: List[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
+        self.lora_manager.set_active_loras(lora_requests, lora_mapping)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.lora_manager.add_lora(lora_request)

@@ -51,64 +51,20 @@ def _apply_lora(
         output:          (batch_size, output_dim)
     """
     org_output = output
-    if x.ndim == 3:
-        x = x.view(x.shape[0] * x.shape[1], -1)
-    if output.ndim == 3:
-        output = output.view(output.shape[0] * output.shape[1], -1)
+    x = x.view(-1, x.shape[-1])
+    output = output.view(-1, output.shape[-1])
+    indices = indices.view(-1)
     add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
     return output.view_as(org_output)
 
 
-def _apply_lora_packed_2slice(
-    x: torch.Tensor,
-    lora_a_stacked: Tuple[torch.Tensor, torch.Tensor],
-    lora_b_stacked: Tuple[torch.Tensor, torch.Tensor],
-    indices: torch.Tensor,
-    output: torch.Tensor,
-    output_dim: int,
-):
-    """Applies lora to each input.
-
-    This method applies all loras to each input. It uses the
-    indices vector to determine which lora yields the
-    correct output. An index of -1 means no lora should be
-    applied. This method adds the final lora results to the
-    output.
-
-    This method is used for layers that are composed of 2 sublayers
-    (slices) packed together (eg. gate_proj + up_proj ->
-    gate_up_proj).
-
-    Both slices must have the same size (output_dim), meaning the output
-    tensor will have size output_dim*2.
-
-    Input shapes:
-        x:               (batch_size, hidden_dim)
-        lora_a_stacked:  2 element tuple of (num_loras, lora_rank, hidden_dim)
-        lora_b_stacked:  2 element tuple of (num_loras, output_dim, lora_rank)
-        indices:         (batch_size)
-        output:          (batch_size, output_dim*2)
-        output_dim:      scalar
-    """
-    org_output = output
-    if x.ndim == 3:
-        x = x.view(x.shape[0] * x.shape[1], -1)
-    if output.ndim == 3:
-        output = output.view(output.shape[0] * output.shape[1], -1)
-    add_lora_slice(output, x, lora_a_stacked[0], lora_b_stacked[0], indices, 0,
-                   1.0, 0, output_dim)
-    add_lora_slice(output, x, lora_a_stacked[1], lora_b_stacked[1], indices, 0,
-                   1.0, output_dim, output_dim)
-    return output.view_as(org_output)
-
-
-def _apply_lora_packed_3slice(
+def _apply_lora_packed_nslice(
     x: torch.Tensor,
     lora_a_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     lora_b_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     indices: torch.Tensor,
     output: torch.Tensor,
-    output_slices: Tuple[int, int],
+    output_slices: Tuple[int, ...],
 ):
     """Applies lora to each input.
 
@@ -118,10 +74,8 @@ def _apply_lora_packed_3slice(
     applied. This method adds the final lora results to the
     output.
 
-    This method is used for layers that are composed of 3 sublayers
-    (slices) packed together (attention projection). The
-    first slice (Q) may have different size from the two subsequent
-    slices (K, V).
+    This method is used for layers that are composed of multiple sublayers
+    (slices) packed together.
 
     Input shapes:
         x:                 (batch_size, hidden_dim)
@@ -129,13 +83,12 @@ def _apply_lora_packed_3slice(
         lora_b_stacked:    3 element tuple of (num_loras, output_dim, lora_rank)
         indices:           (batch_size)
         output:            (batch_size, q_slice_size + 2*kv_slice_size)
-        output_slices:     2 element tuple of (q_slice_size, kv_slice_size)
+        output_slices:     n-1 element tuple of (slice_size...), where n is number of slices
     """
     org_output = output
-    if x.ndim == 3:
-        x = x.view(x.shape[0] * x.shape[1], -1)
-    if output.ndim == 3:
-        output = output.view(output.shape[0] * output.shape[1], -1)
+    x = x.view(-1, x.shape[-1])
+    output = output.view(-1, output.shape[-1])
+    indices = indices.view(-1)
     add_lora_slice(output, x, lora_a_stacked[0], lora_b_stacked[0], indices, 0,
                    1.0, 0, output_slices[0])
     add_lora_slice(output, x, lora_a_stacked[1], lora_b_stacked[1], indices, 0,
@@ -147,20 +100,17 @@ def _apply_lora_packed_3slice(
 
 @dataclass
 class LoRAMapping:
+    # Per every token in input_ids:
     index_mapping: Tuple[int, ...]
+    # Per sampled token:
     prompt_mapping: Tuple[int, ...]
-
-    def __eq__(self, __value: object) -> bool:
-        return (isinstance(__value, self.__class__)
-                and self.prompt_mapping == __value.prompt_mapping
-                and self.index_mapping == __value.index_mapping)
 
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)
         self.prompt_mapping = tuple(self.prompt_mapping)
 
 
-class LoRALayer(nn.Module):
+class BaseLayerWithLoRA(nn.Module):
 
     def create_lora_weights(self, max_loras: int, lora_config: LoRAConfig,
                             model_config: PretrainedConfig) -> None:
@@ -193,7 +143,7 @@ class LoRALayer(nn.Module):
         ...
 
 
-class LoRAVocabParallelEmbedding(LoRALayer):
+class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
@@ -327,7 +277,7 @@ class LoRAVocabParallelEmbedding(LoRALayer):
         return full_output.view_as(full_output_org)
 
 
-class LoRAColumnParallelLinear(LoRALayer):
+class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: ColumnParallelLinear) -> None:
         super().__init__()
@@ -432,7 +382,7 @@ class LoRAColumnParallelLinear(LoRALayer):
         return self.base_layer.linear_weights
 
 
-class LoRAMergedColumnParallelLinear2Slice(LoRAColumnParallelLinear):
+class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
     packed together (eg. gate_proj + up_proj -> gate_up_proj).
 
@@ -523,18 +473,18 @@ class LoRAMergedColumnParallelLinear2Slice(LoRAColumnParallelLinear):
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
             self.base_layer.linear_weights, x, bias)
-        _apply_lora_packed_2slice(
+        _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
             self.indices[:self.indices_len[0]],
             output,
-            self.output_dim,
+            (self.output_dim, ),
         )
         return output
 
 
-class LoRAQKVParallelLinear(LoRAColumnParallelLinear):
+class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 3 sublayers (slices)
     packed together in qkv proj fashion
     (q_proj + k_proj + v_proj -> qkv_proj).
@@ -687,7 +637,7 @@ class LoRAQKVParallelLinear(LoRAColumnParallelLinear):
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
             self.base_layer.linear_weights, x, bias)
-        _apply_lora_packed_3slice(
+        _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
@@ -698,7 +648,7 @@ class LoRAQKVParallelLinear(LoRAColumnParallelLinear):
         return output
 
 
-class LoRARowParallelLinear(LoRALayer):
+class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: RowParallelLinear) -> None:
         super().__init__()
@@ -824,7 +774,7 @@ class LoRARowParallelLinear(LoRALayer):
         return self.base_layer.weight
 
 
-class LoRASampler(LoRALayer):
+class SamplerWithLoRA(BaseLayerWithLoRA):
 
     def __init__(
         self,
@@ -984,16 +934,17 @@ class LoRASampler(LoRALayer):
         return type(self.base_layer).forward(self, *args, **kwargs)
 
 
-def from_layer(layer: nn.Module,
-               max_loras: int,
-               lora_config: LoRAConfig,
-               model_config: Optional[PretrainedConfig] = None) -> LoRALayer:
+def from_layer(
+        layer: nn.Module,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None) -> BaseLayerWithLoRA:
     supported_layer_types = {
-        VocabParallelEmbedding: LoRAVocabParallelEmbedding,
-        ColumnParallelLinear: LoRAColumnParallelLinear,
-        QKVParallelLinear: LoRAQKVParallelLinear,
-        MergedColumnParallelLinear: LoRAMergedColumnParallelLinear2Slice,
-        RowParallelLinear: LoRARowParallelLinear,
+        VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
+        ColumnParallelLinear: ColumnParallelLinearWithLoRA,
+        QKVParallelLinear: QKVParallelLinearWithLora,
+        MergedColumnParallelLinear: MergedColumnParallelLinearWithLoRA,
+        RowParallelLinear: RowParallelLinearWithLoRA,
     }
     for src_layer_type, lora_layer_type in supported_layer_types.items():
         if type(layer) is src_layer_type:  # pylint: disable=unidiomatic-typecheck
@@ -1009,8 +960,8 @@ def from_layer_sampler(
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: Optional[PretrainedConfig] = None,
-) -> LoRASampler:
-    ret = LoRASampler(layer, lm_head.embedding_dim, lm_head.weight.dtype,
-                      lm_head.weight.device)
+) -> SamplerWithLoRA:
+    ret = SamplerWithLoRA(layer, lm_head.embedding_dim, lm_head.weight.dtype,
+                          lm_head.weight.device)
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret

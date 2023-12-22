@@ -7,9 +7,10 @@ from safetensors.torch import load_file
 from torch import nn
 
 from vllm.config import LoRAConfig
-from vllm.lora.layers import (LoRAColumnParallelLinear, LoRARowParallelLinear,
-                              LoRAMergedColumnParallelLinear2Slice)
-from vllm.lora.lora import LoRA, PackedLoRA
+from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
+                              RowParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithLoRA)
+from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.models import (EMBEDDING_MODULES, LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, LoRAMapping)
 from vllm.lora.request import LoRARequest
@@ -54,7 +55,7 @@ def create_lora(lora_id: int, model: nn.Module,
     loras = {}
     for name in sub_modules:
         w = model.get_submodule(name).weight
-        loras[name] = LoRA(
+        loras[name] = LoRALayerWeights(
             name,
             8,
             16,
@@ -76,7 +77,7 @@ def create_packed_lora(
     for replaced_module_name in replaced_module_names:
         if replaced_module_name == empty_replaced_module_name:
             continue
-        loras[replaced_module_name] = LoRA(
+        loras[replaced_module_name] = LoRALayerWeights(
             replaced_module_name,
             8,
             16,
@@ -99,12 +100,13 @@ def test_replace_submodules(dist_init, dummy_model):
                                lora_target_modules=["dense1", "layer1.dense2"])
     model = manager.model
 
-    assert isinstance(model.get_submodule("dense1"), LoRAColumnParallelLinear)
+    assert isinstance(model.get_submodule("dense1"),
+                      ColumnParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense1"),
-                      LoRAColumnParallelLinear)
+                      ColumnParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("dense2"), RowParallelLinear)
     assert isinstance(model.get_submodule("layer1.dense2"),
-                      LoRARowParallelLinear)
+                      RowParallelLinearWithLoRA)
 
 
 def test_lora_model_manager(dist_init, dummy_model):
@@ -289,10 +291,10 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     worker_lora_manager = LRUCacheWorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.config.vocab_size, lora_config,
         torch.device("cuda"))
-    worker_lora_manager.create_lora_adapter(llama_2_7b_model_extra_embeddings)
+    worker_lora_manager.create_lora_manager(llama_2_7b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("2", 2, sql_lora_files)
     ], mapping)
@@ -300,7 +302,7 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
     assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 2
 
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("3", 3, sql_lora_files),
         LoRARequest("4", 4, sql_lora_files)
@@ -311,7 +313,7 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 3
     assert worker_lora_manager._lora_manager.lora_id_to_index[3] == 4
 
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("2", 2, sql_lora_files),
         LoRARequest("5", 5, sql_lora_files)
@@ -322,7 +324,7 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 5
     assert worker_lora_manager._lora_manager.lora_id_to_index[3] == 4
 
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("1", 1, sql_lora_files)
@@ -333,7 +335,7 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 5
     assert worker_lora_manager._lora_manager.lora_id_to_index[3] == 4
 
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("6", 6, sql_lora_files),
         LoRARequest("7", 7, sql_lora_files),
         LoRARequest("8", 8, sql_lora_files)
@@ -346,7 +348,7 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
 
     # Over capacity
     with pytest.raises(RuntimeError):
-        worker_lora_manager.apply_loras([
+        worker_lora_manager.set_active_loras([
             LoRARequest("10", 10, sql_lora_files),
             LoRARequest("11", 11, sql_lora_files),
             LoRARequest("12", 12, sql_lora_files),
@@ -362,10 +364,10 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     worker_lora_manager = WorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.config.vocab_size, lora_config,
         torch.device("cuda"))
-    worker_lora_manager.create_lora_adapter(llama_2_7b_model_extra_embeddings)
+    worker_lora_manager.create_lora_manager(llama_2_7b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("2", 2, sql_lora_files)
     ], mapping)
@@ -373,7 +375,7 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
     assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 2
 
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("3", 3, sql_lora_files),
         LoRARequest("4", 4, sql_lora_files)
@@ -383,7 +385,7 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 3
     assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 4
 
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("2", 2, sql_lora_files),
         LoRARequest("5", 5, sql_lora_files)
@@ -393,7 +395,7 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 2
     assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 5
 
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("1", 1, sql_lora_files),
         LoRARequest("1", 1, sql_lora_files)
@@ -403,7 +405,7 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     assert worker_lora_manager._lora_manager.lora_id_to_index[1] is None
     assert worker_lora_manager._lora_manager.lora_id_to_index[2] is None
 
-    worker_lora_manager.apply_loras([
+    worker_lora_manager.set_active_loras([
         LoRARequest("6", 6, sql_lora_files),
         LoRARequest("7", 7, sql_lora_files),
         LoRARequest("8", 8, sql_lora_files)
@@ -415,7 +417,7 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
 
     # Over capacity
     with pytest.raises(RuntimeError):
-        worker_lora_manager.apply_loras([
+        worker_lora_manager.set_active_loras([
             LoRARequest("10", 10, sql_lora_files),
             LoRARequest("11", 11, sql_lora_files),
             LoRARequest("12", 12, sql_lora_files),
@@ -446,12 +448,12 @@ def test_packed_loras(dist_init, dummy_model_gate_up):
     model = manager.model
 
     assert isinstance(model.get_submodule("gate_up_proj"),
-                      LoRAMergedColumnParallelLinear2Slice)
+                      MergedColumnParallelLinearWithLoRA)
     assert manager.add_lora(model_lora)
     assert manager.add_lora(model_lora1)
 
     packed_lora = model_lora.get_lora("gate_up_proj")
-    assert packed_lora and isinstance(packed_lora, PackedLoRA)
+    assert packed_lora and isinstance(packed_lora, PackedLoRALayerWeights)
 
     assert torch.allclose(packed_lora.lora_a[0],
                           model_lora.get_lora("gate_proj").lora_a)
@@ -463,7 +465,7 @@ def test_packed_loras(dist_init, dummy_model_gate_up):
                           model_lora.get_lora("up_proj").lora_b)
 
     packed_lora1 = model_lora1.get_lora("gate_up_proj")
-    assert packed_lora1 and isinstance(packed_lora1, PackedLoRA)
+    assert packed_lora1 and isinstance(packed_lora1, PackedLoRALayerWeights)
 
     assert packed_lora1.lora_a[0] is None
     assert packed_lora1.lora_b[0] is None

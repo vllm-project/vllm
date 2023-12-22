@@ -2,7 +2,7 @@ from typing import List, Optional
 
 import torch
 
-from vllm.lora.lora import LoRA
+from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 
 
 class DummyLoRAManager:
@@ -11,10 +11,10 @@ class DummyLoRAManager:
         super().__init__()
         self._loras = {}
 
-    def set_module_lora(self, module_name: str, lora: LoRA):
+    def set_module_lora(self, module_name: str, lora: LoRALayerWeights):
         self._loras[module_name] = lora
 
-    def get_module_lora(self, module_name: str) -> Optional[LoRA]:
+    def get_module_lora(self, module_name: str) -> Optional[LoRALayerWeights]:
         return self._loras.get(module_name, None)
 
     def init_random_lora(self,
@@ -22,7 +22,7 @@ class DummyLoRAManager:
                          weight: torch.Tensor,
                          rank: int = 8,
                          generate_embeddings_tensor: int = 0):
-        lora = LoRA(
+        lora = LoRALayerWeights(
             module_name,
             rank=rank,
             lora_alpha=1,
@@ -49,7 +49,7 @@ class DummyLoRAManager:
                   rank=8,
                   noop=False,
                   embeddings_tensor=None):
-        lora = LoRA(
+        lora = LoRALayerWeights(
             module_name,
             rank=rank,
             lora_alpha=1,
@@ -83,6 +83,6 @@ class DummyLoRAManager:
                 noop=i in noop_lora_index,
             )
             base_loras.append(base_lora)
-        packed_lora = LoRA.pack(base_loras)
+        packed_lora = PackedLoRALayerWeights.pack(base_loras)
         self.set_module_lora(module_name, packed_lora)
         return packed_lora

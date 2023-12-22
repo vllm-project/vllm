@@ -5,7 +5,7 @@ from typing import Any, List, Optional, Set, Type, Union
 import torch
 
 from vllm.lora.models import (TARGET_MODULES_QKV, LoRAModel, LoRAModelManager,
-                              LRUCacheLoRAModelManager, create_lora_adapter)
+                              LRUCacheLoRAModelManager, create_lora_manager)
 from vllm.lora.request import LoRARequest
 from vllm.lora.layers import LoRAMapping
 from vllm.config import LoRAConfig
@@ -13,7 +13,7 @@ from vllm.config import LoRAConfig
 logger = logging.getLogger(__name__)
 
 
-class AbstractWorkerLoRAManager(ABC):
+class WorkerLoRAManager(ABC):
     """Abstract class for managing LoRA models on the worker side."""
 
     def __init__(self, max_num_seqs: int, max_num_batched_tokens: int,
@@ -30,7 +30,7 @@ class AbstractWorkerLoRAManager(ABC):
         ...
 
     @abstractmethod
-    def create_lora_adapter(
+    def create_lora_manager(
         self,
         model: torch.nn.Module,
         target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
@@ -38,8 +38,8 @@ class AbstractWorkerLoRAManager(ABC):
         ...
 
     @abstractmethod
-    def apply_loras(self, lora_requests: List[LoRARequest],
-                    lora_mapping: LoRAMapping) -> None:
+    def set_active_loras(self, lora_requests: List[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
         ...
 
     @abstractmethod
@@ -63,41 +63,7 @@ class AbstractWorkerLoRAManager(ABC):
         ...
 
 
-class DisabledWorkerLoRAManager(AbstractWorkerLoRAManager):
-    """WorkerLoRAManager that does nothing."""
-
-    @property
-    def is_enabled(self) -> bool:
-        return False
-
-    def create_lora_adapter(
-        self,
-        model: torch.nn.Module,
-        target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
-    ) -> Any:
-        return model
-
-    def apply_loras(self, lora_requests: List[LoRARequest],
-                    lora_mapping: LoRAMapping) -> None:
-        return
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return False
-
-    def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
-        return False
-
-    def remove_lora(self, lora_id: int) -> bool:
-        return False
-
-    def remove_all_loras(self) -> bool:
-        return
-
-    def list_loras(self) -> Set[int]:
-        return set()
-
-
-class WorkerLoRAManager(AbstractWorkerLoRAManager):
+class WorkerLoRAManager(WorkerLoRAManager):
     """WorkerLoRAManager that manages LoRA models on the worker side.
 
     Every request, the requested LoRAs will be loaded (unless they are already
@@ -123,12 +89,12 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
     def is_enabled(self) -> bool:
         return True
 
-    def create_lora_adapter(
+    def create_lora_manager(
         self,
         model: torch.nn.Module,
         target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
     ) -> Any:
-        lora_manager = create_lora_adapter(
+        lora_manager = create_lora_manager(
             model,
             max_num_seqs=self.max_num_seqs,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -140,10 +106,10 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
         self._lora_manager: LoRAModelManager = lora_manager
         return lora_manager.model
 
-    def apply_loras(self, lora_requests: List[LoRARequest],
-                    lora_mapping: LoRAMapping) -> None:
+    def set_active_loras(self, lora_requests: List[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
         self._apply_loras(lora_requests)
-        self._lora_manager.set_row_lora_mapping(lora_mapping)
+        self._lora_manager.set_lora_mapping(lora_mapping)
 
     def _apply_loras(self, lora_requests: List[LoRARequest]) -> None:
         loras_that_exist = self.list_loras()
@@ -226,12 +192,12 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     _lora_manager_cls: Type[
         LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
 
-    def create_lora_adapter(
+    def create_lora_manager(
         self,
         model: torch.nn.Module,
         target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
     ) -> Any:
-        lora_manager = create_lora_adapter(
+        lora_manager = create_lora_manager(
             model,
             target_modules=target_modules,
             lora_manager_cls=self._lora_manager_cls,

@@ -49,7 +49,6 @@ class Worker:
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
-        self.lora_manager = None
 
     def init_model(self) -> None:
         # torch.distributed.all_reduce does not free the input tensor until
