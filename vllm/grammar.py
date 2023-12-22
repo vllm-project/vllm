@@ -378,10 +378,10 @@ class GrammarLogitsProcessor(NextTokenValidator):
     def __call__(self, token_ids: List[int], logits: torch.Tensor) -> torch.Tensor:
         self._update_seen_token_ids(token_ids)
 
-        # get valid token IDs and modify logits
-        valid_token_ids = self.valid_token_id_set
-        logits = [
-            logit_val if tok_id in valid_token_ids else -float("inf")
-            for tok_id, logit_val in zip(sorted(self.tokenizer.vocab.values()), logits)
-        ]
+        # modify logits given valid token IDs
+        N = len(logits)
+        mask = torch.zeros(N, dtype=torch.bool)
+        valid = torch.tensor(list(self.valid_token_id_set), dtype=torch.long)
+        mask[valid] = True
+        logits[~mask] = float('-inf')
         return logits
