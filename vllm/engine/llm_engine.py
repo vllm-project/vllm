@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupOutput,
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus, ExecuteModelData)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
@@ -130,6 +130,7 @@ class LLMEngine:
 
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(SamplerOutput)
+        self.prev_done_seq_group_ids = set()
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -334,7 +335,7 @@ class LLMEngine:
 
     def _schedule(
         self
-    ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs,
+    ) -> Tuple[List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]], SchedulerOutputs,
                List[RequestOutput]]:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
         return seq_group_metadata_list, scheduler_outputs, [
@@ -592,6 +593,8 @@ class LLMEngine:
         """
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
         if scheduler_outputs.is_empty():
+            self.prev_done_seq_group_ids.update(
+                scheduler_outputs.done_seq_group_ids)
             return ignored
 
         # Execute the model.
@@ -609,7 +612,11 @@ class LLMEngine:
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
                 blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
+                finished_request_ids_list=list(
+                scheduler_outputs.done_seq_group_ids.intersection(
+                    self.prev_done_seq_group_ids))
             )
+            self.prev_done_seq_group_ids.clear()
 
         return self._process_model_outputs(output, scheduler_outputs)
 
@@ -806,10 +813,12 @@ class LLMEngine:
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        finished_request_ids_list: List[int],
     ) -> Any:
         """Runs the given method on all workers using static DAG APIs."""
         data = ExecuteModelData(
             seq_group_metadata_list=seq_group_metadata_list,
+            finished_request_ids_list=finished_request_ids_list,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
@@ -819,12 +828,11 @@ class LLMEngine:
         try:
             # TODO(sang): Is it necessary to check all outputs
             # are the same? It requires 3X unnecessary deserialization.
-            all_outputs = [
-                self.decoder.decode(chan.begin_read()) for chan in output_channels
+            
+            all_outputs_serialized = [
+                chan.begin_read() for chan in output_channels
             ]
-            output = all_outputs[0]
-            for other_output in all_outputs[1:]:
-                assert output == other_output
+            output = self.decoder.decode(all_outputs_serialized[0])
             return output
         finally:
             # Has to call end_read in order to reuse the DAG.

@@ -1,13 +1,13 @@
 import enum
 import time
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
 
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.block_manager import AllocStatus, BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta, SequenceStatus)
 
 logger = init_logger(__name__)
 
@@ -36,6 +36,7 @@ class SchedulerOutputs:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
         ignored_seq_groups: List[SequenceGroup],
+        done_seq_group_ids: Set[str],
     ) -> None:
         self.scheduled_seq_groups = scheduled_seq_groups
         self.prompt_run = prompt_run
@@ -46,6 +47,7 @@ class SchedulerOutputs:
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
         self.ignored_seq_groups = ignored_seq_groups
+        self.done_seq_group_ids = done_seq_group_ids
 
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
@@ -82,6 +84,11 @@ class Scheduler:
         self.running: List[SequenceGroup] = []
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
+        self.done_ids: Set[str] = set()
+
+    @property
+    def _use_deltas(self):
+        return self.scheduler_config.use_deltas
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
@@ -91,6 +98,7 @@ class Scheduler:
         if isinstance(request_id, str):
             request_id = (request_id, )
         request_ids = set(request_id)
+        self.done_ids.update(request_ids)
         for state_queue in [self.waiting, self.running, self.swapped]:
             # We need to reverse the list as we are removing elements
             # from it as we iterate over it. If we don't do it,
@@ -202,7 +210,9 @@ class Scheduler:
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
                     ignored_seq_groups=ignored_seq_groups,
+                    done_seq_group_ids=self.done_ids.copy(),
                 )
+                self.done_ids.clear()
                 return scheduler_outputs
 
         # NOTE(woosuk): Preemption happens only when there is no available slot
@@ -274,17 +284,19 @@ class Scheduler:
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             ignored_seq_groups=[],
+            done_seq_group_ids=self.done_ids.copy(),
         )
+        self.done_ids.clear()
         return scheduler_outputs
 
-    def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
+    def schedule(self) -> Tuple[List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]], SchedulerOutputs]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
         scheduler_outputs = self._schedule()
 
         # Create input data structures.
-        seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        seq_group_metadata_list: List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]] = []
         for seq_group in scheduler_outputs.scheduled_seq_groups:
             seq_data: Dict[int, SequenceData] = {}
             block_tables: Dict[int, List[int]] = {}
@@ -293,13 +305,20 @@ class Scheduler:
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
 
-            seq_group_metadata = SequenceGroupMetadata(
-                request_id=seq_group.request_id,
-                is_prompt=scheduler_outputs.prompt_run,
-                seq_data=seq_data,
-                sampling_params=seq_group.sampling_params,
-                block_tables=block_tables,
-            )
+            is_prompt = scheduler_outputs.prompt_run
+            if not self._use_deltas or is_prompt:
+                seq_group_metadata = SequenceGroupMetadata(
+                    request_id=seq_group.request_id,
+                    is_prompt=is_prompt,
+                    seq_data=seq_data,
+                    sampling_params=seq_group.sampling_params,
+                    block_tables=block_tables,
+                )
+            else:
+                seq_group_metadata = SequenceGroupMetadataDelta(
+                    request_id=seq_group.request_id,
+                    block_tables=block_tables,
+                )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
 
@@ -310,10 +329,13 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        self.running = [
-            seq_group for seq_group in self.running
-            if not seq_group.is_finished()
-        ]
+        new_running = []
+        for seq_group in self.running:
+            if seq_group.is_finished():
+                self.done_ids.add(seq_group.request_id)
+            else:
+                new_running.append(seq_group)
+        self.running = new_running
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)

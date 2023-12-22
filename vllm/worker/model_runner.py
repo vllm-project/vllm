@@ -9,7 +9,7 @@ from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata, SequenceGroupMetadataDelta
 
 logger = init_logger(__name__)
 
@@ -53,6 +53,9 @@ class ModelRunner:
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables = None  # Set after initial profiling.
 
+        # Used only when self.scheduler_config.use_deltas = True.
+        self.seq_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
+
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
 
@@ -66,7 +69,7 @@ class ModelRunner:
 
     def _prepare_prompt(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
@@ -76,6 +79,12 @@ class ModelRunner:
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
+
+            # Prepare a cache so that decoding can use delta instead.
+            if self.seq_metadata_cache is not None:
+                self.seq_metadata_cache[
+                    seq_group_metadata.request_id] = seq_group_metadata
+
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
@@ -143,7 +152,7 @@ class ModelRunner:
 
     def _prepare_decode(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
@@ -152,8 +161,15 @@ class ModelRunner:
         context_lens: List[int] = []
         block_tables: List[List[int]] = []
 
-        for seq_group_metadata in seq_group_metadata_list:
+        for seq_idx, seq_group_metadata in enumerate(seq_group_metadata_list):
             assert not seq_group_metadata.is_prompt
+
+            if (self.seq_metadata_cache is not None and
+                    seq_group_metadata.request_id in self.seq_metadata_cache):
+                seq_group_metadata = self.seq_metadata_cache[
+                    seq_group_metadata.request_id].update_from_delta(
+                        seq_group_metadata)
+                seq_group_metadata_list[seq_idx] = seq_group_metadata
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
             for seq_id in seq_ids:
@@ -321,9 +337,15 @@ class ModelRunner:
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        finished_request_ids_list: List[int] = None,
     ) -> SamplerOutput:
+        # Clean up cache for finished ids.
+        if self.seq_metadata_cache and finished_request_ids_list:
+            for finished_request_id in finished_request_ids_list:
+                self.seq_metadata_cache.pop(finished_request_id, None)
+
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
@@ -342,6 +364,7 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
@@ -354,6 +377,21 @@ class ModelRunner:
             hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
         )
+
+        seq_group_request_ids = [
+            seq_group_metadata.request_id
+            for seq_group_metadata in seq_group_metadata_list
+        ]
+
+        if self.seq_metadata_cache is not None:
+            for request_id, sampler_output in zip(seq_group_request_ids,
+                                                    output):
+                cached_seq_metadata = self.seq_metadata_cache[request_id]
+                for sample in sampler_output.samples:
+                    cached_seq_metadata.seq_data[
+                        sample.parent_seq_id].append_token_ids(
+                            [sample.output_token], [0])
+
         return output
 
     @torch.inference_mode()

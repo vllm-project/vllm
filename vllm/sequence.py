@@ -66,9 +66,14 @@ class SequenceData(msgspec.Struct, array_like=True, omit_defaults=True):
     output_token_ids: List[int] = []
     cumulative_logprob: float = 0.0
 
-    def append_token_id(self, token_id: int, logprob: float) -> None:
-        self.output_token_ids.append(token_id)
-        self.cumulative_logprob += logprob
+    def append_token_ids(self, token_ids: List[int],
+                         logprobs: List[float]) -> None:
+        """Append token ids to the output token ids and update the cumulative
+        logprob. Also updates the number of processed token ids to the sequence
+        length before the new tokens.
+        """
+        self.output_token_ids.extend(token_ids)
+        self.cumulative_logprob += sum(logprobs)
 
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
@@ -86,6 +91,7 @@ class SequenceData(msgspec.Struct, array_like=True, omit_defaults=True):
         if not self.output_token_ids:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
+        
 
     def __repr__(self) -> str:
         return (f"SequenceData("
@@ -159,10 +165,19 @@ class Sequence:
         token_id: int,
         logprobs: Dict[int, float],
     ) -> None:
-        assert token_id in logprobs
-        self._append_tokens_to_blocks([token_id])
-        self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id])
+        return self.append_token_ids([token_id], [logprobs])
+
+    def append_token_ids(
+        self,
+        token_ids: List[int],
+        logprobs: List[Dict[int, float]],
+    ) -> None:
+        self._append_tokens_to_blocks(token_ids)
+        self.output_logprobs.extend(logprobs)
+        self.data.append_token_ids(token_ids, [
+            logprob[token_id]
+            for logprob, token_id in zip(logprobs, token_ids)
+        ])
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -322,7 +337,19 @@ class SequenceGroup:
                 f"num_seqs={len(self.seqs_dict)})")
 
 
-class SequenceGroupMetadata(msgspec.Struct, array_like=True, omit_defaults=True):
+class SequenceGroupMetadataDelta(msgspec.Struct,
+                                 tag=True,
+                                 array_like=True,
+                                 omit_defaults=True):
+    request_id: str
+    block_tables: Optional[Dict[int, List[int]]]
+
+    @property
+    def is_prompt(self):
+        return False
+
+
+class SequenceGroupMetadata(msgspec.Struct, tag=True, array_like=True, omit_defaults=True):
     """Metadata for a sequence group. Used to create `InputMetadata`.
 
 
@@ -340,6 +367,11 @@ class SequenceGroupMetadata(msgspec.Struct, array_like=True, omit_defaults=True)
     seq_data: Dict[int, SequenceData]
     sampling_params: SamplingParams
     block_tables: Dict[int, List[int]]
+
+    def update_from_delta(self, delta: "SequenceGroupMetadataDelta"):
+        self.block_tables = delta.block_tables
+        self.is_prompt = delta.is_prompt
+        return self
 
 
 class SequenceOutput(msgspec.Struct, array_like=True, omit_defaults=True):
@@ -407,7 +439,9 @@ class SamplerOutput(msgspec.Struct, array_like=True, omit_defaults=True):
 
 class ExecuteModelData(msgspec.Struct, array_like=True, omit_defaults=True):
 
-    seq_group_metadata_list: List[SequenceGroupMetadata]
+    seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+                                        SequenceGroupMetadataDelta]]
+    finished_request_ids_list: List[str]
     blocks_to_swap_in: Dict[int, int]
     blocks_to_swap_out: Dict[int, int]
     blocks_to_copy: Dict[int, List[int]]

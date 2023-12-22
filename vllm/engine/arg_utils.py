@@ -19,7 +19,7 @@ class EngineArgs:
     dtype: str = 'auto'
     seed: int = 0
     max_model_len: Optional[int] = None
-    worker_use_ray: bool = False
+    worker_use_ray: bool = True
     use_ray_compiled_dag: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
@@ -235,7 +235,8 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
-                                           self.max_paddings)
+                                           self.max_paddings,
+                                           use_deltas=parallel_config.worker_use_ray)
         return model_config, cache_config, parallel_config, scheduler_config
 
 

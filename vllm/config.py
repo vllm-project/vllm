@@ -378,6 +378,8 @@ class SchedulerConfig:
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
         max_paddings: Maximum number of paddings to be added to a batch.
+        use_deltas: Whether scheduler output is emitted as a "delta" or update.
+            Deltas are smaller and incur less overhead over IPC.
     """
 
     def __init__(
@@ -386,6 +388,7 @@ class SchedulerConfig:
         max_num_seqs: int,
         max_model_len: int,
         max_paddings: int,
+        use_deltas: bool = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -396,6 +399,7 @@ class SchedulerConfig:
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self.max_paddings = max_paddings
+        self.use_deltas = use_deltas
         self._verify_args()
 
     def _verify_args(self) -> None:

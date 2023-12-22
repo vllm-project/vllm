@@ -41,6 +41,7 @@ try:
                 args.blocks_to_swap_in,
                 args.blocks_to_swap_out,
                 args.blocks_to_copy,
+                finished_request_ids_list=args.finished_request_ids_list,
             )
             output = self.encoder.encode(output)
             return output
