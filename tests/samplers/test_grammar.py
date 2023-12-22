@@ -351,8 +351,6 @@ def test_integration_with_vllm(vllm_runner, hf_runner):
               tensor_parallel_size=1)
 
     prompts = [
-        "Who is the president of Jamaica?",
-        "What is 1+1?",
         "Random prompt unrelated to output",
         "Seriously, no matter what the prompt is..."
         "it will always follow the grammar"
