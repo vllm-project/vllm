@@ -56,6 +56,8 @@ class FastInteractiveParser(InteractiveParser):
             copy(self.parser_state),
             copy(self.lexer_thread),
         )
+
+
 #########################################################################
 #########################################################################
 
@@ -160,7 +162,8 @@ class InteractivePredictiveLALRParser:
 
             # if successfully parsed new token, add blank state and set fallback checkpoint
             if success:
-                self.valid_next_terminals[""] = self._accepts() | self._ignored_terms
+                self.valid_next_terminals[""] = self._accepts(
+                ) | self._ignored_terms
                 self._terminal_start_parser = self.interactive_parser.copy()
 
             self._filter_candidate_terminals()
@@ -182,8 +185,7 @@ class InteractivePredictiveLALRParser:
         for incomplete_seq, terminals in self.valid_next_terminals.items():
             if incomplete_seq != "":
                 self.valid_next_terminals[incomplete_seq] = set([
-                    term for term in terminals
-                    if term != "$END"
+                    term for term in terminals if term != "$END"
                     and self.partial_seq_validator[term](incomplete_seq)
                 ])
             if not self.valid_next_terminals[incomplete_seq]:
@@ -206,7 +208,8 @@ class InteractivePredictiveLALRParser:
         for incomplete_seq, terminals in self.valid_next_terminals.items():
             candidate = incomplete_seq + new_seq
             for term in terminals:
-                if term != "$END" and self.partial_seq_validator[term](candidate):
+                if term != "$END" and self.partial_seq_validator[term](
+                        candidate):
                     return True
         return False
 
@@ -219,7 +222,8 @@ class TokenTrie:
     IS_TOKEN = (None, "is complete token")
 
     def __init__(self,
-                 tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+                 tokenizer: Union[PreTrainedTokenizer,
+                                  PreTrainedTokenizerFast],
                  legal_chars: Optional[Set[str]] = None):
         self.norm_vocab = collections.defaultdict(set)
         for token_id in tokenizer.vocab.values():
@@ -227,9 +231,10 @@ class TokenTrie:
                 self.norm_vocab[None].add(token_id)
                 continue
             bos_len = len(tokenizer.bos_token)
-            norm_token = tokenizer.decode([tokenizer.bos_token_id, token_id])[bos_len:]
+            norm_token = tokenizer.decode([tokenizer.bos_token_id,
+                                           token_id])[bos_len:]
             if legal_chars is None or all(
-                    [char in legal_chars for char in norm_token]):
+                [char in legal_chars for char in norm_token]):
                 self.norm_vocab[norm_token].add(token_id)
 
         # faster lookups, reduce time by 10%
@@ -251,11 +256,12 @@ class TokenTrie:
     def get_next_level_token_prefixes(self, subprefix: str) -> Set[str]:
         if subprefix not in self._next_level_token_prefixes_cache:
             self._next_level_token_prefixes_cache[subprefix] = (
-                self.get_next_level_token_prefixes_uncached(subprefix)
-            )
+                self.get_next_level_token_prefixes_uncached(subprefix))
         return self._next_level_token_prefixes_cache[subprefix]
 
-    def get_next_level_token_prefixes_uncached(self, subprefix: str, _node: dict = None) -> Set[str]:
+    def get_next_level_token_prefixes_uncached(self,
+                                               subprefix: str,
+                                               _node: dict = None) -> Set[str]:
         """
         Traverse the trie starting from a specified subprefix to identify all child nodes that represent
         the longest possible strings without omitting any nodes that contain complete tokens.
@@ -282,9 +288,7 @@ class TokenTrie:
         for char, next_node in _node.items():
             if char != self.IS_TOKEN:
                 results |= self.get_next_level_token_prefixes_uncached(
-                    subprefix + char,
-                    _node=next_node
-                )
+                    subprefix + char, _node=next_node)
 
         return results
 
@@ -300,12 +304,14 @@ class NextTokenValidator:
     - step_seq(new_seq): Append a sequence, update internal states
     - property valid_token_str_set: The valid set of vocabulary tokens strings which can occur next
     """
-    def __init__(self,
-                 tokenizer,
-                 grammar: str,
-                 grammar_start: str = "start",
-                 legal_chars: Optional[set[str]] = None,
-                 ):
+
+    def __init__(
+        self,
+        tokenizer,
+        grammar: str,
+        grammar_start: str = "start",
+        legal_chars: Optional[set[str]] = None,
+    ):
         self.tokenizer = tokenizer
         self.token_trie = TokenTrie(tokenizer, legal_chars=legal_chars)
 
@@ -333,7 +339,8 @@ class NextTokenValidator:
         token_prefix_stack = collections.deque([""])
         while token_prefix_stack:
             token_prefix = token_prefix_stack.pop()
-            for child_token_prefix in self.token_trie.get_next_level_token_prefixes(token_prefix):
+            for child_token_prefix in self.token_trie.get_next_level_token_prefixes(
+                    token_prefix):
                 if self.parser.is_valid_next_seq(child_token_prefix):
                     token_prefix_stack.append(child_token_prefix)
                     if self.token_trie.is_token(child_token_prefix):
@@ -361,17 +368,18 @@ class BatchDataItemParser:
     parser: NextTokenValidator
 
 
-
 class GrammarLogitsProcessor:
     """
     Apply NextTokenValidator in __call__ and set excluded tokens logits to -inf
     """
-    def __init__(self,
-                 tokenizer,
-                 grammar: str,
-                 grammar_start: str = "start",
-                 legal_chars: Optional[set[str]] = None,
-                 ):
+
+    def __init__(
+        self,
+        tokenizer,
+        grammar: str,
+        grammar_start: str = "start",
+        legal_chars: Optional[set[str]] = None,
+    ):
         self.tokenizer = tokenizer
         self.grammar = grammar
         self.grammar_start = grammar_start
@@ -382,15 +390,11 @@ class GrammarLogitsProcessor:
 
     def _new_batch_data_item_parser(self):
         return BatchDataItemParser(
-            "",
-            [],
-            NextTokenValidator(
-                tokenizer=self.tokenizer,
-                grammar=self.grammar,
-                grammar_start=self.grammar_start,
-                legal_chars=self.legal_chars
-            )
-        )
+            "", [],
+            NextTokenValidator(tokenizer=self.tokenizer,
+                               grammar=self.grammar,
+                               grammar_start=self.grammar_start,
+                               legal_chars=self.legal_chars))
 
     def _get_batch_data_item_parser(self, token_ids: List[int]):
         """
@@ -398,18 +402,16 @@ class GrammarLogitsProcessor:
         This is generally the corresponding parser, but if there's a collision
         their parsers are interchangable
         """
-        for bdip in sorted(
-                self.batch_data_item_parsers,
-                key=lambda bdip: -len(bdip.token_ids)
-        ):
+        for bdip in sorted(self.batch_data_item_parsers,
+                           key=lambda bdip: -len(bdip.token_ids)):
             if token_ids[:len(bdip.token_ids)] == bdip.token_ids:
                 return bdip
 
         # no match, make new
         return self._new_batch_data_item_parser()
 
-
-    def _update_seen_token_ids(self, bdip: BatchDataItemParser, token_ids: List[int]):
+    def _update_seen_token_ids(self, bdip: BatchDataItemParser,
+                               token_ids: List[int]):
 
         # update batch item token tracker
         bdip.token_ids = token_ids
@@ -420,7 +422,8 @@ class GrammarLogitsProcessor:
         bdip.text = all_text
         bdip.parser.step_seq(new_text)
 
-    def __call__(self, token_ids: List[int], logits: torch.Tensor) -> torch.Tensor:
+    def __call__(self, token_ids: List[int],
+                 logits: torch.Tensor) -> torch.Tensor:
         # get the batch item data and parser for batch item, given provided token sequence
         bdip = self._get_batch_data_item_parser(token_ids)
 
@@ -429,7 +432,8 @@ class GrammarLogitsProcessor:
         # modify logits given valid token IDs
         N = len(logits)
         mask = torch.zeros(N, dtype=torch.bool)
-        valid = torch.tensor(list(bdip.parser.valid_token_id_set), dtype=torch.long)
+        valid = torch.tensor(list(bdip.parser.valid_token_id_set),
+                             dtype=torch.long)
         mask[valid] = True
         logits[~mask] = float('-inf')
         return logits

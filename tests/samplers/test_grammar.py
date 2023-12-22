@@ -111,13 +111,9 @@ bif\tbif\tbif
 """.strip() + "\n"  # grammar requires newline before eos
 
 
-
 def sample_from_logits(logits):
     probs = np.exp(logits) / np.sum(np.exp(logits))
-    return np.random.choice(
-        len(logits),
-        p=probs
-    )
+    return np.random.choice(len(logits), p=probs)
 
 
 def test_next_token_validator_simple(tokenizer):
@@ -127,20 +123,19 @@ def test_next_token_validator_simple(tokenizer):
     ntv = NextTokenValidator(tokenizer, hello_grammar)
 
     # tokens specific to codeLlama
-    assert ntv.valid_token_str_set == {'wo', 'hell', 'h', 'he', 'hel', 'world', 'wor', 'w', 'hello'}
-    assert sorted(ntv.valid_token_id_set) == [107, 122, 354, 827, 3952, 11526, 12199, 13762, 14181, 29882, 29893]
+    assert ntv.valid_token_str_set == {
+        'wo', 'hell', 'h', 'he', 'hel', 'world', 'wor', 'w', 'hello'
+    }
+    assert sorted(ntv.valid_token_id_set) == [
+        107, 122, 354, 827, 3952, 11526, 12199, 13762, 14181, 29882, 29893
+    ]
 
 
-@pytest.mark.parametrize("grammar_fixture, example_fixture", [
-    ("json_grammar", "json_example"),
-    ("csv_grammar", "csv_example")
-])
-def test_can_generate_with_grammar(
-        tokenizer,
-        request,
-        grammar_fixture,
-        example_fixture
-):
+@pytest.mark.parametrize("grammar_fixture, example_fixture",
+                         [("json_grammar", "json_example"),
+                          ("csv_grammar", "csv_example")])
+def test_can_generate_with_grammar(tokenizer, request, grammar_fixture,
+                                   example_fixture):
     """Assert that example file is legal to generate with NextTokenValidator"""
     grammar = request.getfixturevalue(grammar_fixture)
     example = request.getfixturevalue(example_fixture)
@@ -160,7 +155,9 @@ def test_can_generate_with_grammar(
                 example_remainder = example_remainder[len(tok):]
                 break
         else:
-            raise Exception(f"Couldn't find token to create legal output given grammar, remaining output: '{example_remainder}'")
+            raise Exception(
+                f"Couldn't find token to create legal output given grammar, remaining output: '{example_remainder}'"
+            )
 
     # EOS should be in the set of next legal tokens
     assert None in next_token_validator.valid_token_str_set
@@ -174,7 +171,6 @@ def test_json_valid_with_edge_cases(tokenizer, json_grammar):
         "{\n    \"\": true,\n    \"regularKey\": false\n}",  # empty keys
         "{\n    \"\\u043a\\u043b\\u044e\\u0447\": \"\\u0437\\u043d\\u0430\\u0447\\u0435\\u043d\\u0438\\u0435\",\n    \"emoji\\ud83d\\ude42\": \"value\\ud83d\\ude00\"\n}",  # unicode keys
     ]
-
 
     for example in valid_edgecase_jsons:
         next_token_validator = NextTokenValidator(
@@ -191,7 +187,9 @@ def test_json_valid_with_edge_cases(tokenizer, json_grammar):
                     example_remainder = example_remainder[len(tok):]
                     break
             else:
-                raise Exception(f"Couldn't find token to create legal output given grammar, remaining output: '{example_remainder}'")
+                raise Exception(
+                    f"Couldn't find token to create legal output given grammar, remaining output: '{example_remainder}'"
+                )
 
         # EOS should be in the set of next legal tokens
         assert None in next_token_validator.valid_token_str_set
@@ -236,11 +234,8 @@ def test_token_trie_sanity(tokenizer):
     assert all([len(p) == 1 for p in all_prefixes])
 
     # every token should have one of these prefixes as a start character
-    assert all([
-        t[0] in all_prefixes
-        for t in toktrie.norm_vocab
-        if t is not None
-    ])
+    assert all(
+        [t[0] in all_prefixes for t in toktrie.norm_vocab if t is not None])
 
     # construct the set of next level prefixes
     all_subprefixes = set()
@@ -251,12 +246,14 @@ def test_token_trie_sanity(tokenizer):
     assert len(set([len(spfx) for spfx in all_subprefixes])) > 1
 
 
-@pytest.mark.parametrize("start_tok, validator", [
-    (29945, float),  # 5 - float
-    (285, lambda s: bool(json.dumps(s))),  # f for false
-    (260, lambda s: bool(json.dumps(s))),  # t for false
-    (376, lambda s: str(json.dumps(s))),  #  " for string
-])
+@pytest.mark.parametrize(
+    "start_tok, validator",
+    [
+        (29945, float),  # 5 - float
+        (285, lambda s: bool(json.dumps(s))),  # f for false
+        (260, lambda s: bool(json.dumps(s))),  # t for false
+        (376, lambda s: str(json.dumps(s))),  #  " for string
+    ])
 def test_gen_primative(json_grammar, tokenizer, start_tok, validator):
     # Note: string may last a
     for _ in range(4):
@@ -268,10 +265,10 @@ def test_gen_primative(json_grammar, tokenizer, start_tok, validator):
 
         token_ids = [start_tok]
         while True:
-            logits = grammar_logits_processor(
-                token_ids=token_ids,
-                logits=np.random.uniform(-10, 10, len(tokenizer.vocab))
-            )
+            logits = grammar_logits_processor(token_ids=token_ids,
+                                              logits=np.random.uniform(
+                                                  -10, 10,
+                                                  len(tokenizer.vocab)))
             new_token_id = sample_from_logits(logits)
             if new_token_id == tokenizer.eos_token_id:
                 break
@@ -289,12 +286,11 @@ def test_random_grammared_generation(json_grammar, tokenizer):
         tokenizer,
         json_grammar,
         legal_chars=set(map(chr, range(256))),
-   )
+    )
 
     # bias closing tokens logits to prevent infinite generation
     closing_token_ids = set([
-        tok_id
-        for tok_str in ["]", "}", '"', ",", None]
+        tok_id for tok_str in ["]", "}", '"', ",", None]
         for tok_id in grammar_logits_processor.token_trie.norm_vocab[tok_str]
     ])
     closing_tokens_bias = -10
@@ -303,18 +299,16 @@ def test_random_grammared_generation(json_grammar, tokenizer):
     # more tokens than these, and numbers close much more quickly, are less
     # gramatically complicated and result in a less interesting test
     opening_token_ids = set([
-        tok_id
-        for tok_str in ["[", "{", '"', ","]
+        tok_id for tok_str in ["[", "{", '"', ","]
         for tok_id in grammar_logits_processor.token_trie.norm_vocab[tok_str]
     ])
     opening_tokens_bias = 5
 
     token_ids = []
     while True:
-        logits = grammar_logits_processor(
-            token_ids=token_ids,
-            logits=np.random.uniform(-10, 10, len(tokenizer.vocab))
-        )
+        logits = grammar_logits_processor(token_ids=token_ids,
+                                          logits=np.random.uniform(
+                                              -10, 10, len(tokenizer.vocab)))
 
         for closing_token_id in closing_token_ids:
             logits[closing_token_id] += closing_tokens_bias
@@ -336,14 +330,12 @@ def test_integration_with_vllm(vllm_runner, hf_runner):
     tokenizer = hf_runner(model_id, dtype=dtype).tokenizer
     grammar = """?start: "hello" | "world" """
 
-    grammar_logits_processor = GrammarLogitsProcessor(
-        tokenizer,
-        grammar
-    )
-    sampling_params = SamplingParams(temperature=0.01,
-                                     top_p=0.1,
-                                     max_tokens=256,
-                                     logits_processors=[grammar_logits_processor])
+    grammar_logits_processor = GrammarLogitsProcessor(tokenizer, grammar)
+    sampling_params = SamplingParams(
+        temperature=0.01,
+        top_p=0.1,
+        max_tokens=256,
+        logits_processors=[grammar_logits_processor])
     llm = LLM(model=model_id,
               max_num_batched_tokens=4096,
               tensor_parallel_size=1)
@@ -357,6 +349,7 @@ def test_integration_with_vllm(vllm_runner, hf_runner):
     request_outputs = llm.generate(prompts, sampling_params=sampling_params)
     assert len(request_outputs) == len(prompts)
 
-    for request_output in llm.generate(prompts, sampling_params=sampling_params):
+    for request_output in llm.generate(prompts,
+                                       sampling_params=sampling_params):
         assert len(request_output.outputs) == 1
         assert request_output.outputs[0].text in ("hello", "world")
