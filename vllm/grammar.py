@@ -2,12 +2,14 @@ import collections
 from copy import deepcopy, copy
 import os
 import regex
-from typing import Optional
+import torch
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing import Optional, List, Set, Union
 
 from lark import Lark
 from lark.parsers.lalr_interactive_parser import InteractiveParser
 from lark.parsers.lalr_parser_state import ParserState
-from lark.lexer import Token, LexerState, PatternStr, PatternRE
+from lark.lexer import Token, LexerState, Pattern, PatternStr, PatternRE
 from lark.exceptions import UnexpectedCharacters, UnexpectedToken
 
 
@@ -104,7 +106,7 @@ class InteractivePredictiveLALRParser:
         self.valid_next_terminals = {"": self._accepts() | self._ignored_terms}
 
     @staticmethod
-    def _get_partial_pattern_validator(pattern):
+    def _get_partial_pattern_validator(pattern: Pattern):
         """
         Accepts a pattern object, either lark.lexer.PatternStr or lark.lexer.PatternRE
         Returns a function which validates a partial string
@@ -136,9 +138,8 @@ class InteractivePredictiveLALRParser:
         - Update the set of candidate terminals
         """
         for char in new_seq:
-
             # update canonical sequence and lexer sequence
-            self.sequence_history += new_seq
+            self.sequence_history += char
             self.interactive_parser.lexer_thread.state.text = self.sequence_history
 
             success = False
@@ -149,7 +150,6 @@ class InteractivePredictiveLALRParser:
             except UnexpectedToken as e:
                 # fall back so full token can be reprocessed
                 self.interactive_parser = self._terminal_start_parser.copy()
-                self.interactive_parser.lexer_thread.state.text = self.sequence_history
             else:
                 success = True
 
@@ -215,12 +215,15 @@ class InteractivePredictiveLALRParser:
 
 
 class TokenTrie:
+    """
+    Trie structure for efficiently finding tokens which are suffixes of other sequences
+    """
+
     IS_TOKEN = (None, "is complete token")
 
-    def __init__(self, tokenizer, legal_chars: Optional[set[str]] = None):
-        """
-        Trie structure for efficiently finding tokens which are suffixes of other sequences
-        """
+    def __init__(self,
+                 tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+                 legal_chars: Optional[Set[str]] = None):
         self.norm_vocab = collections.defaultdict(set)
         for token_id in tokenizer.vocab.values():
             if token_id == tokenizer.eos_token_id:
@@ -248,14 +251,14 @@ class TokenTrie:
 
         self._next_level_token_prefixes_cache = {}
 
-    def get_next_level_token_prefixes(self, subprefix: str):
+    def get_next_level_token_prefixes(self, subprefix: str) -> Set[str]:
         if subprefix not in self._next_level_token_prefixes_cache:
             self._next_level_token_prefixes_cache[subprefix] = (
                 self.get_next_level_token_prefixes_uncached(subprefix)
             )
         return self._next_level_token_prefixes_cache[subprefix]
 
-    def get_next_level_token_prefixes_uncached(self, subprefix: str, _node=None):
+    def get_next_level_token_prefixes_uncached(self, subprefix: str, _node: dict = None) -> Set[str]:
         """
         Traverse the trie starting from a specified subprefix to identify all child nodes that represent
         the longest possible strings without omitting any nodes that contain complete tokens.
@@ -288,7 +291,7 @@ class TokenTrie:
 
         return results
 
-    def is_token(self, seq):
+    def is_token(self, seq: Optional[str]) -> bool:
         return seq in self.norm_vocab_set
 
 
@@ -312,7 +315,7 @@ class NextTokenValidator:
         self.parser = InteractivePredictiveLALRParser(grammar=grammar,
                                                       start=grammar_start)
 
-    def step_seq(self, new_seq):
+    def step_seq(self, new_seq: str):
         self.parser.step_seq(new_seq)
 
     @property
@@ -347,6 +350,7 @@ class NextTokenValidator:
         get valid token id based on self.valid_token_str_set
         note that some token strings correspond to multiple token IDs
         """
+        print(self.valid_token_str_set)
         return set.union(*[
             self.token_trie.norm_vocab[tok_str]
             for tok_str in self.valid_token_str_set
@@ -364,7 +368,7 @@ class GrammarLogitsProcessor(NextTokenValidator):
         self.generation_text = ""
 
 
-    def _update_seen_token_ids(self, token_ids):
+    def _update_seen_token_ids(self, token_ids: List[int]):
         # ensure integrity
         assert token_ids[:len(self.generation_token_ids)] == self.generation_token_ids
         self.generation_token_ids = token_ids
@@ -375,7 +379,7 @@ class GrammarLogitsProcessor(NextTokenValidator):
         self.generation_text = all_text
         self.step_seq(new_text)
 
-    def __call__(self, token_ids, logits):
+    def __call__(self, token_ids: List[int], logits: torch.Tensor) -> torch.Tensor:
         self._update_seen_token_ids(token_ids)
 
         # get valid token IDs and modify logits
@@ -385,3 +389,115 @@ class GrammarLogitsProcessor(NextTokenValidator):
             for tok_id, logit_val in zip(sorted(self.tokenizer.vocab.values()), logits)
         ]
         return logits
+
+
+if __name__ == "__main__":
+    from transformers import AutoTokenizer
+    import numpy as np
+    model_id = "codellama/CodeLlama-7b-hf"
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    json_grammar = r"""
+    start: value
+    value: WS* object WS*
+    object: dict
+          | list
+          | string
+          | signed_number      -> number
+          | "true"             -> true
+          | "false"            -> false
+          | "null"             -> null
+
+    list : "[" [value ("," value)*] "]"
+
+    dict : "{" [pair ("," pair)*] "}"
+    pair : string ":" value
+
+    string : "\"" escaped_string_char* "\""
+    escaped_string_char: _STR_INNER_CHAR | _ESCAPED_CHAR
+    _ESCAPED_CHAR: "\\" _ANY_CHAR
+    _STR_INNER_CHAR: /[^\\\"]/
+    _ANY_CHAR: /[.]/
+
+    signed_number: ["+"|"-"] number
+    number: float | int
+    float: int exp | decimal exp?
+    decimal: int "." int? | "." int
+    exp: ("e"|"E") signed_int
+    signed_int: ["+"|"-"] int
+    int: DIGIT+
+    DIGIT: "0".."9"
+
+    WS: /[ \t\f\r\n]/
+    """
+
+
+    sample_from_logits = lambda lgts: np.random.choice(len(lgts), p=np.exp(lgts)/np.sum(np.exp(lgts)))
+
+
+    grammar_logits_processor = GrammarLogitsProcessor(
+            tokenizer,
+        json_grammar,
+        legal_chars=set(map(chr, range(256))),
+    )
+
+    start_tok = 260
+    token_ids = [start_tok]
+    while True:
+        logits = grammar_logits_processor(
+            token_ids=token_ids,
+            logits=np.random.uniform(-10, 10, len(tokenizer.vocab))
+        )
+        new_token_id = sample_from_logits(logits)
+        if new_token_id == tokenizer.eos_token_id:
+            break
+        token_ids.append(new_token_id)
+
+    import pdb;pdb.set_trace()
+
+    """
+    legal_chars = set([c for c in map(chr, range(256)) if c.isprintable()])
+    print(len(legal_chars))
+    grammar_logits_processor = GrammarLogitsProcessor(
+        tokenizer,
+        json_grammar,
+        legal_chars=legal_chars
+    )
+
+    closing_token_ids = set([
+        tok_id
+        for tok_str in ["]", "}", '"', ","]
+        for tok_id in grammar_logits_processor.token_trie.norm_vocab[tok_str]
+    ])
+    closing_tokens_bias = -5
+
+
+
+    token_ids = []
+    grammar_logits_processor._update_seen_token_ids(token_ids)
+    for _ in range(100000):
+        print(tokenizer.decode(token_ids))
+        print(repr(tokenizer.decode(token_ids)))
+        logits = grammar_logits_processor(
+            token_ids=token_ids,
+            logits=np.random.uniform(-10, 10, len(tokenizer.vocab))
+        )
+
+
+        for closing_token_id in closing_token_ids:
+            logits[closing_token_id] += closing_tokens_bias
+
+        for opening_token_id in opening_token_ids:
+            logits[opening_token_id] += opening_tokens_bias
+
+
+        new_token_id = sample_from_logits(logits)
+        if new_token_id == tokenizer.eos_token_id:
+            break
+        token_ids.append(new_token_id)
+        closing_tokens_bias += 0.2
+        opening_tokens_bias -= 0.1
+
+
+    print(tokenizer.decode(token_ids))
+    """

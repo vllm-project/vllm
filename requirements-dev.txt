@@ -12,4 +12,4 @@ types-setuptools
 pytest
 pytest-forked
 pytest-asyncio
-
+httpx  # https://github.com/vllm-project/vllm/issues/1975
