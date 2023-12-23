@@ -66,9 +66,9 @@ class FastInteractiveParser(InteractiveParser):
 def get_pattern_validator(pattern: Pattern, is_complete: bool):
     """
     Accepts a pattern object, either lark.lexer.PatternStr or lark.lexer.PatternRE
-    Returns a function which validates a partial string
+    Returns a function which validates a complete or partial string
 
-    e.g. for PatternRE "abc*", returns true for "a", "ab", "abc", "abcccc"
+    e.g. for PatternRE "abc*", is_complete=False returns true for "a", "ab", "abc", "abcccc"
     """
     if isinstance(pattern, PatternRE):
         compiled_pattern = regex.compile(pattern.value)
@@ -89,22 +89,20 @@ def get_pattern_validator(pattern: Pattern, is_complete: bool):
 
 
 def memoize_with_key(*key_attrs):
-    """
-    Decorator for memoizing class methods based on specified instance attributes.
-    """
     def decorator(method):
+        mname = method.__name__
         @wraps(method)
-        def wrapper(self, *args, **kwargs):
-            # create a unique key based on the specified attributes of instance
-            key_elements = [getattr(self, attr) for attr in key_attrs]
-            key = (method.__name__, tuple(key_elements), args, tuple(sorted(kwargs.items())))
+        def wrapper(self, *args):
+            # Construct a simple key from key attributes and method arguments
+            key_elements = tuple(getattr(self, attr, None) for attr in key_attrs)
+            key = (mname, key_elements, args)
 
-            # check if cached
+            # Check cache for existing result
             if key in self._memo:
                 return self._memo[key]
 
-            # call
-            result = method(self, *args, **kwargs)
+            # Call the method and store the result
+            result = method(self, *args)
             self._memo[key] = result
             return result
 
@@ -115,7 +113,7 @@ def memoize_with_key(*key_attrs):
 @dataclass
 class IncrementalParser:
     interactive_parser: FastInteractiveParser
-    tokens: tuple
+    tokens_key: str  # "\n" separated, for caching purposes
     partial_token: str
     terminal_candidates: list
     _ignored_terms: set
@@ -147,7 +145,7 @@ class IncrementalParser:
 
         return cls(
             interactive_parser=interactive_parser,
-            tokens=tuple(),
+            tokens_key="",
             partial_token="",
             terminal_candidates=None,
             _ignored_terms=set(lark_parser.lexer_conf.ignore),
@@ -163,7 +161,7 @@ class IncrementalParser:
         instance_dict.update(kwargs)
         return self.__class__(**instance_dict)
 
-    @memoize_with_key('tokens', 'partial_token')
+    @memoize_with_key('tokens_key', 'partial_token')
     def new_parser_for_appended_char(self, char: str):
         """
         - Construct extended (maybe-partial) token candidate
@@ -193,7 +191,7 @@ class IncrementalParser:
             new_token_str = next(iter(complete_terminals))
             return self.new(
                 interactive_parser=self.get_stepped_parser_state(new_token_str),
-                tokens=tuple(list(self.tokens) + [new_token_str]),
+                tokens_key=self.tokens_key + "\n" + new_token_str,
                 partial_token="",
                 terminal_candidates=None,
             )
@@ -210,7 +208,7 @@ class IncrementalParser:
             if self._seq_validator[(term, validator_type)](seq)
         ])
 
-    @memoize_with_key('tokens')
+    @memoize_with_key('tokens_key')
     def get_stepped_parser_state(self, new_token_str):
         ip = copy(self.interactive_parser)
         ip.feed_token(
@@ -218,8 +216,7 @@ class IncrementalParser:
         )
         return ip
 
-
-    @memoize_with_key('tokens')
+    @memoize_with_key('tokens_key')
     def accepts(self):
         return set(self.interactive_parser.accepts()) | self._ignored_terms
 
