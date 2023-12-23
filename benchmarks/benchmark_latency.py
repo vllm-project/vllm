@@ -1,6 +1,8 @@
 """Benchmark the latency of processing a single batch of requests."""
 import argparse
 import time
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -21,6 +23,7 @@ def main(args: argparse.Namespace):
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
+        enforce_eager=args.enforce_eager,
     )
 
     sampling_params = SamplingParams(
@@ -34,12 +37,15 @@ def main(args: argparse.Namespace):
     print(sampling_params)
     dummy_prompt_token_ids = [[0] * args.input_len] * args.batch_size
 
-    def run_to_completion(profile: bool = False):
-        if profile:
-            with torch.profiler.profile(activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-            ]) as p:
+    def run_to_completion(profile_dir: Optional[str] = None):
+        if profile_dir:
+            with torch.profiler.profile(
+                    activities=[
+                        torch.profiler.ProfilerActivity.CPU,
+                        torch.profiler.ProfilerActivity.CUDA,
+                    ],
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                        str(profile_dir))) as p:
                 llm.generate(prompt_token_ids=dummy_prompt_token_ids,
                              sampling_params=sampling_params,
                              use_tqdm=False)
@@ -54,17 +60,20 @@ def main(args: argparse.Namespace):
             return latency
 
     print("Warming up...")
-    run_to_completion(profile=False)
+    run_to_completion(profile_dir=None)
 
     if args.profile:
-        print("Profiling...")
-        run_to_completion(profile=True)
+        profile_dir = args.profile_result_dir
+        if not profile_dir:
+            profile_dir = Path(".") / "vllm_benchmark_result" / f"latency_result_{time.time()}"
+        print(f"Profiling (results will be saved to '{profile_dir}')...")
+        run_to_completion(profile_dir=args.profile_result_dir)
         return
 
     # Benchmark.
     latencies = []
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion(profile=False))
+        latencies.append(run_to_completion(profile_dir=None))
     print(f'Avg latency: {np.mean(latencies)} seconds')
 
 
@@ -76,7 +85,7 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
-                        choices=['awq', 'squeezellm', None],
+                        choices=['awq', 'gptq', 'squeezellm', None],
                         default=None)
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
     parser.add_argument('--input-len', type=int, default=32)
@@ -103,9 +112,20 @@ if __name__ == '__main__':
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
+    parser.add_argument('--enforce-eager',
+                        action='store_true',
+                        help='enforce eager mode and disable CUDA graph')
     parser.add_argument(
         '--profile',
         action='store_true',
         help='profile the generation process of a single batch')
+    parser.add_argument(
+        '--profile-result-dir',
+        type=str,
+        default=None,
+        help=(
+            'path to save the pytorch profiler output. Can be visualized '
+            'with ui.perfetto.dev or Tensorboard.'
+        ))
     args = parser.parse_args()
     main(args)

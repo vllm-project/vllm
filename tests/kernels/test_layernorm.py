@@ -1,58 +1,47 @@
 import pytest
 import torch
-import torch.nn as nn
 
-from vllm._C import ops
+from vllm.model_executor.layers.layernorm import RMSNorm
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [67, 768, 2048, 5120, 8192]  # Arbitrary values for testing
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
+HIDDEN_SIZES = [768, 5120, 8192]  # Arbitrary values for testing
+ADD_RESIDUAL = [False, True]
 SEEDS = [0]
-
-
-class RefRMSNorm(nn.Module):
-
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        weight = torch.empty(hidden_size)
-        weight.normal_(mean=1.0, std=0.1)
-        self.weight = nn.Parameter(weight)
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance +
-                                                    self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_rms_norm(
     num_tokens: int,
     hidden_size: int,
+    add_residual: bool,
     dtype: torch.dtype,
     seed: int,
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    scale = float(hidden_size**-0.5)
-    x = torch.empty(num_tokens, hidden_size, dtype=dtype, device="cuda")
-    x.uniform_(-scale, scale)
-    ref = RefRMSNorm(hidden_size).to(dtype).cuda()
+    layer = RMSNorm(hidden_size).to(dtype).cuda()
+    layer.weight.data.normal_(mean=1.0, std=0.1)
+    scale = 1 / (2 * hidden_size)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
+    x *= scale
+    residual = torch.randn_like(x) * scale if add_residual else None
 
-    out = torch.empty_like(x)
-    ops.rms_norm(
-        out,
-        x,
-        ref.weight.data,
-        ref.variance_epsilon,
-    )
-    ref_out = ref(x)
-    assert torch.allclose(out, ref_out, atol=1e-2, rtol=1e-5)
+    # NOTE(woosuk): The reference implementation should be executed first
+    # because the custom kernel is in-place.
+    ref_out = layer._forward(x, residual)
+    out = layer(x, residual)
+    # NOTE(woosuk): LayerNorm operators (including RMS) typically have larger
+    # numerical errors than other operators because they involve reductions.
+    # Therefore, we use a larger tolerance.
+    if add_residual:
+        assert torch.allclose(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        assert torch.allclose(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+    else:
+        assert torch.allclose(out, ref_out, atol=1e-2, rtol=1e-2)

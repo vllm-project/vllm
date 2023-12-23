@@ -1,4 +1,5 @@
 import enum
+import socket
 import uuid
 from platform import uname
 
@@ -27,18 +28,17 @@ class Counter:
         self.counter = 0
 
 
+def is_hip() -> bool:
+    return torch.version.hip is not None
+
+
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
-    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97
+    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97 if not is_hip() else 74
     max_shared_mem = cuda_utils.get_device_attribute(
         cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
     return int(max_shared_mem)
-
-
-def get_gpu_memory(gpu: int = 0) -> int:
-    """Returns the total memory of the GPU in bytes."""
-    return torch.cuda.get_device_properties(gpu).total_memory
 
 
 def get_cpu_memory() -> int:
@@ -53,3 +53,9 @@ def random_uuid() -> str:
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
+
+
+def get_open_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]

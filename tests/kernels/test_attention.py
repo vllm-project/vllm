@@ -136,9 +136,6 @@ def test_paged_attention(
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
-    head_mapping = torch.repeat_interleave(
-        torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"),
-        num_queries_per_kv)
     alibi_slopes = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads,
@@ -175,7 +172,7 @@ def test_paged_attention(
             query,
             key_cache,
             value_cache,
-            head_mapping,
+            num_kv_heads,
             scale,
             block_tables,
             context_lens,
@@ -207,7 +204,7 @@ def test_paged_attention(
             query,
             key_cache,
             value_cache,
-            head_mapping,
+            num_kv_heads,
             scale,
             block_tables,
             context_lens,
@@ -383,11 +380,12 @@ def test_multi_query_cached_kv_attention(
         context_lens=context_lens_tensor,
         max_context_len=max_context_len,
         block_tables=block_tables_tensor,
+        use_cuda_graph=False,
         draft_lens=query_lens)
 
     attn = PagedAttention(num_heads, head_size, scale)
     output = attn.forward(query, key, value, key_cache, value_cache,
-                          input_metadata, None)
+                          input_metadata)
     assert output.shape == query.shape
 
     ref_output = torch.zeros_like(query)
@@ -403,7 +401,6 @@ def test_multi_query_cached_kv_attention(
         query_lens,
         scale,
     )
-    __import__('pdb').set_trace()
 
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 

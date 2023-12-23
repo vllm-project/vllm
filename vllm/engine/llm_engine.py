@@ -1,4 +1,5 @@
 import copy
+import os
 import time
 from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
@@ -7,6 +8,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.metrics import record_metrics
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -83,6 +85,7 @@ class LLMEngine:
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"quantization={model_config.quantization}, "
+            f"enforce_eager={model_config.enforce_eager}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -103,6 +106,10 @@ class LLMEngine:
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
+            # Disable Ray usage stats collection.
+            ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
+            if ray_usage != "1":
+                os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
             self._init_workers_ray(placement_group)
         else:
             self._init_workers(distributed_init_method)
@@ -158,9 +165,13 @@ class LLMEngine:
         for bundle in placement_group.bundle_specs:
             if not bundle.get("GPU", 0):
                 continue
+            if self.parallel_config.tensor_parallel_size == 1:
+                num_gpus = self.cache_config.gpu_memory_utilization
+            else:
+                num_gpus = 1
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=self.cache_config.gpu_memory_utilization,
+                num_gpus=num_gpus,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
@@ -221,12 +232,23 @@ class LLMEngine:
             raise ValueError("No available memory for the cache blocks. "
                              "Try increasing `gpu_memory_utilization` when "
                              "initializing the engine.")
+        max_seq_len = self.cache_config.block_size * num_gpu_blocks
+        if self.model_config.max_model_len > max_seq_len:
+            raise ValueError(
+                f"The model's max seq len ({self.model_config.max_model_len}) "
+                "is larger than the maximum number of tokens that can be "
+                f"stored in KV cache ({max_seq_len}). Try increasing "
+                "`gpu_memory_utilization` or decreasing `max_model_len` when "
+                "initializing the engine.")
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         # Initialize the cache.
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
+        # Warm up the model. This includes capturing the model into CUDA graph
+        # if enforce_eager is False.
+        self._run_workers("warm_up_model")
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
@@ -591,8 +613,8 @@ class LLMEngine:
         else:
             self.num_generation_tokens.append((now, num_batched_tokens))
 
-        elapsed_time = now - self.last_logging_time
-        if elapsed_time < _LOGGING_INTERVAL_SEC:
+        should_log = now - self.last_logging_time >= _LOGGING_INTERVAL_SEC
+        if not should_log:
             return
 
         # Discard the old stats.
@@ -631,6 +653,16 @@ class LLMEngine:
         else:
             cpu_cache_usage = 0.0
 
+        record_metrics(
+            avg_prompt_throughput=avg_prompt_throughput,
+            avg_generation_throughput=avg_generation_throughput,
+            scheduler_running=len(self.scheduler.running),
+            scheduler_swapped=len(self.scheduler.swapped),
+            scheduler_waiting=len(self.scheduler.waiting),
+            gpu_cache_usage=gpu_cache_usage,
+            cpu_cache_usage=cpu_cache_usage,
+        )
+
         logger.info("Avg prompt throughput: "
                     f"{avg_prompt_throughput:.1f} tokens/s, "
                     "Avg generation throughput: "
@@ -667,9 +699,10 @@ class LLMEngine:
         """Stop the finished sequences."""
         for stop_str in sampling_params.stop:
             if seq.output_text.endswith(stop_str):
-                # Truncate the output text so that the stop string is
-                # not included in the output.
-                seq.output_text = seq.output_text[:-len(stop_str)]
+                if not sampling_params.include_stop_str_in_output:
+                    # Truncate the output text so that the stop string is
+                    # not included in the output.
+                    seq.output_text = seq.output_text[:-len(stop_str)]
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
         if seq.get_last_token_id() in sampling_params.stop_token_ids:

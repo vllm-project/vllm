@@ -172,15 +172,13 @@ class BaiChuanAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.W_pack(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         if self.postion_embedding != "ALIBI":
             q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
-                                cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -221,7 +219,6 @@ class BaiChuanDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -236,7 +233,6 @@ class BaiChuanDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
 
         # Fully Connected
@@ -273,19 +269,16 @@ class BaiChuanModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for i in range(len(self.layers)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
-                cache_event,
                 residual,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -311,10 +304,9 @@ class BaiChuanBaseForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata, cache_events)
+                                   input_metadata)
         return hidden_states
 
     def sample(
@@ -341,29 +333,52 @@ class BaiChuanBaseForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
+            if name == "lm_head.weight":
+                # Unlike Baichuan, Baichuan2 normalizes the head weights. Refer to:
+                # https://huggingface.co/baichuan-inc/Baichuan2-7B-Chat/blob/84603cde5ebffb6084e476cfaeceaf0b8b91fe54/modeling_baichuan.py#L508
+                # Distinguish between Baichuan and Baichuan2 by checking the
+                # vocab size. This is suggested by
+                # https://github.com/vllm-project/vllm/pull/1022#discussion_r1325652704
+                is_baichuan2 = self.config.vocab_size == 125696
+                if is_baichuan2:
+                    loaded_weight = torch.nn.functional.normalize(
+                        loaded_weight)
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                param = params_dict[name.replace(weight_name, param_name)]
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
 
 
-class BaichuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 13b
+class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
+    """Baichuan 13B and Baichuan2 7B/13B."""
 
     def __init__(self,
                  config,
                  linear_method: Optional[LinearMethodBase] = None):
-        super().__init__(config, "ALIBI", linear_method)
+        if config.hidden_size == 4096:  # baichuan2 7b
+            super().__init__(config, "ROPE", linear_method)
+        else:  # baichuan 13b, baichuan2 13b
+            super().__init__(config, "ALIBI", linear_method)
 
 
-class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):  # baichuan 7b
+class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
+    """Baichuan 7B."""
 
     def __init__(self,
                  config,

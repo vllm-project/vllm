@@ -9,7 +9,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Attention ops
   ops.def(
-    "paged_attention_v1_foobar",
+    "paged_attention_v1",
     &paged_attention_v1,
     "Compute the attention between an input query and the cached keys/values using PagedAttention.");
   ops.def(
@@ -52,8 +52,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &rotary_embedding,
     "Apply GPT-NeoX or GPT-J style rotary embedding to query and key");
 
+#ifndef USE_ROCM
   // Quantization ops
   ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
+#endif
+  ops.def("gptq_gemm", &gptq_gemm, "Quantized GEMM for GPTQ");
+  ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
 
   // Cache ops
