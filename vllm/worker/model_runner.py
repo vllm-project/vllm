@@ -72,7 +72,8 @@ class ModelRunner:
         if self.lora_config:
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens, vocab_size,
+                self.scheduler_config.max_num_batched_tokens +
+                self.scheduler_config.max_paddings, vocab_size,
                 self.lora_config, self.device)
             self.model = self.lora_manager.create_lora_manager(self.model)
 
@@ -531,6 +532,13 @@ class ModelRunner:
                 block_tables=block_tables[:batch_size],
                 use_cuda_graph=True,
             )
+
+            if self.lora_config:
+                lora_mapping = LoRAMapping(
+                    [0] * batch_size,
+                    [0] * batch_size,
+                )
+                self.set_active_loras(set(), lora_mapping)
 
             graph_runner = CUDAGraphRunner(self.model)
             graph_runner.capture(
