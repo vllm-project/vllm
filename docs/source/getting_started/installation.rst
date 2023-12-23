@@ -42,6 +42,10 @@ You can install vLLM using pip:
         $ pip uninstall torch -y
         $ pip install torch --upgrade --index-url https://download.pytorch.org/whl/cu118
 
+        $ # Re-install xFormers with CUDA 11.8.
+        $ pip uninstall xformers -y
+        $ pip install --upgrade xformers --index-url https://download.pytorch.org/whl/cu118
+
 
 .. _build_from_source:
 
