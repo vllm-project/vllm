@@ -131,6 +131,15 @@ def test_next_token_validator_simple(tokenizer):
     ]
 
 
+def test_can_span_multiple_terminals(tokenizer):
+    true_segmented_grammar = """
+    ?start: "is" "t" "r" "u" "e"
+    """
+    ntv = NextTokenValidator(tokenizer, true_segmented_grammar)
+    ntv.step_seq("is")
+    assert "true" in ntv.valid_token_str_set
+
+
 @pytest.mark.parametrize("grammar_fixture, example_fixture",
                          [("json_grammar", "json_example"),
                           ("csv_grammar", "csv_example")])
