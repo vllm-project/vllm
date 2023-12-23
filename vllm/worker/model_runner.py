@@ -483,19 +483,29 @@ class ModelRunner:
         return
 
     def remove_all_loras(self) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.remove_all_loras()
 
     def set_active_loras(self, lora_requests: List[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.set_active_loras(lora_requests, lora_mapping)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.remove_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
 
     @torch.inference_mode()

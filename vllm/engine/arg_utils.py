@@ -279,8 +279,8 @@ class EngineArgs:
             max_loras=self.max_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             lora_dtype=self.lora_dtype,
-            max_cpu_loras=self.max_cpu_loras
-            if self.max_cpu_loras > 0 else None) if self.enable_lora else None
+            max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
+            and self.max_cpu_loras > 0 else None) if self.enable_lora else None
         return model_config, cache_config, parallel_config, scheduler_config, lora_config
 
 

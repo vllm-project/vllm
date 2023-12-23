@@ -89,13 +89,12 @@ def _apply_lora_packed_nslice(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    output_slices = (0, ) + output_slices
-    for slice_idx_right in range(1, len(output_slices)):
-        slice_idx_left = slice_idx_right - 1
-        add_lora_slice(output, x, lora_a_stacked[slice_idx_left],
-                       lora_b_stacked[slice_idx_left], indices, 0, 1.0,
-                       output_slices[slice_idx_left],
-                       output_slices[slice_idx_right])
+    offset_left = 0
+    for slice_idx in range(len(output_slices)):
+        add_lora_slice(output, x, lora_a_stacked[slice_idx],
+                       lora_b_stacked[slice_idx], indices, 0, 1.0, offset_left,
+                       output_slices[slice_idx])
+        offset_left += output_slices[slice_idx]
     return output.view_as(org_output)
 
 
@@ -480,7 +479,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             self.lora_b_stacked,
             self.indices[:self.indices_len[0]],
             output,
-            (self.output_dim, ),
+            (self.output_dim, self.output_dim),
         )
         return output
 
@@ -563,7 +562,8 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                                    device=self.base_layer.weight.device,
                                ))
 
-        self.output_slices = (self.q_proj_shard_size, self.kv_proj_shard_size)
+        self.output_slices = (self.q_proj_shard_size, self.kv_proj_shard_size,
+                              self.kv_proj_shard_size)
         self.packed_indices: Optional[torch.Tensor] = None
         self.standard_indices: Optional[torch.Tensor] = None
         self.indices_len: Optional[List[int]] = None

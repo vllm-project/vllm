@@ -111,7 +111,8 @@ class Worker:
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
-        self.model_runner.remove_all_loras()
+        if self.model_runner.lora_manager:
+            self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks

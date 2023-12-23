@@ -388,13 +388,16 @@ class LoRAModelManager:
             return True
         return False
 
+    def _add_lora(self, lora: LoRAModel) -> bool:
+        self._create_merged_loras_inplace(lora)
+        self._registered_loras[lora.id] = lora
+
     def add_lora(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager CPU cache."""
         if lora.id not in self._registered_loras:
             if len(self._registered_loras) >= self.capacity:
                 raise RuntimeError("No free LoRA slots.")
-            self._create_merged_loras_inplace(lora)
-            self._registered_loras[lora.id] = lora
+            self._add_lora(lora)
             return True
         return False
 
@@ -600,10 +603,13 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def add_lora(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
-        was_added = super().add_lora(lora)
-        if not was_added:
+        if lora.id not in self._registered_loras:
+            self._add_lora(lora)
+            was_added = True
+        else:
             # We always touch to update the LRU cache order
             self._registered_loras.touch(lora.id)
+            was_added = False
         return was_added
 
     def activate_lora(

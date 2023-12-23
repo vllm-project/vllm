@@ -121,40 +121,40 @@ def test_lora_model_manager(dist_init, dummy_model):
         2,
         LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2),
         lora_target_modules=["dense1", "dense2", "lm_head"])
-    assert all(x is None for x in manager.lora_id_to_index)
+    assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_lora(model_lora1)
     assert manager.activate_lora(1)
-    assert manager.lora_id_to_index[0] == 1
+    assert manager.lora_index_to_id[0] == 1
     assert not manager.add_lora(model_lora1)
     assert not manager.activate_lora(1)
     assert manager.add_lora(model_lora2)
     assert manager.activate_lora(2)
-    assert manager.lora_id_to_index[0] == 1
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] == 2
     assert not manager.add_lora(model_lora2)
     assert not manager.activate_lora(2)
     assert manager.add_lora(model_lora3)
-    assert manager.lora_id_to_index[0] == 1
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] == 2
     with pytest.raises(ValueError):
         assert manager.activate_lora(3)
-    assert manager.lora_id_to_index[0] == 1
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] == 2
     assert manager.remove_lora(model_lora2.id)
-    assert manager.lora_id_to_index[1] is None
+    assert manager.lora_index_to_id[1] is None
     assert not manager.remove_lora(model_lora2.id)
     assert manager.remove_lora(model_lora1.id)
     assert not manager.remove_lora(model_lora1.id)
     assert manager.add_lora(model_lora1)
-    assert manager.lora_id_to_index[0] is None
-    assert manager.lora_id_to_index[1] is None
+    assert manager.lora_index_to_id[0] is None
+    assert manager.lora_index_to_id[1] is None
     assert manager.add_lora(model_lora2)
     assert manager.activate_lora(3)
-    assert manager.lora_id_to_index[0] == 3
-    assert manager.lora_id_to_index[1] is None
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] is None
     assert manager.activate_lora(2)
-    assert manager.lora_id_to_index[0] == 3
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 2
 
 
 def test_lora_lru_cache_model_manager(dist_init, dummy_model):
@@ -169,43 +169,43 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
         2,
         LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2),
         lora_target_modules=["dense1", "dense2", "lm_head"])
-    assert all(x is None for x in manager.lora_id_to_index)
+    assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_lora(model_lora1)
     assert manager.activate_lora(1)
-    assert manager.lora_id_to_index[0] == 1
+    assert manager.lora_index_to_id[0] == 1
     assert not manager.add_lora(model_lora1)
     assert not manager.activate_lora(1)
     assert manager.add_lora(model_lora2)
     assert manager.activate_lora(2)
-    assert manager.lora_id_to_index[0] == 1
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] == 2
     assert not manager.add_lora(model_lora2)
     assert not manager.activate_lora(2)
     assert manager.add_lora(model_lora3)
-    assert manager.lora_id_to_index[0] == 1
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] == 2
     assert manager.activate_lora(3)
-    assert manager.lora_id_to_index[0] == 3
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 2
     assert manager.remove_lora(model_lora2.id)
-    assert manager.lora_id_to_index[1] is None
+    assert manager.lora_index_to_id[1] is None
     assert not manager.remove_lora(model_lora2.id)
     assert manager.remove_lora(model_lora1.id)
     assert not manager.remove_lora(model_lora1.id)
     assert manager.add_lora(model_lora1)
     assert manager.activate_lora(1)
-    assert manager.lora_id_to_index[0] == 3
-    assert manager.lora_id_to_index[1] == 1
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 1
     assert manager.add_lora(model_lora2)
     assert manager.deactivate_lora(3)
-    assert manager.lora_id_to_index[0] is None
-    assert manager.lora_id_to_index[1] == 1
+    assert manager.lora_index_to_id[0] is None
+    assert manager.lora_index_to_id[1] == 1
     assert manager.activate_lora(2)
-    assert manager.lora_id_to_index[0] == 2
-    assert manager.lora_id_to_index[1] == 1
+    assert manager.lora_index_to_id[0] == 2
+    assert manager.lora_index_to_id[1] == 1
     assert manager.activate_lora(3)
-    assert manager.lora_id_to_index[0] == 2
-    assert manager.lora_id_to_index[1] == 3
+    assert manager.lora_index_to_id[0] == 2
+    assert manager.lora_index_to_id[1] == 3
 
 
 def test_lru_lora_model_manager(dist_init, dummy_model):
@@ -221,7 +221,7 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
         LoRAConfig(max_lora_rank=8, max_cpu_loras=2, max_loras=2),
         ["dense1", "dense2", "lm_head"])
 
-    assert all(x is None for x in manager.lora_id_to_index)
+    assert all(x is None for x in manager.lora_index_to_id)
 
     # Add up to capacity
     assert manager.add_lora(model_lora1)
@@ -230,8 +230,8 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert manager.activate_lora(2)
 
     assert set(manager.list_loras()) == {1, 2}
-    assert manager.lora_id_to_index[0] == 1
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] == 2
 
     # Add over capacity
     assert manager.add_lora(model_lora3)
@@ -240,8 +240,8 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert manager.activate_lora(4)
 
     assert set(manager.list_loras()) == {3, 4}
-    assert manager.lora_id_to_index[0] == 3
-    assert manager.lora_id_to_index[1] == 4
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 4
 
     # Add 3 again to move it to the top and then add 2
     # should return false since it's in already
@@ -251,16 +251,16 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert manager.activate_lora(2)
 
     assert set(manager.list_loras()) == {3, 2}
-    assert manager.lora_id_to_index[0] == 3
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 2
 
     # Remove manually
     assert manager.remove_lora(3)
     assert not manager.remove_lora(3)
 
     assert set(manager.list_loras()) == {2}
-    assert manager.lora_id_to_index[0] is None
-    assert manager.lora_id_to_index[1] == 2
+    assert manager.lora_index_to_id[0] is None
+    assert manager.lora_index_to_id[1] == 2
 
     assert manager.add_lora(model_lora3)
     assert manager.activate_lora(3)
@@ -268,21 +268,21 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert manager.activate_lora(4)
 
     assert set(manager.list_loras()) == {3, 4}
-    assert manager.lora_id_to_index[0] == 3
-    assert manager.lora_id_to_index[1] == 4
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 4
 
     assert manager.remove_oldest_lora()
     assert set(manager.list_loras()) == {4}
-    assert manager.lora_id_to_index[0] is None
-    assert manager.lora_id_to_index[1] == 4
+    assert manager.lora_index_to_id[0] is None
+    assert manager.lora_index_to_id[1] == 4
 
     assert manager.remove_oldest_lora()
     assert set(manager.list_loras()) == set()
-    assert all(x is None for x in manager.lora_id_to_index)
+    assert all(x is None for x in manager.lora_index_to_id)
 
     assert not manager.remove_oldest_lora()
     assert set(manager.list_loras()) == set()
-    assert all(x is None for x in manager.lora_id_to_index)
+    assert all(x is None for x in manager.lora_index_to_id)
 
 
 def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
@@ -299,8 +299,8 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("2", 2, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {1, 2}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 2
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 1
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] == 2
 
     worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
@@ -308,10 +308,10 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("4", 4, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {1, 2, 3, 4}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 2
-    assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 3
-    assert worker_lora_manager._lora_manager.lora_id_to_index[3] == 4
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 1
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] == 2
+    assert worker_lora_manager._lora_manager.lora_index_to_id[2] == 3
+    assert worker_lora_manager._lora_manager.lora_index_to_id[3] == 4
 
     worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
@@ -319,10 +319,10 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("5", 5, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {1, 2, 4, 5}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 2
-    assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 5
-    assert worker_lora_manager._lora_manager.lora_id_to_index[3] == 4
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 1
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] == 2
+    assert worker_lora_manager._lora_manager.lora_index_to_id[2] == 5
+    assert worker_lora_manager._lora_manager.lora_index_to_id[3] == 4
 
     worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
@@ -330,10 +330,10 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("1", 1, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {1, 2, 4, 5}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 2
-    assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 5
-    assert worker_lora_manager._lora_manager.lora_id_to_index[3] == 4
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 1
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] == 2
+    assert worker_lora_manager._lora_manager.lora_index_to_id[2] == 5
+    assert worker_lora_manager._lora_manager.lora_index_to_id[3] == 4
 
     worker_lora_manager.set_active_loras([
         LoRARequest("6", 6, sql_lora_files),
@@ -341,10 +341,10 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("8", 8, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {1, 6, 7, 8}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 7
-    assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 8
-    assert worker_lora_manager._lora_manager.lora_id_to_index[3] == 6
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 1
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] == 7
+    assert worker_lora_manager._lora_manager.lora_index_to_id[2] == 8
+    assert worker_lora_manager._lora_manager.lora_index_to_id[3] == 6
 
     # Over capacity
     with pytest.raises(RuntimeError):
@@ -372,8 +372,8 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("2", 2, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {1, 2}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 2
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 1
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] == 2
 
     worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
@@ -381,9 +381,9 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("4", 4, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {1, 3, 4}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 3
-    assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 4
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 1
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] == 3
+    assert worker_lora_manager._lora_manager.lora_index_to_id[2] == 4
 
     worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
@@ -391,9 +391,9 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("5", 5, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {1, 2, 5}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 2
-    assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 5
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 1
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] == 2
+    assert worker_lora_manager._lora_manager.lora_index_to_id[2] == 5
 
     worker_lora_manager.set_active_loras([
         LoRARequest("1", 1, sql_lora_files),
@@ -401,9 +401,9 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("1", 1, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {1}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 1
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] is None
-    assert worker_lora_manager._lora_manager.lora_id_to_index[2] is None
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 1
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] is None
+    assert worker_lora_manager._lora_manager.lora_index_to_id[2] is None
 
     worker_lora_manager.set_active_loras([
         LoRARequest("6", 6, sql_lora_files),
@@ -411,9 +411,9 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         LoRARequest("8", 8, sql_lora_files)
     ], mapping)
     assert worker_lora_manager.list_loras() == {6, 7, 8}
-    assert worker_lora_manager._lora_manager.lora_id_to_index[0] == 8
-    assert worker_lora_manager._lora_manager.lora_id_to_index[1] == 6
-    assert worker_lora_manager._lora_manager.lora_id_to_index[2] == 7
+    assert worker_lora_manager._lora_manager.lora_index_to_id[0] == 8
+    assert worker_lora_manager._lora_manager.lora_index_to_id[1] == 6
+    assert worker_lora_manager._lora_manager.lora_index_to_id[2] == 7
 
     # Over capacity
     with pytest.raises(RuntimeError):
