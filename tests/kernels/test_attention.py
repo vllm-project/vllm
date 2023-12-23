@@ -293,8 +293,8 @@ def ref_multi_query_cached_kv_attention(
 
 @pytest.mark.parametrize("num_seqs", [2])
 @pytest.mark.parametrize("max_num_query", [8])
-@pytest.mark.parametrize("num_heads", [(32, )])
-@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("num_heads", [(12, )])
+@pytest.mark.parametrize("head_size", [64])
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("dtype", [torch.half])
 @pytest.mark.parametrize("seed", SEEDS)

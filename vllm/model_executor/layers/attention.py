@@ -314,46 +314,31 @@ def _multi_query_paged_attention(
         input_metadata: metadata for paged attention.
         alibi_slopes: shape = [num_heads]
     """
-    output = torch.empty_like(query)
     max_num_query = max(input_metadata.draft_lens)
 
     block_size = value_cache.shape[3]
     num_seqs = input_metadata.context_lens.shape[0]
     assert num_seqs * max_num_query == query.shape[0]
+    
+    query = query.reshape(
+        num_seqs, 
+        max_num_query, 
+        query.shape[1], 
+        query.shape[2])
+    output = torch.empty_like(query)
 
-
-    # duplicate block tables
-    block_tables = torch.repeat_interleave(input_metadata.block_tables,
-                                           max_num_query,
-                                           dim=0)
-
-    # interpolate context lens from context_len to context_len + draft_len
-    context_lens = torch.repeat_interleave(input_metadata.context_lens,
-                                           max_num_query,
-                                           dim=0)
-    # TODO(stephen) vectorize
-    for i in range(context_lens.shape[0]):
-        if input_metadata.draft_lens[i // max_num_query] <= i % max_num_query:
-            context_lens[i] = -1
-        else:
-            context_lens[i] += i % max_num_query
-
-    # TODO(stephen) add grid stride over sequences to kernel to increase cache locality,
-    # in effect enabling pseudo matrix blocking
-    # TODO(stephen) exit from block early if seq_len is -1
-    # ops.paged_flash_attention(
-    ops.paged_attention_v1(
+    ops.paged_flash_attention(
         output,
         query,
         key_cache,
         value_cache,
         num_kv_heads,
         scale,
-        block_tables,
-        context_lens,
+        input_metadata.block_tables,
+        input_metadata.context_lens,
         block_size,
         input_metadata.max_context_len,
-        # max_num_query,
+        max_num_query,
         alibi_slopes,
     )
 
