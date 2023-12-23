@@ -1,6 +1,7 @@
 import collections
 from copy import deepcopy, copy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from functools import wraps
 import regex
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -9,7 +10,7 @@ from typing import Optional, List, Set, Union
 from lark import Lark
 from lark.parsers.lalr_interactive_parser import InteractiveParser
 from lark.parsers.lalr_parser_state import ParserState
-from lark.lexer import Pattern, PatternStr, PatternRE
+from lark.lexer import Token, Pattern, PatternStr, PatternRE
 from lark.exceptions import UnexpectedCharacters, UnexpectedToken
 
 
@@ -62,19 +63,174 @@ class FastInteractiveParser(InteractiveParser):
 #########################################################################
 
 
-class InteractivePredictiveLALRParser:
+def get_pattern_validator(pattern: Pattern, is_complete: bool):
     """
-    Parser which consumes an EBNF grammar and provides helpers to determine allowable language model tokens
+    Accepts a pattern object, either lark.lexer.PatternStr or lark.lexer.PatternRE
+    Returns a function which validates a partial string
 
-    Interfaces:
-    - step_seq(new_seq): Update the parser with a new sequence to append
-    - is_valid_next_seq(new_seq): Determine whether a candidate sequence is valid
-
-    Core components for terminal level, and sub-terminal level processing:
-    - 1) Lark LALR parser: Applies state transitions, determining set of valid next-terminals
-    - 2) Incremental terminal filter: Eliminates next-terminal candidates if terminal pattern doesn't match
+    e.g. for PatternRE "abc*", returns true for "a", "ab", "abc", "abcccc"
     """
+    if isinstance(pattern, PatternRE):
+        compiled_pattern = regex.compile(pattern.value)
+        if is_complete:
+            return (lambda seq: compiled_pattern.fullmatch(seq)
+                is not None)
+        else:
+            return (lambda seq: compiled_pattern.fullmatch(seq, partial=True)
+                is not None)
+    elif isinstance(pattern, PatternStr):
+        base_str = pattern.value
+        if is_complete:
+            return (lambda seq: seq == base_str)
+        else:
+            return (lambda seq: base_str.startswith(seq))
+    else:
+        raise TypeError(f"Invalid pattern type: {type(pattern)}")
 
+
+def memoize_with_key(*key_attrs):
+    """
+    Decorator for memoizing class methods based on specified instance attributes.
+    """
+    def decorator(method):
+        @wraps(method)
+        def wrapper(self, *args, **kwargs):
+            # create a unique key based on the specified attributes of instance
+            key_elements = [getattr(self, attr) for attr in key_attrs]
+            key = (method.__name__, tuple(key_elements), args, tuple(sorted(kwargs.items())))
+
+            # check if cached
+            if key in self._memo:
+                return self._memo[key]
+
+            # call
+            result = method(self, *args, **kwargs)
+            self._memo[key] = result
+            return result
+
+        return wrapper
+    return decorator
+
+
+@dataclass
+class IncrementalParser:
+    interactive_parser: FastInteractiveParser
+    tokens: tuple
+    partial_token: str
+    terminal_candidates: list
+    _ignored_terms: set
+    _seq_validator: dict
+    _memo: dict
+
+    @classmethod
+    def from_lark_parser(cls, lark_parser):
+        print(lark_parser.terminals)
+        base_interactive_parser = lark_parser.parse_interactive()
+        interactive_parser = FastInteractiveParser(
+                base_interactive_parser.parser,
+                base_interactive_parser.parser_state,
+                base_interactive_parser.lexer_thread)
+        interactive_parser.lexer_thread.state.text = ""
+
+        _seq_validator = {
+            (term.name, "partial"): get_pattern_validator(term.pattern, is_complete=False)
+            for term in lark_parser.terminals
+        }
+        _seq_validator.update({
+            (term.name, "complete"): get_pattern_validator(term.pattern, is_complete=True)
+            for term in lark_parser.terminals
+        })
+
+        _seq_validator[("$END", "partial")] = lambda seq: seq is None
+        _seq_validator[("$END", "complete")] = lambda seq: seq is None
+
+
+        return cls(
+            interactive_parser=interactive_parser,
+            tokens=tuple(),
+            partial_token="",
+            terminal_candidates=None,
+            _ignored_terms=set(lark_parser.lexer_conf.ignore),
+            _seq_validator=_seq_validator,
+            _memo={}
+        )
+
+    def new(self, **kwargs):
+        instance_dict = {
+            f.name: getattr(self, f.name)
+            for f in fields(self)
+        }
+        instance_dict.update(kwargs)
+        return self.__class__(**instance_dict)
+
+    @memoize_with_key('tokens', 'partial_token')
+    def new_parser_for_appended_char(self, char: str):
+        """
+        - Construct extended (maybe-partial) token candidate
+        - If no partial matches, None
+        - If partial matches, but not complete,
+              return new parser with updated partial token str and updated terminal candidates
+        - If complete match, reset partial token, return parser with token-updated parser state
+        """
+        assert len(char) == 1
+
+        new_maybe_partial_token = self.partial_token + char
+        new_allowed_terminals = self.filter_terminals(
+            self.allowed_terminals,
+            new_maybe_partial_token,
+            require_complete=False
+        )
+        if not new_allowed_terminals:
+            return None
+
+        complete_terminals = self.filter_terminals(
+            self.allowed_terminals,
+            new_maybe_partial_token,
+            require_complete=True
+        )
+        if complete_terminals:
+            assert len(complete_terminals) == 1
+            new_token_str = next(iter(complete_terminals))
+            return self.new(
+                interactive_parser=self.get_stepped_parser_state(new_token_str),
+                tokens=tuple(list(self.tokens) + [new_token_str]),
+                partial_token="",
+                terminal_candidates=None,
+            )
+        else:
+            return self.new(
+                partial_token=new_maybe_partial_token,
+                terminal_candidates=new_allowed_terminals,
+            )
+
+    def filter_terminals(self, checked_terminals, seq, require_complete):
+        validator_type = "complete" if require_complete else "partial"
+        return set([
+            term for term in checked_terminals
+            if self._seq_validator[(term, validator_type)](seq)
+        ])
+
+    @memoize_with_key('tokens')
+    def get_stepped_parser_state(self, new_token_str):
+        ip = copy(self.interactive_parser)
+        ip.feed_token(
+            Token(new_token_str, '')
+        )
+        return ip
+
+
+    @memoize_with_key('tokens')
+    def accepts(self):
+        return set(self.interactive_parser.accepts()) | self._ignored_terms
+
+    @property
+    def allowed_terminals(self):
+        if self.terminal_candidates is not None:
+            return self.terminal_candidates
+        return self.accepts()
+
+
+class SpeculativeParser:
     def __init__(self, grammar: str, start: str):
         self.parser = Lark(
             grammar,
@@ -83,53 +239,8 @@ class InteractivePredictiveLALRParser:
             parser='lalr',
             cache=True,  # results in 2-3x faster loading
         )
-        base_interactive_parser = self.parser.parse_interactive()
-        self.interactive_parser = FastInteractiveParser(
-            base_interactive_parser.parser,
-            base_interactive_parser.parser_state,
-            base_interactive_parser.lexer_thread)
-
-        # fallback parser from start of terminal in case of ambiguous (LR(1))
-        self._terminal_start_parser = self.interactive_parser.copy()
-
-        self.partial_seq_validator = {
-            term.name: self._get_partial_pattern_validator(term.pattern)
-            for term in self.parser.terminals
-        }
-
-        self._ignored_terms = set(self.parser.lexer_conf.ignore)
-
-        # for calculating `accepts()` efficiently
-        self._accepts_cache = {}
-
-        self.sequence_history = ""
-
-        # for processing terminals interactively
-        self.valid_next_terminals = {"": self._accepts() | self._ignored_terms}
-
-    @staticmethod
-    def _get_partial_pattern_validator(pattern: Pattern):
-        """
-        Accepts a pattern object, either lark.lexer.PatternStr or lark.lexer.PatternRE
-        Returns a function which validates a partial string
-
-        e.g. for PatternRE "abc*", returns true for "a", "ab", "abc", "abcccc"
-        """
-        if isinstance(pattern, PatternRE):
-            compiled_pattern = regex.compile(pattern.value)
-            return (lambda seq: compiled_pattern.fullmatch(seq, partial=True)
-                    is not None)
-        elif isinstance(pattern, PatternStr):
-            base_str = pattern.value
-            return (lambda seq: base_str.startswith(seq))
-        else:
-            raise TypeError(f"Invalid pattern type: {type(pattern)}")
-
-    def _accepts(self):
-        if self.sequence_history not in self._accepts_cache:
-            accepted_terminals = self.interactive_parser.accepts()
-            self._accepts_cache[self.sequence_history] = accepted_terminals
-        return self._accepts_cache[self.sequence_history]
+        self.incr_parser = IncrementalParser.from_lark_parser(self.parser)
+        self.fallback_incr_parser = copy(self.incr_parser)
 
     def step_seq(self, new_seq: str):
         """
@@ -140,78 +251,21 @@ class InteractivePredictiveLALRParser:
         - Update the set of candidate terminals
         """
         for char in new_seq:
-            # update canonical sequence and lexer sequence
-            self.sequence_history += char
-            self.interactive_parser.lexer_thread.state.text = self.sequence_history
-
-            success = False
-            try:
-                self.interactive_parser.exhaust_lexer()
-            except UnexpectedCharacters:
-                pass
-            except UnexpectedToken:
-                # fall back so full token can be reprocessed
-                self.interactive_parser = self._terminal_start_parser.copy()
+            new_incr_parser = self.incr_parser.new_parser_for_appended_char(char)
+            if new_incr_parser is None:
+                self.incr_parser = self.fallback_incr_parser
             else:
-                success = True
-
-            self.valid_next_terminals = {
-                (incomplete_seq + char): term
-                for incomplete_seq, term in self.valid_next_terminals.items()
-            }
-
-            # if successfully parsed new token, add blank state and set fallback checkpoint
-            if success:
-                self.valid_next_terminals[""] = self._accepts(
-                ) | self._ignored_terms
-                self._terminal_start_parser = self.interactive_parser.copy()
-
-            self._filter_candidate_terminals()
-
-            if not self.valid_next_terminals:
-                raise ValueError(
-                    f"Invalid continuation for `{self.sequence_history}` `{new_seq}`"
-                )
-
-    def _filter_candidate_terminals(self):
-        """
-        Filter the set of candidate terminals
-        - If a new terminal is reached, get the accepted set of terminals from the parser
-        - If the new sequence doesn't comprise a full terminal, filter based on partial pattern match
-
-        Handles ambiguity by allowing terminals which are potentially complete
-        """
-        to_prune_sequences = set()
-        for incomplete_seq, terminals in self.valid_next_terminals.items():
-            if incomplete_seq != "":
-                self.valid_next_terminals[incomplete_seq] = set([
-                    term for term in terminals if term != "$END"
-                    and self.partial_seq_validator[term](incomplete_seq)
-                ])
-            if not self.valid_next_terminals[incomplete_seq]:
-                to_prune_sequences.add(incomplete_seq)
-
-        for to_prune_seq in to_prune_sequences:
-            del self.valid_next_terminals[to_prune_seq]
+                self.incr_parser = new_incr_parser
 
     def is_valid_next_seq(self, new_seq: Optional[str]):
-        """
-        Check if current un-terminalized sequence + new_seq is valid for any terminal
-
-        new_seq can be a string or None representing EOS
-        """
         if new_seq is None:
-            return "$END" in [
-                term for terminals in self.valid_next_terminals.values()
-                for term in terminals
-            ]
-        for incomplete_seq, terminals in self.valid_next_terminals.items():
-            candidate = incomplete_seq + new_seq
-            for term in terminals:
-                if term != "$END" and self.partial_seq_validator[term](
-                        candidate):
-                    return True
-        return False
+            return "$END" in self.incr_parser.allowed_terminals
+        new_incr_parser = self.incr_parser
+        for i, char in enumerate(new_seq):
+            new_incr_parser = new_incr_parser.new_parser_for_appended_char(char)
+            if new_incr_parser is None:
+                return False
+        return True
 
 
 class TokenTrie:
@@ -314,8 +368,8 @@ class NextTokenValidator:
         self.tokenizer = tokenizer
         self.token_trie = TokenTrie(tokenizer, legal_chars=legal_chars)
 
-        self.parser = InteractivePredictiveLALRParser(grammar=grammar,
-                                                      start=grammar_start)
+        self.parser = SpeculativeParser(grammar=grammar,
+                                        start=grammar_start)
 
     def step_seq(self, new_seq: str):
         self.parser.step_seq(new_seq)
