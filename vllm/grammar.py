@@ -320,17 +320,16 @@ class SpeculativeParser:
         return True
 
 
-class TokenTrie:
+class TokenVocab:
     """
-    Trie structure for efficiently finding tokens which are suffixes of other sequences
+    Normalized token vocabulary accounting for whitespace and multiple IDs per token
     """
-
-    IS_TOKEN = (None, "is complete token")
 
     def __init__(self,
                  tokenizer: Union[PreTrainedTokenizer,
                                   PreTrainedTokenizerFast],
                  legal_chars: Optional[Set[str]] = None):
+
         self.norm_vocab = collections.defaultdict(set)
         for token_id in tokenizer.vocab.values():
             if token_id == tokenizer.eos_token_id:
@@ -343,63 +342,11 @@ class TokenTrie:
                 [char in legal_chars for char in norm_token]):
                 self.norm_vocab[norm_token].add(token_id)
 
+    def __iter__(self):
+        return iter(self.norm_vocab)
 
-        # faster lookups, reduce time by 10%
-        self.norm_vocab_set = set(self.norm_vocab)
-
-        self.trie = {}
-        for word in self.norm_vocab:
-            current_dict = self.trie
-            if word is None:
-                continue
-            for char in word:
-                if char not in current_dict:
-                    current_dict[char] = {}
-                current_dict = current_dict[char]
-            current_dict[self.IS_TOKEN] = True
-
-        self._next_level_token_prefixes_cache = {}
-
-    def get_next_level_token_prefixes(self, subprefix: str) -> Set[str]:
-        if subprefix not in self._next_level_token_prefixes_cache:
-            self._next_level_token_prefixes_cache[subprefix] = (
-                self.get_next_level_token_prefixes_uncached(subprefix))
-        return self._next_level_token_prefixes_cache[subprefix]
-
-    def get_next_level_token_prefixes_uncached(self,
-                                               subprefix: str,
-                                               _node: dict = None) -> Set[str]:
-        """
-        Traverse the trie starting from a specified subprefix to identify all child nodes that represent
-        the longest possible strings without omitting any nodes that contain complete tokens.
-        """
-        # cache
-        if _node is None and subprefix in self._next_level_token_prefixes_cache:
-            return self._next_level_token_prefixes_cache[subprefix]
-
-        # if not first level of recursion, and at a branching point or is a token, or return self
-        if _node is not None and (len(_node) > 1 or self.IS_TOKEN in _node):
-            return {subprefix}
-
-        # get the current node if at the first level of recursion
-        if _node is None:
-            _node = self.trie
-            for char in subprefix:
-                if char not in _node:
-                    return set()
-                _node = _node[char]
-
-        # Single child, need to go deeper
-        results = set()
-        for char, next_node in _node.items():
-            if char != self.IS_TOKEN:
-                results |= self.get_next_level_token_prefixes_uncached(
-                    subprefix + char, _node=next_node)
-
-        return results
-
-    def is_token(self, seq: Optional[str]) -> bool:
-        return seq in self.norm_vocab_set
+    def __get__(self, tok_str):
+        return self.norm_vocab[tok_str]
 
 
 class NextTokenValidator:
@@ -419,7 +366,7 @@ class NextTokenValidator:
         legal_chars: Optional[set[str]] = None,
     ):
         self.tokenizer = tokenizer
-        self.token_trie = TokenTrie(tokenizer, legal_chars=legal_chars)
+        self.vocab = TokenVocab(tokenizer, legal_chars=legal_chars)
 
         self.parser = SpeculativeParser(grammar=grammar,
                                         start=grammar_start)
@@ -431,27 +378,11 @@ class NextTokenValidator:
     def valid_token_str_set(self):
         """
         Generate the set of valid tokens given the current sequence
-
-        1) Push all first level token prefixes to the stack
-        2) for each token in the stack, validate against the parser
-          - if valid, add all children to the stack for later processing
-          - if valid AND a token, add to valid_token_set
-
-        TODO: this can be improved with multi-threading
         """
         valid_token_str_set = set()
-        if self.parser.is_valid_next_seq(None):
-            valid_token_str_set.add(None)
-        token_prefix_stack = collections.deque([""])
-        while token_prefix_stack:
-            token_prefix = token_prefix_stack.pop()
-            for child_token_prefix in self.token_trie.get_next_level_token_prefixes(
-                    token_prefix):
-                if self.parser.is_valid_next_seq(child_token_prefix):
-                    token_prefix_stack.append(child_token_prefix)
-                    if self.token_trie.is_token(child_token_prefix):
-                        valid_token_str_set.add(child_token_prefix)
-
+        for tok in self.vocab:
+            if self.parser.is_valid_next_seq(tok):
+                valid_token_str_set.add(tok)
         return valid_token_str_set
 
     @property
@@ -461,7 +392,7 @@ class NextTokenValidator:
         note that some token strings correspond to multiple token IDs
         """
         return set.union(*[
-            self.token_trie.norm_vocab[tok_str]
+            self.vocab[tok_str]
             for tok_str in self.valid_token_str_set
         ])
 
