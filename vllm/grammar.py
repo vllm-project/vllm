@@ -1,7 +1,7 @@
 import collections
 from copy import deepcopy, copy
 from dataclasses import dataclass, fields
-from functools import wraps
+from functools import wraps, lru_cache
 import regex
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -124,7 +124,7 @@ class IncrementalParserState:
     - incomplete `partial_token` string
     the set of prior terminal_ids and a partial token comprise a unique parser state
 
-    Core function exposed is `self.new_parser_for_appended(new_seq)`
+    Core function exposed is `self.step_seq(new_seq)`
     - Returns a new IncrementalParserState based with new_seq applied
 
     Memoization strategy is
@@ -145,8 +145,17 @@ class IncrementalParserState:
     _seq_validator: dict
     _memo: dict
 
+
     @classmethod
-    def from_lark_parser(cls, lark_parser):
+    @lru_cache(1000)
+    def from_grammar(cls, grammar: str, start: str):
+        lark_parser = Lark(
+            grammar,
+            regex=True,  # use `regex` not `re`
+            start=start,
+            parser='lalr',
+            cache=True,  # results in 2-3x faster loading
+        )
         base_interactive_parser = lark_parser.parse_interactive()
         interactive_parser = FastInteractiveParser(
                 base_interactive_parser.parser,
@@ -192,7 +201,7 @@ class IncrementalParserState:
         return inst
 
     @memoize_by_instance
-    def new_parser_for_appended(self, new_seq: str):
+    def step_seq(self, new_seq: str):
         """
         - Construct extended (maybe-partial) token candidate
         - If complete match, create new-terminal incremented parser state
@@ -222,7 +231,7 @@ class IncrementalParserState:
 
             leftover = len(new_seq) - complete_terminal["match_length"]
             if leftover:
-                return new_parser.new_parser_for_appended(
+                return new_parser.step_seq(
                     new_maybe_partial_token[-leftover:]
                 )
             else:
@@ -284,45 +293,17 @@ class IncrementalParserState:
             return self.terminal_candidates
         return self.accepts()
 
-
-class SpeculativeParser:
-    def __init__(self, grammar: str, start: str):
-        self.parser = Lark(
-            grammar,
-            regex=True,  # use `regex` not `re`
-            start=start,
-            parser='lalr',
-            cache=True,  # results in 2-3x faster loading
-        )
-        self.incr_parser = IncrementalParserState.from_lark_parser(self.parser)
-        self.fallback_incr_parser = self.incr_parser
-
-    def step_seq(self, new_seq: str):
-        """
-        Append sequence to parser and apply state updates
-        - Append the sequence to the canonical self.sequence_history
-        - Parse the changes
-        - Update the character position of the last complete terminal
-        - Update the set of candidate terminals
-        """
-        new_incr_parser = self.incr_parser.new_parser_for_appended(new_seq)
-        if new_incr_parser is None:
-            self.incr_parser = self.fallback_incr_parser
-        else:
-            self.incr_parser = new_incr_parser
-
     def is_valid_next_seq(self, new_seq: Optional[str]):
         if new_seq is None:
-            return "$END" in self.incr_parser.allowed_terminals
-        return self.incr_parser.new_parser_for_appended(new_seq) is not None
-        if new_incr_parser is None:
-            return False
-        return True
+            return "$END" in self.allowed_terminals
+        return self.step_seq(new_seq) is not None
 
 
 class TokenVocab:
     """
     Normalized token vocabulary accounting for whitespace and multiple IDs per token
+    - iter: iterate over normalized token strings
+    - vocab[token_str]: return token id set
     """
 
     def __init__(self,
@@ -345,19 +326,11 @@ class TokenVocab:
     def __iter__(self):
         return iter(self.norm_vocab)
 
-    def __get__(self, tok_str):
+    def __getitem__(self, tok_str):
         return self.norm_vocab[tok_str]
 
 
 class NextTokenValidator:
-    """
-    Given a grammar and a tokenset, construct a parser and token trie.
-
-    Interface:
-    - step_seq(new_seq): Append a sequence, update internal states
-    - property valid_token_str_set: The valid set of vocabulary tokens strings which can occur next
-    """
-
     def __init__(
         self,
         tokenizer,
@@ -368,107 +341,43 @@ class NextTokenValidator:
         self.tokenizer = tokenizer
         self.vocab = TokenVocab(tokenizer, legal_chars=legal_chars)
 
-        self.parser = SpeculativeParser(grammar=grammar,
-                                        start=grammar_start)
+        self.root_parser = IncrementalParserState.from_grammar(
+            grammar,
+            grammar_start
+        )
 
-    def step_seq(self, new_seq: str):
-        self.parser.step_seq(new_seq)
-
-    @property
-    def valid_token_str_set(self):
+    def get_valid_next_token_strs(self, full_seq):
         """
-        Generate the set of valid tokens given the current sequence
+        Generate valid token strings given the full sequence
         """
-        for tok in self.vocab:
-            if self.parser.is_valid_next_seq(tok):
-                yield tok
+        parser = self.root_parser.step_seq(full_seq)
+        for tok_str in self.vocab:
+            if parser.is_valid_next_seq(tok_str):
+                yield tok_str
 
-    @property
-    def valid_token_id_set(self):
+
+    def get_valid_next_token_ids(self, full_seq):
         """
-        get valid token id based on self.valid_token_str_set
-        note that some token strings correspond to multiple token IDs
+        Generate valid token ids given the full sequence
         """
-        return set.union(*[
-            self.vocab[tok_str]
-            for tok_str in self.valid_token_str_set
-        ])
+        for tok_str in self.get_valid_next_token_strs(full_seq):
+            yield from self.vocab[tok_str]
 
 
-# TODO: replace with subclass called NextTokenIDValidator to make things cleaner
-@dataclass
-class BatchDataItemParser:
-    text: str
-    token_ids: List[str]
-    parser: NextTokenValidator
-
-
-class GrammarLogitsProcessor:
+class GrammarLogitsProcessor(NextTokenValidator):
     """
     Apply NextTokenValidator in __call__ and set excluded tokens logits to -inf
     """
-
-    def __init__(
-        self,
-        tokenizer,
-        grammar: str,
-        grammar_start: str = "start",
-        legal_chars: Optional[set[str]] = None,
-    ):
-        self.tokenizer = tokenizer
-        self.grammar = grammar
-        self.grammar_start = grammar_start
-        self.legal_chars = legal_chars
-
-        # track multiple parsers for batch requests
-        self.batch_data_item_parsers: List[BatchDataItemParser] = []
-
-    def _new_batch_data_item_parser(self):
-        return BatchDataItemParser(
-            "", [],
-            NextTokenValidator(tokenizer=self.tokenizer,
-                               grammar=self.grammar,
-                               grammar_start=self.grammar_start,
-                               legal_chars=self.legal_chars))
-
-    def _get_batch_data_item_parser(self, token_ids: List[int]):
-        """
-        Get longest batch data item parser which matches the seen tokens.
-        This is generally the corresponding parser, but if there's a collision
-        their parsers are interchangable
-        """
-        for bdip in sorted(self.batch_data_item_parsers,
-                           key=lambda bdip: -len(bdip.token_ids)):
-            if token_ids[:len(bdip.token_ids)] == bdip.token_ids:
-                return bdip
-
-        # no match, make new
-        return self._new_batch_data_item_parser()
-
-    def _update_seen_token_ids(self, bdip: BatchDataItemParser,
-                               token_ids: List[int]):
-
-        # update batch item token tracker
-        bdip.token_ids = token_ids
-
-        # step forward
-        all_text = self.tokenizer.decode(token_ids)
-        new_text = all_text[len(bdip.text):]
-        bdip.text = all_text
-        bdip.parser.step_seq(new_text)
-
     def __call__(self, token_ids: List[int],
                  logits: torch.Tensor) -> torch.Tensor:
-        # get the batch item data and parser for batch item, given provided token sequence
-        bdip = self._get_batch_data_item_parser(token_ids)
-
-        self._update_seen_token_ids(bdip, token_ids)
+        # get valid token IDs given prior tokens
+        sequence = self.tokenizer.decode(token_ids)
+        valid_token_ids = self.get_valid_next_token_id_set(sequence)
 
         # modify logits given valid token IDs
         N = len(logits)
         mask = torch.zeros(N, dtype=torch.bool)
-        valid = torch.tensor(list(bdip.parser.valid_token_id_set),
-                             dtype=torch.long)
+        valid = torch.tensor(valid_token_ids, dtype=torch.long)
         mask[valid] = True
         logits[~mask] = float('-inf')
         return logits
