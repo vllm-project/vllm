@@ -379,11 +379,9 @@ class NextTokenValidator:
         """
         Generate the set of valid tokens given the current sequence
         """
-        valid_token_str_set = set()
         for tok in self.vocab:
             if self.parser.is_valid_next_seq(tok):
-                valid_token_str_set.add(tok)
-        return valid_token_str_set
+                yield tok
 
     @property
     def valid_token_id_set(self):
