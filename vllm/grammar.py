@@ -73,56 +73,80 @@ def get_pattern_validator(pattern: Pattern, is_complete: bool):
     if isinstance(pattern, PatternRE):
         compiled_pattern = regex.compile(pattern.value)
         if is_complete:
-            return (lambda seq: compiled_pattern.fullmatch(seq)
-                is not None)
+            # False: No match
+            # int: match length
+            def get_fullmatch_length(seq):
+                r = compiled_pattern.match(seq)
+                if r is None or not r.spans():
+                    return None
+                spans = r.spans()[0]
+                return spans[1] - spans[0]
+            return get_fullmatch_length
         else:
             return (lambda seq: compiled_pattern.fullmatch(seq, partial=True)
                 is not None)
     elif isinstance(pattern, PatternStr):
         base_str = pattern.value
         if is_complete:
-            return (lambda seq: seq == base_str)
+            def get_strmatch_length(seq):
+                if not seq.startswith(base_str):
+                    return None
+                return len(base_str)
+            return get_strmatch_length
         else:
             return (lambda seq: base_str.startswith(seq))
     else:
         raise TypeError(f"Invalid pattern type: {type(pattern)}")
 
 
-def memoize_with_key(*key_attrs):
-    def decorator(method):
-        mname = method.__name__
-        @wraps(method)
-        def wrapper(self, *args):
-            # Construct a simple key from key attributes and method arguments
-            key_elements = tuple(getattr(self, attr, None) for attr in key_attrs)
-            key = (mname, key_elements, args)
+def memoize_by_instance(method):
+    """
+    Memoize by id(self) and fn args
+    """
+    mname = method.__name__
+    @wraps(method)
+    def wrapper(self, *args):
+        key = (mname, id(self), args)
+        if key in self._memo:
+            return self._memo[key]
+        result = method(self, *args)
+        self._memo[key] = result
+        return result
 
-            # Check cache for existing result
-            if key in self._memo:
-                return self._memo[key]
-
-            # Call the method and store the result
-            result = method(self, *args)
-            self._memo[key] = result
-            return result
-
-        return wrapper
-    return decorator
+    return wrapper
 
 
 @dataclass
-class IncrementalParser:
-    interactive_parser: FastInteractiveParser
-    tokens_key: str  # "\n" separated, for caching purposes
+class IncrementalParserState:
+    """
+    Parsing utility which tracks state provided
+    - sequence of prior terminal ids
+    - incomplete `partial_token` string
+    the set of prior terminal_ids and a partial token comprise a unique parser state
+
+    Core function exposed is `self.new_parser_for_appended(new_seq)`
+    - Returns a new IncrementalParserState based with new_seq applied
+
+    Memoization strategy is
+    - 1) Ensure uniqueness of (prior_terminal_ids, partial_token)
+    - 2) Cache class methods via `memoize_by_instance` which considers id(self) and fn arguments
+    """
+
+    # unique state key
+    prior_terminal_ids: tuple[str]
     partial_token: str
+
+    # function of key
+    interactive_parser: FastInteractiveParser
     terminal_candidates: list
+
+    # shared across instances
     _ignored_terms: set
     _seq_validator: dict
     _memo: dict
 
     @classmethod
     def from_lark_parser(cls, lark_parser):
-        print(lark_parser.terminals)
         base_interactive_parser = lark_parser.parse_interactive()
         interactive_parser = FastInteractiveParser(
                 base_interactive_parser.parser,
@@ -145,7 +169,7 @@ class IncrementalParser:
 
         return cls(
             interactive_parser=interactive_parser,
-            tokens_key="",
+            prior_terminal_ids=tuple(),
             partial_token="",
             terminal_candidates=None,
             _ignored_terms=set(lark_parser.lexer_conf.ignore),
@@ -153,62 +177,95 @@ class IncrementalParser:
             _memo={}
         )
 
-    def new(self, **kwargs):
+    def new(self, prior_terminal_ids, partial_token, **kwargs):
+        # cache
+        key = (prior_terminal_ids, partial_token)
+        if key in self._memo:
+            return self._memo[key]
         instance_dict = {
             f.name: getattr(self, f.name)
             for f in fields(self)
         }
         instance_dict.update(kwargs)
-        return self.__class__(**instance_dict)
+        inst = self.__class__(**instance_dict)
+        self._memo[key] = inst
+        return inst
 
-    @memoize_with_key('tokens_key', 'partial_token')
-    def new_parser_for_appended_char(self, char: str):
+    @memoize_by_instance
+    def new_parser_for_appended(self, new_seq: str):
         """
         - Construct extended (maybe-partial) token candidate
-        - If no partial matches, None
-        - If partial matches, but not complete,
+        - If complete match, create new-terminal incremented parser state
+          - there is leftover from new_seq, recurse on the new parser
+        - If partial matches,
               return new parser with updated partial token str and updated terminal candidates
-        - If complete match, reset partial token, return parser with token-updated parser state
+        - If no partial matches, return None
         """
-        assert len(char) == 1
+        new_maybe_partial_token = self.partial_token + new_seq
 
-        new_maybe_partial_token = self.partial_token + char
-        new_allowed_terminals = self.filter_terminals(
-            self.allowed_terminals,
+        complete_terminal = self.get_complete_terminal(
+            tuple(sorted(self.allowed_terminals)),
             new_maybe_partial_token,
-            require_complete=False
         )
-        if not new_allowed_terminals:
-            return None
-
-        complete_terminals = self.filter_terminals(
-            self.allowed_terminals,
-            new_maybe_partial_token,
-            require_complete=True
-        )
-        if complete_terminals:
-            assert len(complete_terminals) == 1
-            new_token_str = next(iter(complete_terminals))
-            return self.new(
-                interactive_parser=self.get_stepped_parser_state(new_token_str),
-                tokens_key=self.tokens_key + "\n" + new_token_str,
+        if complete_terminal is not None:
+            terminal_name = complete_terminal["terminal_id"]
+            if terminal_name in self._ignored_terms:
+                new_interactive_parser = self.interactive_parser
+            else:
+                new_interactive_parser = self.get_stepped_parser_state(terminal_name)
+            new_parser = self.new(
+                interactive_parser=new_interactive_parser,
+                prior_terminal_ids=tuple(list(self.prior_terminal_ids) + [terminal_name]),
                 partial_token="",
                 terminal_candidates=None,
             )
-        else:
-            return self.new(
-                partial_token=new_maybe_partial_token,
-                terminal_candidates=new_allowed_terminals,
-            )
 
-    def filter_terminals(self, checked_terminals, seq, require_complete):
-        validator_type = "complete" if require_complete else "partial"
+            leftover = len(new_seq) - complete_terminal["match_length"]
+            if leftover:
+                return new_parser.new_parser_for_appended(
+                    new_maybe_partial_token[-leftover:]
+                )
+            else:
+                return new_parser
+
+        partial_terminal_ids = self.get_partial_terminal_ids(
+            tuple(sorted(self.allowed_terminals)),
+            new_maybe_partial_token,
+        )
+        if partial_terminal_ids:
+            return self.new(
+                prior_terminal_ids=self.prior_terminal_ids,
+                partial_token=new_maybe_partial_token,
+                terminal_candidates=partial_terminal_ids,
+            )
+        else:
+            return None
+
+
+    def get_complete_terminal(self, checked_terminals, seq):
+        terminal_matchlens = {
+            term: self._seq_validator[(term, "complete")](seq)
+            for term in checked_terminals
+        }
+        terminal_matchlens = {term: ml for term, ml in terminal_matchlens.items() if ml}
+        if not terminal_matchlens:
+            return None
+        if len(terminal_matchlens) > 1:
+            terminal_matchlens = {
+                t: ml for t, ml in terminal_matchlens.items()
+                if t not in self._ignored_terms
+            }
+        assert len(terminal_matchlens) == 1
+        result = next(iter(terminal_matchlens.items()))
+        return {"terminal_id": result[0], "match_length": result[1]}
+
+    def get_partial_terminal_ids(self, checked_terminals, seq):
         return set([
             term for term in checked_terminals
-            if self._seq_validator[(term, validator_type)](seq)
+            if self._seq_validator[(term, "partial")](seq)
         ])
 
-    @memoize_with_key('tokens_key')
+    @memoize_by_instance
     def get_stepped_parser_state(self, new_token_str):
         ip = copy(self.interactive_parser)
         ip.feed_token(
@@ -216,11 +273,12 @@ class IncrementalParser:
         )
         return ip
 
-    @memoize_with_key('tokens_key')
+    @memoize_by_instance
     def accepts(self):
         return set(self.interactive_parser.accepts()) | self._ignored_terms
 
     @property
+    @memoize_by_instance
     def allowed_terminals(self):
         if self.terminal_candidates is not None:
             return self.terminal_candidates
@@ -236,8 +294,8 @@ class SpeculativeParser:
             parser='lalr',
             cache=True,  # results in 2-3x faster loading
         )
-        self.incr_parser = IncrementalParser.from_lark_parser(self.parser)
-        self.fallback_incr_parser = copy(self.incr_parser)
+        self.incr_parser = IncrementalParserState.from_lark_parser(self.parser)
+        self.fallback_incr_parser = self.incr_parser
 
     def step_seq(self, new_seq: str):
         """
@@ -247,21 +305,18 @@ class SpeculativeParser:
         - Update the character position of the last complete terminal
         - Update the set of candidate terminals
         """
-        for char in new_seq:
-            new_incr_parser = self.incr_parser.new_parser_for_appended_char(char)
-            if new_incr_parser is None:
-                self.incr_parser = self.fallback_incr_parser
-            else:
-                self.incr_parser = new_incr_parser
+        new_incr_parser = self.incr_parser.new_parser_for_appended(new_seq)
+        if new_incr_parser is None:
+            self.incr_parser = self.fallback_incr_parser
+        else:
+            self.incr_parser = new_incr_parser
 
     def is_valid_next_seq(self, new_seq: Optional[str]):
         if new_seq is None:
             return "$END" in self.incr_parser.allowed_terminals
-        new_incr_parser = self.incr_parser
-        for i, char in enumerate(new_seq):
-            new_incr_parser = new_incr_parser.new_parser_for_appended_char(char)
-            if new_incr_parser is None:
-                return False
+        return self.incr_parser.new_parser_for_appended(new_seq) is not None
+        if new_incr_parser is None:
+            return False
         return True
 
 
@@ -287,6 +342,7 @@ class TokenTrie:
             if legal_chars is None or all(
                 [char in legal_chars for char in norm_token]):
                 self.norm_vocab[norm_token].add(token_id)
+
 
         # faster lookups, reduce time by 10%
         self.norm_vocab_set = set(self.norm_vocab)
