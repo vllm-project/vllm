@@ -45,6 +45,7 @@ class Worker:
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
+        self.preoccupied_mem = None
 
     def init_model(self) -> None:
         # torch.distributed.all_reduce does not free the input tensor until
@@ -65,6 +66,8 @@ class Worker:
         if self.rank < 0:
             raise ValueError("Invalid or unspecified rank.")
         torch.cuda.set_device(self.device)
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        self.preoccupied_mem = total_gpu_memory - free_gpu_memory
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 
@@ -97,7 +100,8 @@ class Worker:
         # profiled peak memory.
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        peak_memory = total_gpu_memory - free_gpu_memory
+        peak_memory = max(
+            total_gpu_memory - free_gpu_memory - self.preoccupied_mem, 0)
 
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, self.model_config, self.parallel_config)
