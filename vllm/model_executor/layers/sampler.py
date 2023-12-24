@@ -68,7 +68,7 @@ class Sampler(nn.Module):
         logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
 
         if do_top_p_top_k:
-            logits = _apply_top_p_top_k(logits, sampling_tensors.top_ps,
+            logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
 
         if do_min_p:
@@ -176,7 +176,7 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     return logits
 
 
-def _apply_top_p_top_k(
+def _apply_top_k_top_p(
     logits: torch.Tensor,
     p: torch.Tensor,
     k: torch.Tensor,
