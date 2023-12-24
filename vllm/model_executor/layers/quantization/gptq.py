@@ -29,9 +29,9 @@ class GPTQConfig(QuantizationConfig):
         self.desc_act = desc_act
         self.pack_factor = 32 // self.weight_bits
         # exllama kernel v1 only supports 4 bit
-        if self.weight_bits != 4:
+        if self.weight_bits not in [2, 4, 8]:
             raise ValueError(
-                "Currently, only 4-bit weight quantization is supported for "
+                "Currently, only 2/4/8-bit weight quantization is supported for "
                 f"GPTQ, but got {self.weight_bits} bits.")
 
     def __repr__(self) -> str:
@@ -205,11 +205,13 @@ class GPTQLinearMethod(LinearMethodBase):
             else:
                 weights["g_idx"] = torch.empty((1, 1), device="meta")
             weights["exllama_state"] = ExllamaState.READY
-            ops.gptq_shuffle(weights["qweight"], weights["g_idx"])
+            ops.gptq_shuffle(weights["qweight"], weights["g_idx"],
+                             self.quant_config.weight_bits)
         output = ops.gptq_gemm(reshaped_x, weights["qweight"],
                                weights["qzeros"], weights["scales"],
                                weights["g_idx"],
-                               weights["exllama_state"] == ExllamaState.READY)
+                               weights["exllama_state"] == ExllamaState.READY,
+                               self.quant_config.weight_bits)
         if bias is not None:
             output = output + bias
         return output.reshape(out_shape)

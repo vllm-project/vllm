@@ -146,6 +146,78 @@ public:
     __device__ __forceinline__ const uint32_t* item_uint32_ptr(int row, int column) { return &data[row / 8 * width + column]; }
 };
 
+class MatrixView_q2_row
+{
+public:
+    const uint32_t* data;
+    const int height;
+    const int width;
+
+    __device__ __forceinline__ MatrixView_q2_row(const uint32_t* data, const int height, const int width)
+        : data(data), height(height), width(width)
+    { }
+
+    __device__ __forceinline__ int item(int row, int column) const
+    {
+        int shift = (column & 0x0f) * 2;
+        return (data[row * width / 16 + column / 16] >> shift) & 0x03;
+    }
+
+    __device__ __forceinline__ void item2(int (&items)[2], int row, int column) const
+    {
+        int shift = (column & 0x0f) * 2;
+        uint32_t d = data[row * width / 16 + column / 16] >> shift;
+        items[0] = d & 0x03;
+        items[1] = (d >> 2) & 0x03;
+    }
+
+    __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const
+    {
+        int shift = (column & 0x0f) * 2;
+        uint32_t d = data[row * width / 16 + column / 16] >> shift;
+        items[0] = d & 0x03;
+        items[1] = (d >> 2) & 0x03;
+        items[2] = (d >> 4) & 0x03;
+        items[3] = (d >> 6) & 0x03;
+    }
+};
+
+class MatrixView_q8_row
+{
+public:
+    const uint32_t* data;
+    const int height;
+    const int width;
+
+    __device__ __forceinline__ MatrixView_q8_row(const uint32_t* data, const int height, const int width)
+        : data(data), height(height), width(width)
+    { }
+
+    __device__ __forceinline__ int item(int row, int column) const
+    {
+        int shift = (column & 0x03) * 8;
+        return (data[row * width / 4 + column / 4] >> shift) & 0xff;
+    }
+
+    __device__ __forceinline__ void item2(int (&items)[2], int row, int column) const
+    {
+        int shift = (column & 0x03) * 8;
+        uint32_t d = data[row * width / 4 + column / 4] >> shift;
+        items[0] = d & 0xff;
+        items[1] = (d >> 8) & 0xff;
+    }
+
+    __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const
+    {
+        int shift = (column & 0x03) * 2;
+        uint32_t d = data[row * width / 4 + column / 4] >> shift;
+        items[0] = d & 0xff;
+        items[1] = (d >> 8) & 0xff;
+        items[2] = (d >> 16) & 0xff;
+        items[3] = (d >> 24) & 0xff;
+    }
+};
+
 }  // namespace gptq
 }  // namespace vllm
 #endif

@@ -38,16 +38,17 @@ __forceinline__ __device__ void dequant_4bit_8
 (
     const uint32_t q_0,
     half2 (&dq)[4],
-    int stride
+    int stride,
+    const uint32_t zero
 )
 {
     const uint32_t c0 = 0x64006400;
     const half y16_ = __float2half_rn(1.0f / 16.0f);
     const half2 y16 = __halves2half2(y16_, y16_);
-    const half z1_  = __float2half_rn(-1024.0f         - 8.0f);
-    const half z16_ = __float2half_rn(-1024.0f / 16.0f - 8.0f);
-    const half2 z1  = __halves2half2(z1_,  z1_);
-    const half2 z16 = __halves2half2(z16_, z16_);
+    const half_uint16 z1_(0xe400 | zero); // half(-1024.0f - zero);
+    const half z16_ = __hsub(__int2half_rn(-64), __int2half_rn(zero));
+    const half2 z1 = __half2half2(z1_.as_half);
+    const half2 z16 = __half2half2(z16_);
 
     uint32_t qa = q_0;
     half2_uint32 q0((qa & 0x000f000f) | c0); // half2(q[ 0], q[ 1])      + 1024
@@ -140,95 +141,6 @@ __forceinline__ __device__ void dequant_4bit_8_gptq
         dq[3] = __hfma2(q3.as_half2, y1y16[1], z1z16[1]);  // half2( q[6] - z, q[7] - z )
     }
 }
-}  // namespace gptq
-}  // namespace vllm
-
-#else
-
-namespace vllm {
-namespace gptq {
-__forceinline__ __device__ void shuffle_4bit_8
-(
-    uint32_t* q,
-    int stride
-)
-{
-}
-
-__forceinline__ __device__ void dequant_4bit_8
-(
-    const uint32_t q_0,
-    half2 (&dq)[4],
-    int stride
-)
-{
-    half dqh[8];
-    for (int i = 0; i < 8; i++) dqh[i] = dq_ns(exb(q_0, i * 4, 0x0f), 8);
-
-    for (int i = 0; i < 4; i++) dq[i] = __halves2half2(dqh[i * 2], dqh[i * 2 + 1]);
-}
-
-__forceinline__ __device__ void dequant_4bit_8_prep_zero_scale
-(
-    const uint32_t zero,
-    const half scale,
-    half2 (&z1)[2],
-    half2 (&y1)[2]
-)
-{
-    half z = __int2half_rn(-((int)zero));
-    z = __hmul(z, scale);
-    z1[0] = __half2half2(z);
-    y1[0] = __half2half2(scale);
-}
-
-__forceinline__ __device__ void dequant_4bit_8_prep_zero
-(
-    const uint32_t zero,
-    half2(&z1)[2],
-    half2(&y1)[2]
-)
-{
-    half z = __int2half_rn(-((int)zero));
-    z1[0] = __half2half2(z);
-}
-
-__forceinline__ __device__ void dequant_4bit_8_gptq
-(
-    const uint32_t q_0,
-    half2 (&dq)[4],
-    half2 (&z1)[2],
-    half2 (&y1)[2],
-    int stride,
-    bool scaled
-)
-{
-    half2 dqh2[8];
-
-    uint32_t qa = q_0;
-    for (int i = 0; i < 4; i++)
-    {
-        half d0 = __int2half_rn(qa & 0x0f); qa >>= 4;
-        half d1 = __int2half_rn(qa & 0x0f); qa >>= 4;
-        dqh2[i] = __halves2half2(d0, d1);
-    }
-
-    if (scaled)
-    {
-        dq[0] = __hfma2(dqh2[0], y1[0], z1[0]);
-        dq[1] = __hfma2(dqh2[1], y1[0], z1[0]);
-        dq[2] = __hfma2(dqh2[2], y1[0], z1[0]);
-        dq[3] = __hfma2(dqh2[3], y1[0], z1[0]);
-    }
-    else
-    {
-        dq[0] = __hadd2(dqh2[0], z1[0]);
-        dq[1] = __hadd2(dqh2[1], z1[0]);
-        dq[2] = __hadd2(dqh2[2], z1[0]);
-        dq[3] = __hadd2(dqh2[3], z1[0]);
-    }
-}
-
 }  // namespace gptq
 }  // namespace vllm
 
