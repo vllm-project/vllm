@@ -318,12 +318,13 @@ def _multi_query_paged_attention(
 
     block_size = value_cache.shape[3]
     num_seqs = input_metadata.context_lens.shape[0]
+    num_heads = query.shape[1]
     assert num_seqs * max_num_query == query.shape[0]
     
     query = query.reshape(
         num_seqs, 
         max_num_query, 
-        query.shape[1], 
+        num_heads, 
         query.shape[2])
     output = torch.empty_like(query)
 
@@ -336,10 +337,9 @@ def _multi_query_paged_attention(
         scale,
         input_metadata.block_tables,
         input_metadata.context_lens,
+        input_metadata.draft_lens,
         block_size,
         input_metadata.max_context_len,
-        max_num_query,
-        alibi_slopes,
-    )
+        max_num_query)
 
     return output

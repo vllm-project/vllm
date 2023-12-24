@@ -6,14 +6,16 @@
 #include "cute/pointer.hpp"
 
 struct __align__(32) AttentionAtom {
-    int32_t* block_idx_list;
+    using index_t = uint32_t;
 
-    int32_t q_start_idx;
-    int32_t q_len;
-    int32_t kv_blocks;
-    int32_t total_extent;
-    int32_t global_q_idx;
-    int32_t unused;
+    index_t* block_idx_list;
+
+    index_t q_start_idx;
+    index_t q_len;
+    index_t kv_blocks;
+    index_t total_extent;
+    index_t global_q_idx;
+    index_t unused;
 
     template <int threads>
     __device__ void load_kv_block_idxs(cute::smem_ptr<int32_t> block_idx_list_shr, int tidx) const

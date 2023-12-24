@@ -102,7 +102,7 @@ inline __device__ void softmax_rescale_o(Tensor0 &scores, Tensor1 &scores_max, T
 
 template <typename Kernel_traits, bool Is_causal, bool Is_even_K, typename Params>
 inline __device__ void compute_attn_1rowblock(const Params& params,
-                                              const int atom_idx,
+                                              const AttentionAtom& atom_info,
                                               const int head_idx)
 {
     using Element = typename Kernel_traits::Element;
@@ -121,10 +121,6 @@ inline __device__ void compute_attn_1rowblock(const Params& params,
     constexpr int kNWarps = Kernel_traits::kNWarps;
     constexpr int MMA_M =
         kBlockM / decltype(size<0>(typename Kernel_traits::TiledMma::TiledShape_MNK{}))::value;
-
-    if (atom_idx >= params.num_atoms) return;
-
-    const AttentionAtom atom_info = params.atoms[atom_idx];
 
     // May have a padded launch of attention atoms, this will handle that for us.
     if (atom_info.q_len == 0) return;
@@ -458,7 +454,21 @@ inline __device__ void compute_attn(const Params& params)
     const int atom_idx = blockIdx.y;
     const int head_idx = blockIdx.x;
 
-    flash::compute_attn_1rowblock<Kernel_traits, Is_causal, Is_even_K>(params, atom_idx, head_idx);
+    if (atom_idx >= params.num_seqs) return;
+
+    AttentionAtom atom;
+
+    int draft_len = params.draft_lens[atom_idx];
+    int context_len = params.context_lens[atom_idx];
+
+    atom.block_idx_list = reinterpret_cast<AttentionAtom::index_t*>(params.block_tables) + atom_idx * params.max_num_blocks_per_seq;
+    atom.q_start_idx = atom_idx * params.max_num_query;
+    atom.q_len = draft_len;
+    atom.kv_blocks = DIVIDE_ROUND_UP(context_len, params.block_size);
+    atom.total_extent = context_len;
+    atom.global_q_idx = context_len - draft_len;
+
+    flash::compute_attn_1rowblock<Kernel_traits, Is_causal, Is_even_K>(params, atom, head_idx);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

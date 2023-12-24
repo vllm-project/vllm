@@ -40,10 +40,10 @@ void paged_flash_attention(
   float scale,
   torch::Tensor& block_tables,
   torch::Tensor& context_lens,
+  torch::Tensor& draft_lens,
   int block_size,
   int max_context_len,
-  int max_num_query,
-  const c10::optional<torch::Tensor>& alibi_slopes);
+  int max_num_query);
 
 void rms_norm(
   torch::Tensor& out,

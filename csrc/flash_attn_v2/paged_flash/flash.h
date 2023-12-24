@@ -13,6 +13,8 @@ constexpr int TOTAL_DIM = 0;
 constexpr int H_DIM = 1;
 constexpr int D_DIM = 2;
 
+#define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Qkv_params {
@@ -44,10 +46,21 @@ struct Flash_fwd_params : public Qkv_params {
     void* __restrict__ o_ptr;
 
     // The attention metadata
-    AttentionAtom* __restrict__ atoms;
+    // AttentionAtom* __restrict__ atoms;
 
     // Total attention atoms
-    int num_atoms;
+    // int num_atoms;
+
+    // PagedAttention metadata
+    int num_seqs;
+    int max_num_query;
+    int max_context_len;
+    int block_size;
+    int max_num_blocks_per_seq;
+
+    index_t* __restrict__ block_tables;
+    index_t* __restrict__ context_lens;
+    index_t* __restrict__ draft_lens;
 
     // The stride between rows of O.
     index_t o_row_stride;

@@ -339,6 +339,7 @@ def test_multi_query_cached_kv_attention(
     # generate random query lens
     query_lens = [random.randint(1, max_num_query) for _ in range(num_seqs)]
     query_lens[-1] = max_num_query
+    query_lens_tensor = torch.tensor(query_lens, dtype=torch.int, device="cuda")
 
     # Create the block tables, following single_query_attention test
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
@@ -381,7 +382,7 @@ def test_multi_query_cached_kv_attention(
         max_context_len=max_context_len,
         block_tables=block_tables_tensor,
         use_cuda_graph=False,
-        draft_lens=query_lens)
+        draft_lens=query_lens_tensor)
 
     attn = PagedAttention(num_heads, head_size, scale)
     output = attn.forward(query, key, value, key_cache, value_cache,

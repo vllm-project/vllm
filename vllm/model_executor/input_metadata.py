@@ -23,7 +23,7 @@ class InputMetadata:
         context_lens: Optional[torch.Tensor],
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
-        draft_lens: Optional[List[int]] = None,
+        draft_lens: Optional[torch.Tensor] = None,
     ) -> None:
         self.prompt_lens = prompt_lens
         self.max_context_len = max_context_len
