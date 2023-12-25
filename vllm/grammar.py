@@ -158,21 +158,20 @@ class Trie:
     def get_best(self, word):
         node = self.root
         prefix = ""
+        best_prefix = ""
         best_value = node.value
         for char in word:
             if char in node.children:
-                prefix += char
                 node = node.children[char]
+                prefix += char
                 if node.is_end_of_word:
+                    best_prefix = prefix
                     best_value = node.value
             else:
                 break  # break if char not in trie
-        if node.is_end_of_word:
-            best_value = node.value
 
-        remainder = word[len(prefix):]
-        assert best_value is not None
-        return prefix, best_value, remainder
+        remainder = word[len(best_prefix):]
+        return best_prefix, best_value, remainder
 
 
 @dataclass
@@ -183,7 +182,7 @@ class IncrementalParserState:
     - incomplete `partial_token` string
     the set of prior terminal_ids and a partial token comprise a unique parser state
 
-    Core function exposed is `self.step_seq(new_seq)`
+    Core function exposed is `self.step(new_seq)`
     - Returns a new IncrementalParserState based with new_seq applied
 
     Memoization strategy is
@@ -208,6 +207,10 @@ class IncrementalParserState:
     _memo: dict
     _full_seq_trie: Trie
 
+    def __repr__(self):
+        shown = ["partial_token", "full_seq", "terminal_candidates", "prior_terminal_ids"]
+        attrs_str = ", ".join(f"{s}={repr(getattr(self, s))}" for s in shown)
+        return f"{self.__class__.__name__}({attrs_str})"
 
     @classmethod
     @lru_cache(1000)
@@ -267,13 +270,15 @@ class IncrementalParserState:
         Get the parser of a full sequence
         """
         match_seq, parser, remainder_seq = self._full_seq_trie.get_best(full_seq)
+        if parser is None:
+            return
         if remainder_seq:
-            parser = parser.step_seq(remainder_seq)
+            parser = parser.step(remainder_seq)
             self._full_seq_trie.insert(full_seq, parser)
         return parser
 
     @memoize_by_instance
-    def step_seq(self, new_seq: str):
+    def step(self, new_seq: str):
         """
         - Construct extended (maybe-partial) token candidate
         - If complete match, create new-terminal incremented parser state
@@ -291,7 +296,6 @@ class IncrementalParserState:
             self.allowed_terminals,
             new_maybe_partial_token
         )
-
         if best_terminal is None:
             return None
 
@@ -315,8 +319,13 @@ class IncrementalParserState:
             else:
                 new_interactive_parser = self.get_stepped_parser_state(best_terminal)
 
+            if self.partial_token:
+                base_seq = self.full_seq[:-len(self.partial_token)]
+            else:
+                base_seq = self.full_seq
+
             new_parser = self.new(
-                full_seq=self.full_seq[:-len(self.partial_token)] + processed_seq,
+                full_seq=base_seq + processed_seq,
                 interactive_parser=new_interactive_parser,
                 prior_terminal_ids=hash((self.prior_terminal_ids, best_terminal)),
                 partial_token="",
@@ -329,7 +338,7 @@ class IncrementalParserState:
 
             # process remainder
             else:
-                return new_parser.step_seq(remainder_seq)
+                return new_parser.step(remainder_seq)
 
     def get_best_matched_terminal(self, checked_terminals, seq):
         for terminal in checked_terminals:
@@ -368,7 +377,7 @@ class IncrementalParserState:
     def is_valid_next_seq(self, new_seq: Optional[str]):
         if new_seq is None:
             return "$END" in self.allowed_terminals
-        return self.step_seq(new_seq) is not None
+        return self.step(new_seq) is not None
 
 
 class TokenVocab:

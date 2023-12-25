@@ -4,7 +4,7 @@ import json
 
 from transformers import AutoTokenizer
 
-from vllm.grammar import TokenTrie, NextTokenValidator, GrammarLogitsProcessor
+from vllm.grammar import NextTokenValidator, GrammarLogitsProcessor
 from vllm import LLM, SamplingParams
 
 
@@ -34,9 +34,9 @@ def json_grammar():
 
     string : "\"" escaped_string_char* "\""
     escaped_string_char: _STR_INNER_CHAR | _ESCAPED_CHAR
-    _ESCAPED_CHAR: "\\" _ANY_CHAR
+    _ESCAPED_CHAR: "\\" _ESCAPABLE_CHAR
     _STR_INNER_CHAR: /[^\\\"]/
-    _ANY_CHAR: /./
+    _ESCAPABLE_CHAR: /[\\\/bfnrtu]/
 
     signed_number: ["+"|"-"] number
     number: float | int
@@ -48,7 +48,7 @@ def json_grammar():
     DIGIT: "0".."9"
 
     WS: /[ \t\f\r\n]/
-    """
+    """.strip()
 
 
 @pytest.fixture
@@ -121,12 +121,14 @@ def test_next_token_validator_simple(tokenizer):
     ?start: "hello" | "world"
     """
     ntv = NextTokenValidator(tokenizer, hello_grammar)
+    valid_next_str_set = set(ntv.get_valid_next_token_strs(""))
+    valid_next_id_set = set(ntv.get_valid_next_token_ids(""))
 
     # tokens specific to codeLlama
-    assert ntv.valid_token_str_set == {
+    assert valid_next_str_set == {
         'wo', 'hell', 'h', 'he', 'hel', 'world', 'wor', 'w', 'hello'
     }
-    assert sorted(ntv.valid_token_id_set) == [
+    assert sorted(valid_next_id_set) == [
         107, 122, 354, 827, 3952, 11526, 12199, 13762, 14181, 29882, 29893
     ]
 
@@ -136,8 +138,7 @@ def test_can_span_multiple_terminals(tokenizer):
     ?start: "is" "t" "r" "u" "e"
     """
     ntv = NextTokenValidator(tokenizer, true_segmented_grammar)
-    ntv.step_seq("is")
-    assert "true" in ntv.valid_token_str_set
+    assert "true" in set(ntv.get_valid_next_token_strs("is"))
 
 
 @pytest.mark.parametrize("grammar_fixture, example_fixture",
@@ -155,12 +156,13 @@ def test_can_generate_with_grammar(tokenizer, request, grammar_fixture,
         legal_chars=set(map(chr, range(256))),
     )
     example_remainder = example
+    generation = ""
     while example_remainder:
-        for tok in next_token_validator.valid_token_str_set:
+        for tok in next_token_validator.get_valid_next_token_strs(generation):
             if tok is None:
                 continue
             if example_remainder.startswith(tok):
-                next_token_validator.step_seq(tok)
+                generation += tok
                 example_remainder = example_remainder[len(tok):]
                 break
         else:
@@ -169,99 +171,82 @@ def test_can_generate_with_grammar(tokenizer, request, grammar_fixture,
             )
 
     # EOS should be in the set of next legal tokens
-    assert None in next_token_validator.valid_token_str_set
+    assert None in next_token_validator.get_valid_next_token_strs(generation)
 
 
-def test_json_valid_with_edge_cases(tokenizer, json_grammar):
-    valid_edgecase_jsons = [
+@pytest.mark.parametrize(
+    "json_example",
+    [
         "{\n    \"emptyObject\": {\n        \"innerEmptyObject\": {}\n    }\n}",  # empty obj
         "{\n    \"mixedArray\": [null, 123, \"text\", true, {\"key\": \"value\"}]\n}",  # mixed array
         "{\n    \"deepArray\": [[[[[\"deep\"]]]]]\n}",  # deeply nested list
         "{\n    \"\": true,\n    \"regularKey\": false\n}",  # empty keys
         "{\n    \"\\u043a\\u043b\\u044e\\u0447\": \"\\u0437\\u043d\\u0430\\u0447\\u0435\\u043d\\u0438\\u0435\",\n    \"emoji\\ud83d\\ude42\": \"value\\ud83d\\ude00\"\n}",  # unicode keys
     ]
+)
+def test_json_valid_with_edge_cases(tokenizer, json_grammar, json_example):
+    next_token_validator = NextTokenValidator(
+        tokenizer,
+        json_grammar,
+    )
+    example_remainder = json_example
+    generation = ""
+    while example_remainder:
+        for tok in next_token_validator.get_valid_next_token_strs(generation):
+            if tok is None:
+                continue
+            if example_remainder.startswith(tok):
+                generation += tok
+                example_remainder = example_remainder[len(tok):]
+                break
+        else:
+            raise Exception(
+                f"Couldn't find token to create legal output given grammar, remaining output: '{example_remainder}'"
+            )
 
-    for example in valid_edgecase_jsons:
-        next_token_validator = NextTokenValidator(
-            tokenizer,
-            json_grammar,
-        )
-        example_remainder = example
-        while example_remainder:
-            for tok in next_token_validator.valid_token_str_set:
-                if tok is None:
-                    continue
-                if example_remainder.startswith(tok):
-                    next_token_validator.step_seq(tok)
-                    example_remainder = example_remainder[len(tok):]
-                    break
-            else:
-                raise Exception(
-                    f"Couldn't find token to create legal output given grammar, remaining output: '{example_remainder}'"
-                )
-
-        # EOS should be in the set of next legal tokens
-        assert None in next_token_validator.valid_token_str_set
+    # EOS should be in the set of next legal tokens
+    assert None in next_token_validator.get_valid_next_token_strs(generation)
 
 
-def test_json_fails_with_edge_cases(tokenizer, json_grammar):
-    invalid_edgecase_jsons = [
+@pytest.mark.parametrize(
+    "json_example",
+    [
         "{\n    \"key1\": \"value1\",\n    \"key2\": \"value2\",\n}",  # trailing comma
         "{\n    \"key\": \"value\" // This is a comment\n}\n",  # comment
         "{\n    \"number\": 1.2.3\n}",  # incorrect decimal format
         "{\n    \"key\": \"value\"unexpected\"\n}",  # incorrect str format
-        "{\n    \"object\": {\"key\": \"value\"}\n}\n",  # unclosed object
+        "{\n    \"object\": {\"key\": \"value\", }\n}",  # trailing comma
         "{\n    \"array\": [1, 2,, 3]\n}\n",  # double comma
     ]
+)
+def test_json_fails_with_edge_cases(tokenizer, json_grammar, json_example):
+    next_token_validator = NextTokenValidator(
+        tokenizer,
+        json_grammar,
+    )
+    example_remainder = json_example
+    generation = ""
+    while example_remainder:
+        for tok in next_token_validator.get_valid_next_token_strs(generation):
+            if tok is None:
+                continue
+            if example_remainder.startswith(tok):
+                generation += tok
+                example_remainder = example_remainder[len(tok):]
+                break
+        else:
+            return
 
-    for example in invalid_edgecase_jsons:
-        next_token_validator = NextTokenValidator(
-            tokenizer,
-            json_grammar,
-        )
-        example_remainder = example
-        while example_remainder:
-            for tok in next_token_validator.valid_token_str_set:
-                if tok is None:
-                    continue
-                if example_remainder.startswith(tok):
-                    next_token_validator.step_seq(tok)
-                    example_remainder = example_remainder[len(tok):]
-                    break
-            else:
-                return
-
-    raise Exception("Invalid json was accepted")
-
-
-def test_token_trie_sanity(tokenizer):
-    toktrie = TokenTrie(tokenizer)
-
-    all_prefixes = toktrie.get_next_level_token_prefixes("")
-
-    # every token should be composable from a single unique char, so they will all be len of 1
-    assert all([len(p) == 1 for p in all_prefixes])
-
-    # every token should have one of these prefixes as a start character
-    assert all(
-        [t[0] in all_prefixes for t in toktrie.norm_vocab if t is not None])
-
-    # construct the set of next level prefixes
-    all_subprefixes = set()
-    for pfx in all_prefixes:
-        all_subprefixes |= toktrie.get_next_level_token_prefixes(pfx)
-
-    # these should have varying length because some tokens don't have level-2 prefixes
-    assert len(set([len(spfx) for spfx in all_subprefixes])) > 1
+    raise Exception(f"Invalid json was accepted: '{json_example}'")
 
 
 @pytest.mark.parametrize(
     "start_tok, validator",
     [
-        (29945, float),  # 5 - float
-        (285, lambda s: bool(json.dumps(s))),  # f for false
-        (260, lambda s: bool(json.dumps(s))),  # t for false
-        (376, lambda s: str(json.dumps(s))),  #  " for string
+        ("5", float),  # 5 - float
+        ("f", lambda s: bool(json.dumps(s))),  # f for false
+        ("t", lambda s: bool(json.dumps(s))),  # t for false
+        ('"', lambda s: str(json.dumps(s))),  #  " for string
     ])
 def test_gen_primative(json_grammar, tokenizer, start_tok, validator):
     # Note: string may last a
@@ -272,7 +257,9 @@ def test_gen_primative(json_grammar, tokenizer, start_tok, validator):
             legal_chars=set(map(chr, range(256))),
         )
 
-        token_ids = [start_tok]
+        start_token_id = list(grammar_logits_processor.vocab[start_tok])[0]
+
+        token_ids = [start_token_id]
         while True:
             logits = grammar_logits_processor(token_ids=token_ids,
                                               logits=np.random.uniform(
@@ -300,7 +287,7 @@ def test_random_grammared_generation(json_grammar, tokenizer):
     # bias closing tokens logits to prevent infinite generation
     closing_token_ids = set([
         tok_id for tok_str in ["]", "}", '"', ",", None]
-        for tok_id in grammar_logits_processor.token_trie.norm_vocab[tok_str]
+        for tok_id in grammar_logits_processor.vocab[tok_str]
     ])
     closing_tokens_bias = -10
 
@@ -309,7 +296,7 @@ def test_random_grammared_generation(json_grammar, tokenizer):
     # gramatically complicated and result in a less interesting test
     opening_token_ids = set([
         tok_id for tok_str in ["[", "{", '"', ","]
-        for tok_id in grammar_logits_processor.token_trie.norm_vocab[tok_str]
+        for tok_id in grammar_logits_processor.vocab[tok_str]
     ])
     opening_tokens_bias = 5
 
@@ -337,7 +324,7 @@ def test_integration_with_vllm(vllm_runner, hf_runner):
     dtype = "half"
 
     tokenizer = hf_runner(model_id, dtype=dtype).tokenizer
-    grammar = """?start: "hello" | "world" """
+    grammar = ""?start: "hello" | "world" ""
 
     grammar_logits_processor = GrammarLogitsProcessor(tokenizer, grammar)
     sampling_params = SamplingParams(
