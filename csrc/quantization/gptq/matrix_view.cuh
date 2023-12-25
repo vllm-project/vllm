@@ -182,6 +182,57 @@ public:
     }
 };
 
+class MatrixView_q3_row
+{
+public:
+    const uint32_t* data;
+    const int height;
+    const int width;
+
+    __device__ __forceinline__ MatrixView_q3_row(const uint32_t* data, const int height, const int width)
+        : data(data), height(height), width(width)
+    { }
+
+    __device__ __forceinline__ int item(int row, int column) const
+    {
+        int z_w = column * 3 / 32;
+        int z_mod =  column & 0x1f;
+
+        if (z_mod == 10) {
+            return (data[row * width * 3 / 32 + z_w] >> 30) | ((data[row * width * 3 / 32 + (z_w + 1)] << 2) & 0x4);
+        } else if (z_mod == 21) {
+            return (data[row * width * 3 / 32 + z_w] >> 31) | ((data[row * width * 3 / 32 + (z_w + 1)] << 1) & 0x6);
+        } else if (z_mod < 10) {
+            return (data[row * width * 3 / 32 + z_w] >> (z_mod * 3)) & 0x07;
+        } else if (z_mod < 21) {
+            return (data[row * width * 3 / 32 + z_w] >> (z_mod * 3  - 32)) & 0x07;
+        } else {
+            return (data[row * width * 3 / 32 + z_w] >> (z_mod * 3  - 64)) & 0x07;
+        }
+    }
+
+    __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const
+    {
+        int shift = (column & 0x1f);
+        uint32_t d;
+        if (shift <= 4) {
+            d = data[row * width / 32 * 3 + column * 3 / 32] >> (shift * 3);
+        } else if (shift == 8) {
+            d = (data[row * width / 32 * 3 + column * 3 / 32] >> 24) | ((data[row * width / 32 * 3 + column * 3 / 32 + 1] & 0x0f) << 8);
+        } else if (shift <= 16) {
+            d = data[row * width / 32 * 3 + column * 3 / 32] >> (shift * 3 - 32);
+        } else if (shift == 20) {
+            d = (data[row * width / 32 * 3 + column * 3 / 32] >> 28) | ((data[row * width / 32 * 3 + column * 3 / 32 + 1] & 0xff) << 4);
+        } else {
+            d = data[row * width / 32 * 3 + column * 3 / 32] >> (shift * 3 - 64);
+        }
+        items[0] = d & 0x07;
+        items[1] = (d >> 3) & 0x07;
+        items[2] = (d >> 6) & 0x07;
+        items[3] = (d >> 9) & 0x07;
+    }
+};
+
 class MatrixView_q8_row
 {
 public:
