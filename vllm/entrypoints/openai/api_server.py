@@ -277,7 +277,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             skip_special_tokens=request.skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
-        
+
         formatters = []
         if request.regex_format:
             regex_formater = build_vllm_logits_processor(
