@@ -288,7 +288,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             json_formater = build_vllm_logits_processor(
                 tokenizer,
                 JsonSchemaParser(request.json_format if isinstance(
-                    request.json_format, str) else None))
+                    request.json_format, dict) else None))
             formatters.append(json_formater)
 
         sampling_params.logits_processors = formatters
@@ -550,7 +550,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             json_formater = build_vllm_logits_processor(
                 tokenizer,
                 JsonSchemaParser(request.json_format if isinstance(
-                    request.json_format, str) else None))
+                    request.json_format, dict) else None))
             formatters.append(json_formater)
 
         sampling_params.logits_processors = formatters
