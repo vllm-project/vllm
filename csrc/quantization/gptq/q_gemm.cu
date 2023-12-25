@@ -654,7 +654,7 @@ void gemm_half_q_half_cuda_part
     gridDim.y = DIVIDE(size_m, m_count);
     gridDim.z = DIVIDE(size_k, BLOCK_KN_SIZE);
 
-    fp_gemm_half_q_half_gptq_kernel kernel = pick_gemm_half_q_half_gptq_kernel(true, m_count);
+    fp_gemm_half_q_half_gptq_kernel kernel = pick_gemm_half_q_half_gptq_kernel(true, m_count, bit);
 
     kernel<<<gridDim, blockDim>>>
     (
@@ -667,7 +667,7 @@ void gemm_half_q_half_cuda_part
         size_n,
         size_k,
         groups,
-        b_q_perm,
+        b_q_perm
     );
 }
 
@@ -978,7 +978,6 @@ __global__ void reconstruct_exllama_2bit_kernel
             {
                 for (int j = 0; j < 8; j++)
                 {
-                    printf("Debug %d %d %d\n", offset_k, lk, n);
                     for (int v = 0; v < 4; v++) dq[v][j] = __hmul2(scales[v], dq[v][j]);
                     b_.set4(offset_k + lk++, n, __low2half(dq[0][j]), __low2half(dq[1][j]), __low2half(dq[2][j]), __low2half(dq[3][j]));
                     b_.set4(offset_k + lk++, n, __high2half(dq[0][j]), __high2half(dq[1][j]), __high2half(dq[2][j]), __high2half(dq[3][j]));
@@ -1177,7 +1176,7 @@ __global__ void gemm_half_q_half_alt_2bit_kernel(
     int g_h = h * 16;
     int k = 0;
     int z_w = w / 16;
-    int z_mod = (w % 16) * 2
+    int z_mod = (w % 16) * 2;
     half2 res2;
     half res[BLOCK_M_SIZE_MAX] = {};
 
@@ -1763,7 +1762,7 @@ void gptq_shuffle
     vllm::gptq::shuffle_exllama_weight(
         (uint32_t*) q_weight.data_ptr(),
         q_perm.device().is_meta() ? NULL : (int*) q_perm.data_ptr(),
-        q_weight.size(0) * 8,
+        q_weight.size(0) * 32 / bit,
         q_weight.size(1),
         bit
     );
