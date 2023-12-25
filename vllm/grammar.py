@@ -63,38 +63,58 @@ class FastInteractiveParser(InteractiveParser):
 #########################################################################
 
 
-def get_pattern_validator(pattern: Pattern, is_complete: bool):
+
+
+def get_pattern_validator(pattern: Pattern):
     """
     Accepts a pattern object, either lark.lexer.PatternStr or lark.lexer.PatternRE
     Returns a function which validates a complete or partial string
 
     e.g. for PatternRE "abc*", is_complete=False returns true for "a", "ab", "abc", "abcccc"
+
+    Returns Tuple with 2 values
+    - 0) The processed sequence
+    - 1) None if doesn't complete terminal, "" if completes terminal with no remainder, or "remainder"
     """
     if isinstance(pattern, PatternRE):
         compiled_pattern = regex.compile(pattern.value)
-        if is_complete:
-            # False: No match
-            # int: match length
-            def get_fullmatch_length(seq):
-                r = compiled_pattern.match(seq)
-                if r is None or not r.spans():
-                    return None
-                spans = r.spans()[0]
-                return spans[1] - spans[0]
-            return get_fullmatch_length
-        else:
-            return (lambda seq: compiled_pattern.fullmatch(seq, partial=True)
-                is not None)
+        @lru_cache(int(1e6))
+        def get_re_matched_parts(seq):
+            # match complete terminal, potentially with leftover seq
+            complete_terminal_match = compiled_pattern.match(seq)
+            if complete_terminal_match:
+                spans = complete_terminal_match.spans()
+                if spans:
+                    span = complete_terminal_match.spans()[0]
+                    if span[0] == 0:
+                        processed_seq = seq[:span[1]]
+                        remainder_seq = seq[span[1]:]
+                        return processed_seq, remainder_seq
+
+            # match doesn't complete terminal, but the sequence is fully allowed
+            partial_terminal_match = compiled_pattern.fullmatch(seq, partial=True)
+            if partial_terminal_match:
+                return seq, None
+
+            return None, None
+
+        return get_re_matched_parts
+
     elif isinstance(pattern, PatternStr):
         base_str = pattern.value
-        if is_complete:
-            def get_strmatch_length(seq):
-                if not seq.startswith(base_str):
-                    return None
-                return len(base_str)
-            return get_strmatch_length
-        else:
-            return (lambda seq: base_str.startswith(seq))
+        @lru_cache(int(1e6))
+        def get_str_matched_parts(seq):
+            if seq.startswith(base_str):
+                processed_seq = seq[:len(base_str)]
+                remainder_seq = seq[len(base_str):]
+                return processed_seq, remainder_seq
+            elif base_str.startswith(seq):
+                return seq, None
+            else:
+                return None, None
+
+        return get_str_matched_parts
+
     else:
         raise TypeError(f"Invalid pattern type: {type(pattern)}")
 
@@ -126,7 +146,7 @@ class Trie:
     def __init__(self):
         self.root = TrieNode()
 
-    def __setitem__(self, key, value):
+    def insert(self, key, value):
         node = self.root
         for char in key:
             if char not in node.children:
@@ -147,6 +167,9 @@ class Trie:
                     best_value = node.value
             else:
                 break  # break if char not in trie
+        if node.is_end_of_word:
+            best_value = node.value
+
         remainder = word[len(prefix):]
         assert best_value is not None
         return prefix, best_value, remainder
@@ -204,16 +227,10 @@ class IncrementalParserState:
         interactive_parser.lexer_thread.state.text = ""
 
         _seq_validator = {
-            (term.name, "partial"): get_pattern_validator(term.pattern, is_complete=False)
+            (term.name): get_pattern_validator(term.pattern)
             for term in lark_parser.terminals
         }
-        _seq_validator.update({
-            (term.name, "complete"): get_pattern_validator(term.pattern, is_complete=True)
-            for term in lark_parser.terminals
-        })
-
-        _seq_validator[("$END", "partial")] = lambda seq: seq is None
-        _seq_validator[("$END", "complete")] = lambda seq: seq is None
+        _seq_validator["$END"] = lambda seq: tuple(["" if seq is None else None] * 2)
 
 
         parser = cls(
@@ -227,26 +244,22 @@ class IncrementalParserState:
             _memo={},
             _full_seq_trie=Trie()
         )
-        parser._full_seq_trie[""] = parser
+        parser._full_seq_trie.insert("", parser)
         return parser
 
-    def new(self, prior_terminal_ids, partial_token, full_seq, **kwargs):
-        # check cache
-        term_key = (prior_terminal_ids, partial_token)
+    def new(self, **kwargs):
+        term_key = (kwargs["prior_terminal_ids"], kwargs["partial_token"])
         if term_key in self._memo:
             return self._memo[term_key]
 
-        # create
         instance_dict = {
             f.name: getattr(self, f.name)
             for f in fields(self)
         }
         instance_dict.update(kwargs)
         inst = self.__class__(**instance_dict)
-
-        # update cache
         self._memo[term_key] = inst
-        self._full_seq_trie[full_seq] = inst
+
         return inst
 
     def __getitem__(self, full_seq):
@@ -256,6 +269,7 @@ class IncrementalParserState:
         match_seq, parser, remainder_seq = self._full_seq_trie.get_best(full_seq)
         if remainder_seq:
             parser = parser.step_seq(remainder_seq)
+            self._full_seq_trie.insert(full_seq, parser)
         return parser
 
     @memoize_by_instance
@@ -268,72 +282,67 @@ class IncrementalParserState:
               return new parser with updated partial token str and updated terminal candidates
         - If no partial matches, return None
         """
+        if new_seq == "":
+            return self
+
         new_maybe_partial_token = self.partial_token + new_seq
 
-        complete_terminal = self.get_complete_terminal(
-            tuple(sorted(self.allowed_terminals)),
-            new_maybe_partial_token,
+        best_terminal, processed_seq, remainder_seq = self.get_best_matched_terminal(
+            self.allowed_terminals,
+            new_maybe_partial_token
         )
-        if complete_terminal is not None:
-            terminal_name = complete_terminal["terminal_id"]
-            if terminal_name in self._ignored_terms:
-                new_interactive_parser = self.interactive_parser
-            else:
-                new_interactive_parser = self.get_stepped_parser_state(terminal_name)
 
-            ml = complete_terminal["match_length"]
-            remainder_seq = new_seq[ml:]
-            processed_seq = new_seq[:ml]
+        if best_terminal is None:
+            return None
 
-            new_parser = self.new(
-                full_seq=self.full_seq + processed_seq,
-                interactive_parser=new_interactive_parser,
-                prior_terminal_ids=tuple(list(self.prior_terminal_ids) + [terminal_name]),
-                partial_token="",
-                terminal_candidates=None,
+        # candidate doesn't complete terminal
+        if remainder_seq is None:
+            partial_terminal_ids = self.get_partial_terminal_ids(
+                self.allowed_terminals,
+                new_maybe_partial_token,
             )
-
-            if remainder_seq:
-                return new_parser.step_seq(remainder_seq)
-            else:
-                return new_parser
-
-        partial_terminal_ids = self.get_partial_terminal_ids(
-            tuple(sorted(self.allowed_terminals)),
-            new_maybe_partial_token,
-        )
-        if partial_terminal_ids:
             return self.new(
                 full_seq=self.full_seq + new_seq,
                 prior_terminal_ids=self.prior_terminal_ids,
                 partial_token=new_maybe_partial_token,
                 terminal_candidates=partial_terminal_ids,
             )
+
+        # terminal completes rule
         else:
-            return None
+            if best_terminal in self._ignored_terms:
+                new_interactive_parser = self.interactive_parser
+            else:
+                new_interactive_parser = self.get_stepped_parser_state(best_terminal)
 
+            new_parser = self.new(
+                full_seq=self.full_seq[:-len(self.partial_token)] + processed_seq,
+                interactive_parser=new_interactive_parser,
+                prior_terminal_ids=hash((self.prior_terminal_ids, best_terminal)),
+                partial_token="",
+                terminal_candidates=None,
+            )
 
-    def get_complete_terminal(self, checked_terminals, seq):
-        terminal_matchlens = {
-            term: self._seq_validator[(term, "complete")](seq)
-            for term in checked_terminals
-        }
-        terminal_matchlens = {term: ml for term, ml in terminal_matchlens.items() if ml}
-        if not terminal_matchlens:
-            return None
-        if len(terminal_matchlens) > 1:
-            terminal_matchlens = {
-                t: ml for t, ml in terminal_matchlens.items()
-                if t not in self._ignored_terms
-            }
-        assert len(terminal_matchlens) == 1
-        result = next(iter(terminal_matchlens.items()))
-        return {"terminal_id": result[0], "match_length": result[1]}
+            # no leftover to process
+            if remainder_seq == "":
+                return new_parser
+
+            # process remainder
+            else:
+                return new_parser.step_seq(remainder_seq)
+
+    def get_best_matched_terminal(self, checked_terminals, seq):
+        for terminal in checked_terminals:
+            processed_seq, remainder_seq = self._seq_validator[terminal](seq)
+            if processed_seq:
+                return terminal, processed_seq, remainder_seq
+
+        return None, None, None
 
     def get_partial_terminal_ids(self, checked_terminals, seq):
         return set([
             term for term in checked_terminals
-            if self._seq_validator[(term, "partial")](seq)
+            if self._seq_validator[term](seq)[0] is not None
         ])
 
     @memoize_by_instance
@@ -352,9 +361,10 @@ class IncrementalParserState:
     @memoize_by_instance
     def allowed_terminals(self):
         if self.terminal_candidates is not None:
-            return self.terminal_candidates
-        return self.accepts()
+            return tuple(sorted(self.terminal_candidates))
+        return tuple(sorted(self.accepts()))
 
+    @memoize_by_instance
     def is_valid_next_seq(self, new_seq: Optional[str]):
         if new_seq is None:
             return "$END" in self.allowed_terminals
@@ -413,6 +423,8 @@ class NextTokenValidator:
         Generate valid token strings given the full sequence
         """
         parser = self.root_parser[full_seq]
+        if parser is None:
+            return
         for tok_str in self.vocab:
             if parser.is_valid_next_seq(tok_str):
                 yield tok_str
