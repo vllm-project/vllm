@@ -294,7 +294,5 @@ def test_sampler_top_k_top_p(seed: int):
                 sampling_metadata=sampling_metadata)
     hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
-    assert ((hf_probs - sample_probs).abs() <
-            1e-5).all()  # some cases failed with 1e-4
-    assert hf_probs.count_nonzero(dim=-1).equal(
-        sample_probs.count_nonzero(dim=-1))
+    assert torch.allclose(hf_probs, sample_probs, atol=1e-5)
+    assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
