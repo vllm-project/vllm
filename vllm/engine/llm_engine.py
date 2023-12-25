@@ -599,7 +599,7 @@ class LLMEngine:
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        return self._process_model_outputs(output, scheduler_outputs) + ignored
 
     def _log_system_stats(
         self,
