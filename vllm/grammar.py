@@ -76,10 +76,8 @@ def get_pattern_validator(pattern: Pattern):
     Accepts a pattern object, either lark.lexer.PatternStr or lark.lexer.PatternRE
     Returns a function which validates a complete or partial string
 
-    e.g. for PatternRE "abc*", is_complete=False returns true for "a", "ab", "abc", "abcccc"
-
     Returns Tuple with 2 values
-    - 0) The processed sequence
+    - 0) The processed portion of the sequence (None if no match at all)
     - 1) None if doesn't complete terminal, "" if completes terminal with no remainder, or "remainder"
     """
     if isinstance(pattern, PatternRE):
@@ -183,28 +181,28 @@ class Trie:
 @dataclass
 class IncrementalParserState:
     """
-    Parsing utility which tracks state provided
-    - sequence of prior terminal ids
+    Parsing utility which enforces uniqueness of
+    - interactive parser state stack
     - incomplete `partial_token` string
-    the set of prior terminal_ids and a partial token comprise a unique parser state
+    the state of the parser and the incomplete token comprise a unique parser state
 
     Core function exposed is `self.step(new_seq)`
     - Returns a new IncrementalParserState based with new_seq applied
 
     Memoization strategy is
-    - 1) Ensure uniqueness of (prior_terminal_ids, partial_token)
+    - 1) Ensure uniqueness of (interactive_parser, partial_token)
     - 2) Cache class methods via `memoize_by_instance` which considers id(self) and fn arguments
     """
 
     # unique state key
-    prior_terminal_ids: tuple[str]
+    interactive_parser: FastInteractiveParser
     partial_token: str
 
     # orthogonal unique state key
     full_seq: str
 
     # function of key
-    interactive_parser: FastInteractiveParser
+    prior_terminal_ids: tuple[str]
     terminal_candidates: list
 
     # shared across instances
@@ -257,6 +255,7 @@ class IncrementalParserState:
         return parser
 
     def new(self, **kwargs):
+        """Cached create now state"""
         parser_state_key = (hash(kwargs["interactive_parser"]), kwargs["partial_token"])
         if parser_state_key in self._memo:
             return self._memo[parser_state_key]
@@ -273,9 +272,7 @@ class IncrementalParserState:
         return inst
 
     def __getitem__(self, full_seq):
-        """
-        Get the parser of a full sequence
-        """
+        """Get the parser state, given a full sequence"""
         match_seq, parser, remainder_seq = self._full_seq_trie.get_best(full_seq)
         if parser is None:
             return
