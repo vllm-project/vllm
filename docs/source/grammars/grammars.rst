@@ -1,9 +1,13 @@
 .. _grammars:
 
+.. toctree::
+ :maxdepth: 2
+
+
 Grammars
 ========
 
-vLLM offers `Lark <https://lark-parser.readthedocs.io/en/stable/>`_ based EBNF grammars via ``vllm.grammar.GrammarLogitsProcessor``.
+vLLM offers `Lark <https://lark-parser.readthedocs.io/en/stable/>`_ style EBNF grammars via ``vllm.grammar.GrammarLogitsProcessor``.
 
 ``GrammarLogitsProcessor`` ensures generated text follows the rules of a grammar. This provides the ability to guarantee your output is syntactically valid JSON, SQL, Python, RegEx, etc.
 
@@ -12,11 +16,13 @@ Sample Code for JSON
 
 .. code-block:: python
 
-    json_grammar = """
-    ?value: dict
+    json_grammar = r"""
+    start: value
+    value: WS* object WS*
+    object: dict
           | list
           | string
-          | SIGNED_NUMBER      -> number
+          | signed_number      -> number
           | "true"             -> true
           | "false"            -> false
           | "null"             -> null
@@ -24,12 +30,24 @@ Sample Code for JSON
     list : "[" [value ("," value)*] "]"
 
     dict : "{" [pair ("," pair)*] "}"
-    pair : string ":" value
+    pair : WS* string WS* ":" value
 
-    string : ESCAPED_STRING
+    string : "\"" escaped_string_char* "\""
+    escaped_string_char: _STR_INNER_CHAR | _ESCAPED_CHAR
+    _ESCAPED_CHAR: "\\" _ESCAPABLE_CHAR
+    _STR_INNER_CHAR: /[^\\\"]/
+    _ESCAPABLE_CHAR: /[\\\/bfnrtu]/
 
-    %import common.ESCAPED_STRING
-    %import common.SIGNED_NUMBER
+    signed_number: ["+"|"-"] number
+    number: float | int
+    float: int exp | decimal exp?
+    decimal: int "." int? | "." int
+    exp: ("e"|"E") signed_int
+    signed_int: ["+"|"-"] int
+    int: DIGIT+
+    DIGIT: "0".."9"
+
+    WS: /[ \t\f\r\n]/
     """
     grammar_logits_processor = GrammarLogitsProcessor(
         tokenizer,
@@ -38,27 +56,18 @@ Sample Code for JSON
     )
     SamplingParams(logits_processor=grammar_logits_processor)
 
-Resources
----------
-
-- `How to write an EBNF grammar for Lark <https://lark-parser.readthedocs.io/en/latest/grammar.html>`_
-- `Wikipedia - EBNF <https://en.wikipedia.org/wiki/Extended_Backus%E2%80%93Naur_form>`_
-- `Wikipedia - LALR Parser <https://en.wikipedia.org/wiki/LALR_parser>`_
-
-Example Lark Grammars
----------------------
-
-- `JSON <https://lark-parser.readthedocs.io/en/latest/examples/advanced/_json_parser.html>`_
-- `Python3 <https://github.com/python-poetry/poetry-core/blob/main/src/poetry/core/_vendor/lark/grammars/python.lark>`_
-- `Resource with many grammars including SQLite, TOML, YAML, Lua, and more <https://github.com/ligurio/lark-grammars>`_
 
 Performance
 -----------
 
-For a simple JSON grammar, on the authors mid-end laptop using codeLlama-7b's vocabulary, generation occurred at ~10 validated logit sets per second. However performance was improved dramatically from the baseline with a few tweaks to ~400/s. These tweaks include
+For the provided JSON grammar in the subsection below, constrained to only keyboard characters, on the authors mid-end laptop using codeLlama-7b's vocabulary, generation occurred at the following rates:
 
-- Optimizing the grammar
-- Constraining legal characters
+- first 10 tokens: 3.47 tokens / second
+- first 100 tokens: 8.61 tokens / second
+- first 1,000 tokens: 14.41 tokens / second
+- first 10,000 tokens: 23.80 tokens / second
+
+There is a "warmup" period where token legality is cached based on parser state. The first generation and first tokens within that generation are the slowest.
 
 **Design your EBNF grammar with minimal regexp**
 
@@ -76,7 +85,7 @@ Breaking down the following expressions ESCAPE_STRING into an expression with ma
           | "true"             -> true
           | "false"            -> false
           | "null"             -> null
-
+python parser test case
     list : "[" [value ("," value)*] "]"
 
     dict : "{" [pair ("," pair)*] "}"
@@ -125,3 +134,38 @@ Expect increased performance if you constrain your generation to UTF-8, eliminat
         grammar,
         legal_chars=set(map(chr, range(256))),,
     )
+
+Example 2: constrain the grammar to the set of keyboard typeable characters:
+
+.. code-block::
+
+    def keyboard_chars():
+        keyboard_chars = ""
+        keyboard_chars += "abcdefghijklmnopqrstuvwxyz"
+        keyboard_chars += "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        keyboard_chars += "0123456789"
+        keyboard_chars += "`~!@#$%^&*()-_=+[{]}\\|;:'\",<.>/? "
+        keyboard_chars += "\t\n"
+        return keyboard_chars
+    GrammarLogitsProcessor(
+        tokenizer,
+        grammar,
+        legal_chars=set(keyboard_chars()),
+    )
+
+
+Resources
+---------
+
+- `How to write an EBNF grammar for Lark <https://lark-parser.readthedocs.io/en/latest/grammar.html>`_
+- `Wikipedia - EBNF <https://en.wikipedia.org/wiki/Extended_Backus%E2%80%93Naur_form>`_
+- `Wikipedia - LALR Parser <https://en.wikipedia.org/wiki/LALR_parser>`_
+
+Example Lark Grammars
+---------------------
+
+Note: These grammars should
+
+- `JSON <https://lark-parser.readthedocs.io/en/latest/examples/advanced/_json_parser.html>`_
+- `Python3 <https://github.com/python-poetry/poetry-core/blob/main/src/poetry/core/_vendor/lark/grammars/python.lark>`_
+- `Resource with many grammars including SQLite, TOML, YAML, Lua, and more <https://github.com/ligurio/lark-grammars>`_
