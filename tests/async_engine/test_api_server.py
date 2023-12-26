@@ -51,10 +51,9 @@ def test_api_server(api_server):
                 for r in pool.map(_query_server, prompts):
                     result = r
                     break
-            except Exception as e:
-                print("fail", e)
+            except requests.exceptions.ConnectionError:
                 time.sleep(1)
-        print("Server is ready")
+
         # Actual tests start here
         # Try with 1 prompt
         for result in pool.map(_query_server, prompts):
@@ -72,7 +71,7 @@ def test_api_server(api_server):
         # Cancel requests
         prompts = ["canceled requests"] * 100
         pool.map_async(_query_server, prompts)
-        time.sleep(0.01)
+        time.sleep(0.001)
         pool.terminate()
         pool.join()
 
