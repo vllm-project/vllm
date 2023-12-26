@@ -182,8 +182,7 @@ def test_can_generate_with_grammar(tokenizer, request, grammar_fixture,
         "{\n    \"deepArray\": [[[[[\"deep\"]]]]]\n}",  # deeply nested list
         "{\n    \"\": true,\n    \"regularKey\": false\n}",  # empty keys
         "{\n    \"\\u043a\\u043b\\u044e\\u0447\": \"\\u0437\\u043d\\u0430\\u0447\\u0435\\u043d\\u0438\\u0435\",\n    \"emoji\\ud83d\\ude42\": \"value\\ud83d\\ude00\"\n}",  # unicode keys
-    ]
-)
+    ])
 def test_json_valid_with_edge_cases(tokenizer, json_grammar, json_example):
     next_token_validator = NextTokenValidator(
         tokenizer,
@@ -217,8 +216,7 @@ def test_json_valid_with_edge_cases(tokenizer, json_grammar, json_example):
         "{\n    \"key\": \"value\"unexpected\"\n}",  # incorrect str format
         "{\n    \"object\": {\"key\": \"value\", }\n}",  # trailing comma
         "{\n    \"array\": [1, 2,, 3]\n}\n",  # double comma
-    ]
-)
+    ])
 def test_json_fails_with_edge_cases(tokenizer, json_grammar, json_example):
     next_token_validator = NextTokenValidator(
         tokenizer,
