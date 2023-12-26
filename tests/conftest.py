@@ -8,8 +8,9 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-_TEST_PROMPTS = ["prompts/example.txt"]
-_LONG_PROMPTS = ["prompts/summary.txt"]
+_TEST_DIR = os.path.dirname(__file__)
+_TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
+_LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 
 def _read_prompts(filename: str) -> str:
@@ -24,7 +25,7 @@ def _read_prompts(filename: str) -> str:
 def example_prompts() -> List[str]:
     prompts = []
     for filename in _TEST_PROMPTS:
-        prompts += _read_prompts(os.path.join("tests", filename))
+        prompts += _read_prompts(filename)
     return prompts
 
 
@@ -32,7 +33,7 @@ def example_prompts() -> List[str]:
 def example_long_prompts() -> List[str]:
     prompts = []
     for filename in _LONG_PROMPTS:
-        prompts += _read_prompts(os.path.join("tests", filename))
+        prompts += _read_prompts(filename)
     return prompts
 
 
