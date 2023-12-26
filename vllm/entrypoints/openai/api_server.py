@@ -610,7 +610,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                     logprobs=logprobs,
                     finish_reason=finish_reason,
                 )
-                yield f"data: {response_json}\n\n"
+
                 if output.finish_reason is not None:
                     logprobs = (LogProbs()
                                 if request.logprobs is not None else None)
@@ -628,6 +628,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                         finish_reason=output.finish_reason,
                         usage=final_usage,
                     )
+                    yield f"data: {response_json}\n\n"
+                else:
                     yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"
 
