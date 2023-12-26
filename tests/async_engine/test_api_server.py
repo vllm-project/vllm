@@ -44,13 +44,14 @@ def test_api_server(api_server):
     """
     with Pool(32) as pool:
         # Wait until the server is ready
-        prompts = ["Hello world"] * 1
+        prompts = ["warm up"] * 1
         result = None
         while not result:
             try:
-                for _ in pool.map(_query_server, prompts):
+                for r in pool.map(_query_server, prompts):
+                    result = r
                     break
-            except Exception:
+            except requests.exceptions.ConnectionError:
                 time.sleep(1)
 
         # Actual tests start here
@@ -63,13 +64,14 @@ def test_api_server(api_server):
         assert num_aborted_requests == 0
 
         # Try with 100 prompts
-        prompts = ["Hello world"] * 100
+        prompts = ["test prompt"] * 100
         for result in pool.map(_query_server, prompts):
             assert result
 
         # Cancel requests
+        prompts = ["canceled requests"] * 100
         pool.map_async(_query_server, prompts)
-        time.sleep(0.01)
+        time.sleep(0.001)
         pool.terminate()
         pool.join()
 
@@ -81,6 +83,6 @@ def test_api_server(api_server):
     # check that server still runs after cancellations
     with Pool(32) as pool:
         # Try with 100 prompts
-        prompts = ["Hello world"] * 100
+        prompts = ["test prompt after canceled"] * 100
         for result in pool.map(_query_server, prompts):
             assert result
