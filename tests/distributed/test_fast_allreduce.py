@@ -1,8 +1,10 @@
-import torch
 import random
-import torch.distributed as dist
-from vllm.model_executor.parallel_utils.fast_allreduce import FastAllreduce
+
 import pytest
+import torch
+import torch.distributed as dist
+
+from vllm.model_executor.parallel_utils.fast_allreduce import FastAllreduce
 
 from tests.distributed.comm_utils import init_test_distributed_environment, multi_process_tensor_parallel
 

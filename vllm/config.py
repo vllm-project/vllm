@@ -331,7 +331,9 @@ class ParallelConfig:
         worker_use_ray: Whether to use Ray for model workers. Will be set to
             True if either pipeline_parallel_size or tensor_parallel_size is
             greater than 1.
-        disable_fast_allreduce: Only applicable if enforce_eage is False and using tensor parallelism. Whether to disable fast allreduce path
+        disable_fast_allreduce: Disable the custom all-reduce kernel and fall back to NCCL.
+            Note that the custom kernel is only used with CUDA graph and never used in eager
+            mode.
     """
 
     def __init__(
@@ -349,7 +351,7 @@ class ParallelConfig:
         self.disable_fast_allreduce = disable_fast_allreduce
         if not disable_fast_allreduce and (is_hip()
                                            or pipeline_parallel_size > 1):
-            self.disable_fast_allreduce = False
+            self.disable_fast_allreduce = True
             logger.info(
                 "Fast allreduce automatically disabled. Not supported on HIP and pipeline parallel"
             )

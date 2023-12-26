@@ -9,19 +9,19 @@ fa_handle = None
 is_capturing = False
 
 
-def init_fast_ar():
+def init_fast_ar() -> None:
     global fa_handle
     world_size = get_tensor_model_parallel_world_size()
     if world_size > 1:
         fa_handle = FastAllreduce(get_tensor_model_parallel_rank(), world_size)
 
 
-def begin_capture():
+def begin_capture() -> None:
     global is_capturing
     is_capturing = True
 
 
-def end_capture():
+def end_capture() -> None:
     global is_capturing
     is_capturing = False
 

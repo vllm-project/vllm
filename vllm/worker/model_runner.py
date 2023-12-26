@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-import vllm.model_executor.parallel_utils.communication_op as comm_op
+from vllm.model_executor.parallel_utils import communication_op as comm_op
 from vllm.utils import in_wsl
 
 logger = init_logger(__name__)

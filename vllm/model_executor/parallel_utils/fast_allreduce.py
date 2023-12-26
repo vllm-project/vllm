@@ -1,8 +1,9 @@
+import pynvml
 import torch
 import torch.distributed as dist
-import pynvml
-from vllm.logger import init_logger
+
 from vllm._C import fast_ar
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 

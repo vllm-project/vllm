@@ -1,12 +1,8 @@
-"""Test the communication operators.
-
-Run `pytest tests/distributed/test_comm_ops.py --forked`.
-"""
 from multiprocessing import Process, set_start_method
 import torch
 
 from vllm.config import ParallelConfig
-from vllm.engine.ray_utils import get_open_port
+from vllm.utils import get_open_port
 from vllm.worker.worker import _init_distributed_environment
 
 

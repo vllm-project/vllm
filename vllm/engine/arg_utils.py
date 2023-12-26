@@ -203,8 +203,8 @@ class EngineArgs:
                             help='maximum context length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode.')
-        parser.add_argument('--disable_fast_allreduce',
-                            type=int,
+        parser.add_argument('--disable-fast-allreduce',
+                            action='store_true',
                             default=EngineArgs.disable_fast_allreduce,
                             help='See ParallelConfig')
         return parser
