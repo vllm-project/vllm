@@ -1,5 +1,5 @@
-.. toctree::
- :maxdepth: 2
+.. contents:: Table of Contents
+    :depth: 3
 
 
 .. _grammars:
