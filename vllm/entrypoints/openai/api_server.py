@@ -75,6 +75,10 @@ def parse_args():
                         help="The file path to the chat template, "
                         "or the template in single-line form "
                         "for the specified model")
+    parser.add_argument("--disable-special-tokens",
+                        action='store_true',
+                        help="Disable special tokens when tokenizing. "
+                        "Usefule for chat template with special tokens.")
     parser.add_argument("--response-role",
                         type=str,
                         default="assistant",
@@ -141,13 +145,14 @@ async def check_model(request) -> Optional[JSONResponse]:
 async def check_length(
     request: Union[ChatCompletionRequest, CompletionRequest],
     prompt: Optional[str] = None,
-    prompt_ids: Optional[List[int]] = None
+    prompt_ids: Optional[List[int]] = None,
+    add_special_tokens: bool = True
 ) -> Tuple[List[int], Optional[JSONResponse]]:
     assert (not (prompt is None and prompt_ids is None)
             and not (prompt is not None and prompt_ids is not None)
             ), "Either prompt or prompt_ids should be provided."
     input_ids = prompt_ids if prompt_ids is not None else tokenizer(
-        prompt).input_ids
+        prompt, add_special_tokens=add_special_tokens).input_ids
     token_num = len(input_ids)
 
     if request.max_tokens is None:
@@ -247,7 +252,9 @@ async def create_chat_completion(request: ChatCompletionRequest,
         logger.error(f"Error in applying chat template from request: {str(e)}")
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
-    token_ids, error_check_ret = await check_length(request, prompt=prompt)
+    add_special_tokens = not args.disable_special_tokens
+    token_ids, error_check_ret = await check_length(
+        request, prompt=prompt, add_special_tokens=add_special_tokens)
     if error_check_ret is not None:
         return error_check_ret
 
