@@ -65,8 +65,18 @@ class Worker:
 
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
+        
+        # This caused problem for rank non-0 (for example, 1 when -tp 2), when calling torch.cuda.set_device(self.device) in ROCm.
+        # HIP Error invalid device ordial
+        # where CUDA_VISIABLE_DEVICES=0,1, and set_device with cuda:1.
+        try:
+            self.device = torch.device(f"cuda:{self.local_rank}")
+            torch.cuda.set_device(self.device)
+        except RuntimeError as re:
+            print(f"RuntimeError {re} in cuda.set_device {self.device}, visible device={os.environ.get('CUDA_VISIBLE_DEVICES')}. ")
+            self.device = torch.device("cuda:0")
+            print(f"Trying get around by set_device to {self.device}")
+            torch.cuda.set_device(self.device)
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 
