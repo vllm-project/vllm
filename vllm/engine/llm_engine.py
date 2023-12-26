@@ -222,14 +222,15 @@ class LLMEngine:
                                                  worker_node_and_gpu_ids),
                                              start=1):
             local_rank = node_workers[node_id].index(rank)
-            worker.init_worker.remote(lambda: Worker(
-                model_config,
-                parallel_config,
-                scheduler_config,
-                local_rank,
-                rank,
-                distributed_init_method,
-            ))
+            worker.init_worker.remote(
+                lambda rank=rank, local_rank=local_rank: Worker(
+                    model_config,
+                    parallel_config,
+                    scheduler_config,
+                    local_rank,
+                    rank,
+                    distributed_init_method,
+                ))
 
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)

@@ -1,9 +1,8 @@
-import os
 from typing import Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_open_port, is_hip, set_cuda_visible_devices
+from vllm.utils import is_hip, set_cuda_visible_devices
 
 logger = init_logger(__name__)
 
