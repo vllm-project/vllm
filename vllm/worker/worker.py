@@ -73,7 +73,9 @@ class Worker:
             self.device = torch.device(f"cuda:{self.local_rank}")
             torch.cuda.set_device(self.device)
         except RuntimeError as re:
-            print(f"RuntimeError {re} in cuda.set_device {self.device}, visible device={os.environ.get('CUDA_VISIBLE_DEVICES')}. ")
+            print(
+                f"RuntimeError {re} in cuda.set_device {self.device}, visible device={os.environ.get('CUDA_VISIBLE_DEVICES')}. "
+            )
             self.device = torch.device("cuda:0")
             print(f"Trying get around by set_device to {self.device}")
             torch.cuda.set_device(self.device)

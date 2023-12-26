@@ -41,8 +41,8 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     
     max_shared_mem = cuda_utils.get_device_attribute(
         cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
-    if max_shared_mem==0 and is_hip(): 
-        # got 0 sometimes
+    if max_shared_mem == 0 and is_hip(): 
+        # got 0 sometimes when using 74
         cudaDevAttrMaxSharedMemoryPerBlockOptin = 97
         max_shared_mem = cuda_utils.get_device_attribute(
             cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
