@@ -116,6 +116,7 @@ Alternatively, if you plan to install vLLM-ROCm on a local machine or start from
 
 - `ROCm <https://rocm.docs.amd.com/en/latest/deploy/linux/index.html>`_
 - `Pytorch <https://pytorch.org/>`_
+- `hipBLAS <https://rocm.docs.amd.com/projects/hipBLAS/en/latest/install.html>`_
 
 1. Install `flash attention for ROCm <https://github.com/ROCmSoftwarePlatform/flash-attention/tree/flash_attention_for_rocm>`_
 
