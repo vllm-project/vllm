@@ -181,7 +181,8 @@ class Worker:
                 swap_in_src, swap_in_dst, swap_out_src, swap_out_dst, copy_src,
                 copy_dst
             ]
-            broadcast_object_list([num_seq_groups] + swapping_block_numbers, src=0)
+            broadcast_object_list([num_seq_groups] + swapping_block_numbers,
+                                  src=0)
         else:
             recv_data = [None] * 7
             broadcast_object_list(recv_data, src=0)
@@ -195,7 +196,7 @@ class Worker:
             return {}
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                self.gpu_cache)
+                                                 self.gpu_cache)
         return output
 
 
