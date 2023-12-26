@@ -324,7 +324,7 @@ def test_integration_with_vllm(vllm_runner, hf_runner):
     dtype = "half"
 
     tokenizer = hf_runner(model_id, dtype=dtype).tokenizer
-    grammar = ""?start: "hello" | "world" ""
+    grammar = """?start: "hello" | "world" """
 
     grammar_logits_processor = GrammarLogitsProcessor(tokenizer, grammar)
     sampling_params = SamplingParams(

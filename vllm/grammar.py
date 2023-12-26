@@ -50,6 +50,12 @@ class FastInteractiveParser(InteractiveParser):
             self.parser_state.state_stack,
             self.parser_state.value_stack,
         )
+        self.hash_val = None
+
+    def __hash__(self):
+        if self.hash_val is None:
+            self.hash_val = hash(tuple(self.parser_state.state_stack))
+        return self.hash_val
 
     def __copy__(self):
         return type(self)(
@@ -251,9 +257,9 @@ class IncrementalParserState:
         return parser
 
     def new(self, **kwargs):
-        term_key = (kwargs["prior_terminal_ids"], kwargs["partial_token"])
-        if term_key in self._memo:
-            return self._memo[term_key]
+        parser_state_key = (hash(kwargs["interactive_parser"]), kwargs["partial_token"])
+        if parser_state_key in self._memo:
+            return self._memo[parser_state_key]
 
         instance_dict = {
             f.name: getattr(self, f.name)
@@ -261,7 +267,8 @@ class IncrementalParserState:
         }
         instance_dict.update(kwargs)
         inst = self.__class__(**instance_dict)
-        self._memo[term_key] = inst
+
+        self._memo[parser_state_key] = inst
 
         return inst
 
@@ -306,6 +313,7 @@ class IncrementalParserState:
                 new_maybe_partial_token,
             )
             return self.new(
+                interactive_parser=self.interactive_parser,
                 full_seq=self.full_seq + new_seq,
                 prior_terminal_ids=self.prior_terminal_ids,
                 partial_token=new_maybe_partial_token,
