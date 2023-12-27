@@ -17,6 +17,8 @@ _IS_CAPTURING = False
 
 def init_fast_ar() -> None:
     global _FA_HANDLE
+    if _FA_HANDLE is not None:
+        return
     rank = get_tensor_model_parallel_rank()
     world_size = get_tensor_model_parallel_world_size()
     if world_size > 1 and _can_p2p(rank, world_size):
