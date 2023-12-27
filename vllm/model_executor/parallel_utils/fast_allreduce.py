@@ -17,10 +17,10 @@ _IS_CAPTURING = False
 
 def init_fast_ar() -> None:
     global _FA_HANDLE
+    rank = get_tensor_model_parallel_rank()
     world_size = get_tensor_model_parallel_world_size()
-    if world_size > 1:
-        _FA_HANDLE = FastAllreduce(get_tensor_model_parallel_rank(),
-                                   world_size)
+    if world_size > 1 and _can_p2p(rank, world_size):
+        _FA_HANDLE = FastAllreduce(rank, world_size)
 
 
 def begin_capture() -> None:
@@ -68,6 +68,29 @@ def _is_full_nvlink(rank, world_size):
                 logger.info(
                     f"NVLink detection failed with message \"{str(error)}\". "
                     "This is normal if your machine has no NVLink equipped")
+                return False
+    pynvml.nvmlShutdown()
+    return True
+
+
+def _can_p2p(rank, world_size):
+    pynvml.nvmlInit()
+    handle1 = pynvml.nvmlDeviceGetHandleByIndex(rank)
+    for i in range(world_size):
+        if i != rank:
+            handle2 = pynvml.nvmlDeviceGetHandleByIndex(rank)
+            try:
+                p2p_status = pynvml.nvmlDeviceGetP2PStatus(
+                    handle1, handle2, pynvml.NVML_P2P_CAPS_INDEX_READ)
+                if p2p_status != pynvml.NVML_P2P_STATUS_OK:
+                    logger.info(
+                        f"P2P is not supported between device {i} and {rank}. "
+                        "Fast allreduce will be disabled")
+                    return False
+            except pynvml.NVMLError as error:
+                logger.info(
+                    f"P2P detection failed with message \"{str(error)}\". "
+                    "Fast allreduce will be disabled")
                 return False
     pynvml.nvmlShutdown()
     return True

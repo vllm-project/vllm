@@ -46,7 +46,8 @@ def manual_registration(world_size, rank, distributed_init_port):
     init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
     sz = 1024
-    fa = fast_ar.FastAllreduce(rank, world_size)
+    fast_ar.init_fast_ar()
+    fa = fast_ar.get_handle()
     inp = torch.ones(sz,
                      dtype=torch.float32,
                      device=torch.cuda.current_device())
