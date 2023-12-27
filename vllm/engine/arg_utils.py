@@ -230,8 +230,7 @@ class EngineArgs:
                                    self.max_context_len_to_capture)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
-                                   self.swap_space,
-                                   self.kv_cache_dtype,
+                                   self.swap_space, self.kv_cache_dtype,
                                    model_config.get_sliding_window())
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,

@@ -13,16 +13,16 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-NUM_BLOCKS = 4000  # Arbitrary values for testing
+NUM_BLOCKS = 40000  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
-DTYPES = [torch.half]
+DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-NUM_HEADS = [(64, 8)]  # Arbitrary values for testing
-HEAD_SIZES = [256]
-BLOCK_SIZES = [16]
-USE_ALIBI = [True]
+NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
+HEAD_SIZES = [64, 80, 96, 112, 128, 256]
+BLOCK_SIZES = [16, 32]
+USE_ALIBI = [False, True]
 USE_FP8_KV_CACHE = [False, True]
 SEEDS = [0]
 
@@ -98,7 +98,7 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
-@pytest.mark.parametrize("version", ["v1"])
+@pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -167,8 +167,10 @@ def test_paged_attention(
     else:
         # Convert to fp8
         converted_key_cache = torch.empty_like(key_cache, dtype=torch.uint8)
-        converted_value_cache = torch.empty_like(value_cache, dtype=torch.uint8)
-        cache_ops.convert_fp8(key_cache, value_cache, converted_key_cache, converted_value_cache)
+        converted_value_cache = torch.empty_like(value_cache,
+                                                 dtype=torch.uint8)
+        cache_ops.convert_fp8(key_cache, value_cache, converted_key_cache,
+                              converted_value_cache)
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)

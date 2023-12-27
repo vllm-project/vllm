@@ -63,7 +63,9 @@ def main(
     cache_dtype = torch.uint8 if enable_fp8_kv_cache else dtype
     x = 16 // torch.tensor([], dtype=cache_dtype).element_size()
     key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x, block_size, x)
-    key_cache = torch.empty(size=key_cache_shape, dtype=cache_dtype, device="cuda")
+    key_cache = torch.empty(size=key_cache_shape,
+                            dtype=cache_dtype,
+                            device="cuda")
     if not enable_fp8_kv_cache:
         key_cache.uniform_(-scale, scale)
     else:
@@ -199,7 +201,7 @@ if __name__ == '__main__':
         block_size=args.block_size,
         use_alibi=args.use_alibi,
         dtype=dtype_to_torch_dtype[args.dtype],
-        enable_fp8_kv_cache = args.enable_fp8_kv_cache,
+        enable_fp8_kv_cache=args.enable_fp8_kv_cache,
         seed=args.seed,
         do_profile=args.profile,
     )
