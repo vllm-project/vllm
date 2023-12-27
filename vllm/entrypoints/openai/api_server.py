@@ -243,6 +243,16 @@ async def create_chat_completion(request: ChatCompletionRequest,
     if error_check_ret is not None:
         return error_check_ret
 
+    grammar = request_dict.pop("grammar")
+    if grammar:
+        grammar_logits_processor = GrammarLogitsProcessor(
+            tokenizer=llm_engine.model_config.tokenizer,
+            grammar=grammar
+        )
+        logits_processors = [grammar_logits_processor]
+    else:
+        logits_processors = []
+
     model_name = request.model
     request_id = f"cmpl-{random_uuid()}"
     created_time = int(time.monotonic())
@@ -266,6 +276,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             use_beam_search=request.use_beam_search,
             skip_special_tokens=request.skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
+            logits_processors=logits_processors,
         )
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
