@@ -187,14 +187,14 @@ class _AsyncLLMEngine(LLMEngine):
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
-            all_outputs = (await self._run_workers_async(
+            all_outputs = await self._run_workers_async(
                 "execute_model",
                 driver_kwargs={
                     "seq_group_metadata_list": seq_group_metadata_list,
                     "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
                     "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-                }))
+                })
 
             # The outputs from all the workers are the same, so we just use the
             # first one from the driver worker.
