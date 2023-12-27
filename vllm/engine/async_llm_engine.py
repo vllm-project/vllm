@@ -215,10 +215,6 @@ class _AsyncLLMEngine(LLMEngine):
         """Runs the given method on all workers."""
         coros = []
 
-        # Run the ray workers asynchronously.
-        for worker in self.workers:
-            coros.append(worker.execute_method.remote(method, *args, **kwargs))
-
         if driver_args is None:
             driver_args = args
         if driver_kwargs is None:
@@ -228,6 +224,10 @@ class _AsyncLLMEngine(LLMEngine):
         driver_executor = getattr(self.driver_worker, method)
         coros.append(asyncio.get_event_loop().run_in_executor(
             None, partial(driver_executor, *driver_args, **driver_kwargs)))
+
+        # Run the ray workers asynchronously.
+        for worker in self.workers:
+            coros.append(worker.execute_method.remote(method, *args, **kwargs))
 
         all_outputs = await asyncio.gather(*coros)
         return all_outputs
