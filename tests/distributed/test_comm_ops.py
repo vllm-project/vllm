@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from vllm.config import ParallelConfig
-from vllm.engine.ray_utils import get_open_port
+from vllm.utils import get_open_port
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_all_gather,
