@@ -494,7 +494,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     logger.info(f"grammar: {request.grammar}")
     if request.grammar:
         grammar_logits_processor = GrammarLogitsProcessor(
-            tokenizer=engine.model_config.tokenizer, grammar=request.grammar)
+            tokenizer=tokenizer, grammar=request.grammar)
         logits_processors = [grammar_logits_processor]
     else:
         logits_processors = []
