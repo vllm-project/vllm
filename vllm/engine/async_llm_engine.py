@@ -12,6 +12,10 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 
+from vllm.core.scheduler import SchedulerOutputs
+from cllam.trace import TRACER
+import cllam.trace as CTrace
+
 logger = init_logger(__name__)
 
 
@@ -173,6 +177,13 @@ class RequestTracker:
 class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
 
+    def get_context_token_num(self, scheduler_outputs: SchedulerOutputs) -> int:
+        total_context_len = 0
+        for seq_group in scheduler_outputs.scheduled_seq_groups:
+            for seq in seq_group.get_seqs():
+                total_context_len += seq.get_len()
+        return total_context_len
+    
     async def step_async(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
@@ -183,10 +194,21 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
+        step_tid = TRACER.add(CTrace.Step)
+        step_trace = TRACER.get(step_tid)
+        step_trace.start = time.perf_counter()
+        
+        
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
         if scheduler_outputs.is_empty():
+            step_trace.end = time.perf_counter()
             return ignored
 
+        step_trace.batch_start = time.perf_counter()
+        step_trace.is_prompt_run = scheduler_outputs.prompt_run
+        step_trace.batched_token_num = scheduler_outputs.num_batched_tokens
+        step_trace.context_token_num = self.get_context_token_num(scheduler_outputs)
+        
         # Execute the model.
         output = await self._run_workers_async(
             "execute_model",
@@ -196,8 +218,13 @@ class _AsyncLLMEngine(LLMEngine):
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
 
-        return self._process_model_outputs(output, scheduler_outputs) + ignored
+        step_trace.batch_end = time.perf_counter()
 
+        output = self._process_model_outputs(output, scheduler_outputs) + ignored
+
+        step_trace.end = time.perf_counter()
+        return output
+    
     async def _run_workers_async(
         self,
         method: str,

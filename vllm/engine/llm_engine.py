@@ -18,6 +18,9 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
+from cllam.trace import TRACER
+import cllam.trace as CTrace
+import torch
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
@@ -573,10 +576,21 @@ class LLMEngine:
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
+        step_tid = TRACER.add(CTrace.Step)
+        step_trace = TRACER.get(step_tid)
+        step_trace.start = time.perf_counter()
+        
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
         if scheduler_outputs.is_empty():
+            step_trace.end = time.perf_counter()
             return ignored
 
+        torch.cuda.synchronize()
+        step_trace.batch_start = time.perf_counter()
+        step_trace.is_prompt_run = scheduler_outputs.prompt_run
+        step_trace.batched_token_num = scheduler_outputs.num_batched_tokens
+        step_trace.context_token_num = 0 # TODO
+        
         # Execute the model.
         output = self._run_workers(
             "execute_model",
@@ -585,9 +599,14 @@ class LLMEngine:
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
         )
+        torch.cuda.synchronize()
+        step_trace.batch_end = time.perf_counter()
 
-        return self._process_model_outputs(output, scheduler_outputs)
-
+        output = self._process_model_outputs(output, scheduler_outputs)
+        
+        step_trace.end = time.perf_counter()
+        return output
+    
     def _log_system_stats(
         self,
         prompt_run: bool,
