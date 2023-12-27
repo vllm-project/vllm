@@ -18,6 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
+from vllm.grammar import GrammarLogitsProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import add_global_metrics_labels
@@ -243,12 +244,9 @@ async def create_chat_completion(request: ChatCompletionRequest,
     if error_check_ret is not None:
         return error_check_ret
 
-    grammar = request_dict.pop("grammar")
-    if grammar:
+    if request.grammar:
         grammar_logits_processor = GrammarLogitsProcessor(
-            tokenizer=llm_engine.model_config.tokenizer,
-            grammar=grammar
-        )
+            tokenizer=engine.model_config.tokenizer, grammar=request.grammar)
         logits_processors = [grammar_logits_processor]
     else:
         logits_processors = []
