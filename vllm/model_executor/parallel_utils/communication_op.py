@@ -1,29 +1,8 @@
 import torch
 
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size, get_tensor_model_parallel_group,
-    get_tensor_model_parallel_rank)
-from vllm.model_executor.parallel_utils.fast_allreduce import FastAllreduce
-
-fa_handle = None
-is_capturing = False
-
-
-def init_fast_ar() -> None:
-    global fa_handle
-    world_size = get_tensor_model_parallel_world_size()
-    if world_size > 1:
-        fa_handle = FastAllreduce(get_tensor_model_parallel_rank(), world_size)
-
-
-def begin_capture() -> None:
-    global is_capturing
-    is_capturing = True
-
-
-def end_capture() -> None:
-    global is_capturing
-    is_capturing = False
+    get_tensor_model_parallel_world_size, get_tensor_model_parallel_group)
+from vllm.model_executor.parallel_utils import fast_allreduce as fast_ar
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor):
@@ -36,7 +15,8 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor):
         return input_
     # fast allreduce only works with IPC pre-registered buffer.
     # This is only handled when captured with cuda graph
-    if is_capturing and fa_handle is not None:
+    if fast_ar.is_capturing():
+        fa_handle = fast_ar.get_handle()
         if torch.cuda.is_current_stream_capturing():
             if fa_handle.should_fast_ar(input_):
                 return fa_handle.all_reduce(input_)

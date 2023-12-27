@@ -4,8 +4,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from vllm.model_executor.parallel_utils.fast_allreduce import FastAllreduce
-
+from vllm.model_executor.parallel_utils import fast_allreduce as fast_ar
+from vllm.model_executor.parallel_utils.communication_op import tensor_model_parallel_all_reduce
 from tests.distributed.comm_utils import init_test_distributed_environment, multi_process_tensor_parallel
 
 random.seed(42)
@@ -19,28 +19,25 @@ def graph_registration(world_size, rank, distributed_init_port):
                                       distributed_init_port)
     for sz in test_sizes:
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            fa = FastAllreduce(rank, world_size)
-            # use integers so result matches NCCL exactly
-            inp1 = torch.randint(1,
-                                 16, (sz, ),
-                                 dtype=dtype,
-                                 device=torch.cuda.current_device())
-            inp2 = torch.randint(1,
-                                 16, (sz, ),
-                                 dtype=dtype,
-                                 device=torch.cuda.current_device())
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                out1 = fa.all_reduce(inp1)
-                out2 = fa.all_reduce(inp2)
-                # the input buffer is immediately modified to test synchronization
-                dist.all_reduce(inp1)
-                dist.all_reduce(inp2)
-            fa.register_graph_buffers()
+            with fast_ar.capture(enable=True):
+                # use integers so result matches NCCL exactly
+                inp1 = torch.randint(1,
+                                     16, (sz, ),
+                                     dtype=dtype,
+                                     device=torch.cuda.current_device())
+                inp2 = torch.randint(1,
+                                     16, (sz, ),
+                                     dtype=dtype,
+                                     device=torch.cuda.current_device())
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    out1 = tensor_model_parallel_all_reduce(inp1)
+                    out2 = tensor_model_parallel_all_reduce(inp2)
+                    # the input buffer is immediately modified to test synchronization
+                    dist.all_reduce(inp1)
+                    dist.all_reduce(inp2)
             graph.replay()
-            torch.cuda.synchronize()
-
             assert torch.allclose(out1, inp1)
             assert torch.allclose(out2, inp2)
 
@@ -49,7 +46,7 @@ def manual_registration(world_size, rank, distributed_init_port):
     init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
     sz = 1024
-    fa = FastAllreduce(rank, world_size)
+    fa = fast_ar.FastAllreduce(rank, world_size)
     inp = torch.ones(sz,
                      dtype=torch.float32,
                      device=torch.cuda.current_device())

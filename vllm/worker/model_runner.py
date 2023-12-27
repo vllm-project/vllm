@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.model_executor.parallel_utils import communication_op as comm_op
+from vllm.model_executor.parallel_utils import fast_allreduce
 from vllm.utils import in_wsl
 
 logger = init_logger(__name__)
@@ -420,35 +420,31 @@ class ModelRunner:
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
-        if not self.parallel_config.disable_fast_allreduce:
-            comm_op.init_fast_ar()
-        comm_op.begin_capture()
-        # NOTE: Capturing the largest batch size first may help reduce the
-        # memory usage of CUDA graph.
-        for batch_size in reversed(_BATCH_SIZES_TO_CAPTURE):
-            # Create dummy input_metadata.
-            input_metadata = InputMetadata(
-                prompt_lens=[],
-                slot_mapping=slot_mapping[:batch_size],
-                max_context_len=self.max_context_len_to_capture,
-                context_lens=context_lens[:batch_size],
-                block_tables=block_tables[:batch_size],
-                use_cuda_graph=True,
-            )
+        with fast_allreduce.capture(
+                enable=not self.parallel_config.disable_fast_allreduce):
+            # NOTE: Capturing the largest batch size first may help reduce the
+            # memory usage of CUDA graph.
+            for batch_size in reversed(_BATCH_SIZES_TO_CAPTURE):
+                # Create dummy input_metadata.
+                input_metadata = InputMetadata(
+                    prompt_lens=[],
+                    slot_mapping=slot_mapping[:batch_size],
+                    max_context_len=self.max_context_len_to_capture,
+                    context_lens=context_lens[:batch_size],
+                    block_tables=block_tables[:batch_size],
+                    use_cuda_graph=True,
+                )
 
-            graph_runner = CUDAGraphRunner(self.model)
-            graph_runner.capture(
-                input_tokens[:batch_size],
-                input_positions[:batch_size],
-                kv_caches,
-                input_metadata,
-                memory_pool=self.graph_memory_pool,
-            )
-            self.graph_memory_pool = graph_runner.graph.pool()
-            self.graph_runners[batch_size] = graph_runner
-        comm_op.end_capture()
-        if comm_op.fa_handle is not None:
-            comm_op.fa_handle.register_graph_buffers()
+                graph_runner = CUDAGraphRunner(self.model)
+                graph_runner.capture(
+                    input_tokens[:batch_size],
+                    input_positions[:batch_size],
+                    kv_caches,
+                    input_metadata,
+                    memory_pool=self.graph_memory_pool,
+                )
+                self.graph_memory_pool = graph_runner.graph.pool()
+                self.graph_runners[batch_size] = graph_runner
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time

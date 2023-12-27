@@ -1,15 +1,61 @@
+from contextlib import contextmanager
 import pynvml
 import torch
 import torch.distributed as dist
+from typing import Optional
 
 from vllm._C import fast_ar
 from vllm.logger import init_logger
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank)
 
 logger = init_logger(__name__)
 
+_FA_HANDLE = None
+_IS_CAPTURING = False
+
+
+def init_fast_ar() -> None:
+    global _FA_HANDLE
+    world_size = get_tensor_model_parallel_world_size()
+    if world_size > 1:
+        _FA_HANDLE = FastAllreduce(get_tensor_model_parallel_rank(),
+                                   world_size)
+
+
+def begin_capture() -> None:
+    global _IS_CAPTURING
+    _IS_CAPTURING = True
+
+
+def end_capture() -> None:
+    global _IS_CAPTURING
+    _IS_CAPTURING = False
+
+
+def is_capturing() -> bool:
+    return _IS_CAPTURING and _FA_HANDLE is not None
+
+
+def get_handle() -> Optional["FastAllreduce"]:
+    return _FA_HANDLE
+
+
+@contextmanager
+def capture(enable: bool):
+    if enable:
+        init_fast_ar()
+    try:
+        begin_capture()
+        yield
+    finally:
+        end_capture()
+        if enable:
+            get_handle().register_graph_buffers()
+
 
 # query if the set of gpus are fully connected by nvlink (1 hop)
-def full_nvlink(rank, world_size):
+def _is_full_nvlink(rank, world_size):
     pynvml.nvmlInit()
     handle = pynvml.nvmlDeviceGetHandleByIndex(rank)
     for i in range(world_size):
@@ -41,11 +87,10 @@ class FastAllreduce:
         self.max_size = max_size
         self.world_size = world_size
         handles, offsets = self._get_ipc_meta(self.meta)
-        self.full_nvlink = full_nvlink(rank, world_size)
+        self.full_nvlink = _is_full_nvlink(rank, world_size)
         self._ptr = fast_ar.init_fast_ar(self.meta, self.rank_data, handles,
                                          offsets, rank, self.full_nvlink)
         self.fast_cond = self.full_nvlink or world_size <= 2
-        self.is_capturing = False
 
     def _get_ipc_meta(self, inp: torch.Tensor):
         data = inp.storage()._share_cuda_()
