@@ -191,8 +191,8 @@ __inline__ __device__ uint8_t vec_conversion<uint8_t, float>(const float& a)
 template<>
 __inline__ __device__ float4 vec_conversion<float4, uint32_t>(const uint32_t& a)
 {
-    float4 tmp;
-    return tmp;
+    float4 res = make_float4(1.0f, 2.0f, 3.0f, 4.0f);
+    return res;
 }
 
 
