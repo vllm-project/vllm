@@ -1,45 +1,96 @@
 from collections import deque
 from typing import Deque
+import enum
+import bisect
 
 from vllm.sequence import SequenceGroup
 
 
-class Policy:
+class PreemptionMode(enum.Enum):
+    """Preemption modes.
 
-    def get_priority(
-        self,
-        now: float,
-        seq_group: SequenceGroup,
-    ) -> float:
-        raise NotImplementedError
+    1. Swapping: Swap out the blocks of the preempted sequences to CPU memory
+    and swap them back in when the sequences are resumed.
+    2. Recomputation: Discard the blocks of the preempted sequences and
+    recompute them when the sequences are resumed, treating the sequences as
+    new prompts.
+    """
+    SWAP = enum.auto()
+    RECOMPUTE = enum.auto()
+
+
+class Policy:
+    """Base class policy"""
 
     def sort_by_priority(
         self,
-        now: float,
         seq_groups: Deque[SequenceGroup],
     ) -> Deque[SequenceGroup]:
-        return deque(
-            sorted(
-                seq_groups,
-                key=lambda seq_group: self.get_priority(now, seq_group),
-                reverse=True,
-            ))
+        raise NotImplementedError
+
+    def get_preemption_mode(self, seq_group: SequenceGroup) -> PreemptionMode:
+        raise NotImplementedError
 
 
 class FCFS(Policy):
+    """Default FIFO Policy"""
 
-    def get_priority(
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+
+    def sort_by_priority(
         self,
-        now: float,
-        seq_group: SequenceGroup,
-    ) -> float:
-        return now - seq_group.metrics.arrival_time
+        seq_groups: Deque[SequenceGroup],
+    ) -> Deque[SequenceGroup]:
+        """We can just sort `Deque[SequenceGroup]` by `arrival_time`"""
+        return deque(sorted(seq_groups, key=lambda x: x.metrics.arrival_time))
+
+    def get_preemption_mode(self, seq_group: SequenceGroup) -> PreemptionMode:
+        #Copa-pasted from previous implementation
+        if seq_group.get_max_num_running_seqs() == 1:
+            return PreemptionMode.RECOMPUTE
+        else:
+            return PreemptionMode.SWAP
+
+
+class MaxThroughput(Policy):
+    """MaxThroughput tries to maximize throughput by reordering incoming requests.
+    
+    Args:
+        max_delay: maximum acceptable delay in sec while reorder `List[SequenceGroup]`. 0 means FIFO behavior. 
+    """
+
+    def __init__(self, max_delay: float = 0, **kwargs) -> None:
+        super().__init__()
+        self.max_delay = max_delay
+
+    def sort_by_priority(
+        self,
+        seq_groups: Deque[SequenceGroup],
+    ) -> Deque[SequenceGroup]:
+        """Sort head withing `max_delay` of the `seq_groups` by length. It reduces padding computation overhead."""
+        if len(seq_groups) == 0:
+            return seq_groups
+        arrival_time_sorted = sorted(seq_groups, key=lambda x: x.metrics.arrival_time)
+        pos = bisect.bisect_left(arrival_time_sorted,
+                                 arrival_time_sorted[0].metrics.arrival_time +
+                                 self.max_delay,
+                                 key=lambda x: x.metrics.arrival_time)
+        return deque(
+            sorted(arrival_time_sorted[:pos],
+                   key=lambda x: x.get_seqs()[0].get_len()) +
+            arrival_time_sorted[pos:])
+
+    def get_preemption_mode(self, seq_group: SequenceGroup) -> PreemptionMode:
+        """Always use SWAP"""
+        return PreemptionMode.SWAP
 
 
 class PolicyFactory:
 
     _POLICY_REGISTRY = {
         'fcfs': FCFS,
+        'throughput': MaxThroughput,
     }
 
     @classmethod
