@@ -522,8 +522,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             prompt_logprobs=request.logprobs if request.echo else None,
             skip_special_tokens=request.skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
-            logits_processors=logits_processors
-        )
+            logits_processors=logits_processors)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
 
