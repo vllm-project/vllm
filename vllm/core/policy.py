@@ -1,4 +1,4 @@
-from typing import List
+from collections import deque
 
 from vllm.sequence import SequenceGroup
 
@@ -15,13 +15,14 @@ class Policy:
     def sort_by_priority(
         self,
         now: float,
-        seq_groups: List[SequenceGroup],
-    ) -> List[SequenceGroup]:
-        return sorted(
-            seq_groups,
-            key=lambda seq_group: self.get_priority(now, seq_group),
-            reverse=True,
-        )
+        seq_groups: deque[SequenceGroup],
+    ) -> deque[SequenceGroup]:
+        return deque(
+            sorted(
+                seq_groups,
+                key=lambda seq_group: self.get_priority(now, seq_group),
+                reverse=True,
+            ))
 
 
 class FCFS(Policy):
