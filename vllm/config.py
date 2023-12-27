@@ -349,12 +349,6 @@ class ParallelConfig:
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_fast_allreduce = disable_fast_allreduce
-        if not disable_fast_allreduce and (is_hip()
-                                           or pipeline_parallel_size > 1):
-            self.disable_fast_allreduce = True
-            logger.info(
-                "Fast allreduce automatically disabled. Not supported on HIP and pipeline parallel"
-            )
         self.world_size = pipeline_parallel_size * tensor_parallel_size
         if self.world_size > 1:
             self.worker_use_ray = True
@@ -364,6 +358,11 @@ class ParallelConfig:
         if self.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported yet.")
+        if is_hip() or self.pipeline_parallel_size > 1:
+            self.disable_fast_allreduce = True
+            logger.info(
+                "Fast allreduce automatically disabled. Not supported on HIP and pipeline parallel"
+            )
 
 
 class SchedulerConfig:

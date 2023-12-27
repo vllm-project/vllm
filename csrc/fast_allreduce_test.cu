@@ -1,3 +1,12 @@
+/**
+ * This is a standalone test for fast allreduce. 
+ * To compile, make sure you have MPI and NCCL installed in your system.
+ * export MPI_HOME=XXX
+ * nvcc -O2 -arch=native -std=c++17 fast_allreduce_test.cu -o fast_allreduce_test -lnccl -I${MPI_HOME}/include -lmpi
+ * 
+ * To run:
+ * mpirun -np 8 ./fast_allreduce_test
+*/
 #include <cuda.h>
 #include <curand_kernel.h>
 #include <stdio.h>
