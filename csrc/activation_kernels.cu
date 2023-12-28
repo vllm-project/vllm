@@ -6,16 +6,16 @@
 
 namespace vllm {
 
-template <typename T> 
-__device__ __forceinline__ T silu(const T &x) {
+template<typename T>
+__device__ __forceinline__ T silu(const T& x) {
   // x * sigmoid(x)
-  return (T)(((float)x) / (1.0f + expf((float)-x)));
+  return (T) (((float) x) / (1.0f + expf((float) -x)));
 }
 
-template <typename scalar_t>
+template<typename scalar_t>
 __global__ void silu_and_mul_kernel(
-  scalar_t *__restrict__ out,         // [..., d]
-  const scalar_t *__restrict__ input, // [..., 2, d]
+  scalar_t* __restrict__ out,               // [..., d]
+  const scalar_t* __restrict__ input,       // [..., 2, d]
   const int d) {
   const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
