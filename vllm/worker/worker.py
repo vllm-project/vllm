@@ -184,6 +184,8 @@ class Worker:
             broadcast_object_list([num_seq_groups] + swapping_block_numbers,
                                   src=0)
         else:
+            # num_seq_groups, swap_in_src, swap_in_dst, swap_out_src,
+            # swap_out_dst, copy_src, copy_dst (7 elements)
             recv_data = [None] * 7
             broadcast_object_list(recv_data, src=0)
             num_seq_groups = recv_data[0]

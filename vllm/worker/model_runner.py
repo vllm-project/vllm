@@ -345,6 +345,9 @@ class ModelRunner:
             def get_size_or_none(x: Optional[torch.Tensor]):
                 return x.size() if x is not None else None
 
+            # Broadcast the input data. For input tensors, we first broadcast
+            # its shape and then broadcast the tensor to avoid high
+            # serialization cost.
             py_data = {
                 "input_tokens_size":
                 input_tokens.size(),
@@ -387,21 +390,21 @@ class ModelRunner:
                                           dtype=torch.long,
                                           device="cuda")
             broadcast(input_positions, src=0)
-            if py_data["slot_mapping_size"]:
+            if py_data["slot_mapping_size"] is not None:
                 slot_mapping = torch.empty(*py_data["slot_mapping_size"],
                                            dtype=torch.long,
                                            device="cuda")
                 broadcast(slot_mapping, src=0)
             else:
                 slot_mapping = None
-            if py_data["context_lens_size"]:
+            if py_data["context_lens_size"] is not None:
                 context_lens = torch.empty(*py_data["context_lens_size"],
                                            dtype=torch.int,
                                            device="cuda")
                 broadcast(context_lens, src=0)
             else:
                 context_lens = None
-            if py_data["block_tables_size"]:
+            if py_data["block_tables_size"] is not None:
                 block_tables = torch.empty(*py_data["block_tables_size"],
                                            dtype=torch.int,
                                            device="cuda")
