@@ -46,7 +46,6 @@ class SchedulerOutputs:
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
         self.ignored_seq_groups = ignored_seq_groups
-        self.prefix_cache: Dict[str, SequenceGroup] = {}
 
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
@@ -83,6 +82,7 @@ class Scheduler:
         self.running: List[SequenceGroup] = []
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
+        self.prefix_cache: Dict[str, SequenceGroup] = {}
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
@@ -100,6 +100,13 @@ class Scheduler:
                         prefix_token_ids + seq.data.prompt_token_ids,
                         seq.block_size)
         self.waiting.append(seq_group)
+
+    def add_prefix_seq_groups(
+            self, 
+            seq_group_map: Dict[str, SequenceGroup]) -> None:
+        self.prefix_cache.update(seq_group_map)
+        for seq_group in seq_group_map.values():
+            self.waiting.append(seq_group)
 
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
         if isinstance(request_id, str):

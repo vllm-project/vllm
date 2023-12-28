@@ -299,8 +299,8 @@ def _paged_attention(
 
 
 def _concat_prefix_kvcache(
-        input_metadata: InputMetadata, key: torch.Tenso, value: torch.Tenso,
-        key_cache: torch.Tenso, value_cache: torch.Tenso, num_kv_heads: int,
+        input_metadata: InputMetadata, key: torch.Tensor, value: torch.Tensor,
+        key_cache: torch.Tensor, value_cache: torch.Tensor, num_kv_heads: int,
         head_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
     prefix_key = torch.empty(sum(input_metadata.prefix_len_list),
                              num_kv_heads,
