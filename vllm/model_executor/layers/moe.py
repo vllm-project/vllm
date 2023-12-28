@@ -197,6 +197,9 @@ def grouped_matmul_kernel(
                 accumulator += tl.dot(a, b)
                 a_ptrs += BLOCK_SIZE_K
                 b_ptrs += BLOCK_SIZE_K * ldb
+
+            if ACTIVATION == "silu":
+                accumulator = silu(accumulator)
             c = accumulator.to(tl.float16)
 
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -214,49 +217,34 @@ def grouped_matmul_kernel(
         last_problem_end = last_problem_end + num_tiles
 
 
-def grouped_matmul(fused_group_A: torch.Tensor, cum_group_range: torch.Tensor, group_B: torch.Tensor, relu_epilogue: bool):
+@triton.jit
+def silu(x):
+    return x * tl.sigmoid(x)
+
+
+def grouped_matmul(fused_input: torch.Tensor, cum_group_range: torch.Tensor, fused_group_b: torch.Tensor, activation: str=""):
     device = torch.device('cuda')
-    assert len(group_A) == len(group_B)
-    group_size = len(group_A)
+    assert cum_group_range.shape[0] == fused_group_b.shape[0] + 1
+    group_size = cum_group_range.shape[0] - 1
+    output = torch.zeros(fused_input.shape[0], fused_group_b.shape[2], device=device, dtype=fused_input.dtype)
 
-    A_addrs = []
-    B_addrs = []
-    C_addrs = []
-    g_sizes = []
-    g_lds = []
-    group_C = []
-    for i in range(group_size):
-        A = group_A[i]
-        B = group_B[i]
-        assert A.shape[1] == B.shape[0]
-        M, K = A.shape
-        K, N = B.shape
-        C = torch.empty((M, N), device=device, dtype=A.dtype)
-        group_C.append(C)
-        A_addrs.append(A.data_ptr())
-        B_addrs.append(B.data_ptr())
-        C_addrs.append(C.data_ptr())
-        g_sizes += [M, N, K]
-        g_lds += [A.stride(0), B.stride(0), C.stride(0)]
-
-    # note these are device tensors
-    d_a_ptrs = torch.tensor(A_addrs, device=device)
-    d_b_ptrs = torch.tensor(B_addrs, device=device)
-    d_c_ptrs = torch.tensor(C_addrs, device=device)
-    d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=device)
-    d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=device)
     # we use a fixed number of CTA, and it's auto-tunable
     grid = lambda META: (META['NUM_SM'], )
     grouped_matmul_kernel[grid](
-        d_a_ptrs,
-        d_b_ptrs,
-        d_c_ptrs,
-        d_g_sizes,
-        d_g_lds,
+        fused_input,
+        cum_group_range,
+        fused_group_b,
+        output,
         group_size,
+        n=fused_group_b.shape[2],
+        k=fused_group_b.shape[1],
+        lda=fused_input.stride(0),
+        ldb=fused_group_b.stride(1),
+        ldc=output.stride(0),
+        ACTIVATION=activation,
     )
 
-    return group_C
+    return output
 
 
 group_m = [1024, 512, 256, 128]
