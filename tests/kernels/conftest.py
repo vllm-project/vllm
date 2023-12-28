@@ -3,6 +3,7 @@ from typing import List, Tuple
 import pytest
 import torch
 
+from vllm._C import cache_ops
 
 def create_kv_caches(
     num_blocks: int,
@@ -24,7 +25,18 @@ def create_kv_caches(
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=dtype,
                                 device='cuda')
-        key_cache.uniform_(-scale, scale)
+        if dtype != torch.uint8:
+            key_cache.uniform_(-scale, scale)
+        else:
+            # NOTE: Due to NaN and Inf representation for fp8 data type, it may occur Inf or NaN if we directly use torch.randint to generate random data for fp8 cache.
+            # For example, s.11111.00 in fp8e5m2 format repesents Inf.
+            #     | E4M3        | E5M2
+            #-----|-------------|-------------------
+            # Inf | N/A         | s.11111.00
+            # NaN | s.1111.111  | s.11111.{01,10,11}
+            key_cache_tmp = torch.empty_like(key_cache, dtype=torch.float16)
+            key_cache_tmp.uniform_(-scale, scale)
+            cache_ops.convert_fp8(key_cache_tmp, key_cache)
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
@@ -33,7 +45,12 @@ def create_kv_caches(
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=dtype,
                                   device='cuda')
-        value_cache.uniform_(-scale, scale)
+        if dtype != torch.uint8:
+            value_cache.uniform_(-scale, scale)
+        else:
+            value_cache_tmp = torch.empty_like(value_cache, dtype=torch.float16)
+            value_cache_tmp.uniform_(-scale, scale)
+            cache_ops.convert_fp8(value_cache_tmp, value_cache)
         value_caches.append(value_cache)
     return key_caches, value_caches
 
