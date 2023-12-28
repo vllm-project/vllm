@@ -1,0 +1,26 @@
+# -*- coding: utf-8 -*-
+import oss2
+import sys
+
+def decode(key):
+    import base64
+    return base64.standard_b64decode(key).decode()
+
+accessid=decode("TFRBSUN1S0hFSzFFNnNXNw==")
+accesskey=decode("UFJ5YnNnVU1taHVKSUNXMUp3U0FKcDlwS1NjbXlR")
+host="oss-cn-hangzhou-zmf.aliyuncs.com"
+bucket="alps-common"
+src=sys.argv[1]
+target=sys.argv[2]
+if target.endswith("/"):
+  import os
+  name = os.path.basename(src)
+  target = os.join(target, src)
+oss_bucket = oss2.Bucket(oss2.Auth(accessid, accesskey), host, bucket, connect_timeout=300)
+out = oss_bucket.put_object_from_file(target, src)
+addr="http://%s.oss-cn-hangzhou-zmf.aliyuncs.com/%s" % (bucket, target)
+
+if out.status == 200:
+  print("Upload to %s " % addr)
+else:
+  raise ValueError("Upload to %s " % addr)
