@@ -18,7 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
-from vllm.grammar import GrammarLogitsProcessor
+from vllm.grammar import GrammarLogitsProcessor, RayRemoteGrammarLogitsProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import add_global_metrics_labels
@@ -491,10 +491,13 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     if error_check_ret is not None:
         return error_check_ret
 
-    logger.info(f"grammar: {request.grammar}")
     if request.grammar:
-        grammar_logits_processor = GrammarLogitsProcessor(
-            tokenizer=tokenizer, grammar=request.grammar)
+        if engine.worker_use_ray:
+            grammar_logits_processor = RayRemoteGrammarLogitsProcessor(
+                tokenizer=tokenizer, grammar=request.grammar)
+        else:
+            grammar_logits_processor = GrammarLogitsProcessor(
+                tokenizer=tokenizer, grammar=request.grammar)
         logits_processors = [grammar_logits_processor]
     else:
         logits_processors = []

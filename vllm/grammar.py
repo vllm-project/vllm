@@ -7,6 +7,8 @@ import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing import Optional, List, Set, Union
 
+import ray
+
 from lark import Lark
 from lark.parsers.lalr_interactive_parser import InteractiveParser
 from lark.parsers.lalr_parser_state import ParserState
@@ -468,3 +470,22 @@ class GrammarLogitsProcessor(NextTokenValidator):
         mask[valid] = True
         logits[~mask] = float('-inf')
         return logits
+
+
+@ray.remote
+class GrammarLogitsProcessorActor:
+    def __init__(self, *args, **kwargs):
+        self.processor = GrammarLogitsProcessor(*args, **kwargs)
+
+    def process_logits(self, token_ids: List[int], logits: torch.Tensor) -> torch.Tensor:
+        return self.processor(token_ids, logits)
+
+
+class RayRemoteGrammarLogitsProcessor:
+    def __init__(self, *args, **kwargs):
+        self.actor = GrammarLogitsProcessorActor.remote(*args, **kwargs)
+
+    def __call__(self, token_ids: List[int], logits: torch.Tensor) -> torch.Tensor:
+        logits_cpu = logits.cpu()
+        result_id = self.actor.process_logits.remote(token_ids, logits_cpu)
+        return ray.get(result_id)
