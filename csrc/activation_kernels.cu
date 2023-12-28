@@ -25,7 +25,7 @@ __global__ void silu_and_mul_kernel(
   }
 }
 
-} // namespace vllm    
+} // namespace vllm
 
 void silu_and_mul(
   torch::Tensor& out,      // [..., d]
