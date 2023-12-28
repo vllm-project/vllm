@@ -61,6 +61,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    logprobs: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
@@ -155,6 +156,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
+    logprobs: Optional[LogProbs] = None
     finish_reason: Optional[Literal["stop", "length"]] = None
 
 
@@ -175,6 +177,7 @@ class DeltaMessage(BaseModel):
 class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
+    logprobs: Optional[LogProbs] = None
     finish_reason: Optional[Literal["stop", "length"]] = None
 
 
