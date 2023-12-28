@@ -125,30 +125,30 @@ class MoE(nn.Module):
 
 @triton.autotune(
     configs=[
+        # triton.Config({
+        #     'BLOCK_SIZE_M': 128,
+        #     'BLOCK_SIZE_N': 128,
+        #     'BLOCK_SIZE_K': 32,
+        #     'NUM_SM': 84,
+        # }),
+        # triton.Config({
+        #     'BLOCK_SIZE_M': 128,
+        #     'BLOCK_SIZE_N': 128,
+        #     'BLOCK_SIZE_K': 32,
+        #     'NUM_SM': 128,
+        # }),
+        # triton.Config({
+        #     'BLOCK_SIZE_M': 64,
+        #     'BLOCK_SIZE_N': 64,
+        #     'BLOCK_SIZE_K': 32,
+        #     'NUM_SM': 84,
+        # }),
         triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 128,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_M': 32,
             'BLOCK_SIZE_N': 64,
             'BLOCK_SIZE_K': 32,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
             'NUM_SM': 128,
-        }),
+        }, num_warps=2, num_stages=5),
     ],
     key=['group_size'],
 )
@@ -187,6 +187,7 @@ def grouped_matmul_kernel(
         # iterate through the tiles in the current gemm problem
         while (tile_idx >= last_problem_end
                and tile_idx < last_problem_end + num_tiles):
+               
             # pick up a tile from the current gemm problem
             k = gk
             a_ptr = fused_input_ptr + a_offset * lda
