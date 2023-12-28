@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from vllm._C import ops
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -21,12 +22,13 @@ class MoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
+        tp_size: int,
     ):
         super().__init__()
         self.num_total_experts = num_experts
         self.top_k = top_k
         self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
+        self.intermediate_size = intermediate_size // tp_size
 
         self.gate = ReplicatedLinear(self.hidden_size,
                                      self.num_total_experts,
@@ -44,7 +46,8 @@ class MoE(nn.Module):
                         self.intermediate_size))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = hidden_states.view(-1, self.hidden_dim)
+        batch_size, sequence_length, hidden_size = hidden_states.shape
+        hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
@@ -60,16 +63,16 @@ class MoE(nn.Module):
 
         expanded_hidden_states = self.grouped_mlp(expanded_hidden_states,
                                                   experts_range,
-                                                  self.w1s.weight,
-                                                  self.w2s.weight,
-                                                  self.w3s.weight)
+                                                  self.w1s.data,
+                                                  self.w2s.data,
+                                                  self.w3s.data)
 
-        expanded_hidden_states.mul_(expanded_weights)
+        expanded_hidden_states.mul_(expanded_weights.unsqueeze(-1))
 
         tensor_model_parallel_all_reduce(expanded_hidden_states)
 
         return self.merge_expert_outputs(expanded_hidden_states,
-                                         experts_indices)
+                                         experts_indices).view(batch_size, sequence_length, hidden_size)
 
     def expand_and_permutate_hidden_states(
         self,
@@ -80,8 +83,9 @@ class MoE(nn.Module):
         cum_experts_range = torch.zeros(self.num_total_experts + 1,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
-        num_rows_per_expert = torch.bincount(selected_experts.view(-1),
-                                             minlength=self.num_total_experts)
+        num_rows_per_expert = torch.zeros(self.num_total_experts, dtype=torch.int32,
+                                        device=hidden_states.device)
+        ops.bincount(selected_experts.view(-1), num_rows_per_expert)
         torch.cumsum(num_rows_per_expert, dim=0, out=cum_experts_range[1:])
         experts_indices = torch.argsort(selected_experts.view(-1), dim=-1)
         expanded_weights = routing_weights.view(-1)[experts_indices]
@@ -268,3 +272,6 @@ def grouped_matmul(fused_input: torch.Tensor,
     )
 
     return output
+
+
+

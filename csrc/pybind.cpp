@@ -55,6 +55,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("gptq_gemm", &gptq_gemm, "Quantized GEMM for GPTQ");
   ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
+  ops.def(
+    "bincount",
+    &vllm_bincount,
+    "Gather key and value from the cache into contiguous QKV tensors");
 
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");

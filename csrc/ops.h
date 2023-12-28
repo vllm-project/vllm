@@ -89,3 +89,7 @@ torch::Tensor gptq_gemm(
 void gptq_shuffle(
   torch::Tensor q_weight,
   torch::Tensor q_perm);
+
+void vllm_bincount(
+  torch::Tensor src,
+  torch::Tensor out);

@@ -38,6 +38,7 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                ReplicatedLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.moe import MoE
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -257,8 +258,14 @@ class MixtralDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             sliding_window=config.sliding_window,
             linear_method=linear_method)
-        self.block_sparse_moe = MixtralMoE(config=config,
-                                           linear_method=linear_method)
+        # self.block_sparse_moe = MixtralMoE(config=config,
+        #                                    linear_method=linear_method)
+        self.block_sparse_moe = MoE(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            tp_size=get_tensor_model_parallel_world_size())
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,

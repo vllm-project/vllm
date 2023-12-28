@@ -213,6 +213,7 @@ elif _is_hip():
 ext_modules = []
 
 vllm_extension_sources = [
+    "csrc/bincount.cu",
     "csrc/cache_kernels.cu",
     "csrc/attention/attention_kernels.cu",
     "csrc/pos_encoding_kernels.cu",
