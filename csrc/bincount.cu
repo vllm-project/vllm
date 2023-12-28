@@ -23,9 +23,10 @@ __global__ void bincount_kernel(scalar_t *__restrict__ src, int32_t *out,
 }
 
 void vllm_bincount(torch::Tensor src, torch::Tensor out) {
+   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_ALL_TYPES(
     src.scalar_type(), "bincount_kernel", [&] {
-    vllm::bincount_kernel<scalar_t><<<BLOCKS(src.numel()), THREADS>>>(
+    vllm::bincount_kernel<scalar_t><<<BLOCKS(src.numel()), THREADS, 0, stream>>>(
         src.data<scalar_t>(), out.data<int32_t>(), src.numel());
   });
 }
