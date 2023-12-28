@@ -8,8 +8,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from vllm.model_executor.layers.linear import (ReplicatedLinear,
-                                               ColumnParallelLinear)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
