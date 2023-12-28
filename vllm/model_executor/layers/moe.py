@@ -272,6 +272,3 @@ def grouped_matmul(fused_input: torch.Tensor,
     )
 
     return output
-
-
-
