@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -173,6 +173,10 @@ class LLM:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id, prompt, sampling_params,
                                     prompt_token_ids)
+
+    def add_prefix_template(self, prefix_map: Dict[str, str]) -> None:
+        self.llm_engine.add_prefix_template(prefix_map)
+        self._run_engine(True)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.

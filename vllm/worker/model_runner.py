@@ -77,6 +77,10 @@ class ModelRunner:
         slot_mapping: List[List[int]] = []
 
         prompt_lens: List[int] = []
+        #  prompt with prefix: positions_tensor should  add prefix_len
+        prefix_slot_mapping = []
+        prefix_len_list = []
+
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -84,6 +88,8 @@ class ModelRunner:
             seq_id = seq_ids[0]
 
             seq_data = seq_group_metadata.seq_data[seq_id]
+            prefix_len = seq_data.prefix_len
+            prefix_len_list.append(prefix_len)
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
@@ -109,16 +115,20 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
-                start_idx = max(0, prompt_len - self.sliding_window)
-            for i in range(prompt_len):
-                if i < start_idx:
+                start_idx = max(0,
+                                prompt_len + prefix_len - self.sliding_window)
+
+            for i in range(prompt_len + prefix_len):
+                if i >= prefix_len and i < start_idx:
                     slot_mapping[-1].append(_PAD_SLOT_ID)
                     continue
-
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping[-1].append(slot)
+                if i < prefix_len:
+                    prefix_slot_mapping.append(slot)
+                else:
+                    slot_mapping[-1].append(slot)
 
         max_prompt_len = max(prompt_lens)
         input_tokens = _make_tensor_with_pad(input_tokens,

@@ -3,7 +3,7 @@ import time
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.config import CacheConfig, SchedulerConfig
-from vllm.core.block_manager import AllocStatus, BlockSpaceManager
+from vllm.core.block_manager import AllocStatus, BlockSpaceManager, BlockTable
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
@@ -46,6 +46,7 @@ class SchedulerOutputs:
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
         self.ignored_seq_groups = ignored_seq_groups
+        self.prefix_cache: Dict[str, SequenceGroup] = {}
 
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
@@ -85,6 +86,19 @@ class Scheduler:
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
+        if seq_group.prefix_name in self.prefix_cache:
+            prefix_seq = self.prefix_cache[seq_group.prefix_name].get_seqs()[0]
+            if prefix_seq.is_finished():
+                seq_group.set_prefix_seq(prefix_seq)
+            else:
+                prefix = prefix_seq.prompt
+                prefix_token_ids = prefix_seq.data.prompt_token_ids
+                seqs = seq_group.get_seqs()
+                for seq in seqs:
+                    seq_group.seqs_dict[seq.seq_id] = Sequence(
+                        seq.seq_id, prefix + seq.prompt,
+                        prefix_token_ids + seq.data.prompt_token_ids,
+                        seq.block_size)
         self.waiting.append(seq_group)
 
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -294,6 +308,11 @@ class Scheduler:
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                self._reuse_prefix_cache(
+                    seq_group=seq_group,
+                    block_table=block_tables[seq_id],
+                    blocks_to_copy=scheduler_outputs.blocks_to_copy
+                )
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
@@ -309,7 +328,9 @@ class Scheduler:
         self.block_manager.fork(parent_seq, child_seq)
 
     def free_seq(self, seq: Sequence) -> None:
-        self.block_manager.free(seq)
+        # don't free prefix_table which has block_table.
+        if not seq.block_table:
+            self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
         self.running = [
@@ -411,3 +432,27 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+
+    def _reuse_prefix_cache(self, seq_group: SequenceGroup,
+                            block_table: BlockTable,
+                            blocks_to_copy: Dict[int, List[int]]) -> None:
+        if seq_group.is_prefix:
+            assert len(seq_group.get_seqs()
+                       ) == 1, "prefix_seq_group only has one sequence."
+            seq = seq_group.get_seqs()[0]
+            seq.block_table = block_table  # cache prefix_block_table in prefix_seq
+        elif seq_group.prefix_seq:
+            # reuse prefix_block_table frome prefix_seq
+            prefix_seq = seq_group.prefix_seq
+            need_copy_last_block = prefix_seq.get_prompt_len(
+            ) % prefix_seq.block_size > 0
+            prefix_block_num = len(
+                prefix_seq.block_table) - need_copy_last_block
+            block_table[:prefix_block_num] = prefix_seq.block_table
+            if need_copy_last_block:
+                src_block, dst_block = prefix_seq.block_table[-1], block_table[
+                    prefix_block_num]
+                if src_block in blocks_to_copy:
+                    blocks_to_copy[src_block].append(dst_block)
+                else:
+                    blocks_to_copy[src_block] = [dst_block]

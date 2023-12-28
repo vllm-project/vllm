@@ -1,11 +1,13 @@
 """Multi-head attention."""
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
+                                         LowerTriangularMaskWithTensorBias,
+                                         BlockDiagonalCausalFromBottomRightMask
+                                         )
 
 from vllm._C import ops
 from vllm._C import cache_ops
@@ -120,17 +122,31 @@ class PagedAttention(nn.Module):
             # very attention layer of every iteration.
             # FIXME(woosuk): This is a hack.
             if input_metadata.attn_bias is None:
-                if self.alibi_slopes is None:
-                    attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                        [seq_len] * batch_size)
-                    if self.sliding_window is not None:
-                        attn_bias = attn_bias.make_local_attention(
-                            self.sliding_window)
-                    input_metadata.attn_bias = attn_bias
+                if input_metadata.prefix_len_list:
+                    prompt_lens = [seq_len] * batch_size
+                    kv_lens = [input_metadata.max_prefix_prompt_len
+                               ] * input_metadata.num_prompts
+                    attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
+                        q_seqlen=prompt_lens, kv_seqlen=kv_lens)
+                    assert self.alibi_slopes is None, "current not support alibi"
                 else:
-                    input_metadata.attn_bias = _make_alibi_bias(
-                        self.alibi_slopes, self.num_kv_heads, batch_size,
-                        seq_len, query.dtype)
+                    if self.alibi_slopes is None:
+                        attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                            [seq_len] * batch_size)
+                        if self.sliding_window is not None:
+                            attn_bias = attn_bias.make_local_attention(
+                                self.sliding_window)
+                        input_metadata.attn_bias = attn_bias
+                    else:
+                        input_metadata.attn_bias = _make_alibi_bias(
+                            self.alibi_slopes, self.num_kv_heads, batch_size,
+                            seq_len, query.dtype)
+
+            if input_metadata.prefix_len_list:
+                key, value = _concat_prefix_kvcache(input_metadata, key, value,
+                                                    key_cache, value_cache,
+                                                    self.num_kv_heads,
+                                                    self.head_size)
 
             # TODO(woosuk): Too many view operations. Let's try to reduce them
             # in the future for code readability.
@@ -280,3 +296,62 @@ def _paged_attention(
             alibi_slopes,
         )
     return output
+
+
+def _concat_prefix_kvcache(
+        input_metadata: InputMetadata, key: torch.Tenso, value: torch.Tenso,
+        key_cache: torch.Tenso, value_cache: torch.Tenso, num_kv_heads: int,
+        head_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    prefix_key = torch.empty(sum(input_metadata.prefix_len_list),
+                             num_kv_heads,
+                             head_size,
+                             dtype=key.dtype,
+                             device=key.device)
+    prefix_value = torch.empty_like(prefix_key)
+    cache_ops.gather_cached_kv(
+        prefix_key,
+        prefix_value,
+        key_cache,
+        value_cache,
+        input_metadata.prefix_slot_mapping,
+    )
+    if len(set(input_metadata.prefix_len_list)) == 1:
+        total_key = torch.concat((prefix_key.view(input_metadata.num_prompts,
+                                                  -1, num_kv_heads, head_size),
+                                  key.view(input_metadata.num_prompts, -1,
+                                           num_kv_heads, head_size)),
+                                 dim=1).view(-1, num_kv_heads, head_size)
+        total_value = torch.concat((prefix_value.view(
+            input_metadata.num_prompts, -1, num_kv_heads, head_size),
+                                    value.view(input_metadata.num_prompts, -1,
+                                               num_kv_heads, head_size)),
+                                   dim=1).view(-1, num_kv_heads, head_size)
+    else:
+        total_key = torch.zeros(input_metadata.num_prompts *
+                                input_metadata.max_prefix_prompt_len,
+                                num_kv_heads,
+                                head_size,
+                                dtype=key.dtype,
+                                device=key.device)
+        total_value = torch.zeros_like(total_key)
+        total_index = 0
+        prefix_index = 0
+        for i, prefix_len in enumerate(input_metadata.prefix_len_list):
+            total_key[total_index:total_index +
+                      prefix_len] = prefix_key[prefix_index:prefix_index +
+                                               prefix_len]
+            total_value[total_index:total_index +
+                        prefix_len] = prefix_value[prefix_index:prefix_index +
+                                                   prefix_len]
+            total_index += prefix_len
+            total_key[total_index:total_index +
+                      input_metadata.max_prompt_len] = key[
+                          i * input_metadata.max_prompt_len:(i + 1) *
+                          input_metadata.max_prompt_len]
+            total_value[total_index:total_index +
+                        input_metadata.max_prompt_len] = value[
+                            i * input_metadata.max_prompt_len:(i + 1) *
+                            input_metadata.max_prompt_len]
+            total_index += input_metadata.max_prefix_prompt_len - prefix_len
+            prefix_index += prefix_len
+    return total_key, total_value

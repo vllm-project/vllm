@@ -364,6 +364,7 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        prefix_name: Optional[str] = None,
     ) -> AsyncStream:
         if self.log_requests:
             shortened_prompt = prompt
@@ -394,17 +395,18 @@ class AsyncLLMEngine:
             prompt=prompt,
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
-            arrival_time=arrival_time)
+            arrival_time=arrival_time,
+            prefix_name=prefix_name)
 
         return stream
 
     async def generate(
-        self,
-        prompt: Optional[str],
-        sampling_params: SamplingParams,
-        request_id: str,
-        prompt_token_ids: Optional[List[int]] = None
-    ) -> AsyncIterator[RequestOutput]:
+            self,
+            prompt: Optional[str],
+            sampling_params: SamplingParams,
+            request_id: str,
+            prompt_token_ids: Optional[List[int]] = None,
+            prefix_name: Optional[str] = None) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -418,6 +420,7 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
+            prefix_name: the prefix_name which has cached by prompt cache.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine for the
@@ -432,7 +435,8 @@ class AsyncLLMEngine:
                                             prompt,
                                             sampling_params,
                                             prompt_token_ids=prompt_token_ids,
-                                            arrival_time=arrival_time)
+                                            arrival_time=arrival_time,
+                                            prefix_name=prefix_name)
 
             async for request_output in stream:
                 yield request_output

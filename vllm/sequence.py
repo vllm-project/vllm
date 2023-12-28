@@ -66,14 +66,16 @@ class SequenceData:
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
-        self.cumulative_logprob = 0.0
+        self.cumulative_logprob = 0.
+        self.prefix_len = 0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
     def get_len(self) -> int:
-        return len(self.output_token_ids) + len(self.prompt_token_ids)
+        return len(self.output_token_ids) + len(
+            self.prompt_token_ids) + self.prefix_len
 
     def get_prompt_len(self) -> int:
         return len(self.prompt_token_ids)
@@ -132,6 +134,7 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+        self.block_table = None
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
@@ -236,12 +239,23 @@ class SequenceGroup:
         seqs: List[Sequence],
         sampling_params: SamplingParams,
         arrival_time: float,
+        prefix_name: Optional[str] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
         self.prompt_logprobs: Optional[PromptLogprobs] = None
+        self.prefix_name = prefix_name
+        self.is_prefix = not request_id
+
+    def set_prefix_seq(self, prefix_seq: Sequence):
+        self.prefix_seq = prefix_seq
+        for seq in self.seqs_dict.values():
+            seq.logical_token_blocks = []
+            total_prompt_token_ids = prefix_seq.data.prompt_token_ids + seq.data.prompt_token_ids
+            seq._append_tokens_to_blocks(total_prompt_token_ids)
+            seq.data.prefix_len = self.prefix_seq.data.get_len()
 
     @property
     def prompt(self) -> str:

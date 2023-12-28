@@ -2,7 +2,7 @@ import copy
 import os
 import time
 from functools import partial
-from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union, Dict
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -272,6 +272,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        prefix_name: Optional[str] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -288,6 +289,8 @@ class LLMEngine:
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            prefix_name: the key of prefix_cache to reuse prefix_cache 
+                         to speedup prompt computing.
         """
         if arrival_time is None:
             arrival_time = time.monotonic()
@@ -302,10 +305,38 @@ class LLMEngine:
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time)
+                                  arrival_time, prefix_name)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
+
+    def add_prefix_template(self, prefix_map: Dict[str, str]) -> None:
+        """
+            prefix_map = {prefix_name: prefix_content or (prefix_content, prefix_token_ids)}
+            Generate the kv cache for the corresponding prefix_content, stored as promptcache.
+            Ensure that when a normal request is added, the required prefix_cache has already been created.
+            The current strategy is to concatenate the corresponding prefix_context if the promptcache has not been generated.   
+        """
+        greedy_sampling_params = SamplingParams(temperature=0.0,
+                                                use_beam_search=False,
+                                                max_tokens=1)
+        seq_group_map = {}
+        for prefix_name, con in prefix_map.items():
+            if isinstance(con, tuple):
+                prefix_content, prefix_token_ids = con
+            else:
+                prefix_content = con
+                assert prefix_content is not None
+                prefix_token_ids = self.tokenizer.encode(prefix_content)
+            block_size = self.cache_config.block_size
+            seq_id = next(self.seq_counter)
+            seq = Sequence(seq_id, prefix_content, prefix_token_ids,
+                           block_size)
+            # Create the sequence group.
+            seq_group_map[prefix_name] = SequenceGroup(None, [seq],
+                                                       greedy_sampling_params,
+                                                       None)
+        self.scheduler.add_prefix_seq_groups(seq_group_map)
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
@@ -557,6 +588,8 @@ class LLMEngine:
         request_outputs: List[RequestOutput] = []
         for seq_group in (scheduled_seq_groups +
                           scheduler_outputs.ignored_seq_groups):
+            if seq_group.is_prefix:
+                continue
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
 
