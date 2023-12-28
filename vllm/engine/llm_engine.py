@@ -18,7 +18,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
-from vllm.utils import Counter, set_cuda_visible_devices, get_open_port, get_ip
+from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port
 
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -137,9 +137,9 @@ class LLMEngine:
             self.model_config,
             self.parallel_config,
             self.scheduler_config,
-            0,
-            0,
-            distributed_init_method,
+            local_rank=0,
+            rank=0,
+            distributed_init_method=distributed_init_method,
             is_driver_worker=True,
         )
         self._run_workers("init_model")
@@ -635,10 +635,9 @@ class LLMEngine:
                     "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
                     "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-                }) if not scheduler_outputs.is_empty() else []
+                })
 
-            # The outputs from all the workers are the same, so we just use the
-            # first one from the driver worker.
+            # Only the driver worker returns the sampling results.
             output = all_outputs[0]
         else:
             output = []

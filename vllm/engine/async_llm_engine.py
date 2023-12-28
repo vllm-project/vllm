@@ -196,9 +196,7 @@ class _AsyncLLMEngine(LLMEngine):
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
                 })
 
-            # The outputs from all the workers are the same, so we just use the
-            # first one from the driver worker.
-            output = all_outputs[0]
+            # Only the driver worker returns the sampling results.            output = all_outputs[0]
         else:
             output = []
 

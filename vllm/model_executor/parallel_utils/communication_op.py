@@ -50,6 +50,8 @@ def tensor_model_parallel_all_gather(input_, dim=-1):
 def broadcast(input_, src=0):
     """Broadcast the input tensor."""
     world_size = torch.distributed.get_world_size()
+    assert 0 <= src < world_size, f"Invalid src rank ({src})"
+
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
         assert src == 0, "Invalid src rank"
