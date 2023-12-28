@@ -224,9 +224,8 @@ def grouped_matmul_kernel(
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
-            c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+            c_mask = (offs_cm[:, None] < gm) & (offs_cn[None, :] < gn)
 
-            # assumes full tile for now
             tl.store(c_ptrs, c, mask=c_mask)
 
             # go to the next tile by advancing NUM_SM
