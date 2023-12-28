@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.metrics import add_global_metrics_labels
+from vllm.engine.metrics import add_global_metrics_labels, record_counter_metrics
 from vllm.entrypoints.openai.protocol import (
     CompletionRequest, CompletionResponse, CompletionResponseChoice,
     CompletionResponseStreamChoice, CompletionStreamResponse,
@@ -384,6 +384,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         completion_tokens=previous_num_tokens[i],
                         total_tokens=prompt_tokens + previous_num_tokens[i],
                     )
+                    record_counter_metrics(1 if i == 0 else 0, prompt_tokens,
+                                           previous_num_tokens[i])
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i, delta=[], finish_reason=output.finish_reason)
                     chunk = ChatCompletionStreamResponse(
@@ -392,8 +394,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         created=created_time,
                         choices=[choice_data],
                         model=model_name)
-                    if final_usage is not None:
-                        chunk.usage = final_usage
+                    chunk.usage = final_usage
                     data = chunk.json(exclude_unset=True,
                                       exclude_none=True,
                                       ensure_ascii=False)
@@ -450,6 +451,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
             choices=choices,
             usage=usage,
         )
+        record_counter_metrics(1, usage.prompt_tokens, usage.completion_tokens)
 
         return response
 
@@ -651,6 +653,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                         finish_reason=output.finish_reason,
                         usage=final_usage,
                     )
+                    record_counter_metrics(1, prompt_tokens, completion_tokens)
                     yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -720,6 +723,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         choices=choices,
         usage=usage,
     )
+    record_counter_metrics(1, usage.prompt_tokens, usage.completion_tokens)
 
     if request.stream:
         # When user requests streaming but we don't stream, we still need to

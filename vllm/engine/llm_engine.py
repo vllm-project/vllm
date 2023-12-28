@@ -122,6 +122,10 @@ class LLMEngine:
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
+        # LIst of (timestamp, delta_time)
+        self.generation_times_ms: List[Tuple[float, float]] = []
+        # LIst of (timestamp, delta_time)
+        self.prompt_times_ms: List[Tuple[float, float]] = []
 
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -642,9 +646,9 @@ class LLMEngine:
                 seq_group.remove(seq.seq_id)
                 self.scheduler.free_seq(seq)
 
-    def _process_model_outputs(
-            self, output: SamplerOutput,
-            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+    def _process_model_outputs(self, output: SamplerOutput,
+                               scheduler_outputs: SchedulerOutputs,
+                               ts_start: float) -> List[RequestOutput]:
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
         for seq_group, outputs in zip(scheduled_seq_groups, output):
@@ -662,10 +666,13 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
 
+        ts_end = time.time()
+
         if self.log_stats:
             # Log the system stats.
             self._log_system_stats(scheduler_outputs.prompt_run,
-                                   scheduler_outputs.num_batched_tokens)
+                                   scheduler_outputs.num_batched_tokens,
+                                   1000.0 * (ts_end - ts_start))
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -721,6 +728,7 @@ class LLMEngine:
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
+        ts_start = time.time()
         if not scheduler_outputs.is_empty():
             # Execute the model.
             all_outputs = self._run_workers(
@@ -737,7 +745,9 @@ class LLMEngine:
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        return self._process_model_outputs(output,
+                                           scheduler_outputs,
+                                           ts_start=ts_start)
 
     def do_log_stats(self) -> None:
         self._log_system_stats(False, 0)
@@ -746,13 +756,16 @@ class LLMEngine:
         self,
         prompt_run: bool,
         num_batched_tokens: int,
+        delta_time_ms: float,
     ) -> None:
         now = time.monotonic()
         # Log the number of batched input tokens.
         if prompt_run:
             self.num_prompt_tokens.append((now, num_batched_tokens))
+            self.prompt_times_ms.append((now, delta_time_ms))
         else:
             self.num_generation_tokens.append((now, num_batched_tokens))
+            self.generation_times_ms.append((now, delta_time_ms))
 
         should_log = now - self.last_logging_time >= _LOGGING_INTERVAL_SEC
         if not should_log:
@@ -767,6 +780,7 @@ class LLMEngine:
 
         if len(self.num_prompt_tokens) > 1:
             total_num_tokens = sum(n for _, n in self.num_prompt_tokens[:-1])
+            # Why don't we just divide by _LOGGING_INTERVAL_SEC?
             window = now - self.num_prompt_tokens[0][0]
             avg_prompt_throughput = total_num_tokens / window
         else:
@@ -778,6 +792,30 @@ class LLMEngine:
             avg_generation_throughput = total_num_tokens / window
         else:
             avg_generation_throughput = 0.0
+
+        self.generation_times_ms = [(t, n) for t, n in self.generation_times_ms
+                                    if now - t < _LOGGING_INTERVAL_SEC]
+        self.prompt_times_ms = [(t, n) for t, n in self.prompt_times_ms
+                                if now - t < _LOGGING_INTERVAL_SEC]
+        if len(self.generation_times_ms) >= 1:
+            total_generation_time_ms = sum(
+                n for _, n in self.generation_times_ms)
+            avg_generation_time_ms = total_generation_time_ms / len(
+                self.generation_times_ms)
+            max_generation_time_ms = max(n
+                                         for _, n in self.generation_times_ms)
+        else:
+            avg_generation_time_ms = 0.0
+            max_generation_time_ms = 0.0
+
+        if len(self.prompt_times_ms) >= 1:
+            total_prompt_time_ms = sum(n for _, n in self.prompt_times_ms)
+            avg_prompt_time_ms = total_prompt_time_ms / len(
+                self.prompt_times_ms)
+            max_prompt_time_ms = max(n for _, n in self.prompt_times_ms)
+        else:
+            avg_prompt_time_ms = 0.0
+            max_prompt_time_ms = 0.0
 
         total_num_gpu_blocks = self.cache_config.num_gpu_blocks
         num_free_gpu_blocks = (
@@ -802,12 +840,20 @@ class LLMEngine:
             scheduler_waiting=len(self.scheduler.waiting),
             gpu_cache_usage=gpu_cache_usage,
             cpu_cache_usage=cpu_cache_usage,
+            avg_gen_time_ms=avg_generation_time_ms,
+            max_gen_time_ms=max_generation_time_ms,
+            avg_prompt_time_ms=avg_prompt_time_ms,
+            max_prompt_time_ms=max_prompt_time_ms,
         )
 
         logger.info("Avg prompt throughput: "
                     f"{avg_prompt_throughput:.1f} tokens/s, "
                     "Avg generation throughput: "
                     f"{avg_generation_throughput:.1f} tokens/s, "
+                    "Max iteration time: "
+                    f"{max_generation_time_ms:.1f} ms, "
+                    "Avg time/tok:"
+                    f"{avg_generation_time_ms:.1f} ms, "
                     f"Running: {len(self.scheduler.running)} reqs, "
                     f"Swapped: {len(self.scheduler.swapped)} reqs, "
                     f"Pending: {len(self.scheduler.waiting)} reqs, "

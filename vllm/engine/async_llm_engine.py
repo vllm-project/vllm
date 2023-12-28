@@ -185,6 +185,7 @@ class _AsyncLLMEngine(LLMEngine):
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
+        ts_start = time.time()
         if not scheduler_outputs.is_empty():
             # Execute the model.
             all_outputs = await self._run_workers_async(
@@ -201,7 +202,9 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        return self._process_model_outputs(output,
+                                           scheduler_outputs,
+                                           ts_start=ts_start)
 
     async def _run_workers_async(
         self,
