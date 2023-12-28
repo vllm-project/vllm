@@ -92,10 +92,10 @@ class MoE(nn.Module):
             w2s: torch.Tensor, # [num_experts, ffn_dim, hidden_size]
             w3s: torch.Tensor, # [num_experts, hidden_size, ffn_dim]
         ) -> torch.Tensor: # [batch_size * top_k_experts, hidden_size]
-        grouped_w1_out = grouped_matmul(expanded_hidden_states, w1s, cum_experts_range, True)
-        grouped_w3_out = grouped_matmul(expanded_hidden_states, w3s, cum_experts_range, False)
+        grouped_w1_out = grouped_matmul(expanded_hidden_states, cum_experts_range, w1s, True)
+        grouped_w3_out = grouped_matmul(expanded_hidden_states, cum_experts_range, w3s, False)
         grouped_w1_out.mul_(grouped_w3_out) 
-        return grouped_matmul(grouped_w1_out, w2s, cum_experts_range, False)
+        return grouped_matmul(grouped_w1_out, cum_experts_range, w2s, False)
 
     def merge_expert_outputs(
             self,
@@ -139,31 +139,32 @@ class MoE(nn.Module):
 @triton.jit
 def grouped_matmul_kernel(
     # device tensor of matrices pointers
-    group_a_ptrs,
-    group_b_ptrs,
-    group_c_ptrs,
-    # device tensor of gemm sizes. its shape is [group_size, 3]
-    # dim 0 is group_size, dim 1 is the values of <M, N, K> of each gemm
-    group_gemm_sizes,
-    # device tensor of leading dimension sizes. its shape is [group_size, 3]
-    # dim 0 is group_size, dim 1 is the values of <lda, ldb, ldc> of each gemm
-    g_lds,
-    # number of gemms
+    fused_input_ptr,
+    cum_input_group_range,
+    fused_b_ptr,
+    fused_output_ptr,
     group_size,
+    n,
+    k,
+    lda,
+    ldb,
+    ldc,
     # number of virtual SM
     NUM_SM: tl.constexpr,
     # tile sizes
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    ACTIVATION: tl.constexpr,
 ):
     tile_idx = tl.program_id(0)
     last_problem_end = 0
     for g in range(group_size):
         # get the gemm size of the current problem
-        gm = tl.load(group_gemm_sizes + g * 3)
-        gn = tl.load(group_gemm_sizes + g * 3 + 1)
-        gk = tl.load(group_gemm_sizes + g * 3 + 2)
+        a_offset = tl.load(cum_input_group_range + g)
+        gm = tl.load(cum_input_group_range + g + 1) - a_offset
+        gn = n
+        gk = k
         num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
         num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
         num_tiles = num_m_tiles * num_n_tiles
@@ -171,12 +172,9 @@ def grouped_matmul_kernel(
         while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
             # pick up a tile from the current gemm problem
             k = gk
-            lda = tl.load(g_lds + g * 3)
-            ldb = tl.load(g_lds + g * 3 + 1)
-            ldc = tl.load(g_lds + g * 3 + 2)
-            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
-            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
-            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
+            a_ptr = fused_input_ptr + a_offset * lda
+            b_ptr = fused_b_ptr + g * n
+            c_ptr = fused_output_ptr + a_offset * ldc
             # figure out tile coordinates
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
@@ -193,9 +191,9 @@ def grouped_matmul_kernel(
                 # hint to Triton compiler to do proper loop pipelining
                 tl.multiple_of(a_ptrs, [16, 16])
                 tl.multiple_of(b_ptrs, [16, 16])
-                # assume full tile for now
-                a = tl.load(a_ptrs)
-                b = tl.load(b_ptrs)
+
+                a = tl.load(a_ptrs, mask=offs_k[None, :] < k - kk * BLOCK_SIZE_K, other=0.0)
+                b = tl.load(b_ptrs, mask=offs_k[:, None] < k - kk * BLOCK_SIZE_K, other=0.0)
                 accumulator += tl.dot(a, b)
                 a_ptrs += BLOCK_SIZE_K
                 b_ptrs += BLOCK_SIZE_K * ldb
@@ -204,9 +202,10 @@ def grouped_matmul_kernel(
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
+            c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
             # assumes full tile for now
-            tl.store(c_ptrs, c)
+            tl.store(c_ptrs, c, mask=c_mask)
 
             # go to the next tile by advancing NUM_SM
             tile_idx += NUM_SM
@@ -215,7 +214,7 @@ def grouped_matmul_kernel(
         last_problem_end = last_problem_end + num_tiles
 
 
-def group_gemm_fn(group_A, group_B):
+def grouped_matmul(fused_group_A: torch.Tensor, cum_group_range: torch.Tensor, group_B: torch.Tensor, relu_epilogue: bool):
     device = torch.device('cuda')
     assert len(group_A) == len(group_B)
     group_size = len(group_A)
