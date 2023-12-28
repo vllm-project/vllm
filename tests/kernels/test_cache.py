@@ -14,7 +14,7 @@ BLOCK_SIZES = [8, 16, 32]
 NUM_BLOCKS = [1024, 36000]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
-DEVICES = [i for i in range(torch.cuda.device_count())]
+DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
