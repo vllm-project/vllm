@@ -1,6 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 from os import path
+import os
 from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
@@ -33,10 +34,12 @@ class Request(Trace):
 
 
 class Tracer:
-    TRACE_FOLDER = path.join(Path(__file__), "trace")
+    TRACE_FOLDER = path.join(Path(path.dirname(__file__)), "trace")
 
     def __init__(self):
         self.traces: Dict[str, Trace] = {}
+        if not os.path.exists(self.TRACE_FOLDER):
+            os.makedirs(self.TRACE_FOLDER)
 
     def add(self, trace_type: type) -> int:
         assert issubclass(trace_type, Trace), "Invalid trace type is provided!"
@@ -49,12 +52,16 @@ class Tracer:
         return self.traces[tid]
 
     def export(self, filename: str = "trace"):
-        trace_bundle: Dict[str, List[Trace]] = {}
+        trace_bundle: Dict[str, List[Dict]] = {}
+
         for trace in self.traces.values():
             type_name = trace.__class__.__name__
             if type_name not in trace_bundle:
                 trace_bundle[type_name] = []
-            trace_bundle[type_name].append(trace)
+            trace_dict = asdict(
+                trace, dict_factory=lambda d: {k: v for (k, v) in d if v is not None}
+            )
+            trace_bundle[type_name].append(trace_dict)
 
         trace_path = path.join(self.TRACE_FOLDER, f"{filename}.json")
         with open(trace_path, "w") as file:

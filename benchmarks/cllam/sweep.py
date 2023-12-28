@@ -108,10 +108,10 @@ class BenchEngine:
         return [self.bench_single(run) for run in runs]
 
     def bench_single(self, run: BenchSetting) -> BenchResult:
-        cmd = (f"python {self.vllm_dir}/benchmarks/cllam/bench_serving.py"
+        cmd = (f"python {self.vllm_dir}/benchmarks/benchmark_serving.py"
                f" --dataset {run.dataset} --backend {run.backend}"
                f" --tokenizer {run.tokenizer} --request-rate {run.req_rate}"
-               f" --iteration_num {run.iteration_num} --gen_len {run.gen_len} --prompt_len {run.prompt_len}"
+               f" --gen_len {run.gen_len} --prompt_len {run.prompt_len}"
                f" --num-prompts {run.num_requests}")
         completed_process: CompletedProcess = Util.run_cmd(cmd, True)
         def process_output(completed_process: CompletedProcess):
@@ -202,12 +202,12 @@ if __name__ == "__main__":
     parser.add_argument("--backend", type=str, choices=["vllm"], default="vllm")
     parser.add_argument("--dataset", type=str,
         default="/data/ShareGPT_V3_unfiltered_cleaned_split.json")
-    parser.add_argument("--vllm_dir", type=str, default="/home/lily/vllm_bench_jerry/experimentation-for-cllam")
+    parser.add_argument("--vllm_dir", type=str, default=None)
     parser.add_argument("--outfile", type=str, default="bench_results")
     parser.add_argument("--prompt_len", type=int, default=64)
     parser.add_argument("--gen_len", type=int, default=64)
     parser.add_argument("--num_requests", type=int, default=500)
     parser.add_argument("--repeat_num", type=int, default=3)
-    parser.add_argument("--request_rate_params", type=tuple, help="(start_request_rate, end_request_rate, step_size). End_request_size is INCLUDED.", default=(2, 14, 2))
+    parser.add_argument("--request_rate_params", type=tuple, help="(start_request_rate, end_request_rate, step_size). End_request_size is INCLUDED.", default=(2, 50, 8))
     args = parser.parse_args()
     main(args.vllm_dir, args.model, args.tokenizer, args.backend, args.dataset, args.outfile, args.prompt_len, args.gen_len, args.num_requests, args.repeat_num, args.request_rate_params)

@@ -208,6 +208,9 @@ class _AsyncLLMEngine(LLMEngine):
         step_trace.is_prompt_run = scheduler_outputs.prompt_run
         step_trace.batched_token_num = scheduler_outputs.num_batched_tokens
         step_trace.context_token_num = self.get_context_token_num(scheduler_outputs)
+        step_trace.batched_requests = len(scheduler_outputs.scheduled_seq_groups)
+        step_trace.preempted_requests = [] # TODO
+        step_trace.available_slots = -1 # TODO
         
         # Execute the model.
         output = await self._run_workers_async(

@@ -26,6 +26,8 @@ import aiohttp
 import numpy as np
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from cllam.trace import TRACER
+import cllam.trace as Ctrace
 
 # (prompt len, output len, latency)
 REQUEST_LATENCY: List[Tuple[int, int, float]] = []
@@ -35,6 +37,8 @@ def sample_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
+    prompt_len: int,
+    gen_len: int
 ) -> List[Tuple[str, int, int]]:
     # Load the dataset.
     with open(dataset_path) as f:
@@ -62,17 +66,14 @@ def sample_requests(
 
     # Filter out too long sequences.
     filtered_dataset: List[Tuple[str, int, int]] = []
-    for prompt, prompt_token_ids, output_len in tokenized_dataset:
-        prompt_len = len(prompt_token_ids)
-        if prompt_len < 4 or output_len < 4:
-            # Prune too short sequences.
-            # This is because TGI causes errors when the input or output length
-            # is too short.
+    for _, prompt_token_ids, output_len in tokenized_dataset:
+        cur_prompt_len = len(prompt_token_ids)
+        if cur_prompt_len < prompt_len:
             continue
-        if prompt_len > 1024 or prompt_len + output_len > 2048:
-            # Prune too long sequences.
-            continue
-        filtered_dataset.append((prompt, prompt_len, output_len))
+
+        # truncate prompt to the given length
+        trunc_prompt = tokenizer.decode(prompt_token_ids[:prompt_len])
+        filtered_dataset.append((trunc_prompt, prompt_len, gen_len))
 
     # Sample the requests.
     sampled_requests = random.sample(filtered_dataset, num_requests)
@@ -106,7 +107,12 @@ async def send_request(
     use_beam_search: bool,
 ) -> None:
     request_start_time = time.perf_counter()
-
+    tid = TRACER.add(Ctrace.Request)
+    request_trace = TRACER.get(tid)
+    request_trace.start = request_start_time
+    request_trace.prompt_len = prompt_len
+    request_trace.gen_len = output_len
+    
     headers = {"User-Agent": "Benchmark Client"}
     if backend == "vllm":
         pload = {
@@ -149,6 +155,7 @@ async def send_request(
                 break
 
     request_end_time = time.perf_counter()
+    request_trace.end = request_end_time
     request_latency = request_end_time - request_start_time
     REQUEST_LATENCY.append((prompt_len, output_len, request_latency))
 
@@ -178,7 +185,7 @@ def main(args: argparse.Namespace):
 
     api_url = f"http://{args.host}:{args.port}/generate"
     tokenizer = get_tokenizer(args.tokenizer, trust_remote_code=args.trust_remote_code)
-    input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
+    input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer, args.prompt_len, args.gen_len)
 
     benchmark_start_time = time.perf_counter()
     asyncio.run(benchmark(args.backend, api_url, input_requests, args.best_of,
@@ -202,6 +209,7 @@ def main(args: argparse.Namespace):
     ])
     print("Average latency per output token: "
           f"{avg_per_output_token_latency:.2f} s")
+    TRACER.export(f"{args.request_rate}_{args.prompt_len}_{args.gen_len}")
 
 
 if __name__ == "__main__":
@@ -229,5 +237,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument('--trust-remote-code', action='store_true',
                         help='trust remote code from huggingface')
+    parser.add_argument('--prompt_len', type=int, default=128)
+    parser.add_argument('--gen_len', type=int, default=128)
     args = parser.parse_args()
     main(args)
