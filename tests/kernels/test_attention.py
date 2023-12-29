@@ -107,10 +107,18 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
-def test_paged_attention(kv_cache_factory, version: str, num_seqs: int,
-                         num_heads: Tuple[int, int], head_size: int,
-                         use_alibi: bool, block_size: int, dtype: torch.dtype,
-                         seed: int, device: int) -> None:
+def test_paged_attention(
+    kv_cache_factory,
+    version: str,
+    num_seqs: int,
+    num_heads: Tuple[int, int],
+    head_size: int,
+    use_alibi: bool,
+    block_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: int,
+) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -269,9 +277,14 @@ def ref_multi_query_kv_attention(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_multi_query_kv_attention(num_seqs: int, num_heads: Tuple[int, int],
-                                  head_size: int, dtype: torch.dtype,
-                                  seed: int, device: int) -> None:
+def test_multi_query_kv_attention(
+    num_seqs: int,
+    num_heads: Tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: int,
+) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)

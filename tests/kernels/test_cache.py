@@ -27,10 +27,18 @@ DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_copy_blocks(kv_cache_factory, num_mappings: int, num_layers: int,
-                     num_heads: int, head_size: int, block_size: int,
-                     num_blocks: int, dtype: torch.dtype, seed: int,
-                     device: int) -> None:
+def test_copy_blocks(
+    kv_cache_factory,
+    num_mappings: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: int,
+) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -85,9 +93,17 @@ def test_copy_blocks(kv_cache_factory, num_mappings: int, num_layers: int,
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_reshape_and_cache(kv_cache_factory, num_tokens: int, num_heads: int,
-                           head_size: int, block_size: int, num_blocks: int,
-                           dtype: torch.dtype, seed: int, device: int) -> None:
+def test_reshape_and_cache(
+    kv_cache_factory,
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: int,
+) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)

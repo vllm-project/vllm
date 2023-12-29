@@ -39,8 +39,13 @@ def test_silu_and_mul(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_gelu_new(num_tokens: int, d: int, dtype: torch.dtype, seed: int,
-                  device: int) -> None:
+def test_gelu_new(
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: int,
+) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     gpu_id = f'cuda:{device}'
@@ -56,8 +61,13 @@ def test_gelu_new(num_tokens: int, d: int, dtype: torch.dtype, seed: int,
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
-def test_gelu_fast(num_tokens: int, d: int, dtype: torch.dtype, seed: int,
-                   device: int) -> None:
+def test_gelu_fast(
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: int,
+) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     gpu_id = f'cuda:{device}'
