@@ -28,21 +28,19 @@ class _AsyncLLaVAEngine(LLaVAEngine, _AsyncLLMEngine):
         future when we merge the execute_llava_model function to the 
         execute_model.
         """
-        seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
-        if scheduler_outputs.is_empty():
-            return ignored
+        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
         # Execute the model.
-        output = await self._run_workers_async(
+        output = (await self._run_workers_async(
             "execute_model",
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
             runner_method="execute_llava_model",
-        )
+        )) if not scheduler_outputs.is_empty() else []
 
-        return self._process_model_outputs(output, scheduler_outputs) + ignored
+        return self._process_model_outputs(output, scheduler_outputs)
 
 
 class AsyncLLaVAEngine(AsyncLLMEngine):

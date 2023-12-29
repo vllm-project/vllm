@@ -103,9 +103,7 @@ class LLaVAEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
-        if scheduler_outputs.is_empty():
-            return ignored
+        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
         # Execute the model.
         output = self._run_workers(
@@ -115,6 +113,6 @@ class LLaVAEngine(LLMEngine):
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
             runner_method="execute_llava_model",
-        )
+        ) if not scheduler_outputs.is_empty() else []
 
         return self._process_model_outputs(output, scheduler_outputs)

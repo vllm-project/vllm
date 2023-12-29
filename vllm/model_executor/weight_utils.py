@@ -146,7 +146,7 @@ def prepare_hf_model_weights(
         raise ValueError(f"Unknown load_format: {load_format}")
 
     if fall_back_to_pt:
-        allow_patterns += [".pt"]
+        allow_patterns += ["*.pt"]
 
     if not is_local:
         # Use file lock to prevent multiple processes from
