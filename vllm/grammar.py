@@ -202,10 +202,6 @@ class IncrementalParserState:
 
     # unique state key
     interactive_parser: FastInteractiveParser
-    partial_token: str
-
-    # orthogonal unique state key
-    full_seq: str
 
     # function of key
     terminal_candidates: list
@@ -217,11 +213,7 @@ class IncrementalParserState:
     _full_seq_trie: Trie
 
     def __repr__(self):
-        shown = [
-            "partial_token", "full_seq", "terminal_candidates",
-        ]
-        attrs_str = ", ".join(f"{s}={repr(getattr(self, s))}" for s in shown)
-        return f"{self.__class__.__name__}({attrs_str})"
+        return f"{self.__class__.__name__}({self.interactive_parser.parser_state.state_stack})"
 
     @classmethod
     @lru_cache(1000)
@@ -246,8 +238,6 @@ class IncrementalParserState:
             ["" if seq is None else None] * 2)
 
         parser = cls(interactive_parser=interactive_parser,
-                     full_seq="",
-                     partial_token="",
                      terminal_candidates=None,
                      _ignored_terms=set(lark_parser.lexer_conf.ignore),
                      _seq_validator=_seq_validator,
@@ -258,8 +248,7 @@ class IncrementalParserState:
 
     def new(self, **kwargs):
         """Cached create now state"""
-        parser_state_key = (hash(kwargs["interactive_parser"]),
-                            kwargs["partial_token"])
+        parser_state_key = hash(kwargs["interactive_parser"])
         if parser_state_key in self._memo:
             return self._memo[parser_state_key]
 
@@ -278,9 +267,15 @@ class IncrementalParserState:
         if parser is None:
             return
         if remainder_seq:
-            parser = parser.step(remainder_seq)
-            self._full_seq_trie.insert(full_seq, parser)
-        return parser
+            result = parser.step(remainder_seq)
+            if result is None:
+                return None
+            remainder_seq, parser = result
+            processed_seq = full_seq
+            if remainder_seq:
+                processed_seq = processed_seq[:-len(remainder_seq)]
+            self._full_seq_trie.insert(processed_seq, parser)
+        return remainder_seq, parser
 
     @memoize_by_instance
     def step(self, new_seq: str):
@@ -293,58 +288,43 @@ class IncrementalParserState:
         - If no partial matches, return None
         """
         if new_seq == "":
-            return self
-
-        new_maybe_partial_token = self.partial_token + new_seq
+            return "", self
 
         best_terminal, processed_seq, remainder_seq = self.get_best_matched_terminal(
-            self.allowed_terminals, new_maybe_partial_token)
+           new_seq)
+
+        # invalid
         if best_terminal is None:
             return None
 
         # candidate doesn't complete terminal
-        if remainder_seq is None:
-            partial_terminal_ids = self.get_partial_terminal_ids(
-                self.allowed_terminals,
-                new_maybe_partial_token,
-            )
-            return self.new(
-                interactive_parser=self.interactive_parser,
-                full_seq=self.full_seq + new_seq,
-                partial_token=new_maybe_partial_token,
-                terminal_candidates=partial_terminal_ids,
-            )
+        elif remainder_seq is None:
+            return processed_seq, self
 
-        # terminal completes rule
+        # candidate completes terminal
         else:
-            if best_terminal in self._ignored_terms:
-                new_interactive_parser = self.interactive_parser
-            else:
-                new_interactive_parser = self.get_stepped_parser_state(
-                    best_terminal)
-
-            if self.partial_token:
-                base_seq = self.full_seq[:-len(self.partial_token)]
-            else:
-                base_seq = self.full_seq
-
-            new_parser = self.new(
-                full_seq=base_seq + processed_seq,
-                interactive_parser=new_interactive_parser,
-                partial_token="",
-                terminal_candidates=None,
-            )
-
-            # no leftover to process
+            new_parser = self._next_with_new_terminal(best_terminal)
             if remainder_seq == "":
-                return new_parser
-
-            # process remainder
+                return "", new_parser
             else:
                 return new_parser.step(remainder_seq)
 
-    def get_best_matched_terminal(self, checked_terminals, seq):
-        for terminal in checked_terminals:
+
+    @memoize_by_instance
+    def _next_with_new_terminal(self, terminal):
+        if terminal in self._ignored_terms:
+            new_interactive_parser = self.interactive_parser
+        else:
+            new_interactive_parser = self.get_stepped_parser_state(
+                terminal)
+
+        return self.new(
+            interactive_parser=new_interactive_parser,
+            terminal_candidates=None,
+        )
+
+    def get_best_matched_terminal(self, seq):
+        for terminal in self.accepts():
             processed_seq, remainder_seq = self._seq_validator[terminal](seq)
             if processed_seq:
                 return terminal, processed_seq, remainder_seq
@@ -430,10 +410,18 @@ class NextTokenValidator:
         """
         Generate valid token strings given the full sequence
         """
-        parser = self.root_parser[full_seq]
-        if parser is None:
+
+        result = self.root_parser[full_seq]
+        if result is None:
             return []
-        return filter(parser.is_valid_next_seq, self.vocab)
+        partial_term, parser = result
+        for token in self.vocab:
+            if token is None:
+                if partial_term == "" and parser.is_valid_next_seq(token):
+                    yield None
+            else:
+                if parser.is_valid_next_seq(partial_term + token):
+                    yield token
 
     def get_valid_next_token_ids(self, full_seq):
         """
