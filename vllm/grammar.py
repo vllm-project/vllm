@@ -1,11 +1,12 @@
 import collections
 from copy import deepcopy, copy
 from dataclasses import dataclass, fields
-from functools import wraps, lru_cache
+import functools
 import regex
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing import Optional, List, Set, Union
+import weakref
 
 import ray
 
@@ -82,7 +83,7 @@ def get_pattern_validator(pattern: Pattern):
     if isinstance(pattern, PatternRE):
         compiled_pattern = regex.compile(pattern.value)
 
-        @lru_cache(int(1e6))
+        @functools.lru_cache(int(1e6))
         def get_re_matched_parts(seq):
             # match complete terminal, potentially with leftover seq
             complete_terminal_match = compiled_pattern.match(seq)
@@ -108,7 +109,7 @@ def get_pattern_validator(pattern: Pattern):
     elif isinstance(pattern, PatternStr):
         base_str = pattern.value
 
-        @lru_cache(int(1e6))
+        @functools.lru_cache(int(1e6))
         def get_str_matched_parts(seq):
             if seq.startswith(base_str):
                 processed_seq = seq[:len(base_str)]
@@ -125,22 +126,23 @@ def get_pattern_validator(pattern: Pattern):
         raise TypeError(f"Invalid pattern type: {type(pattern)}")
 
 
-def memoize_by_instance(method):
-    """
-    Memoize by id(self) and fn args
-    """
-    mname = method.__name__
+def method_lru_cache(*lru_args, **lru_kwargs):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapped_func(self, *args, **kwargs):
+            # We're storing the wrapped method inside the instance. If we had
+            # a strong reference to self the instance would never die.
+            self_weak = weakref.ref(self)
+            @functools.wraps(func)
+            @functools.lru_cache(*lru_args, **lru_kwargs)
+            def cached_method(*args, **kwargs):
+                return func(self_weak(), *args, **kwargs)
+            setattr(self, func.__name__, cached_method)
+            return cached_method(*args, **kwargs)
+        return wrapped_func
+    return decorator
 
-    @wraps(method)
-    def wrapper(self, *args):
-        key = (mname, id(self), args)
-        if key in self._memo:
-            return self._memo[key]
-        result = method(self, *args)
-        self._memo[key] = result
-        return result
-
-    return wrapper
+memoize_by_instance = method_lru_cache(int(1e7))
 
 
 class TrieNode:
@@ -216,7 +218,7 @@ class IncrementalParserState:
         return f"{self.__class__.__name__}({self.interactive_parser.parser_state.state_stack})"
 
     @classmethod
-    @lru_cache(1000)
+    @functools.lru_cache(1000)
     def from_grammar(cls, grammar: str, start: str):
         lark_parser = Lark(
             grammar,
@@ -347,7 +349,6 @@ class IncrementalParserState:
     def accepts(self):
         return set(self.interactive_parser.accepts()) | self._ignored_terms
 
-    @property
     @memoize_by_instance
     def allowed_terminals(self):
         if self.terminal_candidates is not None:
@@ -357,7 +358,7 @@ class IncrementalParserState:
     @memoize_by_instance
     def is_valid_next_seq(self, new_seq: Optional[str]):
         if new_seq is None:
-            return "$END" in self.allowed_terminals
+            return "$END" in self.allowed_terminals()
         return self.step(new_seq) is not None
 
 
