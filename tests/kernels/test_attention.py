@@ -23,7 +23,7 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
-USE_FP8_KV_CACHE = [True]
+USE_FP8_KV_CACHE = [False, True]
 SEEDS = [0]
 
 

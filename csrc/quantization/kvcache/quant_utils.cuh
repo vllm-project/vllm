@@ -94,7 +94,6 @@ template<>
 __inline__ __device__ bf16_4_t vec_conversion<bf16_4_t, uint32_t>(const uint32_t& a)
 {
     bf16_4_t res;
-    // uint16_t hi = (uint16_t)(a >> 16U);
     res.x = vec_conversion<__nv_bfloat162, uint16_t>((uint16_t)a);
     res.y = vec_conversion<__nv_bfloat162, uint16_t>((uint16_t)(a >> 16U));
     return res;
