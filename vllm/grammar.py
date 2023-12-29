@@ -141,6 +141,7 @@ def method_lru_cache(*lru_args, **lru_kwargs):
         return wrapped_func
     return decorator
 
+
 memoize_by_instance = method_lru_cache(int(1e7))
 
 
@@ -331,12 +332,6 @@ class IncrementalParserState:
                 return terminal, processed_seq, remainder_seq
 
         return None, None, None
-
-    def get_partial_terminal_ids(self, checked_terminals, seq):
-        return set([
-            term for term in checked_terminals
-            if self._seq_validator[term](seq)[0] is not None
-        ])
 
     @memoize_by_instance
     def get_stepped_parser_state(self, new_token_str):
