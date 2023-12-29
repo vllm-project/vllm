@@ -432,10 +432,8 @@ class NextTokenValidator:
         """
         parser = self.root_parser[full_seq]
         if parser is None:
-            return
-        for tok_str in self.vocab:
-            if parser.is_valid_next_seq(tok_str):
-                yield tok_str
+            return []
+        return filter(parser.is_valid_next_seq, self.vocab)
 
     def get_valid_next_token_ids(self, full_seq):
         """
