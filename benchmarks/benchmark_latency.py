@@ -115,6 +115,11 @@ if __name__ == '__main__':
     parser.add_argument('--enforce-eager',
                         action='store_true',
                         help='enforce eager mode and disable CUDA graph')
+    parser.add_argument('--kv-cache-dtype',
+                        type=str,
+                        choices=['fp8', None],
+                        default=None,
+                        help='Data type for kv cache storage.')
     parser.add_argument(
         '--profile',
         action='store_true',

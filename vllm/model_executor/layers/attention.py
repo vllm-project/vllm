@@ -220,7 +220,7 @@ def _paged_attention(
 ) -> torch.Tensor:
     output = torch.empty_like(query)
 
-    enable_fp8_kv_cache = key_cache.dtype == torch.uint8  # TODO
+    enable_fp8_kv_cache = key_cache.dtype == torch.uint8
 
     block_size = value_cache.shape[3]
     num_seqs, num_heads, head_size = query.shape
