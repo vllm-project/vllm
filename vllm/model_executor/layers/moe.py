@@ -81,6 +81,7 @@ class MoE(nn.Module):
         selected_experts: torch.Tensor,  # [batch_size, top_k_experts]
         routing_weights: torch.Tensor,  # [batch_size, top_k_experts]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        _, experts_indices = torch.sort(selected_experts.view(-1), dim=-1)
         cum_experts_range = torch.zeros(self.num_total_experts + 1,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
@@ -89,7 +90,6 @@ class MoE(nn.Module):
                                           device=hidden_states.device)
         ops.bincount(selected_experts.view(-1), num_rows_per_expert)
         torch.cumsum(num_rows_per_expert, dim=0, out=cum_experts_range[1:])
-        experts_indices = torch.argsort(selected_experts.view(-1), dim=-1)
         expanded_weights = routing_weights.view(-1)[experts_indices]
         return hidden_states[experts_indices.div_(
             self.top_k, rounding_mode="floor"
