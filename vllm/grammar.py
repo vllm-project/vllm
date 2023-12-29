@@ -208,7 +208,6 @@ class IncrementalParserState:
     full_seq: str
 
     # function of key
-    prior_terminal_ids: tuple[str]
     terminal_candidates: list
 
     # shared across instances
@@ -220,7 +219,6 @@ class IncrementalParserState:
     def __repr__(self):
         shown = [
             "partial_token", "full_seq", "terminal_candidates",
-            "prior_terminal_ids"
         ]
         attrs_str = ", ".join(f"{s}={repr(getattr(self, s))}" for s in shown)
         return f"{self.__class__.__name__}({attrs_str})"
@@ -248,7 +246,6 @@ class IncrementalParserState:
             ["" if seq is None else None] * 2)
 
         parser = cls(interactive_parser=interactive_parser,
-                     prior_terminal_ids=tuple(),
                      full_seq="",
                      partial_token="",
                      terminal_candidates=None,
@@ -314,7 +311,6 @@ class IncrementalParserState:
             return self.new(
                 interactive_parser=self.interactive_parser,
                 full_seq=self.full_seq + new_seq,
-                prior_terminal_ids=self.prior_terminal_ids,
                 partial_token=new_maybe_partial_token,
                 terminal_candidates=partial_terminal_ids,
             )
@@ -335,8 +331,6 @@ class IncrementalParserState:
             new_parser = self.new(
                 full_seq=base_seq + processed_seq,
                 interactive_parser=new_interactive_parser,
-                prior_terminal_ids=hash(
-                    (self.prior_terminal_ids, best_terminal)),
                 partial_token="",
                 terminal_candidates=None,
             )
@@ -429,7 +423,6 @@ class NextTokenValidator:
     ):
         self.tokenizer = tokenizer
         self.vocab = TokenVocab(tokenizer, legal_chars=legal_chars)
-
         self.root_parser = IncrementalParserState.from_grammar(
             grammar, grammar_start)
 
