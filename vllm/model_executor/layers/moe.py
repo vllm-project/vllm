@@ -16,6 +16,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 
 
 class MoE(nn.Module):
+
     def __init__(
         self,
         num_experts: int,
@@ -62,17 +63,17 @@ class MoE(nn.Module):
                 hidden_states, selected_experts, routing_weights)
 
         expanded_hidden_states = self.grouped_mlp(expanded_hidden_states,
-                                                  experts_range,
-                                                  self.w1s.data,
-                                                  self.w2s.data,
-                                                  self.w3s.data)
+                                                  experts_range, self.w1s.data,
+                                                  self.w2s.data, self.w3s.data)
 
         expanded_hidden_states.mul_(expanded_weights.unsqueeze(-1))
 
         tensor_model_parallel_all_reduce(expanded_hidden_states)
 
         return self.merge_expert_outputs(expanded_hidden_states,
-                                         experts_indices).view(batch_size, sequence_length, hidden_size)
+                                         experts_indices).view(
+                                             batch_size, sequence_length,
+                                             hidden_size)
 
     def expand_and_permutate_hidden_states(
         self,
@@ -83,8 +84,9 @@ class MoE(nn.Module):
         cum_experts_range = torch.zeros(self.num_total_experts + 1,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
-        num_rows_per_expert = torch.zeros(self.num_total_experts, dtype=torch.int32,
-                                        device=hidden_states.device)
+        num_rows_per_expert = torch.zeros(self.num_total_experts,
+                                          dtype=torch.int32,
+                                          device=hidden_states.device)
         ops.bincount(selected_experts.view(-1), num_rows_per_expert)
         torch.cumsum(num_rows_per_expert, dim=0, out=cum_experts_range[1:])
         experts_indices = torch.argsort(selected_experts.view(-1), dim=-1)
@@ -158,7 +160,7 @@ def grouped_matmul_kernel(
         # iterate through the tiles in the current gemm problem
         while (tile_idx >= last_problem_end
                and tile_idx < last_problem_end + num_tiles):
-               
+
             # pick up a tile from the current gemm problem
             k = gk
             a_ptr = fused_input_ptr + a_offset * lda
@@ -233,23 +235,22 @@ def grouped_matmul(fused_input: torch.Tensor,
         BLOCK_SIZE_N = 128
     # we use a fixed number of CTA, and it's auto-tunable
     grid = lambda META: (META['NUM_SM'], )
-    grouped_matmul_kernel[grid](
-        fused_input,
-        cum_group_range,
-        fused_group_b,
-        output,
-        group_size,
-        n=fused_group_b.shape[2],
-        k=fused_group_b.shape[1],
-        lda=fused_input.stride(0),
-        ldb=fused_group_b.stride(1),
-        ldc=output.stride(0),
-        ACTIVATION=activation,
-        BLOCK_SIZE_M=16,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-        BLOCK_SIZE_K=32,
-        NUM_SM=128,
-        num_warps=num_warps, 
-        num_stages=5),
+    grouped_matmul_kernel[grid](fused_input,
+                                cum_group_range,
+                                fused_group_b,
+                                output,
+                                group_size,
+                                n=fused_group_b.shape[2],
+                                k=fused_group_b.shape[1],
+                                lda=fused_input.stride(0),
+                                ldb=fused_group_b.stride(1),
+                                ldc=output.stride(0),
+                                ACTIVATION=activation,
+                                BLOCK_SIZE_M=16,
+                                BLOCK_SIZE_N=BLOCK_SIZE_N,
+                                BLOCK_SIZE_K=32,
+                                NUM_SM=128,
+                                num_warps=num_warps,
+                                num_stages=5),
 
     return output
