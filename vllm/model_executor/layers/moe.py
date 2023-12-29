@@ -123,35 +123,6 @@ class MoE(nn.Module):
         return out
 
 
-@triton.autotune(
-    configs=[
-        # triton.Config({
-        #     'BLOCK_SIZE_M': 128,
-        #     'BLOCK_SIZE_N': 128,
-        #     'BLOCK_SIZE_K': 32,
-        #     'NUM_SM': 84,
-        # }),
-        # triton.Config({
-        #     'BLOCK_SIZE_M': 128,
-        #     'BLOCK_SIZE_N': 128,
-        #     'BLOCK_SIZE_K': 32,
-        #     'NUM_SM': 128,
-        # }),
-        # triton.Config({
-        #     'BLOCK_SIZE_M': 64,
-        #     'BLOCK_SIZE_N': 64,
-        #     'BLOCK_SIZE_K': 32,
-        #     'NUM_SM': 84,
-        # }),
-        triton.Config({
-            'BLOCK_SIZE_M': 32,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 128,
-        }, num_warps=2, num_stages=5),
-    ],
-    key=['group_size'],
-)
 @triton.jit
 def grouped_matmul_kernel(
     # device tensor of matrices pointers
@@ -255,7 +226,11 @@ def grouped_matmul(fused_input: torch.Tensor,
                          fused_group_b.shape[2],
                          device=device,
                          dtype=fused_input.dtype)
-
+    BLOCK_SIZE_N = 64
+    num_warps = 2
+    if fused_input.shape[0] >= 8:
+        num_warps = 4
+        BLOCK_SIZE_N = 128
     # we use a fixed number of CTA, and it's auto-tunable
     grid = lambda META: (META['NUM_SM'], )
     grouped_matmul_kernel[grid](
@@ -270,6 +245,11 @@ def grouped_matmul(fused_input: torch.Tensor,
         ldb=fused_group_b.stride(1),
         ldc=output.stride(0),
         ACTIVATION=activation,
-    )
+        BLOCK_SIZE_M=16,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+        BLOCK_SIZE_K=32,
+        NUM_SM=128,
+        num_warps=num_warps, 
+        num_stages=5),
 
     return output
