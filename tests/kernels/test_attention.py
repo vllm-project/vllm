@@ -13,14 +13,14 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-NUM_BLOCKS = 4000  # Arbitrary values for testing
+NUM_BLOCKS = 40000  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80]
+HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
 USE_FP8_KV_CACHE = [True]

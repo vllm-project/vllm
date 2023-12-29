@@ -421,7 +421,6 @@ __global__ void convert_fp8_kernel(
   for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
     int64_t idx = block_idx * block_stride + i;
     dst_cache[idx] = vec_conversion<Tout, Tin>(VLLM_LDG(&src_cache[idx]));
-    dst_cache[idx] = vec_conversion<Tout, Tin>(VLLM_LDG(&src_cache[idx]));
   }
 }
 
