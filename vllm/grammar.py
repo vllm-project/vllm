@@ -127,11 +127,10 @@ def get_pattern_validator(pattern: Pattern):
 
 
 def method_lru_cache(*lru_args, **lru_kwargs):
+    # https://stackoverflow.com/a/44078118
     def decorator(func):
         @functools.wraps(func)
         def wrapped_func(self, *args, **kwargs):
-            # We're storing the wrapped method inside the instance. If we had
-            # a strong reference to self the instance would never die.
             self_weak = weakref.ref(self)
             @functools.wraps(func)
             @functools.lru_cache(*lru_args, **lru_kwargs)
