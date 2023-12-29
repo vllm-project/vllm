@@ -5,6 +5,7 @@ import torch
 
 from vllm._C import cache_ops
 
+
 def create_kv_caches(
     num_blocks: int,
     block_size: int,
@@ -28,7 +29,9 @@ def create_kv_caches(
         if dtype != torch.uint8:
             key_cache.uniform_(-scale, scale)
         else:
-            # NOTE: Due to NaN and Inf representation for fp8 data type, it may occur Inf or NaN if we directly use torch.randint to generate random data for fp8 cache.
+            # NOTE(zhaoyang): Due to NaN and Inf representation for fp8 data type,
+            # it may occur Inf or NaN if we directly use torch.randint
+            # to generate random data for fp8 cache.
             # For example, s.11111.00 in fp8e5m2 format repesents Inf.
             #     | E4M3        | E5M2
             #-----|-------------|-------------------
@@ -48,7 +51,8 @@ def create_kv_caches(
         if dtype != torch.uint8:
             value_cache.uniform_(-scale, scale)
         else:
-            value_cache_tmp = torch.empty_like(value_cache, dtype=torch.float16)
+            value_cache_tmp = torch.empty_like(value_cache,
+                                               dtype=torch.float16)
             value_cache_tmp.uniform_(-scale, scale)
             cache_ops.convert_fp8(value_cache_tmp, value_cache)
         value_caches.append(value_cache)

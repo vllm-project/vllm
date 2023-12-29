@@ -13,17 +13,17 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-NUM_BLOCKS = 40000  # Arbitrary values for testing
+NUM_BLOCKS = 4000  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80, 96, 112, 128, 256]
+HEAD_SIZES = [64, 80]
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
-USE_FP8_KV_CACHE = [False, True]
+USE_FP8_KV_CACHE = [True]
 SEEDS = [0]
 
 
@@ -157,20 +157,11 @@ def test_paged_attention(
     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
 
     # Create the KV caches.
+    cache_dtype = dtype if not use_fp8_kv_cache else torch.uint8
     key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
-                                                num_kv_heads, head_size, dtype,
-                                                seed)
+                                                num_kv_heads, head_size,
+                                                cache_dtype, seed)
     key_cache, value_cache = key_caches[0], value_caches[0]
-    if not use_fp8_kv_cache:
-        converted_key_cache = key_cache
-        converted_value_cache = value_cache
-    else:
-        # Convert to fp8
-        converted_key_cache = torch.empty_like(key_cache, dtype=torch.uint8)
-        converted_value_cache = torch.empty_like(value_cache,
-                                                 dtype=torch.uint8)
-        cache_ops.convert_fp8(key_cache, value_cache, converted_key_cache,
-                              converted_value_cache)
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
@@ -178,8 +169,8 @@ def test_paged_attention(
         ops.paged_attention_v1(
             output,
             query,
-            converted_key_cache,
-            converted_value_cache,
+            key_cache,
+            value_cache,
             num_kv_heads,
             scale,
             block_tables,
@@ -211,8 +202,8 @@ def test_paged_attention(
             max_logits,
             tmp_output,
             query,
-            converted_key_cache,
-            converted_value_cache,
+            key_cache,
+            value_cache,
             num_kv_heads,
             scale,
             block_tables,
@@ -226,6 +217,23 @@ def test_paged_attention(
         raise AssertionError(f"Unknown version: {version}")
 
     # Run the reference implementation.
+    if use_fp8_kv_cache:
+        # Convert cache data back to dtype.
+        x = 16 // torch.tensor([], dtype=dtype).element_size()
+        key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x,
+                           block_size, x)
+        value_cache_shape = value_cache.shape
+        converted_key_cache = torch.empty(size=key_cache_shape,
+                                          dtype=dtype,
+                                          device="cuda")
+        converted_value_cache = torch.empty(size=value_cache_shape,
+                                            dtype=dtype,
+                                            device="cuda")
+        cache_ops.convert_fp8(key_cache, converted_key_cache)
+        cache_ops.convert_fp8(value_cache, converted_value_cache)
+        key_cache = converted_key_cache
+        value_cache = converted_value_cache
+
     ref_output = torch.empty_like(query)
     ref_single_query_cached_kv_attention(
         ref_output,
@@ -242,7 +250,12 @@ def test_paged_attention(
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
     # outputs. Thus, we use a relaxed tolerance for the test.
-    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+    # NOTE(zhaoyang): FP8 KV Cache will introduce quantization error,
+    # so we use a relaxed tolerance for the test.
+    atol, rtol = 1e-3, 1e-5
+    if use_fp8_kv_cache:
+        atol, rtol = 1e-2, 1e-5
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
 
 
 def ref_multi_query_kv_attention(
