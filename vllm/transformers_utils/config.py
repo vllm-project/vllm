@@ -36,4 +36,9 @@ def get_config(model: str,
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model, revision=revision)
+
+    if config.model_type == "llava":
+        config.num_attention_heads = config.text_config.num_attention_heads
+        config.hidden_size = config.text_config.hidden_size
+        config.num_hidden_layers = config.text_config.num_hidden_layers
     return config

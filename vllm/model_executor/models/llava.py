@@ -250,10 +250,11 @@ class LlavaForConditionalGeneration(nn.Module):
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
+            if name.startswith("model."):
+                name = name[6:] # remove "model." prefix
 
-            if name.startswith(
-                    "model.language_model"):  # load language model weights
-                name = name[6:]  # remove "model." prefix
+            if name.startswith("language_model"):  # load language model weights
+                # name = name[6:]  # remove "model." prefix
                 if "rotary_emb.inv_freq" in name:
                     continue
                 if ("rotary_emb.cos_cached" in name
@@ -277,10 +278,10 @@ class LlavaForConditionalGeneration(nn.Module):
                         weight_loader = getattr(param, "weight_loader",
                                                 default_weight_loader)
                         weight_loader(param, loaded_weight)
-            elif name.startswith("model.vision_tower") or name.startswith(
-                    'model.multi_modal_projector'
+            elif name.startswith("vision_tower") or name.startswith(
+                    'multi_modal_projector'
             ):  # load vision model weights
-                name = name[6:]  # remove "model." prefix
+                # name = name[6:]  # remove "model." prefix
                 if params_dict.get(name, None) is None:
                     unused_keys.append(name)
                 else:

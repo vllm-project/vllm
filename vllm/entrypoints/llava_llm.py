@@ -53,6 +53,9 @@ class LLaVA:
         self.llm_engine = LLaVAEngine.from_engine_args(engine_args)
         self.request_counter = Counter()
 
+        self.image_token_index = self.llm_engine.model_config.hf_config.image_token_index
+        self.image_token = self.get_tokenizer().decode(self.image_token_index)
+
     def get_tokenizer(
             self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer
@@ -136,10 +139,6 @@ class LLaVA:
             else:
                 raise ValueError("image must be str or PIL.Image")
 
-        # image_token_index = self.config.image_token_index
-        image_token_index = 32000
-        image_token = self.get_tokenizer().decode(image_token_index)
-
         # Add requests to the engine.
         num_requests = len(prompts) if prompts is not None else len(
             prompt_token_ids)
@@ -150,10 +149,10 @@ class LLaVA:
 
             image_token_num = 0
             if prompt is not None:
-                image_token_num = prompt.count(image_token)
+                image_token_num = prompt.count(self.image_token)
             if token_ids is not None:
                 _image_token_num = np.sum(
-                    np.asarray(token_ids) == image_token_index)
+                    np.asarray(token_ids) == self.image_token_index)
                 if image_token_num != _image_token_num:
                     raise ValueError("image_token_num != _image_token_num")
                 else:
