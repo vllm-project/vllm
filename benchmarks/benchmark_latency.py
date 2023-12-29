@@ -24,6 +24,7 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
+        kv_cache_dtype=args.kv_cache_dtype,
     )
 
     sampling_params = SamplingParams(
