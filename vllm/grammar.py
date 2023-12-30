@@ -129,16 +129,21 @@ def get_pattern_validator(pattern: Pattern):
 def method_lru_cache(*lru_args, **lru_kwargs):
     # https://stackoverflow.com/a/44078118
     def decorator(func):
+
         @functools.wraps(func)
         def wrapped_func(self, *args, **kwargs):
             self_weak = weakref.ref(self)
+
             @functools.wraps(func)
             @functools.lru_cache(*lru_args, **lru_kwargs)
             def cached_method(*args, **kwargs):
                 return func(self_weak(), *args, **kwargs)
+
             setattr(self, func.__name__, cached_method)
             return cached_method(*args, **kwargs)
+
         return wrapped_func
+
     return decorator
 
 
@@ -293,7 +298,7 @@ class IncrementalParserState:
             return "", self
 
         best_terminal, processed_seq, remainder_seq = self.get_best_matched_terminal(
-           new_seq)
+            new_seq)
 
         # invalid
         if best_terminal is None:
@@ -311,14 +316,12 @@ class IncrementalParserState:
             else:
                 return new_parser.step(remainder_seq)
 
-
     @memoize_by_instance
     def _next_with_new_terminal(self, terminal):
         if terminal in self._ignored_terms:
             new_interactive_parser = self.interactive_parser
         else:
-            new_interactive_parser = self.get_stepped_parser_state(
-                terminal)
+            new_interactive_parser = self.get_stepped_parser_state(terminal)
 
         return self.new(
             interactive_parser=new_interactive_parser,
@@ -448,18 +451,22 @@ class GrammarLogitsProcessor(NextTokenValidator):
 
 @ray.remote
 class GrammarLogitsProcessorActor:
+
     def __init__(self, *args, **kwargs):
         self.processor = GrammarLogitsProcessor(*args, **kwargs)
 
-    def process_logits(self, token_ids: List[int], logits: torch.Tensor) -> torch.Tensor:
+    def process_logits(self, token_ids: List[int],
+                       logits: torch.Tensor) -> torch.Tensor:
         return self.processor(token_ids, logits)
 
 
 class RayRemoteGrammarLogitsProcessor:
+
     def __init__(self, *args, **kwargs):
         self.actor = GrammarLogitsProcessorActor.remote(*args, **kwargs)
 
-    def __call__(self, token_ids: List[int], logits: torch.Tensor) -> torch.Tensor:
+    def __call__(self, token_ids: List[int],
+                 logits: torch.Tensor) -> torch.Tensor:
         logits_cpu = logits.cpu()
         result_id = self.actor.process_logits.remote(token_ids, logits_cpu)
         return ray.get(result_id)
