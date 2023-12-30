@@ -41,19 +41,29 @@ class MoE(nn.Module):
 
         self.w1s = nn.Parameter(
             torch.rand(self.num_total_experts, self.hidden_size,
-                        self.intermediate_size))
+                       self.intermediate_size))
         self.w2s = nn.Parameter(
             torch.rand(self.num_total_experts, self.intermediate_size,
-                        self.hidden_size))
+                       self.hidden_size))
         self.w3s = nn.Parameter(
             torch.rand(self.num_total_experts, self.hidden_size,
-                        self.intermediate_size))
+                       self.intermediate_size))
 
-        set_weight_attrs(self.w1s, {"weight_loader": self.weight_loader, "parallel_dim": 1})
-        set_weight_attrs(self.w2s, {"weight_loader": self.weight_loader, "parallel_dim": 0})
-        set_weight_attrs(self.w3s, {"weight_loader": self.weight_loader, "parallel_dim": 1})
+        set_weight_attrs(self.w1s, {
+            "weight_loader": self.weight_loader,
+            "parallel_dim": 1
+        })
+        set_weight_attrs(self.w2s, {
+            "weight_loader": self.weight_loader,
+            "parallel_dim": 0
+        })
+        set_weight_attrs(self.w3s, {
+            "weight_loader": self.weight_loader,
+            "parallel_dim": 1
+        })
 
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, expert_id: int):
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
+                      expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
         loaded_weight = loaded_weight.t()
         parallel_dim = getattr(param, "parallel_dim", 0)
@@ -61,7 +71,7 @@ class MoE(nn.Module):
         shard_size = param_data.shape[parallel_dim + 1]
         start_idx = tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(parallel_dim, start_idx,
-                                                shard_size)
+                                             shard_size)
         assert param_data[expert_id].shape == loaded_weight.shape
         param_data[expert_id].copy_(loaded_weight)
 
@@ -110,8 +120,9 @@ class MoE(nn.Module):
         ops.bincount(selected_experts.view(-1), num_rows_per_expert)
         torch.cumsum(num_rows_per_expert, dim=0, out=cum_experts_range[1:])
         expanded_weights = routing_weights.view(-1)[experts_indices]
-        experts_indices.div_(self.top_k, rounding_mode="floor") 
-        return hidden_states[experts_indices], cum_experts_range, expanded_weights, experts_indices
+        experts_indices.div_(self.top_k, rounding_mode="floor")
+        return hidden_states[
+            experts_indices], cum_experts_range, expanded_weights, experts_indices
 
     def grouped_mlp(
         self,
@@ -205,10 +216,12 @@ def grouped_matmul_kernel(
                 tl.multiple_of(b_ptrs, [16, 16])
 
                 a = tl.load(a_ptrs,
-                            mask=(offs_k[None, :] < k - kk * BLOCK_SIZE_K) & (offs_am[:, None] < gm),
+                            mask=(offs_k[None, :] < k - kk * BLOCK_SIZE_K) &
+                            (offs_am[:, None] < gm),
                             other=0.0)
                 b = tl.load(b_ptrs,
-                            mask=(offs_k[:, None] < k - kk * BLOCK_SIZE_K) & (offs_bn[None, :] < gn),
+                            mask=(offs_k[:, None] < k - kk * BLOCK_SIZE_K) &
+                            (offs_bn[None, :] < gn),
                             other=0.0)
                 accumulator += tl.dot(a, b)
                 a_ptrs += BLOCK_SIZE_K
