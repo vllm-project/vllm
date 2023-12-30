@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics.metrics import MetricLogger
-from vllm.engine.metrics.metrics_types import IterationStats, SystemStats
+from vllm.engine.metrics.metrics_utils import SystemStats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -121,10 +121,7 @@ class LLMEngine:
 
         # Metric Logging.
         if self.log_stats:
-            self.metric_logger = MetricLogger(
-                local_logger=logger,
-                logging_interval_sec=_LOGGING_INTERVAL_SEC
-            )
+            self.metric_logger = MetricLogger(_LOGGING_INTERVAL_SEC)
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -561,23 +558,9 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
         
-        # Log the system metrics.
+        # Log the system metrics if logging enabled.
         if self.log_stats:
-            # Update request level timings (for logging).
-            for seq_group in scheduled_seq_groups:
-                seq_group.update_timings(now=time.monotonic())
-
-            # Parse iteration and system stats.
-            iteration_stats = self._parse_iteration_stats(scheduler_outputs),
-            system_stats = None
-            if self.metric_logger.should_log(now=time.monotonic()):
-                system_stats = self._parse_system_stats()
-
-            # Actually Log.
-            self.metric_logger.log_stats(
-                iteration_stats=iteration_stats,
-                system_stats=system_stats
-            )
+            self._log_stats(scheduler_outputs=scheduler_outputs)
 
         return request_outputs
 
@@ -603,16 +586,26 @@ class LLMEngine:
 
         return self._process_model_outputs(output, scheduler_outputs)
 
-    def _parse_iteration_stats(self, scheduler_outputs: SchedulerOutputs) -> IterationStats:
-        return IterationStats(
-            prompt_run=scheduler_outputs.prompt_run,
-            num_batched_tokens=scheduler_outputs.num_batched_tokens,
-            arrival_times=[
-                seq_group.arrival_time for seq_group in scheduler_outputs.scheduled_seq_groups
-            ]
+    def _log_stats(self, scheduler_outputs: SchedulerOutputs) -> None:
+        now = time.monotonic()
+
+        # Get system stats if will log at this step.
+        system_stats = None
+        if self.metric_logger.should_log(now=now):
+            system_stats = self._get_system_stats()
+
+        # Log to Prometheus.
+        log_strings = self.metric_logger.log_stats(
+            now=now,
+            scheduler_outputs=scheduler_outputs,
+            system_stats=system_stats
         )
 
-    def _parse_system_stats(self) -> SystemStats:
+        # Log to Stdout
+        for log_string in log_strings:
+            logger.info(log_string)
+        
+    def _get_system_stats(self) -> SystemStats:
         return SystemStats(
             num_total_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_total_cpu_blocks=self.cache_config.num_cpu_blocks,

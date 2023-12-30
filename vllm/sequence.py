@@ -50,7 +50,6 @@ class SequenceStatus(enum.Enum):
 class SequenceData:
     """Data associated with a sequence.
 
-
     Args:
         prompt_token_ids: The token IDs of the prompt.
 
@@ -244,9 +243,9 @@ class SequenceGroup:
         self.prompt_logprobs: Optional[PromptLogprobs] = None
 
         # Request level timing metrics.
-        self.time_to_first_token = Optional[float] = None
+        self.time_to_first_token: Optional[float] = None
         self.last_token_time: Optional[float] = None
-        self.last_inter_token_latency = Optional[float] = None
+        self.last_inter_token_latency: Optional[float] = None
 
     @property
     def prompt(self) -> str:

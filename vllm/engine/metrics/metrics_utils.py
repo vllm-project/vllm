@@ -1,7 +1,7 @@
 from aioprometheus import Counter, Gauge, Histogram
 from abc import ABC
 from dataclasses import dataclass
-from typing import Union, Optional, Dict, List
+from typing import Union, Dict, List
 from vllm.core.scheduler import SchedulerOutputs
 
 @dataclass
@@ -15,13 +15,13 @@ class SystemStats:
     num_waiting: int
     num_swapped: int
 
-@dataclass
 class IterationStats:
     """IterationStats holds iteration level stats for logging_interval window."""
-    num_prompt_tokens: List[int] = []
-    num_generation_tokens: List[int] = []
-    time_to_first_token: List[float] = []
-    inter_token_latency: List[float] = []
+    def __init__(self):
+        self.num_prompt_tokens: List[int] = []
+        self.num_generation_tokens: List[int] = []
+        self.time_to_first_token: List[float] = []
+        self.inter_token_latency: List[float] = []
 
     def update(self, now: float, scheduler_outputs: SchedulerOutputs) -> None:
         """Updates the Tracked Stats based on the SchedulerOutput."""
@@ -43,8 +43,8 @@ class IterationStats:
             self.num_generation_tokens.append(scheduler_outputs.num_batched_tokens)
             self.inter_token_latency.extend(timings)
 
-    def discard(self) -> None:
-        """Discards Stats that are older than the logging_interval."""
+    def reset(self) -> None:
+        """Reset stats for next logging window."""
         self.num_prompt_tokens = []
         self.num_generation_tokens = []
         self.time_to_first_token = []
