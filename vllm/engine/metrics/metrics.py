@@ -3,7 +3,7 @@ from logging import Logger
 from typing import Optional, List
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.metrics.metrics_registry import METRIC_REGISTRY
-from vllm.engine.metrics.metrics_types import SystemStats, IterationStats, PrometheusMetric
+from vllm.engine.metrics.metrics_utils import SystemStats, IterationStats, PrometheusMetric
 
 labels = {}
             
@@ -26,11 +26,7 @@ class MetricLogger:
         )
 
         # Gauge Metrics from Registry.
-        self.metrics: List[PrometheusMetric] = [
-            metric_class(
-                prometheus_metric=prometheus_metric, labels=labels
-            ) for prometheus_metric, metric_class in METRIC_REGISTRY
-        ]
+        self.metrics: List[PrometheusMetric] = METRIC_REGISTRY
 
     def should_log(self, now: float):
         return now - self.last_logging_time >= self.logging_interval_sec

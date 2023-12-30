@@ -1,4 +1,4 @@
-from aioprometheus import Gauge, Histogram
+from aioprometheus import Counter, Gauge, Histogram
 from abc import ABC
 from dataclasses import dataclass
 from typing import Union, Optional, Dict, List
@@ -57,33 +57,38 @@ class Stats:
 
 class PrometheusMetric(ABC):
     """Metric holds a Prometheus Metric and logic for converting Stats --> Metric"""    
-    def log(self, labels: Dict) -> None:
+    def log(self) -> None:
         """Push metric to Prometheus client."""
         raise NotImplementedError
 
-    def update(self, now: float, stats: Stats) -> None:
-        """Update metric based on stats."""
+    def compute(self, stats: Stats) -> None:
+        """Compute metric based on stats."""
         raise NotImplementedError
+
+class CounterMetric(PrometheusMetric):
+    def __init__(self, prometheus_metric: Counter, labels: Dict[str,str]) -> None:
+        self.counter = prometheus_metric
+        self.metric: Union[float, int] = 0
+        self.labels = labels
+        super().__init__()
     
-    def to_str(self) -> str:
-        """Returns string representation for local logger."""
-        raise NotImplementedError
+    def log(self) -> None:
+        # Increment counter by N if "something happend" (metric > 0).
+        if self.metric > 0:
+            self.counter.add(self.labels, self.metric)
+        self.metric = 0
 
 class GaugeMetric(PrometheusMetric):
     def __init__(self, prometheus_metric: Gauge, labels: Dict[str,str]) -> None:
         self.gauge = prometheus_metric
-        self.metric: Optional[Union[float, int]] = None
+        self.metric: Union[float, int] = 0
         self.labels = labels
-        self.should_local_log = True
         super().__init__()
     
     def log(self) -> None:
-        if self.metric is not None:
-            self.gauge.set(self.labels, self.metric)
-    
-    def update(self, now: float, stats: Stats) -> None:
-        raise NotImplementedError
-    
+        # Set gauge.
+        self.gauge.set(self.labels, self.metric)
+
     def to_str(self) -> str:
         raise NotImplementedError
 
@@ -92,16 +97,9 @@ class HistogramMetric(PrometheusMetric):
         self.histogram = prometheus_metric
         self.metrics: List[Union[float, int]] = []
         self.labels = labels
-        self.should_local_log = False
         super().__init__()
     
     def log(self) -> None:
+        # Log each metric.
         for metric in self.metrics:
             self.histogram.observe(self.labels, metric)
-    
-    def update(self, now: float, stats: Stats) -> None:
-        raise NotImplementedError
-    
-    def to_str(self) -> str:
-        raise NotImplementedError
-    
