@@ -55,7 +55,7 @@ class MoE(nn.Module):
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
-        loaded_weight = loaded_weight.transpose(0, 1)
+        loaded_weight = loaded_weight.t()
         parallel_dim = getattr(param, "parallel_dim", 0)
         param_data = param.data
         shard_size = param_data.shape[parallel_dim + 1]
@@ -110,9 +110,8 @@ class MoE(nn.Module):
         ops.bincount(selected_experts.view(-1), num_rows_per_expert)
         torch.cumsum(num_rows_per_expert, dim=0, out=cum_experts_range[1:])
         expanded_weights = routing_weights.view(-1)[experts_indices]
-        return hidden_states[experts_indices.div_(
-            self.top_k, rounding_mode="floor"
-        )], cum_experts_range, expanded_weights, experts_indices
+        experts_indices.div_(self.top_k, rounding_mode="floor") 
+        return hidden_states[experts_indices], cum_experts_range, expanded_weights, experts_indices
 
     def grouped_mlp(
         self,
@@ -128,7 +127,8 @@ class MoE(nn.Module):
         grouped_w3_out = grouped_matmul(expanded_hidden_states,
                                         cum_experts_range, w3s)
         grouped_w1_out.mul_(grouped_w3_out)
-        return grouped_matmul(grouped_w1_out, cum_experts_range, w2s)
+        ret = grouped_matmul(grouped_w1_out, cum_experts_range, w2s)
+        return ret
 
     def merge_expert_outputs(
             self,
@@ -205,10 +205,10 @@ def grouped_matmul_kernel(
                 tl.multiple_of(b_ptrs, [16, 16])
 
                 a = tl.load(a_ptrs,
-                            mask=offs_k[None, :] < k - kk * BLOCK_SIZE_K,
+                            mask=(offs_k[None, :] < k - kk * BLOCK_SIZE_K) & (offs_am[:, None] < gm),
                             other=0.0)
                 b = tl.load(b_ptrs,
-                            mask=offs_k[:, None] < k - kk * BLOCK_SIZE_K,
+                            mask=(offs_k[:, None] < k - kk * BLOCK_SIZE_K) & (offs_bn[None, :] < gn),
                             other=0.0)
                 accumulator += tl.dot(a, b)
                 a_ptrs += BLOCK_SIZE_K

@@ -10,7 +10,6 @@ from vllm.model_executor.weight_utils import initialize_dummy_weights
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 
-
 def test_moe():
     torch.distributed.init_process_group(
             backend="nccl",
@@ -23,10 +22,9 @@ def test_moe():
         moe = MoE(
             num_experts=4,
             top_k=2,
-            hidden_size=8,
-            intermediate_size=8,
+            hidden_size=16,
+            intermediate_size=16,
             tp_size=1,
         )
-    initialize_dummy_weights(moe)
 
-    output = moe.forward(torch.randn(4, 1, 8, device="cuda"))
+    output = moe.forward(torch.randn(2, 1, 16, device="cuda"))
