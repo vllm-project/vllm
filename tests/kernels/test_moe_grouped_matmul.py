@@ -28,16 +28,12 @@ def ref_grouped_matmul(
 
 
 @pytest.mark.parametrize("group_size", [1, 2, 4, 8, 16])
-# @pytest.mark.parametrize("group_size", [8])
 @pytest.mark.parametrize("m", [1, 5, 33, 81])
-# @pytest.mark.parametrize("m", [8192])
 @pytest.mark.parametrize("n", [128, 1024, 2000])
-# @pytest.mark.parametrize("n", [1792])
 @pytest.mark.parametrize("k", [128, 1024, 2000])
-# @pytest.mark.parametrize("k", [4096])
 @pytest.mark.parametrize("activation", ["", "silu"])
 @pytest.mark.parametrize("dtype",
-                         [torch.float16])
+                         [torch.float16, torch.float32, torch.bfloat16])
 def test_moe_grouped_matmul(
     group_size: int,
     m: int,
@@ -47,11 +43,9 @@ def test_moe_grouped_matmul(
     dtype: torch.dtype,
 ):
     groups = [random.randint(1, m) for _ in range(group_size)]
-    # groups = [m for _ in range(group_size)]
     batch_size = sum(groups)
     fused_input = torch.randn(batch_size, k, dtype=dtype, device="cuda")
     cum_group_range = torch.tensor([0] + list(itertools.accumulate(groups)),
-    # cum_group_range = torch.tensor([    0, 28321, 61089, 65536, 65536, 65536, 65536, 65536, 65536],
                                    dtype=torch.int32,
                                    device="cuda")
     fused_group_b = torch.randn(group_size, k, n, dtype=dtype, device="cuda")
@@ -65,7 +59,6 @@ def test_moe_grouped_matmul(
     diff = torch.abs(ref_output - output)
     mean = torch.mean(diff)
     max = torch.max(diff)
-    # print(f"{mean=}, {max=} {diff=}")
+    print(f"{mean=}, {max=}")
 
-    # assert torch.allclose(output, ref_output, atol=1e-2, rtol=0)
-    assert mean.item() < 1e-2
+    assert torch.allclose(output, ref_output, atol=1e-2, rtol=0)
