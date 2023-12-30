@@ -243,6 +243,11 @@ class SequenceGroup:
         self.arrival_time = arrival_time
         self.prompt_logprobs: Optional[PromptLogprobs] = None
 
+        # Request level timing metrics.
+        self.time_to_first_token = Optional[float] = None
+        self.last_token_time: Optional[float] = None
+        self.last_inter_token_latency = Optional[float] = None
+
     @property
     def prompt(self) -> str:
         # All sequences in the group should have the same prompt.
@@ -254,6 +259,19 @@ class SequenceGroup:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).data.prompt_token_ids
+
+    def update_timings(self, now: float, prompt_run: bool) -> float:
+        """Updates the timing stats for request level latency monitoring."""
+        # Set TTFT if prefill.
+        if prompt_run:
+            assert self.time_to_first_token is None
+            self.time_to_first_token = now - self.arrival_time
+        # Set Inter Token Latency if decode.
+        else:
+            assert self.last_token_time is not None
+            self.last_inter_token_latency = now - self.last_token_time
+        # Set Last Token Time to compute latency at next iteration.
+        self.last_token_time = now
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining

@@ -8,7 +8,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import record_metrics
+from vllm.engine.metrics.metrics import MetricLogger
+from vllm.engine.metrics.metrics_types import IterationStats, SystemStats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _LOGGING_INTERVAL_SEC = 5
-
 
 class LLMEngine:
     """An LLM engine that receives requests and generates texts.
@@ -119,12 +119,12 @@ class LLMEngine:
         # Create the scheduler.
         self.scheduler = Scheduler(scheduler_config, cache_config)
 
-        # Logging.
-        self.last_logging_time = 0.0
-        # List of (timestamp, num_tokens)
-        self.num_prompt_tokens: List[Tuple[float, int]] = []
-        # List of (timestamp, num_tokens)
-        self.num_generation_tokens: List[Tuple[float, int]] = []
+        # Metric Logging.
+        if self.log_stats:
+            self.metric_logger = MetricLogger(
+                local_logger=logger,
+                logging_interval_sec=_LOGGING_INTERVAL_SEC
+            )
 
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -373,6 +373,7 @@ class LLMEngine:
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
+        
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
@@ -559,11 +560,25 @@ class LLMEngine:
                           scheduler_outputs.ignored_seq_groups):
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
-
+        
+        # Log the system metrics.
         if self.log_stats:
-            # Log the system stats.
-            self._log_system_stats(scheduler_outputs.prompt_run,
-                                   scheduler_outputs.num_batched_tokens)
+            # Update request level timings (for logging).
+            for seq_group in scheduled_seq_groups:
+                seq_group.update_timings(now=time.monotonic())
+
+            # Parse iteration and system stats.
+            iteration_stats = self._parse_iteration_stats(scheduler_outputs),
+            system_stats = None
+            if self.metric_logger.should_log(now=time.monotonic()):
+                system_stats = self._parse_system_stats()
+
+            # Actually Log.
+            self.metric_logger.log_stats(
+                iteration_stats=iteration_stats,
+                system_stats=system_stats
+            )
+
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -588,78 +603,25 @@ class LLMEngine:
 
         return self._process_model_outputs(output, scheduler_outputs)
 
-    def _log_system_stats(
-        self,
-        prompt_run: bool,
-        num_batched_tokens: int,
-    ) -> None:
-        now = time.monotonic()
-        # Log the number of batched input tokens.
-        if prompt_run:
-            self.num_prompt_tokens.append((now, num_batched_tokens))
-        else:
-            self.num_generation_tokens.append((now, num_batched_tokens))
-
-        should_log = now - self.last_logging_time >= _LOGGING_INTERVAL_SEC
-        if not should_log:
-            return
-
-        # Discard the old stats.
-        self.num_prompt_tokens = [(t, n) for t, n in self.num_prompt_tokens
-                                  if now - t < _LOGGING_INTERVAL_SEC]
-        self.num_generation_tokens = [(t, n)
-                                      for t, n in self.num_generation_tokens
-                                      if now - t < _LOGGING_INTERVAL_SEC]
-
-        if len(self.num_prompt_tokens) > 1:
-            total_num_tokens = sum(n for _, n in self.num_prompt_tokens[:-1])
-            window = now - self.num_prompt_tokens[0][0]
-            avg_prompt_throughput = total_num_tokens / window
-        else:
-            avg_prompt_throughput = 0.0
-        if len(self.num_generation_tokens) > 1:
-            total_num_tokens = sum(n
-                                   for _, n in self.num_generation_tokens[:-1])
-            window = now - self.num_generation_tokens[0][0]
-            avg_generation_throughput = total_num_tokens / window
-        else:
-            avg_generation_throughput = 0.0
-
-        total_num_gpu_blocks = self.cache_config.num_gpu_blocks
-        num_free_gpu_blocks = (
-            self.scheduler.block_manager.get_num_free_gpu_blocks())
-        num_used_gpu_blocks = total_num_gpu_blocks - num_free_gpu_blocks
-        gpu_cache_usage = num_used_gpu_blocks / total_num_gpu_blocks
-
-        total_num_cpu_blocks = self.cache_config.num_cpu_blocks
-        if total_num_cpu_blocks > 0:
-            num_free_cpu_blocks = (
-                self.scheduler.block_manager.get_num_free_cpu_blocks())
-            num_used_cpu_blocks = total_num_cpu_blocks - num_free_cpu_blocks
-            cpu_cache_usage = num_used_cpu_blocks / total_num_cpu_blocks
-        else:
-            cpu_cache_usage = 0.0
-
-        record_metrics(
-            avg_prompt_throughput=avg_prompt_throughput,
-            avg_generation_throughput=avg_generation_throughput,
-            scheduler_running=len(self.scheduler.running),
-            scheduler_swapped=len(self.scheduler.swapped),
-            scheduler_waiting=len(self.scheduler.waiting),
-            gpu_cache_usage=gpu_cache_usage,
-            cpu_cache_usage=cpu_cache_usage,
+    def _parse_iteration_stats(self, scheduler_outputs: SchedulerOutputs) -> IterationStats:
+        return IterationStats(
+            prompt_run=scheduler_outputs.prompt_run,
+            num_batched_tokens=scheduler_outputs.num_batched_tokens,
+            arrival_times=[
+                seq_group.arrival_time for seq_group in scheduler_outputs.scheduled_seq_groups
+            ]
         )
 
-        logger.info("Avg prompt throughput: "
-                    f"{avg_prompt_throughput:.1f} tokens/s, "
-                    "Avg generation throughput: "
-                    f"{avg_generation_throughput:.1f} tokens/s, "
-                    f"Running: {len(self.scheduler.running)} reqs, "
-                    f"Swapped: {len(self.scheduler.swapped)} reqs, "
-                    f"Pending: {len(self.scheduler.waiting)} reqs, "
-                    f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
-                    f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
-        self.last_logging_time = now
+    def _parse_system_stats(self) -> SystemStats:
+        return SystemStats(
+            num_total_gpu_blocks=self.cache_config.num_gpu_blocks,
+            num_total_cpu_blocks=self.cache_config.num_cpu_blocks,
+            num_free_gpu_blocks=self.scheduler.block_manager.get_num_free_gpu_blocks(),
+            num_free_cpu_blocks=self.scheduler.block_manager.get_num_free_cpu_blocks(),
+            num_running=len(self.scheduler.running),
+            num_swapped=len(self.scheduler.swapped),
+            num_waiting=len(self.scheduler.waiting),
+        )
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
