@@ -11,8 +11,11 @@ import triton.language as tl
 from vllm._C import ops
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
+from vllm.model_executor.utils import set_weight_attrs
 
 
 class MoE(nn.Module):
@@ -37,14 +40,30 @@ class MoE(nn.Module):
                                      linear_method=None)
 
         self.w1s = nn.Parameter(
-            torch.empty(self.num_total_experts, self.hidden_size,
+            torch.rand(self.num_total_experts, self.hidden_size,
                         self.intermediate_size))
         self.w2s = nn.Parameter(
-            torch.empty(self.num_total_experts, self.intermediate_size,
+            torch.rand(self.num_total_experts, self.intermediate_size,
                         self.hidden_size))
         self.w3s = nn.Parameter(
-            torch.empty(self.num_total_experts, self.hidden_size,
+            torch.rand(self.num_total_experts, self.hidden_size,
                         self.intermediate_size))
+
+        set_weight_attrs(self.w1s, {"weight_loader": self.weight_loader, "parallel_dim": 1})
+        set_weight_attrs(self.w2s, {"weight_loader": self.weight_loader, "parallel_dim": 0})
+        set_weight_attrs(self.w3s, {"weight_loader": self.weight_loader, "parallel_dim": 1})
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, expert_id: int):
+        tp_rank = get_tensor_model_parallel_rank()
+        loaded_weight = loaded_weight.transpose(0, 1)
+        parallel_dim = getattr(param, "parallel_dim", 0)
+        param_data = param.data
+        shard_size = param_data.shape[parallel_dim + 1]
+        start_idx = tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(parallel_dim, start_idx,
+                                                shard_size)
+        assert param_data[expert_id].shape == loaded_weight.shape
+        param_data[expert_id].copy_(loaded_weight)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_size = hidden_states.shape
@@ -133,6 +152,7 @@ def grouped_matmul_kernel(
     fused_b_ptr,
     fused_output_ptr,
     group_size,
+    batch_size,
     n,
     k,
     lda,
@@ -228,10 +248,18 @@ def grouped_matmul(fused_input: torch.Tensor,
                          fused_group_b.shape[2],
                          device=device,
                          dtype=fused_input.dtype)
+    BLOCK_SIZE_M = 16
     BLOCK_SIZE_N = 64
+    BLOCK_SIZE_K = 32
     num_warps = 2
+    NUM_SM = 128
+    num_stages = 5
     if fused_input.shape[0] >= 8:
         num_warps = 4
+        BLOCK_SIZE_N = 128
+    if fused_input.shape[0] >= 32:
+        num_warps = 4
+        BLOCK_SIZE_M = 32
         BLOCK_SIZE_N = 128
     # we use a fixed number of CTA, and it's auto-tunable
     grid = lambda META: (META['NUM_SM'], )
@@ -240,17 +268,18 @@ def grouped_matmul(fused_input: torch.Tensor,
                                 fused_group_b,
                                 output,
                                 group_size,
+                                batch_size=fused_input.shape[0],
                                 n=fused_group_b.shape[2],
                                 k=fused_group_b.shape[1],
                                 lda=fused_input.stride(0),
                                 ldb=fused_group_b.stride(1),
                                 ldc=output.stride(0),
                                 ACTIVATION=activation,
-                                BLOCK_SIZE_M=16,
+                                BLOCK_SIZE_M=BLOCK_SIZE_M,
                                 BLOCK_SIZE_N=BLOCK_SIZE_N,
-                                BLOCK_SIZE_K=32,
-                                NUM_SM=128,
+                                BLOCK_SIZE_K=BLOCK_SIZE_K,
+                                NUM_SM=NUM_SM,
                                 num_warps=num_warps,
-                                num_stages=5),
+                                num_stages=num_stages),
 
     return output

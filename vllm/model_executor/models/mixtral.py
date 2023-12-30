@@ -21,6 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
+from math import exp
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -385,6 +386,13 @@ class MixtralForCausalLM(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
 
+        expert_params_mapping = [
+            # (param_name, weight_name, expert_id)
+            (f"{weight_name}s", f"experts.{expert_id}.{weight_name}.weight", expert_id) 
+            for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ]
+
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path,
@@ -394,6 +402,7 @@ class MixtralForCausalLM(nn.Module):
                 fall_back_to_pt=False):
             if "rotary_emb.inv_freq" in name:
                 continue
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -406,14 +415,23 @@ class MixtralForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Skip experts that are not assigned to this worker.
-                if ("block_sparse_moe.experts." in name
-                        and name not in params_dict):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+                for param_name, weight_name, expert_id in expert_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, expert_id=expert_id)
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Skip experts that are not assigned to this worker.
+                    if ("block_sparse_moe.experts." in name
+                            and name not in params_dict):
+                        continue
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
