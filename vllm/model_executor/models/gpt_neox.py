@@ -54,8 +54,7 @@ class GPTNeoXAttention(nn.Module):
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.total_num_heads
-        self.bias = "True" if not hasattr(
-            config, "attention_bias") else config.attention_bias
+        self.bias = getattr(config, "attention_bias", True)
 
         tensor_model_parallel_world_size = (
             get_tensor_model_parallel_world_size())
