@@ -598,15 +598,10 @@ class LLMEngine:
         # Log stats if _LOGGING_INTERVAL passed
         if self.metric_logger.should_log(now=now):
             # Log to Prometheus.
-            log_strings = self.metric_logger.log_stats(
+            self.metric_logger.log_stats(
                 now=now,
                 system_stats=self._get_system_stats()
             )
-            # Log to Stdout.
-            print("\n")
-            for log_string in log_strings:
-                logger.info(log_string)
-            print("\n")
         
     def _get_system_stats(self) -> SystemStats:
         return SystemStats(

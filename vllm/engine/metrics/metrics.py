@@ -3,8 +3,7 @@ from typing import Optional, List
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.metrics.metrics_registry import METRIC_REGISTRY
 from vllm.engine.metrics.metrics_utils import (
-    PrometheusMetric, GaugeMetric,
-    IterationStats, SystemStats, Stats
+    PrometheusMetric, IterationStats, SystemStats, Stats
 )
 
 labels = {}
@@ -41,25 +40,15 @@ class MetricLogger:
         self, 
         now: float,
         system_stats: SystemStats
-    ) -> List[str]:
-        # List of strings to log locally.
-        log_strings: List[str] = []
-
-        # Compute metrics and log to loggers.
+    ) -> None:
+        # Compute metrics and log to log to Prometheus
         for metric in self.metrics:
             metric.compute(stats=Stats(
                 system_stats=system_stats, 
                 iteration_stats=self.iteration_stats,
             ))
-            # To prometheus.
             metric.log()
-            
-            # Save for local logger.
-            if isinstance(metric, GaugeMetric):
-                log_strings.append(metric.to_str())
 
         # Reset iteration stats for next logging window.
         self.iteration_stats.reset()
         self.last_logging_time = now
-
-        return log_strings
