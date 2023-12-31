@@ -8,7 +8,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics.metrics import MetricLogger
+from vllm.engine.metrics import MetricLogger
 from vllm.engine.metrics.metrics_utils import SystemStats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
@@ -603,8 +603,10 @@ class LLMEngine:
                 system_stats=self._get_system_stats()
             )
             # Log to Stdout.
+            print("\n")
             for log_string in log_strings:
                 logger.info(log_string)
+            print("\n")
         
     def _get_system_stats(self) -> SystemStats:
         return SystemStats(
