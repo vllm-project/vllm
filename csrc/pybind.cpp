@@ -58,7 +58,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def(
     "bincount",
     &vllm_bincount,
-    "Gather key and value from the cache into contiguous QKV tensors");
+    "cuda-graph compatible bincount implementation");
 
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
