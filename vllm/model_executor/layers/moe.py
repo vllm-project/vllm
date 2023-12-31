@@ -68,7 +68,7 @@ class MoE(nn.Module):
                       expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
         loaded_weight = loaded_weight.t()
-        parallel_dim = 1 if getattr(param, "tp_type") == "column" else 0
+        parallel_dim = 1 if getattr(param, "tp_type", None) == "column" else 0
         param_data = param.data
         shard_size = param_data.shape[parallel_dim + 1]
         start_idx = tp_rank * shard_size
