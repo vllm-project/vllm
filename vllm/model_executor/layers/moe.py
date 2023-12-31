@@ -188,6 +188,8 @@ class MoE(nn.Module):
         return out
 
 
+# The following code is adapted from
+# https://github.com/openai/triton/blob/main/python/tutorials/11-grouped-gemm.py
 @triton.jit
 def grouped_matmul_kernel(
     # device tensor of matrices pointers

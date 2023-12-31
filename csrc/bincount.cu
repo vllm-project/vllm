@@ -1,3 +1,4 @@
+// code adapted from https://github.com/rusty1s/pytorch_bincount
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
