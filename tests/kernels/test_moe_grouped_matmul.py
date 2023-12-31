@@ -52,8 +52,10 @@ def test_moe_grouped_matmul(
 
     ref_output = ref_grouped_matmul(fused_input, cum_group_range,
                                     fused_group_b, activation)
-    
-    print(f"{fused_input.shape=}, {cum_group_range=}, {fused_group_b.shape=}, {ref_output.shape=}")
+
+    print(
+        f"{fused_input.shape=}, {cum_group_range=}, {fused_group_b.shape=}, {ref_output.shape=}"
+    )
     output = grouped_matmul(fused_input, cum_group_range, fused_group_b,
                             activation)
     diff = torch.abs(ref_output - output)
