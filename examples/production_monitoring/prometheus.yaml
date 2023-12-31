@@ -1,6 +1,6 @@
 # prometheus.yaml
 global:
-  scrape_interval: 15s                      # how often to scrape from endpoint
+  scrape_interval: 5s                       # how often to scrape from endpoint
   evaluation_interval: 30s                  # time between each evaluation of Prometheus' alerting rules
 
 scrape_configs:

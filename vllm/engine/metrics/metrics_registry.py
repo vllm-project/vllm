@@ -35,15 +35,6 @@ gauge_cpu_cache_usage = Gauge(
     "vllm_cpu_cache_usage_perc",
     "CPU KV-cache usage. 1 means 100 percent usage.")
 
-counter_time_to_first_token = Counter(
-    "vllm_time_to_first_token_total_seconds",
-    "Time to first token in seconds."
-)
-counter_inter_token_latency = Counter(
-    "vllm_inter_token_latency_total_seconds",
-    "Inter token latency in seconds."
-)
-
 histogram_time_to_first_token = Histogram(
     "vllm_time_to_first_token_seconds",
     "Histogram of time to first token in seconds.",
@@ -112,16 +103,8 @@ class GaugeCPUCacheUsage(GaugeMetric):
     def to_str(self) -> str:
         return f"CPU KV cache usage: {self.metric * 100:.1f}%"
 
-################################################################################################################################
-# Request Level Timings
-class CounterTimeToFirstToken(CounterMetric):
-    def compute(self, stats: Stats) -> None:
-        self.metric = sum(stats.iteration_stats.time_to_first_token)
-
-class CounterInterTokenLatency(CounterMetric):
-    def compute(self, stats: Stats) -> None:
-        self.metric = sum(stats.iteration_stats.inter_token_latency)
-        
+################################################################################################################################  
+# Request Level Latency      
 class HistogramTimeToFirstToken(HistogramMetric):
     def compute(self, stats: Stats) -> None:
         self.metrics = stats.iteration_stats.time_to_first_token
@@ -140,8 +123,6 @@ METRIC_REGISTRY = [
     (gauge_scheduler_waiting, GaugeSchedulerWaiting),
     (gauge_gpu_cache_usage, GaugeGPUCacheUsage),
     (gauge_cpu_cache_usage, GaugeCPUCacheUsage),
-    (counter_time_to_first_token, CounterTimeToFirstToken),
-    (counter_inter_token_latency, CounterInterTokenLatency),
     (histogram_time_to_first_token, HistogramTimeToFirstToken),
     (histogram_inter_token_latency, HistogramInterTokenLatency),
 ]

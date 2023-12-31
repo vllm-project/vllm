@@ -274,8 +274,6 @@ class SequenceGroup:
         
         # Set Last Token Time to compute latency at next iteration.
         self.last_token_time = now
-
-        # Latency
         return latency
 
     def get_max_num_running_seqs(self) -> int:
