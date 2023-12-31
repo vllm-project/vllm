@@ -20,6 +20,11 @@ from vllm.model_executor.utils import set_weight_attrs
 
 class MoE(nn.Module):
     """A expert parallel MOE that shards each expert across all ranks.
+
+    Each expert's weights are sharded across all ranks. The forward pass
+    will first expand and group the hidden states by experts, then compute
+    the per-rank MLP output of each expert using grouped gemm, and finally
+    reduce the output across ranks.
     """
 
     def __init__(
@@ -91,7 +96,7 @@ class MoE(nn.Module):
 
         # Step 1: expand and permute hidden states and routing weights to group
         #        hidden states by experts.
-        expanded_hidden_states, experts_range, expanded_weights, experts_indices = \
+        expanded_hidden_states, experts_range, expanded_weights, reverse_indices = \
             self.expand_and_permutate_hidden_states(
                 hidden_states, selected_experts, routing_weights)
 
@@ -107,7 +112,7 @@ class MoE(nn.Module):
 
         # Step 4: merge the output of each expert, according to the indices.
         return self.merge_expert_outputs(expanded_hidden_states,
-                                         experts_indices).view(
+                                         reverse_indices).view(
                                              batch_size, sequence_length,
                                              hidden_size)
 
@@ -117,8 +122,8 @@ class MoE(nn.Module):
         selected_experts: torch.Tensor,
         routing_weights: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Expand and premutate hidden states and routing weights to match
-        the number of experts. 
+        """Expand and group hidden states and routing weights according
+        to the selected experts.
 
         Args:
             hidden_states (torch.Tensor): [batch_size, hidden_size]
@@ -130,11 +135,16 @@ class MoE(nn.Module):
 
         Returns:
             expanded_hidden_states: [batch_size * top_k_experts, hidden_size]
-            cum_experts_range: [num_experts + 1]
-            expanded_weights: [batch_size * top_k_experts]
-            experts_indices: [batch_size * top_k_experts]
+                expanded hidden states that rows are grouped by experts.
+            cum_experts_range: [num_experts + 1] the cumulative range of the
+                experts in expanded_hidden_states, in the first dimension.
+            expanded_weights: [batch_size * top_k_experts] the expanded
+                expert weights for each row in expanded_hidden_states.
+            reverse_indices: [batch_size * top_k_experts] the indices of each
+                row in expanded_hidden_states which maps back to the original
+                hidden states.
         """
-        experts_indices = torch.argsort(selected_experts.view(-1), dim=-1)
+        reverse_indices = torch.argsort(selected_experts.view(-1), dim=-1)
         cum_experts_range = torch.zeros(self.num_total_experts + 1,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
@@ -143,10 +153,10 @@ class MoE(nn.Module):
                                           device=hidden_states.device)
         ops.bincount(selected_experts.view(-1), num_rows_per_expert)
         torch.cumsum(num_rows_per_expert, dim=0, out=cum_experts_range[1:])
-        expanded_weights = routing_weights.view(-1)[experts_indices]
-        experts_indices.div_(self.top_k, rounding_mode="floor")
+        expanded_weights = routing_weights.view(-1)[reverse_indices]
+        reverse_indices.div_(self.top_k, rounding_mode="floor")
         return hidden_states[
-            experts_indices], cum_experts_range, expanded_weights, experts_indices
+            reverse_indices], cum_experts_range, expanded_weights, reverse_indices
 
     def grouped_mlp(
         self,
@@ -168,24 +178,25 @@ class MoE(nn.Module):
             self,
             expanded_hidden_states: torch.
         Tensor,  # [batch_size * top_k_experts, hidden_size]
-            expert_indicies,  # [batch_size * top_k_experts]
+            reverse_indices,  # [batch_size * top_k_experts]
     ) -> torch.Tensor:
         out = torch.zeros(expanded_hidden_states.shape[0] // self.top_k,
                           self.hidden_size,
                           device=expanded_hidden_states.device,
                           dtype=expanded_hidden_states.dtype)
-        out.index_add_(0, expert_indicies, expanded_hidden_states)
+        out.index_add_(0, reverse_indices, expanded_hidden_states)
         return out
 
 
 @triton.jit
 def grouped_matmul_kernel(
     # device tensor of matrices pointers
-    flattened_input,
+    compact_input,
     cum_input_group_range,
     mat2,
-    flattened_output,
+    compact_output,
     group_size,
+    # sizes of the gemm problem n and k are fixed.
     n,
     k,
     lda,
@@ -216,9 +227,9 @@ def grouped_matmul_kernel(
 
             # pick up a tile from the current gemm problem
             k = gk
-            a_ptr = flattened_input + a_offset * lda
+            a_ptr = compact_input + a_offset * lda
             b_ptr = mat2 + g * k * n
-            c_ptr = flattened_output + a_offset * ldc
+            c_ptr = compact_output + a_offset * ldc
             # figure out tile coordinates
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
@@ -279,18 +290,21 @@ def grouped_matmul(input: torch.Tensor,
     """Performs a grouped matrix-matrix product of matrices stored in input
     and mat2.
 
-    input is a tensor of shape [batch_size, k] and the groups range is stored
-    in cumulative_group_range.
+    input is a tensor of shape [batch_size, k] where each group are stored
+    compactly in the batch dimension. The range of each group is specified
+    in cumulative_group_range. This allows the input to have fixed shape
+    regardless of the group sizes.
 
     Args:
-        input (torch.Tensor): [batch_size, k] flattened input.
+        input (torch.Tensor): [batch_size, k] compact input.
         cumulative_group_range (torch.Tensor): [num_groups + 1] the cumulative
             range of the groups in input.
         mat2 (torch.Tensor): [num_groups, k, n] the second matrix.
         activation (str, optional): "" or "silu". Defaults to "".
 
     Returns:
-        torch.Tensor: [batch_size, hidden_size] flattened output.
+        torch.Tensor: [batch_size, hidden_size] compact output where groups
+            are stored compactly in the batch dimension.
     """
     device = torch.device('cuda')
     assert cumulative_group_range.shape[0] == mat2.shape[0] + 1
@@ -305,6 +319,7 @@ def grouped_matmul(input: torch.Tensor,
     num_warps = 2
     NUM_SM = 128
     num_stages = 5
+    # hand tune the block size for different problem sizes.
     if input.shape[0] >= 8:
         num_warps = 4
         BLOCK_SIZE_N = 128
