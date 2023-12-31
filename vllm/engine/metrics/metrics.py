@@ -3,10 +3,8 @@ from typing import Optional, List
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.metrics.metrics_registry import METRIC_REGISTRY
 from vllm.engine.metrics.metrics_utils import (
-    PrometheusMetric, 
-    IterationStats, 
-    SystemStats, 
-    Stats
+    PrometheusMetric, GaugeMetric,
+    IterationStats, SystemStats, Stats
 )
 
 labels = {}
@@ -32,22 +30,20 @@ class MetricLogger:
     def should_log(self, now: float) -> bool:
         return now - self.last_logging_time >= self.logging_interval
 
-    def log_stats(
+    def update_iteration_stats(
         self,
         now: float,
-        scheduler_outputs: SchedulerOutputs,
-        system_stats: Optional[SystemStats],
-    ) -> List[str]:
-        # Update the logged iteration stats.
+        scheduler_outputs: SchedulerOutputs
+    ) -> None:
         self.iteration_stats.update(now=now, scheduler_outputs=scheduler_outputs)
 
-        # Actually log every logging_interval seconds. 
-        if not self.should_log(now=now):
-            return
-        assert system_stats is not None, "system_stats should not be none when should_log"
-
+    def log_stats(
+        self, 
+        now: float,
+        system_stats: SystemStats
+    ) -> List[str]:
         # List of strings to log locally.
-        local_logs_strings: List[str] 
+        log_strings: List[str] = []
 
         # Compute metrics and log to loggers.
         for metric in self.metrics:
@@ -59,11 +55,11 @@ class MetricLogger:
             metric.log()
             
             # Save for local logger.
-            if metric.should_local_log:
-                local_logs_strings.append(metric.to_str())
+            if isinstance(metric, GaugeMetric):
+                log_strings.append(metric.to_str())
 
-        # Reset iteration level data for next logging window.
+        # Reset iteration stats for next logging window.
         self.iteration_stats.reset()
         self.last_logging_time = now
 
-        return local_logs_strings
+        return log_strings

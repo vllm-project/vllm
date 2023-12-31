@@ -558,9 +558,9 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
         
-        # Log the system metrics if logging enabled.
+        # Update and log the iteration/system stats if logging enabled.
         if self.log_stats:
-            self._log_stats(scheduler_outputs=scheduler_outputs)
+            self._update_and_log_stats(scheduler_outputs=scheduler_outputs)
 
         return request_outputs
 
@@ -586,24 +586,25 @@ class LLMEngine:
 
         return self._process_model_outputs(output, scheduler_outputs)
 
-    def _log_stats(self, scheduler_outputs: SchedulerOutputs) -> None:
+    def _update_and_log_stats(self, scheduler_outputs: SchedulerOutputs) -> None:
         now = time.monotonic()
 
-        # Get system stats if will log at this step.
-        system_stats = None
-        if self.metric_logger.should_log(now=now):
-            system_stats = self._get_system_stats()
-
-        # Log to Prometheus.
-        log_strings = self.metric_logger.log_stats(
+        # Update iteration stats.
+        self.metric_logger.update_iteration_stats(
             now=now,
-            scheduler_outputs=scheduler_outputs,
-            system_stats=system_stats
+            scheduler_outputs=scheduler_outputs
         )
 
-        # Log to Stdout
-        for log_string in log_strings:
-            logger.info(log_string)
+        # Log stats if _LOGGING_INTERVAL passed
+        if self.metric_logger.should_log(now=now):
+            # Log to Prometheus.
+            log_strings = self.metric_logger.log_stats(
+                now=now,
+                system_stats=self._get_system_stats()
+            )
+            # Log to Stdout.
+            for log_string in log_strings:
+                logger.info(log_string)
         
     def _get_system_stats(self) -> SystemStats:
         return SystemStats(

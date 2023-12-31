@@ -27,7 +27,7 @@ class IterationStats:
         """Updates the Tracked Stats based on the SchedulerOutput."""
         # Update iteration timings for each SequenceGroup.
         timings = [
-            seq_group.update_timings(
+            seq_group.update_latency_timing(
                 now=now, 
                 prompt_run=scheduler_outputs.prompt_run
             ) for seq_group in scheduler_outputs.scheduled_seq_groups
@@ -56,6 +56,8 @@ class Stats:
     iteration_stats: IterationStats
 
 class PrometheusMetric(ABC):
+    can_log_local: bool = False
+
     """Metric holds a Prometheus Metric and logic for converting Stats --> Metric"""    
     def log(self) -> None:
         """Push metric to Prometheus client."""
@@ -67,10 +69,11 @@ class PrometheusMetric(ABC):
 
 class CounterMetric(PrometheusMetric):
     def __init__(self, prometheus_metric: Counter, labels: Dict[str,str]) -> None:
+        super().__init__()
+
         self.counter = prometheus_metric
         self.metric: Union[float, int] = 0
         self.labels = labels
-        super().__init__()
     
     def log(self) -> None:
         # Increment counter by N if "something happend" (metric > 0).
@@ -80,10 +83,12 @@ class CounterMetric(PrometheusMetric):
 
 class GaugeMetric(PrometheusMetric):
     def __init__(self, prometheus_metric: Gauge, labels: Dict[str,str]) -> None:
+        super().__init__()
+
         self.gauge = prometheus_metric
         self.metric: Union[float, int] = 0
         self.labels = labels
-        super().__init__()
+        self.can_log_local = True
     
     def log(self) -> None:
         # Set gauge.
@@ -94,10 +99,11 @@ class GaugeMetric(PrometheusMetric):
 
 class HistogramMetric(PrometheusMetric):
     def __init__(self, prometheus_metric: Histogram, labels: Dict[str,str]) -> None:
+        super().__init__()
+
         self.histogram = prometheus_metric
         self.metrics: List[Union[float, int]] = []
         self.labels = labels
-        super().__init__()
     
     def log(self) -> None:
         # Log each metric.
