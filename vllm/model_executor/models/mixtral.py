@@ -23,10 +23,7 @@
 """Inference-only Mixtral model."""
 from typing import List, Optional, Tuple
 
-import numpy as np
-
 import torch
-import torch.nn.functional as F
 
 from torch import nn
 from transformers import MixtralConfig
@@ -35,7 +32,6 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               ReplicatedLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.moe import MoE
@@ -43,16 +39,15 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
+
 
 class MixtralAttention(nn.Module):
 
@@ -278,8 +273,8 @@ class MixtralForCausalLM(nn.Module):
 
         expert_params_mapping = [
             # (param_name, weight_name, expert_id)
-            (f"{weight_name}s", f"experts.{expert_id}.{weight_name}.weight", expert_id) 
-            for expert_id in range(self.config.num_local_experts)
+            (f"{weight_name}s", f"experts.{expert_id}.{weight_name}.weight",
+             expert_id) for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
         ]
 
