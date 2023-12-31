@@ -100,7 +100,7 @@ app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 def create_error_response(status_code: HTTPStatus,
                           message: str) -> JSONResponse:
     return JSONResponse(ErrorResponse(message=message,
-                                      type="invalid_request_error").dict(),
+                                      type="invalid_request_error").model_dump(),
                         status_code=status_code.value)
 
 
