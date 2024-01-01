@@ -109,7 +109,7 @@ class HistogramMetric(PrometheusMetric):
 class PrometheusLogger:
     """PrometheusLogger is used by LLMEngine to log statistics to Prometheus.
     
-    There are two types of Metrics:
+    There are two types of PrometheusMetrics:
         - system_metrics are snapshots of the system state. Logged every _LOGGING_INTERVAL.
         - iteration_metrics are info about the most recent model step. Logged every iteration.
     """
@@ -137,7 +137,7 @@ class PrometheusLogger:
     def log(
         self, now: float,
         system_stats: Optional[SystemStats], 
-        iteration_stats: IterationStats
+        iteration_stats: IterationStats,
     ) -> None:
         # Log iteration_stats every iteration.
         for metric in self.iteration_metrics:

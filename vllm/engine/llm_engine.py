@@ -603,17 +603,13 @@ class LLMEngine:
         should_log_system: bool,
     ) -> Tuple[Optional[SystemStats], IterationStats]:
         """Get System and Iteration Stats."""
-        # Update latency timings (modifying the seq_group timers).
-        timings = [
-            seq_group.update_latency_timing(
-                now=now, prompt_run=scheduler_outputs.prompt_run
-            ) for seq_group in scheduler_outputs.scheduled_seq_groups
-        ]
         # Parse iteration stats.
         iteration_stats =  IterationStats(
             prompt_run=scheduler_outputs.prompt_run,
             num_batched_tokens=scheduler_outputs.num_batched_tokens,
-            latency_timings=timings
+            latency_timings=[seq_group.get_last_latency(now) 
+                for seq_group in scheduler_outputs.scheduled_seq_groups
+            ]
         )
         
         # Parse system stats if past logging interval.

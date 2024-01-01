@@ -240,12 +240,8 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
+        self.last_token_time = arrival_time
         self.prompt_logprobs: Optional[PromptLogprobs] = None
-
-        # Request level timing metrics.
-        self.time_to_first_token: Optional[float] = None
-        self.last_token_time: Optional[float] = None
-        self.last_inter_token_latency: Optional[float] = None
 
     @property
     def prompt(self) -> str:
@@ -259,20 +255,9 @@ class SequenceGroup:
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).data.prompt_token_ids
 
-    def update_latency_timing(self, now: float, prompt_run: bool) -> float:
-        """Updates the timing stats for request level latency monitoring."""
-        # Set TTFT if prefill.
-        if prompt_run:
-            assert self.time_to_first_token is None
-            latency = now - self.arrival_time
-            self.time_to_first_token = latency
-        # Set Inter Token Latency if decode.
-        else:
-            assert self.last_token_time is not None
-            latency = now - self.last_token_time
-            self.last_inter_token_latency = latency
-        
-        # Set Last Token Time to compute latency at next iteration.
+    def get_last_latency(self, now: float) -> float:
+        """Gets last token latency for Request level latency timing."""
+        latency = now - self.last_token_time
         self.last_token_time = now
         return latency
 
