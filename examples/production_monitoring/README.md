@@ -51,7 +51,7 @@ Navigate to [`http://localhost:3000`](http://localhost:3000). Log in with the de
 
 Navigate to [`http://localhost:3000/connections/datasources/new`](http://localhost:3000/connections/datasources/new) and select Prometheus. 
 
-On Prometheus configuration page, we need to add the Prometheus Server's URL in `Connection`. Since Grafana and Prometheus are running in separate containers, put we need to put the IP address of the Prometheus container. Run the following to lookup the name of your Prometheus container:
+On Prometheus configuration page, we need to add the `Prometheus Server URL` in `Connection`. Since Grafana and Prometheus are running in separate containers, put we need to put the IP address of the Prometheus container. Run the following to lookup the name of your Prometheus container:
 
 ```bash
 docker container ls
@@ -66,7 +66,7 @@ docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' prod
 >> 172.18.0.2
 ```
 
-So, in our case, the url section should be: `http://172.18.0.2:9090`.
+So, in our case, the `Prometheus Server URL` should be: `http://172.18.0.2:9090`.
 
 Click `Save & Test`. We should get a green check saying "Successfully queried the Prometheus API.".
 

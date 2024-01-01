@@ -5,6 +5,7 @@ from datasets import load_dataset
 
 N_CLIENTS = 32
 N_CYCLES = 10
+MAX_SLEEP_TIME = 10.
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
@@ -22,27 +23,29 @@ model = models.data[0].id
 dataset = load_dataset("fka/awesome-chatgpt-prompts")
 prompts = dataset["train"]["prompt"]
 
-def submit_request(idx, sleep_time):
-    time.sleep(sleep_time)
-    print(f"thread {idx} starting.")
+def submit_requests(idx, sleep_time):
+    for id_cycle in range(N_CYCLES):
 
-    completion = client.completions.create(
-        model=model,
-        prompt=random.choice(prompts),
-        echo=False,
-        n=1,
-        stream=False,
-        logprobs=0,
-        max_tokens=256,
-    )
+        time.sleep(sleep_time)
+        print(f"thread {idx} starting in cycle {id_cycle}.")
 
-    print(f"thread {idx} done.")
+        completion = client.completions.create(
+            model=model,
+            prompt=random.choice(prompts),
+            echo=False,
+            n=1,
+            stream=False,
+            logprobs=0,
+            max_tokens=256,
+        )
+
+        print(f"thread {idx} done.")
 
 def simulate():
     threads = [
         Thread(
-            target=submit_request, 
-            args=[idx, random.uniform(0.0, 10.0)]
+            target=submit_requests, 
+            args=[idx, random.uniform(0.0, MAX_SLEEP_TIME)]
         ) for idx in range(N_CLIENTS)
     ]
 
@@ -54,5 +57,4 @@ def simulate():
         t.join()
 
 if __name__ == "__main__":
-    for _ in range(N_CYCLES):
-        simulate()
+    simulate()
