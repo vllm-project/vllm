@@ -2,7 +2,7 @@ import asyncio
 import time
 from functools import partial
 from typing import (Any, Dict, Iterable, List, Optional, Set, Tuple, Type,
-                    Union)
+                    Union, AsyncIterator)
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -142,10 +142,10 @@ class RequestTracker:
 
         self._request_streams[request_id].finish()
 
-    def get_new_and_finished_requests(self) -> Tuple[List[dict], Set[str]]:
+    def get_new_and_finished_requests(self) -> Tuple[List[Dict], Set[str]]:
         """Get the new requests and finished requests to be
         sent to the engine."""
-        new_requests: List[dict] = []
+        new_requests: List[Dict] = []
         finished_requests: Set[str] = set()
 
         while not self._finished_requests.empty():
@@ -183,20 +183,18 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
-        if scheduler_outputs.is_empty():
-            return ignored
+        seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
         # Execute the model.
-        output = await self._run_workers_async(
+        output = (await self._run_workers_async(
             "execute_model",
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
             blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
             blocks_to_copy=scheduler_outputs.blocks_to_copy,
-        )
+        )) if not scheduler_outputs.is_empty() else []
 
-        return self._process_model_outputs(output, scheduler_outputs) + ignored
+        return self._process_model_outputs(output, scheduler_outputs)
 
     async def _run_workers_async(
         self,
@@ -301,7 +299,16 @@ class AsyncLLMEngine:
         elif self.worker_use_ray:
             engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
         else:
-            engine_class = ray.remote(num_gpus=1)(self._engine_class).remote
+            # FIXME(woosuk): This is a bit hacky. Be careful when changing the
+            # order of the arguments.
+            cache_config = args[1]
+            parallel_config = args[2]
+            if parallel_config.tensor_parallel_size == 1:
+                num_gpus = cache_config.gpu_memory_utilization
+            else:
+                num_gpus = 1
+            engine_class = ray.remote(num_gpus=num_gpus)(
+                self._engine_class).remote
         return engine_class(*args, **kwargs)
 
     async def engine_step(self) -> bool:
@@ -395,12 +402,13 @@ class AsyncLLMEngine:
         return stream
 
     async def generate(
-            self,
-            prompt: Optional[str],
+        self,
+        prompt: Optional[str],
             prefix_pos: Optional[int],
-            sampling_params: SamplingParams,
-            request_id: str,
-            prompt_token_ids: Optional[List[int]] = None) -> RequestOutput:
+        sampling_params: SamplingParams,
+        request_id: str,
+        prompt_token_ids: Optional[List[int]] = None
+    ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the

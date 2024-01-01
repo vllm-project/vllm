@@ -24,7 +24,6 @@ def _query_server(prompt: str) -> dict:
 def api_server():
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
-    # pylint: disable=consider-using-with
     uvicorn_process = subprocess.Popen([
         sys.executable, "-u",
         str(script_path), "--model", "facebook/opt-125m"
@@ -33,7 +32,6 @@ def api_server():
     uvicorn_process.terminate()
 
 
-# pylint: disable=redefined-outer-name, unused-argument
 def test_api_server(api_server):
     """
     Run the API server and test it.
@@ -46,14 +44,14 @@ def test_api_server(api_server):
     """
     with Pool(32) as pool:
         # Wait until the server is ready
-        prompts = ["Hello world"] * 1
+        prompts = ["warm up"] * 1
         result = None
         while not result:
-            # pylint: disable=bare-except
             try:
-                for result in pool.map(_query_server, prompts):
+                for r in pool.map(_query_server, prompts):
+                    result = r
                     break
-            except:
+            except requests.exceptions.ConnectionError:
                 time.sleep(1)
 
         # Actual tests start here
@@ -66,13 +64,14 @@ def test_api_server(api_server):
         assert num_aborted_requests == 0
 
         # Try with 100 prompts
-        prompts = ["Hello world"] * 100
+        prompts = ["test prompt"] * 100
         for result in pool.map(_query_server, prompts):
             assert result
 
         # Cancel requests
+        prompts = ["canceled requests"] * 100
         pool.map_async(_query_server, prompts)
-        time.sleep(0.01)
+        time.sleep(0.001)
         pool.terminate()
         pool.join()
 
@@ -84,6 +83,6 @@ def test_api_server(api_server):
     # check that server still runs after cancellations
     with Pool(32) as pool:
         # Try with 100 prompts
-        prompts = ["Hello world"] * 100
+        prompts = ["test prompt after canceled"] * 100
         for result in pool.map(_query_server, prompts):
             assert result

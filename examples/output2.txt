@@ -1,0 +1,800 @@
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan
+
+Answer:
+
+\begin{code}
+# Table
+|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|
+|----|----|----|----|----|----|----|----|
+|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan

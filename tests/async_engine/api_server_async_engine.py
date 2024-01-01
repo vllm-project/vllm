@@ -14,7 +14,6 @@ app = vllm.entrypoints.api_server.app
 
 class AsyncLLMEngineWithStats(AsyncLLMEngine):
 
-    # pylint: disable=redefined-outer-name
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._num_aborts = 0

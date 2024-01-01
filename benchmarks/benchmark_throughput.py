@@ -17,9 +17,8 @@ def sample_requests(
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int],
 ) -> List[Tuple[str, int, int]]:
-    if fixed_output_len is not None:
-        if fixed_output_len < 4:
-            raise ValueError("output_len too small")
+    if fixed_output_len is not None and fixed_output_len < 4:
+        raise ValueError("output_len too small")
 
     # Load the dataset.
     with open(dataset_path) as f:
@@ -70,6 +69,8 @@ def run_vllm(
     use_beam_search: bool,
     trust_remote_code: bool,
     dtype: str,
+    max_model_len: Optional[int],
+    enforce_eager: bool,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -80,6 +81,8 @@ def run_vllm(
         seed=seed,
         trust_remote_code=trust_remote_code,
         dtype=dtype,
+        max_model_len=max_model_len,
+        enforce_eager=enforce_eager,
     )
 
     # Add the requests to the engine.
@@ -100,7 +103,7 @@ def run_vllm(
         )
 
     start = time.perf_counter()
-    # FIXME(woosuk): Do use internal method.
+    # FIXME(woosuk): Do not use internal method.
     llm._run_engine(use_tqdm=True)
     end = time.perf_counter()
     return end - start
@@ -202,7 +205,8 @@ def main(args: argparse.Namespace):
         elapsed_time = run_vllm(requests, args.model, args.tokenizer,
                                 args.quantization, args.tensor_parallel_size,
                                 args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype)
+                                args.trust_remote_code, args.dtype,
+                                args.max_model_len, args.enforce_eager)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -242,7 +246,7 @@ if __name__ == "__main__":
     parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
-                        choices=['awq', 'squeezellm', None],
+                        choices=['awq', 'gptq', 'squeezellm', None],
                         default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n",
@@ -263,6 +267,12 @@ if __name__ == "__main__":
                         action='store_true',
                         help='trust remote code from huggingface')
     parser.add_argument(
+        '--max-model-len',
+        type=int,
+        default=None,
+        help='Maximum length of a sequence (including prompt and output). '
+        'If None, will be derived from the model.')
+    parser.add_argument(
         '--dtype',
         type=str,
         default='auto',
@@ -271,6 +281,9 @@ if __name__ == "__main__":
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
+    parser.add_argument("--enforce-eager",
+                        action="store_true",
+                        help="enforce eager execution")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

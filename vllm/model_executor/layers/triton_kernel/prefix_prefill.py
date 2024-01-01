@@ -143,7 +143,7 @@ if triton.__version__ >= "2.1.0":
         assert Lq == Lk and Lk == Lv
         assert Lk in {16, 32, 64, 128}
 
-        sm_scale = 1.0 / (Lq**0.5)  # 计算scale系数
+        sm_scale = 1.0 / (Lq**0.5)
         batch, head = b_seq_len.shape[0], q.shape[1]
 
         grid = (batch, head, triton.cdiv(max_input_len, BLOCK))  # batch, head,

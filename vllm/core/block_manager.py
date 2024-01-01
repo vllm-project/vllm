@@ -1,10 +1,14 @@
 """A block manager that manages token blocks."""
+import enum
 from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 from vllm.prefix import PrefixPool, Prefix
+
+# Mapping: logical block number -> physical block.
+BlockTable = List[PhysicalTokenBlock]
 
 
 class BlockAllocator:
@@ -26,7 +30,7 @@ class BlockAllocator:
         self.num_blocks = num_blocks
 
         # Initialize the free blocks.
-        self.free_blocks: List[PhysicalTokenBlock] = []
+        self.free_blocks: BlockTable = []
         for i in range(num_blocks):
             block = PhysicalTokenBlock(device=device,
                                        block_number=i,
@@ -51,8 +55,18 @@ class BlockAllocator:
         return len(self.free_blocks)
 
 
-# Mapping: logical block number -> physical block.
-BlockTable = List[PhysicalTokenBlock]
+class AllocStatus(enum.Enum):
+    """Result for BlockSpaceManager.can_allocate
+
+    1. Ok: seq_group can be allocated now.
+    2. Later: seq_group cannot be allocated.
+      The capacity of allocator is larger than seq_group required.
+    3. Never: seq_group can never be allocated.
+      The seq_group is too large to allocated in GPU.
+    """
+    OK = enum.auto()
+    LATER = enum.auto()
+    NEVER = enum.auto()
 
 
 class BlockSpaceManager:
@@ -87,10 +101,10 @@ class BlockSpaceManager:
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
-    def can_allocate(self, seq_group: SequenceGroup) -> bool:
+    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
-        seq = seq_group.get_seqs()[0]
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = len(seq.logical_token_blocks)
 
         if seq_group.prefix is not None and seq_group.prefix.on_gpu:
@@ -100,14 +114,20 @@ class BlockSpaceManager:
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
+
         # Use watermark to avoid frequent cache eviction.
-        return (num_free_gpu_blocks - num_required_blocks >=
-                self.watermark_blocks)
+        if (self.num_total_gpu_blocks - num_required_blocks <
+                self.watermark_blocks):
+            return AllocStatus.NEVER
+        if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
+            return AllocStatus.OK
+        else:
+            return AllocStatus.LATER
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same
         # prompt.
-        seq = seq_group.get_seqs()[0]
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
 
         # Allocate new physical token blocks that will store the prompt tokens.
         num_prompt_blocks = len(seq.logical_token_blocks)
@@ -143,7 +163,7 @@ class BlockSpaceManager:
                 prefix_block_table.append(block)
 
         # Assign the block table for each sequence.
-        for seq in seq_group.get_seqs():
+        for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
         
         if num_prefix_blocks > 0:
