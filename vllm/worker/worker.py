@@ -243,11 +243,7 @@ class Worker:
                 selected_token_indices.append(selected_token_start_idx +
                                               prompt_len - 1)
                 selected_token_start_idx += max_seq_len
-
-                # set the prefix state
-                if seq_group_metadata.prefix is not None and seq_group_metadata.prefix.swap_to_gpu:
-                    seq_group_metadata.prefix.on_gpu = True
-                    seq_group_metadata.prefix.swap_to_gpu = False
+                
                 continue
 
             seq_ids = list(seq_group_metadata.seq_data.keys())

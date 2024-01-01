@@ -555,6 +555,12 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
 
+        # update prefix state
+        for seq_group in scheduled_seq_groups:
+            if seq_group.prefix is not None and seq_group.prefix.swap_to_gpu:
+                seq_group.prefix.on_gpu = True
+                seq_group.prefix.swap_to_gpu = False
+
         if self.log_stats:
             # Log the system stats.
             self._log_system_stats(scheduler_outputs.prompt_run,
