@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import MetricLogger
-from vllm.engine.metrics.metrics_utils import SystemStats
+from vllm.engine.metrics.metrics_utils import SystemStats, IterationStats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -558,9 +558,9 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
         
-        # Update and log the iteration/system stats if logging enabled.
+        # Log the iteration and system stats
         if self.log_stats:
-            self._update_and_log_stats(scheduler_outputs=scheduler_outputs)
+            self._log_stats(scheduler_outputs=scheduler_outputs)
 
         return request_outputs
 
@@ -586,25 +586,45 @@ class LLMEngine:
 
         return self._process_model_outputs(output, scheduler_outputs)
 
-    def _update_and_log_stats(self, scheduler_outputs: SchedulerOutputs) -> None:
+    def _log_stats(self, scheduler_outputs: SchedulerOutputs) -> None:
         now = time.monotonic()
 
-        # Update iteration stats.
-        self.metric_logger.update_iteration_stats(
-            now=now,
-            scheduler_outputs=scheduler_outputs
+        # Log the iteration stats each iteration.
+        self.metric_logger.log_iteration_stats(
+            self._get_iteration_stats(now=now, scheduler_outputs=scheduler_outputs)
+        )    
+    
+        # Log the system stats every LOGGING_INTERVAL seconds.
+        if self.metric_logger.should_log_system_stats(now=now):
+            self.metric_logger.log_system_stats(
+                system_stats=self._get_system_stats(now=now)
+            )
+    
+    def _get_iteration_stats(
+        self, 
+        now: float, 
+        scheduler_outputs: SchedulerOutputs
+    ) -> IterationStats:
+        """Convert the SchedulerOutputs into IterationStats for MetricLogger"""
+        # Update latency timings for each seq_group (updates seq_group state)
+        latency_timings = [
+            seq_group.update_latency_timing(
+                now=now, 
+                prompt_run=scheduler_outputs.scheduled_seq_groups
+            ) for seq_group in scheduler_outputs.scheduled_seq_groups
+        ]
+
+        # Reformat
+        return IterationStats(
+            prompt_run=scheduler_outputs.prompt_run,
+            num_batched_tokens=scheduler_outputs.num_batched_tokens,
+            latency_timings=latency_timings,
         )
 
-        # Log stats if _LOGGING_INTERVAL passed
-        if self.metric_logger.should_log(now=now):
-            # Log to Prometheus.
-            self.metric_logger.log_stats(
-                now=now,
-                system_stats=self._get_system_stats()
-            )
-        
-    def _get_system_stats(self) -> SystemStats:
+    def _get_system_stats(self, now: float) -> SystemStats:
+        """Extract the SystemStatsfor MetricLogger"""
         return SystemStats(
+            now=now,
             num_total_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_total_cpu_blocks=self.cache_config.num_cpu_blocks,
             num_free_gpu_blocks=self.scheduler.block_manager.get_num_free_gpu_blocks(),
