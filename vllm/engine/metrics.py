@@ -3,6 +3,55 @@ from abc import ABC
 from dataclasses import dataclass
 from typing import Union, List, Dict, Callable, Optional
 
+labels = {}
+
+def add_global_metrics_labels(**kwargs):
+    labels.update(kwargs)
+
+# Stats defintions. 
+# These are the interface between the LLMEngine and the Logger/Metrics.
+@dataclass
+class SystemStats:
+    """Raw snapshot of the system state at a given time."""
+    total_gpu_blocks: int
+    total_cpu_blocks: int
+    free_gpu_blocks: int
+    free_cpu_blocks: int
+    num_running: int
+    num_waiting: int
+    num_swapped: int
+
+@dataclass
+class IterationStats:
+    """Raw stats from most recent model iteration."""
+    prompt_run: bool
+    num_batched_tokens: int
+    latency_timings: List[float]
+
+Stats = Union[SystemStats, IterationStats]
+
+@dataclass
+class PrometheusMetric(ABC):
+    """Metric and Function from Stats -> Metric."""
+    metric: Union[Counter, Gauge, Histogram]
+    fn: Callable[[Stats], Union[List[int], List[float], Union[int,float]]]
+
+    def log(self, stats: Stats, labels: Dict[str,str]) -> None:
+        raise NotImplementedError
+
+class CounterMetric(PrometheusMetric):
+    def log(self, stats: Stats, labels: Dict[str,str]) -> None:
+        self.metric.add(labels, self.fn(stats))
+
+class GaugeMetric(PrometheusMetric):
+    def log(self, stats: Stats, labels: Dict[str,str]) -> None:
+        self.metric.set(labels, self.fn(stats))
+
+class HistogramMetric(PrometheusMetric):    
+    def log(self, stats: Stats, labels: Dict[str,str]) -> None:
+        for metric in self.fn(stats):
+            self.metric.observe(labels, metric)
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the metrics definitions.
 
@@ -43,33 +92,6 @@ histogram_inter_token_latency = Histogram(
 )
 # end-metrics-definitions
 
-labels = {}
-
-def add_global_metrics_labels(**kwargs):
-    labels.update(kwargs)
-
-# Stats defintions. 
-# These are the interface between the LLMEngine and the Logger/Metrics.
-@dataclass
-class SystemStats:
-    """Raw snapshot of the system state at a given time."""
-    total_gpu_blocks: int
-    total_cpu_blocks: int
-    free_gpu_blocks: int
-    free_cpu_blocks: int
-    num_running: int
-    num_waiting: int
-    num_swapped: int
-
-@dataclass
-class IterationStats:
-    """Raw stats from most recent model iteration."""
-    prompt_run: bool
-    num_batched_tokens: int
-    latency_timings: List[float]
-
-Stats = Union[SystemStats, IterationStats]
-
 # Functions to convert Stats --> Metrics.
 def _cache_usage(num_total: int, num_free: int) -> float:
     return 1.0 - num_free / num_total if num_total > 0 else 0.
@@ -83,28 +105,6 @@ _gpu_cache_usage_fn = lambda stats: _cache_usage(stats.total_gpu_blocks, stats.f
 _cpu_cache_usage_fn = lambda stats: _cache_usage(stats.total_cpu_blocks, stats.free_cpu_blocks)
 _time_to_first_token_fn = lambda stats: stats.latency_timings if stats.prompt_run else []
 _inter_token_latency_fn = lambda stats: stats.latency_timings if not stats.prompt_run else []
-
-@dataclass
-class PrometheusMetric(ABC):
-    """Metric and Function from Stats -> Metric."""
-    metric: Union[Counter, Gauge, Histogram]
-    fn: Callable[[Stats], Union[List[int], List[float], Union[int,float]]]
-
-    def log(self, stats: Stats, labels: Dict[str,str]) -> None:
-        raise NotImplementedError
-
-class CounterMetric(PrometheusMetric):
-    def log(self, stats: Stats, labels: Dict[str,str]) -> None:
-        self.metric.add(labels, self.fn(stats))
-
-class GaugeMetric(PrometheusMetric):
-    def log(self, stats: Stats, labels: Dict[str,str]) -> None:
-        self.metric.set(labels, self.fn(stats))
-
-class HistogramMetric(PrometheusMetric):    
-    def log(self, stats: Stats, labels: Dict[str,str]) -> None:
-        for metric in self.fn(stats):
-            self.metric.observe(labels, metric)
 
 class PrometheusLogger:
     """PrometheusLogger is used by LLMEngine to log statistics to Prometheus.
