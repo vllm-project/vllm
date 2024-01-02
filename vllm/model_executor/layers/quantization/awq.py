@@ -8,6 +8,8 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
+STORAGE_BITS_SIZE = 32
+
 
 class AWQConfig(QuantizationConfig):
     """Config class for AWQ.
@@ -29,7 +31,7 @@ class AWQConfig(QuantizationConfig):
             raise ValueError(
                 "Currently, only 4-bit weight quantization is supported for "
                 f"AWQ, but got {self.weight_bits} bits.")
-        self.pack_factor = 32 // self.weight_bits
+        self.pack_factor = STORAGE_BITS_SIZE // self.weight_bits
 
     def __repr__(self) -> str:
         return (f"AWQConfig(weight_bits={self.weight_bits}, "
@@ -86,7 +88,7 @@ class AWQLinearMethod(LinearMethodBase):
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
-        if output_size_per_partition % self.quant_config.pack_factor != 0:
+        if output_size_per_partition % STORAGE_BITS_SIZE != 0:
             raise ValueError(
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
@@ -95,7 +97,8 @@ class AWQLinearMethod(LinearMethodBase):
         qweight = Parameter(
             torch.empty(
                 input_size_per_partition,
-                output_size_per_partition // self.quant_config.pack_factor,
+                output_size_per_partition // STORAGE_BITS_SIZE *
+                self.quant_config.weight_bits,
                 device="cuda",
                 dtype=torch.int32,
             ),
@@ -106,12 +109,14 @@ class AWQLinearMethod(LinearMethodBase):
                 "input_dim": 0,
                 "output_dim": 1,
                 "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
+                "weight_bits": self.quant_config.weight_bits,
+                "storage_bits_size": STORAGE_BITS_SIZE,
             })
         qzeros = Parameter(
             torch.empty(
                 input_size_per_partition // self.quant_config.group_size,
-                output_size_per_partition // self.quant_config.pack_factor,
+                output_size_per_partition // STORAGE_BITS_SIZE *
+                self.quant_config.weight_bits,
                 device="cuda",
                 dtype=torch.int32,
             ),
@@ -122,7 +127,8 @@ class AWQLinearMethod(LinearMethodBase):
                 "input_dim": 0,
                 "output_dim": 1,
                 "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
+                "weight_bits": self.quant_config.weight_bits,
+                "storage_bits_size": STORAGE_BITS_SIZE,
             })
         scales = Parameter(
             torch.empty(
