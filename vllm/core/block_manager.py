@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from vllm.block import PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-from vllm.prefix import PrefixPool, Prefix
+from vllm.prefix import Prefix
 
 # Mapping: logical block number -> physical block.
 BlockTable = List[PhysicalTokenBlock]
@@ -279,6 +279,7 @@ class BlockSpaceManager:
         }
         return block_number_mapping
 
+    # currently not used
     def swap_in_prefix(self, prefix: Prefix) -> Dict[int, int]:
         # CPU block -> GPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}

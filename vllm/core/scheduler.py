@@ -196,7 +196,7 @@ class Scheduler:
                 if seq_group.prefix is not None and seq_group.prefix.on_cpu:
                     # prefix.on_gpu will be set inside this function
                     self._swap_in_prefix(seq_group.prefix, blocks_to_swap_in)
-                # if the prefix hasn't been compuated, allocate blocks for it and set prefix.swap_to_gpu to True
+                
                 self._allocate(seq_group)
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
