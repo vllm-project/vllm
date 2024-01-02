@@ -171,8 +171,9 @@ class PagedAttention(nn.Module):
                     input_metadata.start_loc,
                     input_metadata.prompt_lens_tensor,
                     input_metadata.context_lens,
-                    input_metadata.max_seq_len)
-                # TODO: add support for Alibi bias
+                    input_metadata.max_seq_len,
+                    getattr(self, "alibi_slopes", None),
+                )
 
         else:
             # Decoding run.
