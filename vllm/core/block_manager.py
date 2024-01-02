@@ -108,7 +108,8 @@ class BlockSpaceManager:
         num_required_blocks = len(seq.logical_token_blocks)
 
         if seq_group.prefix is not None and seq_group.prefix.on_gpu:
-            num_required_blocks -= seq_group.prefix.get_length() // self.block_size 
+            num_required_blocks -= seq_group.prefix.get_length(
+            ) // self.block_size
 
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
@@ -138,15 +139,17 @@ class BlockSpaceManager:
         if seq_group.prefix is not None:
             # prefix is already on gpu or will be swapped in before the actual computation
             if seq_group.prefix.on_gpu:
-                num_prompt_blocks -= seq_group.prefix.get_length() // self.block_size
+                num_prompt_blocks -= seq_group.prefix.get_length(
+                ) // self.block_size
                 for block in seq_group.prefix.block_table:
                     block.ref_count += seq_group.num_seqs()
                     block_table.append(block)
                 # TODO: will need to perform the copy-on-write if prefix length is not a multiple of block size
-                    
+
             # allocate blocks for the prefix, we need to calculate the prefix's kv in this run
             elif not seq_group.prefix.swap_to_gpu:
-                num_prefix_blocks = seq_group.prefix.get_length() // self.block_size
+                num_prefix_blocks = seq_group.prefix.get_length(
+                ) // self.block_size
                 seq_group.prefix.swap_to_gpu = True
 
         for logical_idx in range(num_prompt_blocks):
@@ -165,7 +168,7 @@ class BlockSpaceManager:
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
-        
+
         if num_prefix_blocks > 0:
             seq_group.prefix.block_table = prefix_block_table.copy()
 
@@ -250,7 +253,7 @@ class BlockSpaceManager:
         # CPU block -> GPU block.
         if seq_group.prefix is not None:
             # make sure to swap in the prefix first
-            assert seq_group.prefix.on_gpu == True
+            assert seq_group.prefix.on_gpu is True
 
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
@@ -338,7 +341,7 @@ class BlockSpaceManager:
             for gpu_block, cpu_block in mapping.items()
         }
         return block_number_mapping
-    
+
     def swap_out_prefix(self, prefix: Prefix) -> Dict[int, int]:
         # GPU block -> CPU block.
         # make sure all the reference seq are finished or swapped out before swapping out the prefix

@@ -1,5 +1,6 @@
 from typing import List, Optional
 
+
 class Prefix:
     """Data and states associated with a prefix of prompt tokens for multiple sequence groups.
 
@@ -13,6 +14,7 @@ class Prefix:
         on_cpu: True if the prefix is on CPU.
         swap_to_gpu: True when the prefix will be computed during the execution of the model.
     """
+
     def __init__(
         self,
         prefix_id: int,
@@ -28,19 +30,20 @@ class Prefix:
         self.block_table = None
         # a lock to prevent multiple sequence from calculating the same prefix
         self.swap_to_gpu = False
-    
+
     def get_block_table_num(self) -> List[int]:
         return [block.block_number for block in self.block_table]
-    
+
     def match(self, tokens: List[int]) -> bool:
         return tokens[:self.length] == self.token_ids
-   
+
     # whether the prefix is on GPU or not
     def get_status(self) -> bool:
         return self.on_gpu
-    
+
     def get_length(self) -> int:
         return self.length
+
 
 class PrefixPool:
     """Manages all the prompt prefixes.
@@ -53,14 +56,15 @@ class PrefixPool:
         prefixes_hash: Mapping from the hash of the prefix to the prefix id.
         block_size: The block size of the executed model.
     """
+
     def __init__(
-        self, 
+        self,
         block_size: int,
     ) -> None:
         self.prefixes = []
         self.prefixes_hash = {}
         self.block_size = block_size
-    
+
     def add_prefix(self, token_ids: List[int]) -> Prefix:
         # generate prefix_id
         prefix_id = len(self.prefixes)
@@ -70,7 +74,7 @@ class PrefixPool:
         prefix_hash = hash(tuple(prefix.token_ids))
         self.prefixes_hash[prefix_hash] = prefix.prefix_id
         return prefix
-        
+
     # @TODO: this one should also come with a method to identify the prefix
     def efficient_search(self, token_ids: List[int]) -> Optional[Prefix]:
         # improve this search
@@ -78,12 +82,11 @@ class PrefixPool:
             if prefix.match(token_ids):
                 return prefix
         return None
-    
+
     # use this first, if we already know from the application which part of the tokens are prefix.
-    def fixed_search(self, prefix_hash : int) -> Optional[Prefix]:
+    def fixed_search(self, prefix_hash: int) -> Optional[Prefix]:
         if prefix_hash not in self.prefixes_hash:
             return None
         # print("Found prefix in the pool.")
         prefix_id = self.prefixes_hash[prefix_hash]
         return self.prefixes[prefix_id]
-

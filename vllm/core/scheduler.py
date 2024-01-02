@@ -75,7 +75,7 @@ class Scheduler:
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window)
-        
+
         self.prefix_pool = PrefixPool(self.cache_config.block_size)
 
         # TODO(zhuohan): Use deque instead of list for better performance.
@@ -196,7 +196,7 @@ class Scheduler:
                 if seq_group.prefix is not None and seq_group.prefix.on_cpu:
                     # prefix.on_gpu will be set inside this function
                     self._swap_in_prefix(seq_group.prefix, blocks_to_swap_in)
-                
+
                 self._allocate(seq_group)
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
@@ -420,7 +420,7 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
-    
+
     def _swap_in_prefix(
         self,
         prefix: Prefix,

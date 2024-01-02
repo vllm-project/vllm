@@ -404,7 +404,7 @@ class AsyncLLMEngine:
     async def generate(
         self,
         prompt: Optional[str],
-            prefix_pos: Optional[int],
+        prefix_pos: Optional[int],
         sampling_params: SamplingParams,
         request_id: str,
         prompt_token_ids: Optional[List[int]] = None

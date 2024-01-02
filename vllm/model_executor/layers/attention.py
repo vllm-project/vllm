@@ -117,7 +117,8 @@ class PagedAttention(nn.Module):
                                                     self.num_queries_per_kv,
                                                     value.shape[-1])
             # normal attention
-            if key_cache is None or value_cache is None or input_metadata.block_tables.numel() == 0:
+            if key_cache is None or value_cache is None or input_metadata.block_tables.numel(
+            ) == 0:
                 # Set attention bias if not provided. This typically happens at the
                 # very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
@@ -166,12 +167,11 @@ class PagedAttention(nn.Module):
                     output,
                     key_cache,
                     value_cache,
-                    input_metadata.block_tables, # [BS, max_block_per_request]
+                    input_metadata.block_tables,  # [BS, max_block_per_request]
                     input_metadata.start_loc,
                     input_metadata.prompt_lens_tensor,
                     input_metadata.context_lens,
-                    input_metadata.max_seq_len
-                )
+                    input_metadata.max_seq_len)
                 # TODO: add support for Alibi bias
 
         else:

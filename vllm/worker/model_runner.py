@@ -96,19 +96,22 @@ class ModelRunner:
                 prefix_len = seq_group_metadata.prefix.get_length()
                 assert prefix_len % self.block_size == 0
                 prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_table = seq_group_metadata.prefix.get_block_table_num()
+                prefix_block_table = seq_group_metadata.prefix.get_block_table_num(
+                )
                 prefix_block_tables.append(prefix_block_table)
-                max_num_blocks_per_seq_prompt = max(max_num_blocks_per_seq_prompt, len(prefix_block_table))
+                max_num_blocks_per_seq_prompt = max(
+                    max_num_blocks_per_seq_prompt, len(prefix_block_table))
             else:
                 prefix_block_tables.append([])
             # actual prompt lens
             context_lens.append(prefix_len)
-            subquery_lens.append(prompt_len-prefix_len)
+            subquery_lens.append(prompt_len - prefix_len)
 
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.append(list(range(prefix_len,prefix_len+len(prompt_tokens))))
+            input_positions.append(
+                list(range(prefix_len, prefix_len + len(prompt_tokens))))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -152,8 +155,8 @@ class ModelRunner:
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long)
         context_lens_tensor = torch.tensor(context_lens,
-                                    dtype=torch.int,
-                                    device='cuda')
+                                           dtype=torch.int,
+                                           device='cuda')
 
         # prefix block tables
         block_tables = _make_tensor_with_pad(
@@ -163,7 +166,11 @@ class ModelRunner:
             dtype=torch.int,
         )
 
-        start_loc_tensor = torch.arange(0, len(prompt_lens)*max_prompt_len, max_prompt_len, dtype=torch.long, device='cuda')
+        start_loc_tensor = torch.arange(0,
+                                        len(prompt_lens) * max_prompt_len,
+                                        max_prompt_len,
+                                        dtype=torch.long,
+                                        device='cuda')
 
         input_metadata = InputMetadata(
             prompt_lens=prompt_lens,

@@ -54,7 +54,9 @@ if __name__ == "__main__":
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--n", type=int, default=4)
-    parser.add_argument("--prompt", type=str, default="San Francisco is a "*32)
+    parser.add_argument("--prompt",
+                        type=str,
+                        default="San Francisco is a " * 32)
     parser.add_argument("--stream", action="store_true")
     args = parser.parse_args()
     prompt = args.prompt

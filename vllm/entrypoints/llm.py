@@ -174,8 +174,11 @@ class LLM:
         prefix_pos: Optional[int],
     ) -> None:
         request_id = str(next(self.request_counter))
-        self.llm_engine.add_request(request_id, prompt, sampling_params,
-                                    prompt_token_ids, prefix_pos=prefix_pos)
+        self.llm_engine.add_request(request_id,
+                                    prompt,
+                                    sampling_params,
+                                    prompt_token_ids,
+                                    prefix_pos=prefix_pos)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
