@@ -12,7 +12,9 @@ inline __device__ void apply_rotary_embedding(
   float base,
   int rot_offset,
   int embed_dim,
-  int rot_dim)
+  int rot_dim,
+  bool apply_logn,
+  int plen)
 {
   const float inv_freq = pos / powf(base, rot_offset*2 / (float)rot_dim);
   scalar_t cos = static_cast<scalar_t>(cosf(inv_freq));
@@ -34,10 +36,18 @@ inline __device__ void apply_rotary_embedding(
   int x_index = rot_offset;
   int y_index = embed_dim + rot_offset;
 
+  float logn_scale = 1;
+  if (apply_logn) {
+    int seq_len = 2048;
+    if (plen > seq_len) {
+      logn_scale = log2f(plen) / log2f(seq_len);
+    }
+  }
+
   const scalar_t x = arr[x_index];
   const scalar_t y = arr[y_index];
-  arr[x_index] = x * cos - y * sin;
-  arr[y_index] = y * cos + x * sin;
+  arr[x_index] = (x * cos - y * sin) * logn_scale;
+  arr[y_index] = (y * cos + x * sin) * logn_scale;
 }
 
 inline __device__ float rotary_embedding_get_base(
@@ -84,7 +94,7 @@ __global__ void rotary_embedding_kernel(
     const int token_head = token_idx * query_stride + head_idx * head_size;
     const int rot_offset = i % embed_dim;
     apply_rotary_embedding<scalar_t, IS_NEOX>(query + token_head, pos,
-                                              base, rot_offset, embed_dim, rot_dim);
+                                              base, rot_offset, embed_dim, rot_dim, true, pos+1);
   }
 
   const int nk = num_kv_heads * embed_dim;
@@ -93,7 +103,7 @@ __global__ void rotary_embedding_kernel(
     const int token_head = token_idx * key_stride + head_idx * head_size;
     const int rot_offset = i % embed_dim;
     apply_rotary_embedding<scalar_t, IS_NEOX>(key + token_head, pos,
-                                              base, rot_offset, embed_dim, rot_dim);
+                                              base, rot_offset, embed_dim, rot_dim, false, pos+1);
   }
 }
 
