@@ -137,27 +137,28 @@ class PromptCapture:
                 pass
         return -1
 
-    def to_ChatCompletionMessageToolCall(self,
-                            call_id: int) -> Union[ChatCompletionMessageToolCall, None]:
+    def to_ChatCompletionMessageToolCall(
+            self, call_id: int) -> Union[ChatCompletionMessageToolCall, None]:
         if len(self.calls_list) and call_id < len(self.calls_list):
             call = self.calls_list[call_id]
             arguments = call["arguments"] if "arguments" in call else None
             function_call = Function(name=call["call"],
-                                         arguments=json.dumps(arguments)
-                                         if arguments is not None else "")
-            return ChatCompletionMessageToolCall(id="call_" + call["call"] + "_" +
-                                    str(call_id),
-                                    type="function",
-                                    function=function_call)
+                                     arguments=json.dumps(arguments)
+                                     if arguments is not None else "")
+            return ChatCompletionMessageToolCall(id="call_" + call["call"] +
+                                                 "_" + str(call_id),
+                                                 type="function",
+                                                 function=function_call)
         return None
 
-    def to_ChoiceDeltaToolCall(self, call_id: int) -> Union[ChoiceDeltaToolCall, None]:
+    def to_ChoiceDeltaToolCall(
+            self, call_id: int) -> Union[ChoiceDeltaToolCall, None]:
         mesg = self.to_ChatCompletionMessageToolCall(call_id)
         if mesg is not None:
             return ChoiceDeltaToolCall(index=call_id,
-                                  id=mesg.id,
-                                  type=mesg.type,
-                                  function=mesg.function)
+                                       id=mesg.id,
+                                       type=mesg.type,
+                                       function=mesg.function)
         return None
 
 
@@ -562,7 +563,8 @@ class OpenAIServing:
                             call_id, tools_list)
                         if func_id >= 0:
                             tools_calls_list.append(
-                                current_capture.to_ChatCompletionMessageToolCall(
+                                current_capture.
+                                to_ChatCompletionMessageToolCall(
                                     call_id=call_id))
                     message = ChatMessage(role=role,
                                           content=None,
