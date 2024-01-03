@@ -1,5 +1,5 @@
 """CacheEngine class for managing the KV cache."""
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -113,39 +113,31 @@ class CacheEngine:
         self,
         src: List[KVCache],
         dst: List[KVCache],
-        src_block_numbers: List[int],
-        dst_block_numbers: List[int],
+        src_to_dst: Dict[int, int],
     ) -> None:
         with torch.cuda.stream(self.cache_stream):
             for i in range(self.num_layers):
                 src_key_cache, src_value_cache = src[i]
                 dst_key_cache, dst_value_cache = dst[i]
                 # Copy the key blocks.
-                cache_ops.swap_blocks(src_key_cache, dst_key_cache,
-                                      src_block_numbers, dst_block_numbers)
+                cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
                 # Copy the value blocks.
                 cache_ops.swap_blocks(src_value_cache, dst_value_cache,
-                                      src_block_numbers, dst_block_numbers)
+                                      src_to_dst)
                 event = self.events[i]
                 event.record(stream=self.cache_stream)
 
-    def swap_in(self, src_block_numbers: List[int],
-                dst_block_numbers: List[int]) -> None:
-        self._swap(self.cpu_cache, self.gpu_cache, src_block_numbers,
-                   dst_block_numbers)
+    def swap_in(self, src_to_dst: Dict[int, int]) -> None:
+        self._swap(self.cpu_cache, self.gpu_cache, src_to_dst)
 
-    def swap_out(self, src_block_numbers: List[int],
-                 dst_block_numbers: List[int]) -> None:
-        self._swap(self.gpu_cache, self.cpu_cache, src_block_numbers,
-                   dst_block_numbers)
+    def swap_out(self, src_to_dst: Dict[int, int]) -> None:
+        self._swap(self.gpu_cache, self.cpu_cache, src_to_dst)
 
-    def copy(self, src_block_numbers: List[int],
-             dst_block_numbers: List[int]) -> None:
+    def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
         key_caches = [key_cache for key_cache, _ in self.gpu_cache]
         value_caches = [value_cache for _, value_cache in self.gpu_cache]
         # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
-        cache_ops.copy_blocks(key_caches, value_caches, src_block_numbers,
-                              dst_block_numbers)
+        cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(
