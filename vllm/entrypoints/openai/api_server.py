@@ -143,7 +143,6 @@ if __name__ == "__main__":
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
-    enable_tools = True
 
     openai_tools_prompter = OpenAIToolsPrompter(
     ) if args.enable_api_tools else None
