@@ -6,26 +6,6 @@ import torch.nn as nn
 import torch.jit
 
 
-# torch.multinomial forces a GPU<->CPU sync.
-# Therefore, we use an optimized implementation instead that skips the sync.
-# Note that we always sample with replacement.
-# probs will be modified in place, but this is fine, as we pass
-# in a copy already.
-@torch.jit.script
-def _multinomial(
-    probs: torch.Tensor,
-    num_samples: int,
-) -> torch.Tensor:
-    if num_samples > 1:
-        # This is equivalent to torch.repeat_interleaved (which also
-        # forces a GPU<->CPU sync).
-        probs = probs[:, None, :].expand(probs.shape[0], num_samples,
-                                         probs.shape[1]).contiguous().view(
-                                             -1, probs.shape[1])
-    q = torch.empty_like(probs).exponential_(1.0)
-    return probs.div_(q).argmax(dim=1).view(-1, num_samples)
-
-
 class RejectionSampler(nn.Module):
     """Apply modified rejection sampling as described in "Accelerating Large
         Language Model Decoding with Speculative Sampling"
@@ -386,3 +366,23 @@ class RejectionSampler(nn.Module):
         assert torch.all(bonus_token_ids >= 0)
         assert torch.all(draft_token_ids < vocab_size)
         assert torch.all(draft_token_ids >= 0)
+
+# torch.multinomial forces a GPU<->CPU sync.
+# Therefore, we use an optimized implementation instead that skips the sync.
+# Note that we always sample with replacement.
+# probs will be modified in place, but this is fine, as we pass
+# in a copy already.
+@torch.jit.script
+def _multinomial(
+    probs: torch.Tensor,
+    num_samples: int,
+) -> torch.Tensor:
+    if num_samples > 1:
+        # This is equivalent to torch.repeat_interleaved (which also
+        # forces a GPU<->CPU sync).
+        probs = probs[:, None, :].expand(probs.shape[0], num_samples,
+                                         probs.shape[1]).contiguous().view(
+                                             -1, probs.shape[1])
+    q = torch.empty_like(probs).exponential_(1.0)
+    return probs.div_(q).argmax(dim=1).view(-1, num_samples)
+
