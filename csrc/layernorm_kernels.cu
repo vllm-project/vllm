@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include "dispatch_utils.h"
 #include "reduction_utils.cuh"
@@ -76,6 +77,7 @@ void rms_norm(
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
     input.scalar_type(),
@@ -101,6 +103,7 @@ void fused_add_rms_norm(
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
     input.scalar_type(),
