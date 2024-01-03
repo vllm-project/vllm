@@ -14,7 +14,7 @@ Requirements
 * Python: 3.8 -- 3.11
 * GPU: MI200s (gfx90a), MI300 (gfx942)
 * Pytorch 2.0.1/2.1.1/2.2
-* ROCm 5.7 ((Verified on 3.10) or ROCm 6.0 ((Verified on 3.9))
+* ROCm 5.7 (Verified on python 3.10) or ROCm 6.0 (Verified on python 3.9)
 
 Installation options:
 
@@ -97,7 +97,7 @@ You can build and install vLLM from source:
 
 Build a docker image from `Dockerfile.rocm`, and launch a docker container.
 
-The `Dokerfile.rocm` is designed to support both ROCm 5.7 and ROCm 5.8. It provides flexibility to customize the build of docker image using the following arguments:
+The `Dokerfile.rocm` is designed to support both ROCm 5.7 and ROCm 6.0. It provides flexibility to customize the build of docker image using the following arguments:
 
 * `BASE_IMAGE`: specifies the base image used when running `docker build`, specifically the PyTorch on ROCm base image. We have tested ROCm 5.7 and ROCm 6.0. The default is `rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1`
 * `FX_GFX_ARCHS`: specifies the GFX architecture that is used to build flash-attention, for example, `gfx90a;gfx942` for MI200 and MI300. The default is `gfx90a;gfx942`
@@ -105,14 +105,14 @@ The `Dokerfile.rocm` is designed to support both ROCm 5.7 and ROCm 5.8. It provi
 
 Their values can be passed in when running `docker build` with `--build-arg` options.
 
-For example, to build docker image for vllm on ROCm 6.0, we can run:
+For example, to build docker image for vllm on ROCm 6.0, you can run:
 
 .. code-block:: console
 
     $ docker build --build-arg BASE_IMAGE="compute-artifactory.amd.com:5000/rocm-plus-docker/framework/release-public:rocm6.0_ubuntu20.04_py3.9_pytorch_rocm6.0_internal_testing" \
        -f Dockerfile.rocm -t vllm-rocm . 
 
-To build vllm on ROCm 5.7, we can use the default:
+To build vllm on ROCm 5.7, you can use the default:
 
 .. code-block:: console
 
