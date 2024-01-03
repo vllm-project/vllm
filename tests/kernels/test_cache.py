@@ -42,7 +42,7 @@ def test_copy_blocks(
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f'cuda:{device}'
+    gpu_id = f"cuda:{device}"
     # Generate random block mappings where each source block is mapped to two
     # destination blocks.
     assert 2 * num_mappings <= num_blocks
@@ -107,7 +107,7 @@ def test_reshape_and_cache(
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f'cuda:{device}'
+    gpu_id = f"cuda:{device}"
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)

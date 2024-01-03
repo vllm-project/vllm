@@ -25,7 +25,7 @@ def test_silu_and_mul(
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f'cuda:{device}'
+    gpu_id = f"cuda:{device}"
     x = torch.randn(num_tokens, 2 * d, dtype=dtype, device=gpu_id)
     layer = SiluAndMul()
     out = layer(x)
@@ -48,7 +48,7 @@ def test_gelu_new(
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f'cuda:{device}'
+    gpu_id = f"cuda:{device}"
     x = torch.randn(num_tokens, d, dtype=dtype, device=gpu_id)
     layer = NewGELU()
     out = layer(x)
@@ -70,7 +70,7 @@ def test_gelu_fast(
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f'cuda:{device}'
+    gpu_id = f"cuda:{device}"
     x = torch.randn(num_tokens, d, dtype=dtype, device=gpu_id)
     layer = FastGELU()
     out = layer(x)

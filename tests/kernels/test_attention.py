@@ -122,7 +122,7 @@ def test_paged_attention(
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f'cuda:{device}'
+    gpu_id = f"cuda:{device}"
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
     query = torch.empty(num_seqs,
@@ -288,7 +288,7 @@ def test_multi_query_kv_attention(
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f'cuda:{device}'
+    gpu_id = f"cuda:{device}"
     # MAX_SEQ_LEN sometimes causes OOM in the reference implementation.
     # As the xformers library is already tested with its own tests, we can use
     # a smaller MAX_SEQ_LEN here.

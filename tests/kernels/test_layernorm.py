@@ -28,7 +28,7 @@ def test_rms_norm(
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f'cuda:{device}'
+    gpu_id = f"cuda:{device}"
     layer = RMSNorm(hidden_size).to(dtype=dtype, device=gpu_id)
     layer.weight.data.normal_(mean=1.0, std=0.1)
     scale = 1 / (2 * hidden_size)

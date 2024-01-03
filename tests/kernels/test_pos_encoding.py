@@ -43,7 +43,7 @@ def test_rotary_embedding(
         rotary_dim = head_size
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f'cuda:{device}'
+    gpu_id = f"cuda:{device}"
     if rotary_dim is None:
         rotary_dim = head_size
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style)
