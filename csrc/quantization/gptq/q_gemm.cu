@@ -790,7 +790,8 @@ void gemm_half_q_half_cuda_part
 
     fp_gemm_half_q_half_gptq_kernel kernel = pick_gemm_half_q_half_gptq_kernel(true, m_count, bit);
 
-    kernel<<<gridDim, blockDim>>>
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    kernel<<<gridDim, blockDim, 0, stream>>>
     (
         a,
         b_q_weight,
@@ -1252,7 +1253,8 @@ void reconstruct_exllama
         reconstruct_exllama_kernel = reconstruct_exllama_8bit_kernel;
     }
 
-    reconstruct_exllama_kernel<<<gridDim, blockDim>>>
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    reconstruct_exllama_kernel<<<gridDim, blockDim, 0, stream>>>
     (
         b_q_weight,
         b_q_perm,
@@ -1363,106 +1365,6 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
     }
 }
 
-__global__ void gemm_half_q_half_alt_2bit_kernel(
-    const half2* __restrict__ vec,
-    const uint32_t* __restrict__ mat,
-    half* __restrict__ mul,
-    const half* __restrict__ scales,
-    const uint32_t* __restrict__ zeros,
-    const int* __restrict__ g_idx,
-    int batch,
-    int height,
-    int width
-)
-{
-    int zero_width = width / 16;
-    int vec_height = height * 8;
-    const int blockwidth2 = BLOCK_KN_SIZE / 2;
-    int b = blockIdx.y * BLOCK_M_SIZE_MAX;
-    int b_end = min(BLOCK_M_SIZE_MAX, batch - b);
-    int h = BLOCK_KN_SIZE * blockIdx.z / 16;
-    int h_end = min(BLOCK_KN_SIZE / 16, height - h) * 8;
-    int w = BLOCK_KN_SIZE * blockIdx.x + threadIdx.x;
-
-    __shared__ half2 blockvec[BLOCK_M_SIZE_MAX][blockwidth2];
-    if (threadIdx.x < h_end) {
-        for (int m = 0; m < b_end; ++m) {
-          blockvec[m][threadIdx.x] =
-              vec[(m + b) * vec_height + blockIdx.z * BLOCK_KN_SIZE / 2 +
-                  threadIdx.x];
-        }
-    }
-
-    __shared__ half2 deq2[16][16];
-    int val = threadIdx.x / 16;
-    int off = threadIdx.x % 16;
-    for (; val < 16; val += BLOCK_KN_SIZE / 16) {
-        deq2[val][off] = __halves2half2(
-            __int2half_rn(val & 0x3), __int2half_rn(val >> 2)
-        );
-    }
-
-    if (blockIdx.z == 0)
-    {
-        for (int m = 0; m < b_end; m++)
-            mul[(b + m) * width + w] = __int2half_rn(0);
-    }
-    __syncthreads();
-
-    int i = width * h + w;
-    int g_h = h * 16;
-    int k = 0;
-    int z_w = w / 16;
-    int z_mod = (w % 16) * 2;
-    half2 res2;
-    half res[BLOCK_M_SIZE_MAX] = {};
-
-    unsigned int tmp;
-    while (k < h_end) {
-        tmp = mat[i];
-        half2 scales_tmp[8];
-        half2 zeros_tmp[8];
-        for (int tmp_k = 0; tmp_k < 8; tmp_k++) {
-            int g = g_idx[g_h + (k + tmp_k) * 2];
-            int g2 = g_idx[g_h + (k + tmp_k) * 2 + 1];
-            half scale_f = scales[g * width + w];
-            half scale_f2 = scales[g2 * width + w];
-            half2 scale = __halves2half2(scale_f, scale_f2);
-            half2 zero = __halves2half2(
-                __hmul(scale_f, __int2half_rn(-((zeros[g * zero_width + z_w] >> z_mod) & 0x03) - 1)),
-                __hmul(scale_f2, __int2half_rn(-((zeros[g2 * zero_width + z_w] >> z_mod) & 0x03) - 1))
-            );
-            scales_tmp[tmp_k] = scale;
-            zeros_tmp[tmp_k] = zero;
-        }
-        for (int m = 0; m < b_end; m++) {
-#ifndef USE_ROCM
-            res2 = {};
-#else
-            res2.x = __half_as_ushort(__float2half(0));
-            res2.y = __half_as_ushort(__float2half(0));
-#endif
-            res2 = __hfma2(__hfma2(deq2[(tmp >>  0) & 0xf][off], scales_tmp[0], zeros_tmp[0]), blockvec[m][k + 0], res2);
-            res2 = __hfma2(__hfma2(deq2[(tmp >>  4) & 0xf][off], scales_tmp[1], zeros_tmp[1]), blockvec[m][k + 1], res2);
-            res2 = __hfma2(__hfma2(deq2[(tmp >> 8) & 0xf][off], scales_tmp[2], zeros_tmp[2]), blockvec[m][k + 2], res2);
-            res2 = __hfma2(__hfma2(deq2[(tmp >> 12) & 0xf][off], scales_tmp[3], zeros_tmp[3]), blockvec[m][k + 3], res2);
-            res2 = __hfma2(__hfma2(deq2[(tmp >> 16) & 0xf][off], scales_tmp[4], zeros_tmp[4]), blockvec[m][k + 4], res2);
-            res2 = __hfma2(__hfma2(deq2[(tmp >> 20) & 0xf][off], scales_tmp[5], zeros_tmp[5]), blockvec[m][k + 5], res2);
-            res2 = __hfma2(__hfma2(deq2[(tmp >> 24) & 0xf][off], scales_tmp[6], zeros_tmp[6]), blockvec[m][k + 6], res2);
-            res2 = __hfma2(__hfma2(deq2[(tmp >> 28) & 0xf][off], scales_tmp[7], zeros_tmp[7]), blockvec[m][k + 7], res2);
-#ifndef USE_ROCM
-            res[m] = __hadd(res[m], __hadd(res2.x, res2.y));
-#else
-            res[m] = __hadd(res[m], __hadd(__ushort_as_half(res2.x), __ushort_as_half(res2.y)));
-#endif
-        }
-        i += width;
-        k += 8;
-    }
-    for (int m = 0; m < b_end; m++) {
-        atomicAdd(&mul[(b + m) * width + w], res[m]);
-    }
-}
 
 __global__ void gemm_half_q_half_alt_8bit_kernel(
     const half2* __restrict__ vec,
@@ -1576,13 +1478,12 @@ void gemm_half_q_half_alt
     gridDim.z = DIVIDE(size_k, BLOCK_KN_SIZE);
 
     auto kernel = gemm_half_q_half_alt_4bit_kernel;
-    if (bit == 2) {
-        kernel = gemm_half_q_half_alt_2bit_kernel;
-    } else if (bit == 8) {
+    if (bit == 8) {
         kernel = gemm_half_q_half_alt_8bit_kernel;
     }
 
-    kernel<<<gridDim, blockDim>>>
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    kernel<<<gridDim, blockDim, 0, stream>>>
     (
         (const half2*) a,
         b_q_weight,
@@ -1715,7 +1616,8 @@ void reconstruct_gptq
         gridDim.y = DIVIDE(height, 32);
     }
 
-    kernel<<<gridDim, blockDim>>>
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    kernel<<<gridDim, blockDim, 0, stream>>>
     (
         b_q_weight,
         b_gptq_scales,
@@ -2085,7 +1987,8 @@ void shuffle_exllama_weight
         } else if (bit == 8) {
             kernel = make_sequential_8bit_kernel;
         }
-        kernel<<<gridDim, blockDim>>>
+        const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+        kernel<<<gridDim, blockDim, 0, stream>>>
         (
             q_weight,
             new_qweight,
@@ -2111,7 +2014,8 @@ void shuffle_exllama_weight
     } else if (bit == 8) {
         shuffle_kernel = shuffle_8bit_kernel;
     }
-    shuffle_kernel<<<gridDim, blockDim>>>(q_weight, height, width);
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    shuffle_kernel<<<gridDim, blockDim, 0, stream>>>(q_weight, height, width);
 }
 
 }  // namespace gptq

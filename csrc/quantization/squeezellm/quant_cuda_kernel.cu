@@ -201,7 +201,8 @@ void squeezellm_gemm(
   );
   dim3 threads(BLOCKWIDTH);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
-  vllm::squeezellm::NUQ4MatMulKernel<<<blocks, threads>>>(
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  vllm::squeezellm::NUQ4MatMulKernel<<<blocks, threads, 0, stream>>>(
 #ifndef USE_ROCM
     (half2*) vec.data<at::Half>(),
 #else
