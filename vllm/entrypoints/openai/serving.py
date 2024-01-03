@@ -14,7 +14,7 @@ from .protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, LogProbs,
     ModelCard, ModelList, ModelPermission, UsageInfo, ChatCompletionToolParam,
-    ToolCallsDelta, ToolCallsMessage, FunctionCall,
+    ChoiceDeltaToolCall, ChatCompletionMessageToolCall, Function,
     ChatCompletionAssistantMessage, ChatCompletionToolMessage, ErrorResponse)
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -78,9 +78,9 @@ class OpenAIToolsPrompter:
                             text_inject += f"\n  {{\"name\": \"{tool.function.name}\", \"description\": \"{tool.function.description}\", \"arguments\": null]}},"
                 text_inject += "\n]\n"
                 text_inject += (
-                    f"Whenever the user asks you something, you can either respond directly or invoke a function. "
+                    f"Whenever the user asks you something, you can either respond directly or invoke a function.\n"
                     f"The decision to invoke a function is yours, only invoke functions when it makes sense to do so.\n"
-                    f"If you have to call at least one function, your message can contain only function calls and nothing else.\n"
+                    f"If you need to call at least one function, your message should contain only a list of function calls and nothing else; the function calls are the response.\n"
                     f"To call a function, the message must start by \"{self.func_call_token()}\" followed by a json like this:\n"
                     f"With arguments:\n"
                     f"  {self.func_call_token()}{{\"call\": \"function_name\", \"arguments\": {{\"arg1\": \"value1\"}}}}.\n"
@@ -137,24 +137,24 @@ class PromptCapture:
                 pass
         return -1
 
-    def to_ToolCallsMessage(self,
-                            call_id: int) -> Union[ToolCallsMessage, None]:
+    def to_ChatCompletionMessageToolCall(self,
+                            call_id: int) -> Union[ChatCompletionMessageToolCall, None]:
         if len(self.calls_list) and call_id < len(self.calls_list):
             call = self.calls_list[call_id]
             arguments = call["arguments"] if "arguments" in call else None
-            function_call = FunctionCall(name=call["call"],
+            function_call = Function(name=call["call"],
                                          arguments=json.dumps(arguments)
                                          if arguments is not None else "")
-            return ToolCallsMessage(id="call_" + call["call"] + "_" +
+            return ChatCompletionMessageToolCall(id="call_" + call["call"] + "_" +
                                     str(call_id),
                                     type="function",
                                     function=function_call)
         return None
 
-    def to_ToolCallsDelta(self, call_id: int) -> Union[ToolCallsDelta, None]:
-        mesg = self.to_ToolCallsMessage(call_id)
+    def to_ChoiceDeltaToolCall(self, call_id: int) -> Union[ChoiceDeltaToolCall, None]:
+        mesg = self.to_ChatCompletionMessageToolCall(call_id)
         if mesg is not None:
-            return ToolCallsDelta(index=call_id,
+            return ChoiceDeltaToolCall(index=call_id,
                                   id=mesg.id,
                                   type=mesg.type,
                                   function=mesg.function)
@@ -438,7 +438,7 @@ class OpenAIServing:
                                     call_id, tools_list)
                                 if func_id >= 0:
                                     tools_calls_list.append(
-                                        current_capture.to_ToolCallsDelta(
+                                        current_capture.to_ChoiceDeltaToolCall(
                                             call_id=call_id))
                             choice_data = ChatCompletionResponseStreamChoice(
                                 index=i,
@@ -562,7 +562,7 @@ class OpenAIServing:
                             call_id, tools_list)
                         if func_id >= 0:
                             tools_calls_list.append(
-                                current_capture.to_ToolCallsMessage(
+                                current_capture.to_ChatCompletionMessageToolCall(
                                     call_id=call_id))
                     message = ChatMessage(role=role,
                                           content=None,
