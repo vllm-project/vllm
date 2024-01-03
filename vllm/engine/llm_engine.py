@@ -155,38 +155,35 @@ class LLMEngine:
         self.driver_dummy_worker: RayWorkerVllm = None
         self.workers: List[RayWorkerVllm] = []
 
+        driver_ip = get_ip()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
-
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
                 placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_id,
             )
-
-            if (bundle.get("node:__internal_head__", 0) > 0
-                    and self.driver_dummy_worker is None):
-                self.driver_dummy_worker = ray.remote(
-                    num_cpus=0,
-                    num_gpus=num_gpus,
-                    scheduling_strategy=scheduling_strategy,
-                    **ray_remote_kwargs,
-                )(RayWorkerVllm).remote()
-                continue
-
             worker = ray.remote(
                 num_cpus=0,
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
             )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
-            self.workers.append(worker)
+
+            worker_ip = ray.get(worker.get_node_ip.remote())
+            if worker_ip == driver_ip and self.driver_dummy_worker is None:
+                # If the worker is on the same node as the driver, we use it
+                # as the resource holder for the driver process.
+                self.driver_dummy_worker = worker
+            else:
+                self.workers.append(worker)
 
         if self.driver_dummy_worker is None:
             raise ValueError(
-                "Placement group must have a bundle with host resources for "
-                "the driver process.")
+                "Ray does not allocate any GPUs on the driver node. Consider "
+                "adjusting the Ray placement group or running the driver on a "
+                "GPU node.")
 
         driver_node_id, driver_gpu_ids = ray.get(
             self.driver_dummy_worker.get_node_and_gpu_ids.remote())
@@ -210,7 +207,7 @@ class LLMEngine:
         for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
             worker.set_cuda_visible_devices.remote(node_gpus[node_id])
 
-        distributed_init_method = f"tcp://{get_ip()}:{get_open_port()}"
+        distributed_init_method = f"tcp://{driver_ip}:{get_open_port()}"
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker

@@ -2,7 +2,7 @@ from typing import Optional, List, Tuple, TYPE_CHECKING
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import is_hip, set_cuda_visible_devices
+from vllm.utils import is_hip, set_cuda_visible_devices, get_ip
 
 logger = init_logger(__name__)
 
@@ -28,6 +28,9 @@ try:
         def execute_method(self, method, *args, **kwargs):
             executor = getattr(self, method)
             return executor(*args, **kwargs)
+
+        def get_node_ip(self) -> str:
+            return get_ip()
 
         def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
             node_id = ray.get_runtime_context().get_node_id()
@@ -92,7 +95,6 @@ def initialize_cluster(
         bundles = current_placement_group.bundle_specs
         # Verify that we can use the placement group.
         gpu_bundles = 0
-        have_host_bundle = False
         for bundle in bundles:
             bundle_gpus = bundle.get("GPU", 0)
             if bundle_gpus > 1:
@@ -100,16 +102,10 @@ def initialize_cluster(
                     "Placement group bundle cannot have more than 1 GPU.")
             if bundle_gpus:
                 gpu_bundles += 1
-                if bundle.get("node:__internal_head__", 0) > 0:
-                    have_host_bundle = True
         if parallel_config.world_size > gpu_bundles:
             raise ValueError(
                 "The number of required GPUs exceeds the total number of "
                 "available GPUs in the placement group.")
-        if not have_host_bundle:
-            raise ValueError(
-                "Placement group must have a bundle with host resources for "
-                "the driver process.")
     else:
         num_gpus_in_cluster = ray.cluster_resources().get("GPU", 0)
         if parallel_config.world_size > num_gpus_in_cluster:
@@ -117,12 +113,7 @@ def initialize_cluster(
                 "The number of required GPUs exceeds the total number of "
                 "available GPUs in the cluster.")
         # Create a new placement group
-        placement_group_specs = ([{
-            "GPU": 1,
-            "node:__internal_head__": 0.01
-        }] + [{
-            "GPU": 1
-        }] * (parallel_config.world_size - 1))
+        placement_group_specs = ([{"GPU": 1}] * parallel_config.world_size)
         current_placement_group = ray.util.placement_group(
             placement_group_specs)
         # Wait until PG is ready - this will block until all
