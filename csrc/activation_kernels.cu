@@ -2,6 +2,7 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include "cuda_compat.h"
 #include "dispatch_utils.h"
 
 namespace vllm {
@@ -19,8 +20,8 @@ __global__ void silu_and_mul_kernel(
   const int d) {
   const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t x = __ldg(&input[token_idx * 2 * d + idx]);
-    const scalar_t y = __ldg(&input[token_idx * 2 * d + d + idx]);
+    const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
+    const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
     out[token_idx * d + idx] = silu(x) * y;
   }
 }
@@ -59,7 +60,7 @@ __global__ void activation_kernel(
   const int d) {
   const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t x = __ldg(&input[token_idx * d + idx]);
+    const scalar_t x = VLLM_LDG(&input[token_idx * d + idx]);
     out[token_idx * d + idx] = ACT_FN(x);
   }
 }

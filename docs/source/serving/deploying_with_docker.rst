@@ -29,7 +29,15 @@ You can build and run vLLM from source via the provided dockerfile. To build vLL
 
 .. code-block:: console
 
-    $ DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai --build-arg max_jobs=8
+    $ DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
+
+
+.. note::
+
+        By default vLLM will build for all GPU types for widest distribution. If you are just building for the
+        current GPU type the machine is running on, you can add the argument ``--build-arg torch_cuda_arch_list=""``
+        for vLLM to find the current GPU type and build for that.
+
 
 To run vLLM:
 

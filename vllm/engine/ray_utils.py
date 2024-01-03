@@ -1,8 +1,8 @@
-import socket
 from typing import Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
+from vllm.utils import get_open_port, is_hip
 
 logger = init_logger(__name__)
 
@@ -42,12 +42,6 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 
-def get_open_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
 def initialize_cluster(
     parallel_config: ParallelConfig,
     engine_use_ray: bool = False,
@@ -73,7 +67,12 @@ def initialize_cluster(
                 "Ray is not installed. Please install Ray to use distributed "
                 "serving.")
         # Connect to a ray cluster.
-        ray.init(address=ray_address, ignore_reinit_error=True)
+        if is_hip():
+            ray.init(address=ray_address,
+                     ignore_reinit_error=True,
+                     num_gpus=parallel_config.world_size)
+        else:
+            ray.init(address=ray_address, ignore_reinit_error=True)
 
     if not parallel_config.worker_use_ray:
         # Initialize cluster locally.
