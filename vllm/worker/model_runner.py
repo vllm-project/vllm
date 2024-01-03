@@ -369,6 +369,7 @@ class ModelRunner:
                 sampling_metadata.selected_token_indices.size(),
             }
             broadcast_object_list([py_data], src=0)
+            # TODO(zhuohan): Combine the broadcasts or set async_op=True.
             broadcast(input_tokens, src=0)
             broadcast(input_positions, src=0)
             if input_metadata.slot_mapping is not None:

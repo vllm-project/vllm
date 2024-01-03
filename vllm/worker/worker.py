@@ -127,22 +127,22 @@ class Worker:
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    def cache_swap(self, swap_in_src: List[int], swap_in_dst: List[int],
-                   swap_out_src: List[int], swap_out_dst: List[int],
-                   copy_src: List[int], copy_dst: List[int]) -> None:
+    def cache_swap(
+        self,
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> None:
         # Issue cache operations.
         issued_cache_op = False
-        if len(swap_in_src) > 0:
-            assert len(swap_in_src) == len(swap_in_dst)
-            self.cache_engine.swap_in(swap_in_src, swap_in_dst)
+        if blocks_to_swap_in:
+            self.cache_engine.swap_in(blocks_to_swap_in)
             issued_cache_op = True
-        if len(swap_out_src) > 0:
-            assert len(swap_out_src) == len(swap_out_dst)
-            self.cache_engine.swap_out(swap_out_src, swap_out_dst)
+        if blocks_to_swap_out:
+            self.cache_engine.swap_out(blocks_to_swap_out)
             issued_cache_op = True
-        if len(copy_src) > 0:
-            assert len(copy_src) == len(copy_dst)
-            self.cache_engine.copy(copy_src, copy_dst)
+        if blocks_to_copy:
+            self.cache_engine.copy(blocks_to_copy)
             issued_cache_op = True
 
         cache_events = self.cache_events if issued_cache_op else None
@@ -168,30 +168,20 @@ class Worker:
             assert blocks_to_swap_out is not None
             assert blocks_to_copy is not None
             # Turn the dictionaries into lists for communication.
-            swap_in_src = list(blocks_to_swap_in.keys())
-            swap_in_dst = list(blocks_to_swap_in.values())
-            swap_out_src = list(blocks_to_swap_out.keys())
-            swap_out_dst = list(blocks_to_swap_out.values())
-            copy_src = []
-            copy_dst = []
-            for src, dst_list in blocks_to_copy.items():
-                copy_src.extend([src] * len(dst_list))
-                copy_dst.extend(dst_list)
-            swapping_block_numbers = [
-                swap_in_src, swap_in_dst, swap_out_src, swap_out_dst, copy_src,
-                copy_dst
+            block_swapping_info = [
+                blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy
             ]
-            broadcast_object_list([num_seq_groups] + swapping_block_numbers,
+            broadcast_object_list([num_seq_groups] + block_swapping_info,
                                   src=0)
         else:
-            # num_seq_groups, swap_in_src, swap_in_dst, swap_out_src,
-            # swap_out_dst, copy_src, copy_dst (7 elements)
-            recv_data = [None] * 7
+            # num_seq_groups, blocks_to_swap_in, blocks_to_swap_out,
+            # blocks_to_copy (4 elements)
+            recv_data = [None] * 4
             broadcast_object_list(recv_data, src=0)
             num_seq_groups = recv_data[0]
-            swapping_block_numbers = recv_data[1:]
+            block_swapping_info = recv_data[1:]
 
-        self.cache_swap(*swapping_block_numbers)
+        self.cache_swap(*block_swapping_info)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:

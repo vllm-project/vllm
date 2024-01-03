@@ -63,7 +63,6 @@ def tensor_model_parallel_gather(input_, dst=0, dim=-1):
     if dim < 0:
         # Convert negative dim to positive.
         dim += input_.dim()
-    input_size = input_.size()
     # Allocate output tensor.
     if get_tensor_model_parallel_rank() == dst:
         gather_list = [torch.empty_like(input_) for _ in range(world_size)]
