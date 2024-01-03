@@ -287,7 +287,8 @@ void gemm_half_q_half_cuda_part
 
     fp_gemm_half_q_half_gptq_kernel kernel = pick_gemm_half_q_half_gptq_kernel(true, m_count);
 
-    kernel<<<gridDim, blockDim>>>
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    kernel<<<gridDim, blockDim, 0, stream>>>
     (
         a,
         b_q_weight,
@@ -434,7 +435,8 @@ void reconstruct_exllama
     gridDim.y = DIVIDE(height, BLOCK_KN_SIZE);
     gridDim.x = DIVIDE(width, BLOCK_KN_SIZE);
 
-    reconstruct_exllama_kernel<<<gridDim, blockDim>>>
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    reconstruct_exllama_kernel<<<gridDim, blockDim, 0, stream>>>
     (
         b_q_weight,
         b_q_perm,
@@ -567,7 +569,8 @@ void gemm_half_q_half_alt
     gridDim.y = DIVIDE(size_m, BLOCK_M_SIZE_MAX);
     gridDim.z = DIVIDE(size_k, BLOCK_KN_SIZE);
 
-    gemm_half_q_half_alt_kernel<<<gridDim, blockDim>>>
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    gemm_half_q_half_alt_kernel<<<gridDim, blockDim, 0, stream>>>
     (
         (const half2*) a,
         b_q_weight,
@@ -639,7 +642,8 @@ void reconstruct_gptq
     blockDim.y = 1;
     gridDim.y = DIVIDE(height, 8);
     gridDim.x = DIVIDE(width, BLOCK_KN_SIZE);
-    reconstruct_gptq_kernel<<<gridDim, blockDim>>>
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    reconstruct_gptq_kernel<<<gridDim, blockDim, 0, stream>>>
     (
         b_q_weight,
         b_gptq_scales,
@@ -794,7 +798,8 @@ void shuffle_exllama_weight
         gridDim.x = DIVIDE(width, THREADS_X);
         gridDim.y = height / 8;
 
-        make_sequential_kernel<<<gridDim, blockDim>>>
+        const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+        make_sequential_kernel<<<gridDim, blockDim, 0, stream>>>
         (
             q_weight,
             new_qweight,
@@ -813,7 +818,8 @@ void shuffle_exllama_weight
     blockDim.y = 1;
     gridDim.x = DIVIDE(width, THREADS_X);
     gridDim.y = 1;
-    shuffle_kernel<<<gridDim, blockDim>>>(q_weight, height, width);
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    shuffle_kernel<<<gridDim, blockDim, 0, stream>>>(q_weight, height, width);
 }
 
 }  // namespace gptq
