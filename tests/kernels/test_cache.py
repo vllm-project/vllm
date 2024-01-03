@@ -15,6 +15,7 @@ NUM_BLOCKS = [1024, 36000]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+USE_FP8_KV_CACHE = [False, True]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -26,6 +27,7 @@ DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("use_fp8_kv_cache", USE_FP8_KV_CACHE)
 @torch.inference_mode()
 def test_copy_blocks(
     kv_cache_factory,
@@ -38,6 +40,7 @@ def test_copy_blocks(
     dtype: torch.dtype,
     seed: int,
     device: int,
+    use_fp8_kv_cache: bool,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -57,9 +60,11 @@ def test_copy_blocks(
         block_mapping[src] = [dst1, dst2]
 
     # Create the KV caches.
+    cache_dtype = dtype if not use_fp8_kv_cache else torch.uint8
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size,
                                                 num_layers, num_heads,
-                                                head_size, dtype, seed, gpu_id)
+                                                head_size, cache_dtype, seed,
+                                                gpu_id)
 
     # Clone the KV caches.
     cloned_key_caches = [key_cache.clone() for key_cache in key_caches]

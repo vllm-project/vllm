@@ -396,7 +396,7 @@ void gather_cached_kv(
   dim3 block(std::min(num_heads * head_size, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_DISPATCH_FLOATING_BYTE_TYPES(
     key.scalar_type(),
     "gather_cached_kv_kernel_optimized",
     [&] {
