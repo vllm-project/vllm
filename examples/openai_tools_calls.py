@@ -12,9 +12,13 @@ models = client.models.list()
 model = models.data[0].id
 stream = True
 
+
 def get_current_date_utc():
     print("Calling get_current_date_utc client side.")
-    return datetime.datetime.now(datetime.timezone.utc).strftime("The current UTC datetime is (day: %A, date (day/month/year): %d/%m/%Y, time: %H:%M).")
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "The current UTC datetime is (day: %A, date (day/month/year): %d/%m/%Y, time: %H:%M)."
+    )
+
 
 # Example dummy function hard coded to return the same weather
 # In production, this could be your backend API or an external API
@@ -22,45 +26,65 @@ def get_current_weather(location, unit="fahrenheit"):
     """Get the current weather in a given location"""
     print("Calling get_current_weather client side.")
     if "tokyo" in location.lower():
-        return json.dumps({"location": "Tokyo", "temperature": "10", "unit": unit})
+        return json.dumps({
+            "location": "Tokyo",
+            "temperature": "10",
+            "unit": unit
+        })
     elif "san francisco" in location.lower():
-        return json.dumps({"location": "San Francisco", "temperature": "72", "unit": unit})
+        return json.dumps({
+            "location": "San Francisco",
+            "temperature": "72",
+            "unit": unit
+        })
     elif "paris" in location.lower():
-        return json.dumps({"location": "Paris", "temperature": "22", "unit": unit})
+        return json.dumps({
+            "location": "Paris",
+            "temperature": "22",
+            "unit": unit
+        })
     else:
         return json.dumps({"location": location, "temperature": "unknown"})
+
 
 def run_conversation():
     # Step 1: send the conversation and available functions to the model
     # messages = [{"role": "user", "content": "What's the weather like in San Francisco, Tokyo, and Paris?"}]
-    messages = [{"role": "user", "content": "What's the weather like in San Francisco, Tokyo, and Paris ? We also need to know the current date."}]
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_current_weather",
-                "description": "Get the current weather in a given location",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "location": {
-                            "type": "string",
-                            "description": "The city and state, e.g. San Francisco, CA",
-                        },
-                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+    messages = [{
+        "role":
+        "user",
+        "content":
+        "What's the weather like in San Francisco, Tokyo, and Paris ? We also need to know the current date."
+    }]
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type":
+                        "string",
+                        "description":
+                        "The city and state, e.g. San Francisco, CA",
                     },
-                    "required": ["location"],
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"]
+                    },
                 },
+                "required": ["location"],
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_current_date_utc",
-                "description": "Get the current UTC time",
-            },
-        }
-    ]
+    }, {
+        "type": "function",
+        "function": {
+            "name": "get_current_date_utc",
+            "description": "Get the current UTC time",
+        },
+    }]
     response = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -79,7 +103,7 @@ def run_conversation():
                 break
             if chunk.choices[0].delta.content is not None:
                 text_message += chunk.choices[0].delta.content
-        response_message = { "role": "assistant", "content": text_message }
+        response_message = {"role": "assistant", "content": text_message}
     else:
         if not len(response.choices):
             return None
@@ -95,7 +119,8 @@ def run_conversation():
             "get_current_weather": get_current_weather,
             "get_current_date_utc": get_current_date_utc,
         }
-        messages.append(response_message)  # extend conversation with assistant's reply
+        messages.append(
+            response_message)  # extend conversation with assistant's reply
         # Step 4: send the info for each function call and function response to the model
         for tool_call in tool_calls:
             function_name = tool_call.function.name
@@ -109,14 +134,12 @@ def run_conversation():
             else:
                 function_response = function_to_call()
 
-            messages.append(
-                {
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": function_name,
-                    "content": function_response,
-                }
-            )  # extend conversation with function response
+            messages.append({
+                "tool_call_id": tool_call.id,
+                "role": "tool",
+                "name": function_name,
+                "content": function_response,
+            })  # extend conversation with function response
         second_response = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -126,5 +149,7 @@ def run_conversation():
             print("Message %i:\n    %s\n" % (it_msg, str(msg)))
 
         return second_response
+
+
 result = run_conversation()
 print("Final response:\n%s" % result)
