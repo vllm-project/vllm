@@ -48,9 +48,11 @@ class Sampler(nn.Module):
         # Only perform sampling in the driver worker.
         # Note: `_get_logits` is still distributed across TP workers because
         # the `embedding` weight is distributed across TP workers.
+        # TODO(zhuohan): Change the get_logits part to a separate stage.
         if not sampling_metadata.perform_sampling:
             return None
 
+        assert logits is not None
         _, vocab_size = logits.shape
 
         # Apply logits processors (if any).
@@ -98,14 +100,15 @@ class Sampler(nn.Module):
 
 def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
                 embedding_bias: Optional[torch.Tensor],
-                vocab_size: int) -> torch.Tensor:
+                vocab_size: int) -> Optional[torch.Tensor]:
     # Get the logits for the next tokens.
     logits = torch.matmul(hidden_states, embedding.t())
     if embedding_bias is not None:
         logits += embedding_bias
     logits = tensor_model_parallel_gather(logits)
     # Remove paddings in vocab (if any).
-    logits = logits[:, :vocab_size]
+    if logits is not None:
+        logits = logits[:, :vocab_size]
     return logits
 
 
