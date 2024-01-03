@@ -167,7 +167,6 @@ class Worker:
             assert blocks_to_swap_in is not None
             assert blocks_to_swap_out is not None
             assert blocks_to_copy is not None
-            # Turn the dictionaries into lists for communication.
             block_swapping_info = [
                 blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy
             ]
