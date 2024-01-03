@@ -33,8 +33,9 @@ def test_prepare_prompt():
         expected_selected_token_indices.append(selected_token_start_idx +
                                                prompt_len - 1)
         selected_token_start_idx += max_seq_len
-    input_tokens, input_positions, _ = model_runner._prepare_prompt(
-        seq_group_metadata_list)
+    input_tokens, input_positions, _, return_prompt_lens = (
+        model_runner._prepare_prompt(seq_group_metadata_list))
+    assert return_prompt_lens == prompt_lens
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens)
     assert input_tokens.shape == (batch_size, max_seq_len)

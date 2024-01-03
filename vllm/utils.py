@@ -1,7 +1,9 @@
 import enum
+import os
 import socket
 import uuid
 from platform import uname
+from typing import List
 
 import psutil
 import torch
@@ -55,7 +57,15 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(uname()).lower()
 
 
-def get_open_port():
+def get_ip() -> str:
+    return socket.gethostbyname(socket.gethostname())
+
+
+def get_open_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
+
+def set_cuda_visible_devices(device_ids: List[int]) -> None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))

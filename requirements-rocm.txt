@@ -3,8 +3,6 @@ typing-extensions>=4.8.0
 starlette
 psutil
 ray >= 2.5.1
-pandas  # Required for Ray data.
-pyarrow  # Required for Ray data.
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 tokenizers>=0.15.0

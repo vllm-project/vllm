@@ -8,16 +8,20 @@ import pytest
 import requests
 
 
-def _query_server(prompt: str) -> dict:
+def _query_server(prompt: str, max_tokens: int = 5) -> dict:
     response = requests.post("http://localhost:8000/generate",
                              json={
                                  "prompt": prompt,
-                                 "max_tokens": 100,
+                                 "max_tokens": max_tokens,
                                  "temperature": 0,
                                  "ignore_eos": True
                              })
     response.raise_for_status()
     return response.json()
+
+
+def _query_server_long(prompt: str) -> dict:
+    return _query_server(prompt, max_tokens=500)
 
 
 @pytest.fixture
@@ -68,10 +72,11 @@ def test_api_server(api_server):
         for result in pool.map(_query_server, prompts):
             assert result
 
+    with Pool(32) as pool:
         # Cancel requests
         prompts = ["canceled requests"] * 100
-        pool.map_async(_query_server, prompts)
-        time.sleep(0.001)
+        pool.map_async(_query_server_long, prompts)
+        time.sleep(0.01)
         pool.terminate()
         pool.join()
 

@@ -320,7 +320,7 @@ class MixtralModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for i in range(len(self.layers)):
@@ -361,7 +361,7 @@ class MixtralForCausalLM(nn.Module):
         self,
         hidden_states: Optional[torch.Tensor],
         sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
+    ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    sampling_metadata)
         return next_tokens
