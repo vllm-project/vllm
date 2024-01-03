@@ -132,7 +132,7 @@ void copy_blocks(
   dim3 block(std::min(1024, numel_per_block));
   const at::cuda::OptionalCUDAGuard device_guard(cache_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_DISPATCH_FLOATING_BYTE_TYPES(
     key_caches[0].scalar_type(), "copy_blocks_kernel", ([&] {
       vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
         key_cache_ptrs_tensor.data_ptr<int64_t>(),
@@ -234,7 +234,7 @@ void reshape_and_cache(
   dim3 block(std::min(num_heads * head_size, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  bool enable_fp8_kv_cache = (key_cache.scalar_type() == at::ScalarType::Byte); // TODO
+  bool enable_fp8_kv_cache = (key_cache.scalar_type() == at::ScalarType::Byte);
   if (enable_fp8_kv_cache) {
     if (key.dtype() == at::ScalarType::Float) {
       CALL_RESHAPE_AND_CACHE(float, uint8_t, true);
