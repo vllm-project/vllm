@@ -1,7 +1,31 @@
-FROM rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1
+# default base image
+ARG BASE_IMAGE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
+
+FROM $BASE_IMAGE
+
+ARG BASE_IMAGE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
+
+RUN echo "Base image is $BASE_IMAGE"
+
+# BASE_IMAGE for ROCm_5.7: "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
+# BASE_IMAGE for ROCm_6.0: "rocm/pytorch:rocm6.0_ubuntu22.04_py3.9_pytorch_2.0.1"
+# Testing image: "compute-artifactory.amd.com:5000/rocm-plus-docker/framework/release-public:rocm6.0_ubuntu20.04_py3.9_pytorch_rocm6.0_internal_testing"
+
+# this does not always work for all rocm versions
+RUN LLVM_GFX_ARCH=$(/opt/rocm/llvm/bin/amdgpu-offload-arch) && \
+    echo "LLVM_GFX_ARCH is $LLVM_GFX_ARCH"
+
+ARG FA_GFX_ARCHS="gfx90a;gfx942"
+
+RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
+
+ARG FA_BRANCH="3d2b6f5"
+
+RUN echo "FA_BRANCH is $FA_BRANCH"
 
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -y
+
 
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
@@ -37,10 +61,11 @@ RUN mkdir libs \
     && cd libs \
     && git clone https://github.com/ROCmSoftwarePlatform/flash-attention.git \
     && cd flash-attention \
-    && git checkout 3d2b6f5 \
+    && git checkout ${FA_BRANCH} \
     && git submodule update --init \
-    && export GPU_ARCHS=$(/opt/rocm/llvm/bin/amdgpu-offload-arch) \
-    && patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch \
+    && export GPU_ARCHS=${FA_GFX_ARCHS} \
+    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" ]; then \
+        patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch; fi \
     && python3 setup.py install \
     && cd ..
 
