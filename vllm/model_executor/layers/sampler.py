@@ -112,27 +112,6 @@ def _prune_hidden_states(
                                       sampling_metadata.selected_token_indices)
 
 
-def _get_prompt_and_output_tokens(
-    sampling_metadata: SamplingMetadata,
-) -> Tuple[List[List[int]], List[List[int]]]:
-    prompt_tokens: List[List[int]] = []
-    output_tokens: List[List[int]] = []
-    for i, seq_group in enumerate(sampling_metadata.seq_groups):
-        seq_ids, sampling_params = seq_group
-        if (i < sampling_metadata.num_prompts
-                and sampling_params.prompt_logprobs is not None):
-            # NOTE: prompt token positions do not need output tokens to
-            # compute penalties.
-            prompt_len = sampling_metadata.prompt_lens[i]
-            prompt_tokens.extend([] for _ in range(prompt_len - 1))
-            output_tokens.extend([] for _ in range(prompt_len - 1))
-        for seq_id in seq_ids:
-            seq_data = sampling_metadata.seq_data[seq_id]
-            prompt_tokens.append(seq_data.prompt_token_ids)
-            output_tokens.append(seq_data.output_token_ids)
-    return prompt_tokens, output_tokens
-
-
 def _get_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,

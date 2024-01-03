@@ -100,7 +100,7 @@ class SamplingParams:
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,
-        min_p: int = 0.0,
+        min_p: float = 0.0,
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
