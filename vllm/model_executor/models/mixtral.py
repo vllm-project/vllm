@@ -150,8 +150,7 @@ class MixtralDecoderLayer(nn.Module):
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            tp_size=get_tensor_model_parallel_world_size())
+            intermediate_size=config.intermediate_size)
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
