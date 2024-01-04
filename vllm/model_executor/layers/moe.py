@@ -199,14 +199,14 @@ class MoE(nn.Module):
 @triton.jit
 def grouped_matmul_kernel(
     # device tensor of matrices pointers
-    compact_input,
+    input,
     cum_input_group_range,
     mat2,
-    compact_output,
+    output,
     group_size,
     # sizes of the gemm problem n and k are fixed.
-    n,
-    k,
+    N,
+    K,
     lda,
     ldb,
     ldc,
@@ -224,8 +224,8 @@ def grouped_matmul_kernel(
         # get the gemm size of the current problem
         a_offset = tl.load(cum_input_group_range + g)
         gm = tl.load(cum_input_group_range + g + 1) - a_offset
-        gn = n
-        gk = k
+        gn = N
+        gk = K
         num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
         num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
         num_tiles = num_m_tiles * num_n_tiles
@@ -235,9 +235,9 @@ def grouped_matmul_kernel(
 
             # pick up a tile from the current gemm problem
             k = gk
-            a_ptr = compact_input + a_offset * lda
-            b_ptr = mat2 + g * k * n
-            c_ptr = compact_output + a_offset * ldc
+            a_ptr = input + a_offset * lda
+            b_ptr = mat2 + g * k * N
+            c_ptr = output + a_offset * ldc
             # figure out tile coordinates
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
@@ -270,7 +270,7 @@ def grouped_matmul_kernel(
 
             if ACTIVATION == "silu":
                 accumulator = silu(accumulator)
-            c = accumulator.to(compact_output.dtype.element_ty)
+            c = accumulator.to(output.dtype.element_ty)
 
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -342,8 +342,8 @@ def grouped_matmul(input: torch.Tensor,
                                 mat2,
                                 output,
                                 group_size,
-                                n=mat2.shape[2],
-                                k=mat2.shape[1],
+                                N=mat2.shape[2],
+                                K=mat2.shape[1],
                                 lda=input.stride(0),
                                 ldb=mat2.stride(1),
                                 ldc=output.stride(0),

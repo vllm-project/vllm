@@ -32,8 +32,7 @@ def ref_grouped_matmul(
 @pytest.mark.parametrize("n", [128, 1024, 2000])
 @pytest.mark.parametrize("k", [128, 1024, 2000])
 @pytest.mark.parametrize("activation", ["", "silu"])
-@pytest.mark.parametrize("dtype",
-                         [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_moe_grouped_matmul(
     group_size: int,
     m: int,
