@@ -182,12 +182,6 @@ class ModelConfig:
             self.max_context_len_to_capture = self.max_model_len
         self.max_context_len_to_capture = min(self.max_context_len_to_capture,
                                               self.max_model_len)
-        if (self.quantization in ["gptq", "squeezellm"]
-                and not self.enforce_eager):
-            # Related issue: https://github.com/vllm-project/vllm/issues/2147
-            logger.warning(f"{self.quantization} does not support CUDA graph "
-                           "yet. Disabling CUDA graph.")
-            self.enforce_eager = True
 
     def verify_with_parallel_config(
         self,
@@ -440,6 +434,9 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
+        if model_config.quantization is not None:
+            raise ValueError(
+                "LoRA is not supported with quantized models yet.")
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
         if scheduler_config.max_num_batched_tokens > 65528:

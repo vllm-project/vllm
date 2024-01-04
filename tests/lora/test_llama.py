@@ -1,6 +1,5 @@
 import pytest
 import ray
-import torch
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -37,15 +36,14 @@ def do_sample(llm, lora_path: str, lora_id: int):
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
 def test_llama_lora(sql_lora_files, tp_size):
-    if torch.cuda.device_count() < tp_size:
-        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+    # if torch.cuda.device_count() < tp_size:
+    #     pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     llm = vllm.LLM(MODEL_PATH,
                    enable_lora=True,
                    max_num_seqs=16,
                    max_loras=4,
-                   tensor_parallel_size=tp_size,
-                   worker_use_ray=True)
+                   tensor_parallel_size=tp_size)
 
     expected_no_lora_output = [
         "\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_75 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_76 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_77 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_78 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user]",
@@ -80,15 +78,14 @@ def test_llama_lora(sql_lora_files, tp_size):
 
 
 def test_llama_tensor_parallel_equality(sql_lora_files):
-    if torch.cuda.device_count() < 4:
-        pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
+    # if torch.cuda.device_count() < 4:
+    #     pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
 
     llm_tp1 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
                        max_num_seqs=16,
                        max_loras=4,
-                       tensor_parallel_size=1,
-                       worker_use_ray=True)
+                       tensor_parallel_size=1)
     output_tp1 = do_sample(llm_tp1, sql_lora_files, lora_id=1)
 
     del llm_tp1
@@ -98,8 +95,7 @@ def test_llama_tensor_parallel_equality(sql_lora_files):
                        enable_lora=True,
                        max_num_seqs=16,
                        max_loras=4,
-                       tensor_parallel_size=2,
-                       worker_use_ray=True)
+                       tensor_parallel_size=2)
     output_tp2 = do_sample(llm_tp2, sql_lora_files, lora_id=1)
 
     del llm_tp2
@@ -111,8 +107,7 @@ def test_llama_tensor_parallel_equality(sql_lora_files):
                        enable_lora=True,
                        max_num_seqs=16,
                        max_loras=4,
-                       tensor_parallel_size=4,
-                       worker_use_ray=True)
+                       tensor_parallel_size=4)
     output_tp4 = do_sample(llm_tp4, sql_lora_files, lora_id=1)
 
     del llm_tp4

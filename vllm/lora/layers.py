@@ -14,6 +14,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
+    tensor_model_parallel_gather,
 )
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear,
@@ -892,7 +893,9 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         logits = torch.matmul(hidden_states, embedding.t())
         if embedding_bias is not None:
             logits += embedding_bias
-        logits = tensor_model_parallel_all_gather(logits)
+        logits = tensor_model_parallel_gather(logits)
+        if logits is None:
+            return None
 
         lora_logits = torch.empty(
             self.embeddings_tensors.shape[0] + 1,
