@@ -11,7 +11,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank)
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -31,9 +31,9 @@ class MoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        tp_size: int,
     ):
         super().__init__()
+        tp_size = get_tensor_model_parallel_world_size()
         self.num_total_experts = num_experts
         self.top_k = top_k
         self.hidden_size = hidden_size
@@ -45,14 +45,20 @@ class MoE(nn.Module):
                                      linear_method=None)
 
         self.w1s = nn.Parameter(
-            torch.rand(self.num_total_experts, self.hidden_size,
-                       self.intermediate_size))
+            torch.empty(self.num_total_experts,
+                        self.hidden_size,
+                        self.intermediate_size,
+                        device="cuda"))
         self.w2s = nn.Parameter(
-            torch.rand(self.num_total_experts, self.intermediate_size,
-                       self.hidden_size))
+            torch.empty(self.num_total_experts,
+                        self.intermediate_size,
+                        self.hidden_size,
+                        device="cuda"))
         self.w3s = nn.Parameter(
-            torch.rand(self.num_total_experts, self.hidden_size,
-                       self.intermediate_size))
+            torch.empty(self.num_total_experts,
+                        self.hidden_size,
+                        self.intermediate_size,
+                        device="cuda"))
 
         set_weight_attrs(self.w1s, {
             "weight_loader": self.weight_loader,
