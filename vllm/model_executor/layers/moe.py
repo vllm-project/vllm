@@ -218,7 +218,7 @@ def grouped_matmul_kernel(
     stride_a0,
     # group_b_ptr.stride(1)
     stride_b1,
-    # group_c_ptr.stride(1)
+    # group_c_ptr.stride(0)
     stride_c0,
     # number of virtual SM
     NUM_SM: tl.constexpr,
