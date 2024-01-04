@@ -14,7 +14,7 @@
 namespace vllm {
 template <typename scalar_t>
 __global__ void bincount_kernel(scalar_t *__restrict__ src, int32_t *out,
-                                     size_t numel) {
+                                size_t numel) {
   const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t stride = blockDim.x * gridDim.x;
   for (ptrdiff_t i = index; i < numel; i += stride) {
@@ -23,6 +23,8 @@ __global__ void bincount_kernel(scalar_t *__restrict__ src, int32_t *out,
 }
 }
 
+// create a custom bincount since pytorch's bincount is
+// not cudagraph capturable.
 void vllm_bincount(torch::Tensor src, torch::Tensor out) {
    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(

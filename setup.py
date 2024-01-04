@@ -213,7 +213,6 @@ elif _is_hip():
 ext_modules = []
 
 vllm_extension_sources = [
-    "csrc/bincount.cu",
     "csrc/cache_kernels.cu",
     "csrc/attention/attention_kernels.cu",
     "csrc/pos_encoding_kernels.cu",
@@ -222,6 +221,7 @@ vllm_extension_sources = [
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     "csrc/quantization/gptq/q_gemm.cu",
     "csrc/cuda_utils_kernels.cu",
+    "csrc/misc_kernels.cu",
     "csrc/pybind.cpp",
 ]
 
