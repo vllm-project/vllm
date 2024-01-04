@@ -27,6 +27,8 @@ Navigating to [`http://localhost:8000/metrics`](http://localhost:8000/metrics) w
 
 ### Prometheus
 
+> Note: You can skip this step, its just a simple test to see that Prometheus is working properly.
+
 #### Confirm Server Working
 Visiting [`http://localhost:9090/targets`](http://localhost:9090/targets) should show that `http://host.docker.internal:8000/metrics` is in state `UP`
 

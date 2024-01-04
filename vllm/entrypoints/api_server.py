@@ -2,6 +2,8 @@ import argparse
 import json
 from typing import AsyncGenerator
 
+from aioprometheus import MetricsMiddleware
+from aioprometheus.asgi.starlette import metrics
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 import uvicorn
@@ -16,6 +18,8 @@ TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
 engine = None
 
+app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
+app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 
 @app.get("/health")
 async def health() -> Response:
