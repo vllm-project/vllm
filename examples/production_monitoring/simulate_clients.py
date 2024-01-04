@@ -1,4 +1,5 @@
-import random, time
+import random
+import time
 from threading import Thread
 from openai import OpenAI
 from datasets import load_dataset
@@ -23,13 +24,14 @@ model = models.data[0].id
 dataset = load_dataset("fka/awesome-chatgpt-prompts")
 prompts = dataset["train"]["prompt"]
 
+
 def submit_requests(idx, sleep_time):
     for id_cycle in range(N_CYCLES):
 
         time.sleep(sleep_time)
         print(f"thread {idx} starting in cycle {id_cycle}.")
 
-        completion = client.completions.create(
+        _ = client.completions.create(
             model=model,
             prompt=random.choice(prompts),
             echo=False,
@@ -41,20 +43,21 @@ def submit_requests(idx, sleep_time):
 
         print(f"thread {idx} done.")
 
+
 def simulate():
     threads = [
-        Thread(
-            target=submit_requests, 
-            args=[idx, random.uniform(0.0, MAX_SLEEP_TIME)]
-        ) for idx in range(N_CLIENTS)
+        Thread(target=submit_requests,
+               args=[idx, random.uniform(0.0, MAX_SLEEP_TIME)])
+        for idx in range(N_CLIENTS)
     ]
 
     for idx, t in enumerate(threads):
         print(f"launching thread {idx}.")
         t.start()
 
-    for idx, t in enumerate(threads):
+    for t in threads:
         t.join()
+
 
 if __name__ == "__main__":
     simulate()
