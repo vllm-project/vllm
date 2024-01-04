@@ -16,7 +16,8 @@ from vllm.model_executor.utils import set_weight_attrs
 
 
 class MoE(nn.Module):
-    """A expert parallel MOE that shards each expert across all ranks.
+    """a tensor-parallel MOE implementation that shards each expert across
+    all ranks.
 
     Each expert's weights are sharded across all ranks. The forward pass
     will first expand and group the hidden states by experts, then compute
@@ -100,9 +101,9 @@ class MoE(nn.Module):
                 hidden_states, selected_experts, routing_weights)
 
         # Step 2: compute the output of each expert.
-        expanded_hidden_states = self.grouped_mlp(expanded_hidden_states,
-                                                  experts_range, self.w1s.data,
-                                                  self.w2s.data, self.w3s.data)
+        expanded_hidden_states = self.apply_experts_ffn(
+            expanded_hidden_states, experts_range, self.w1s.data,
+            self.w2s.data, self.w3s.data)
 
         # Step 3: apply weights to the output of each expert, and reduce
         # across ranks.
@@ -157,7 +158,7 @@ class MoE(nn.Module):
         return hidden_states[
             reverse_indices], cum_experts_range, expanded_weights, reverse_indices
 
-    def grouped_mlp(
+    def apply_experts_ffn(
         self,
         expanded_hidden_states: torch.
         Tensor,  # [batch_size * top_k_experts, hidden_size]
