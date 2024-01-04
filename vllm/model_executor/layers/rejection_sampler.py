@@ -354,7 +354,7 @@ class RejectionSampler(nn.Module):
             t.device for t in
             [target_probs, bonus_token_ids, draft_probs, draft_token_ids]
         ]
-        assert [devices[0] == device for device in devices]
+        assert all([devices[0] == device for device in devices])
 
     def _raise_if_out_of_bounds_vocab(
         self,
