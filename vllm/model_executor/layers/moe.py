@@ -270,7 +270,7 @@ def grouped_matmul_kernel(
 
             if ACTIVATION == "silu":
                 accumulator = silu(accumulator)
-            c = accumulator.to(tl.float16)
+            c = accumulator.to(compact_output.dtype.element_ty)
 
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
