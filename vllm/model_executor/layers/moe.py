@@ -198,18 +198,28 @@ class MoE(nn.Module):
 # https://github.com/openai/triton/blob/main/python/tutorials/11-grouped-gemm.py
 @triton.jit
 def grouped_matmul_kernel(
-    # device tensor of matrices pointers
-    input,
-    cum_input_group_range,
-    mat2,
-    output,
+    # [batch_size, k], where each group are stored compactly in the batch
+    # dimension. The range of each group is specified in cumulative_m_range.
+    group_a_ptr,
+    # [num_groups, k, n]
+    group_b_ptr,
+    # [batch_size, n], where each group are stored compactly in the batch
+    # dimension. The range of each group is specified in cumulative_m_range.
+    group_c_ptr,
+    # num of gemm problems
     group_size,
-    # sizes of the gemm problem n and k are fixed.
-    N,
-    K,
-    lda,
-    ldb,
-    ldc,
+    # for each gemm problem with size <m, n, k>, m is stored in
+    # cumulative_m_range[i + i] - cumulative_m_range[i].
+    # n and k are the same for all problems.
+    cumulative_m_range,
+    n,
+    k,
+    # group_a_ptr.stride(0)
+    stride_a0,
+    # group_b_ptr.stride(1)
+    stride_b1,
+    # group_c_ptr.stride(1)
+    stride_c0,
     # number of virtual SM
     NUM_SM: tl.constexpr,
     # tile sizes
@@ -222,10 +232,10 @@ def grouped_matmul_kernel(
     last_problem_end = 0
     for g in range(group_size):
         # get the gemm size of the current problem
-        a_offset = tl.load(cum_input_group_range + g)
-        gm = tl.load(cum_input_group_range + g + 1) - a_offset
-        gn = N
-        gk = K
+        a_offset = tl.load(cumulative_m_range + g)
+        gm = tl.load(cumulative_m_range + g + 1) - a_offset
+        gn = n
+        gk = k
         num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
         num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
         num_tiles = num_m_tiles * num_n_tiles
@@ -235,9 +245,9 @@ def grouped_matmul_kernel(
 
             # pick up a tile from the current gemm problem
             k = gk
-            a_ptr = input + a_offset * lda
-            b_ptr = mat2 + g * k * N
-            c_ptr = output + a_offset * ldc
+            a_ptr = group_a_ptr + a_offset * stride_a0
+            b_ptr = group_b_ptr + g * k * n
+            c_ptr = group_c_ptr + a_offset * stride_c0
             # figure out tile coordinates
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
@@ -247,8 +257,8 @@ def grouped_matmul_kernel(
             offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             offs_k = tl.arange(0, BLOCK_SIZE_K)
-            a_ptrs = a_ptr + offs_am[:, None] * lda + offs_k[None, :]
-            b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_bn[None, :]
+            a_ptrs = a_ptr + offs_am[:, None] * stride_a0 + offs_k[None, :]
+            b_ptrs = b_ptr + offs_k[:, None] * stride_b1 + offs_bn[None, :]
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N),
                                    dtype=tl.float32)
             for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
@@ -266,15 +276,15 @@ def grouped_matmul_kernel(
                             other=0.0)
                 accumulator += tl.dot(a, b)
                 a_ptrs += BLOCK_SIZE_K
-                b_ptrs += BLOCK_SIZE_K * ldb
+                b_ptrs += BLOCK_SIZE_K * stride_b1
 
             if ACTIVATION == "silu":
                 accumulator = silu(accumulator)
-            c = accumulator.to(output.dtype.element_ty)
+            c = accumulator.to(group_c_ptr.dtype.element_ty)
 
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-            c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
+            c_ptrs = c_ptr + stride_c0 * offs_cm[:, None] + offs_cn[None, :]
             c_mask = (offs_cm[:, None] < gm) & (offs_cn[None, :] < gn)
 
             tl.store(c_ptrs, c, mask=c_mask)
@@ -293,10 +303,10 @@ def silu(x):
 
 def grouped_matmul(input: torch.Tensor,
                    cumulative_group_range: torch.Tensor,
-                   mat2: torch.Tensor,
+                   group_b_ptr: torch.Tensor,
                    activation: str = ""):
     """Performs a grouped matrix-matrix product of matrices stored in input
-    and mat2.
+    and group_b_ptr.
 
     input is a tensor of shape [batch_size, k] where each group are stored
     compactly in the batch dimension. The range of each group is specified
@@ -307,18 +317,18 @@ def grouped_matmul(input: torch.Tensor,
         input (torch.Tensor): [batch_size, k] compact input.
         cumulative_group_range (torch.Tensor): [num_groups + 1] the cumulative
             range of the groups in input.
-        mat2 (torch.Tensor): [num_groups, k, n] the second matrix.
+        group_b_ptr (torch.Tensor): [num_groups, k, n] the second matrix.
         activation (str, optional): "" or "silu". Defaults to "".
 
     Returns:
-        torch.Tensor: [batch_size, hidden_size] compact output where groups
+        torch.Tensor: [batch_size, n] compact output where groups
             are stored compactly in the batch dimension.
     """
     device = torch.device('cuda')
-    assert cumulative_group_range.shape[0] == mat2.shape[0] + 1
+    assert cumulative_group_range.shape[0] == group_b_ptr.shape[0] + 1
     group_size = cumulative_group_range.shape[0] - 1
     output = torch.zeros(input.shape[0],
-                         mat2.shape[2],
+                         group_b_ptr.shape[2],
                          device=device,
                          dtype=input.dtype)
     BLOCK_SIZE_M = 16
@@ -337,16 +347,16 @@ def grouped_matmul(input: torch.Tensor,
         BLOCK_SIZE_N = 128
     # we use a fixed number of CTA, and it's auto-tunable
     grid = lambda META: (META['NUM_SM'], )
-    grouped_matmul_kernel[grid](input,
-                                cumulative_group_range,
-                                mat2,
-                                output,
-                                group_size,
-                                N=mat2.shape[2],
-                                K=mat2.shape[1],
-                                lda=input.stride(0),
-                                ldb=mat2.stride(1),
-                                ldc=output.stride(0),
+    grouped_matmul_kernel[grid](group_a_ptr=input,
+                                group_b_ptr=group_b_ptr,
+                                group_c_ptr=output,
+                                group_size=group_size,
+                                cumulative_m_range=cumulative_group_range,
+                                n=group_b_ptr.shape[2],
+                                k=group_b_ptr.shape[1],
+                                stride_a0=input.stride(0),
+                                stride_b1=group_b_ptr.stride(1),
+                                stride_c0=output.stride(0),
                                 ACTIVATION=activation,
                                 BLOCK_SIZE_M=BLOCK_SIZE_M,
                                 BLOCK_SIZE_N=BLOCK_SIZE_N,
