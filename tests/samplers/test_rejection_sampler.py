@@ -61,7 +61,7 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int):
                                               size=(batch_size, ))
         accepted = mock_causal_accepted_tensor(k, last_accepted_indices)
     else:
-        assert False
+        raise AssertionError()
 
     recovered_token_ids = torch.randint(low=0,
                                         high=vocab_size,
@@ -190,14 +190,14 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
     elif which_token_ids == "draft_token_ids":
         oob_token_ids = draft_token_ids
     else:
-        assert False
+        raise AssertionError()
 
     if above_or_below_vocab_range == "above":
         rogue_token_id = vocab_size + 1
     elif above_or_below_vocab_range == "below":
         rogue_token_id = -1
     else:
-        assert False
+        raise AssertionError()
 
     oob_token_ids[0][0] = rogue_token_id
 

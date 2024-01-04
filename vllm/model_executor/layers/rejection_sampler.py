@@ -367,6 +367,7 @@ class RejectionSampler(nn.Module):
         assert torch.all(draft_token_ids < vocab_size)
         assert torch.all(draft_token_ids >= 0)
 
+
 # torch.multinomial forces a GPU<->CPU sync.
 # Therefore, we use an optimized implementation instead that skips the sync.
 # Note that we always sample with replacement.
@@ -385,4 +386,3 @@ def _multinomial(
                                              -1, probs.shape[1])
     q = torch.empty_like(probs).exponential_(1.0)
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
-
