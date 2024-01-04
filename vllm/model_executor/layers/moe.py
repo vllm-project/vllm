@@ -1,20 +1,17 @@
 from typing import Tuple
 
 import torch
-
 from torch import nn
 import torch.nn.functional as F
-
 import triton
 import triton.language as tl
 
 from vllm._C import ops
 from vllm.model_executor.layers.linear import ReplicatedLinear
-
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank)
 from vllm.model_executor.utils import set_weight_attrs
 
 
