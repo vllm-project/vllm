@@ -59,8 +59,5 @@ def test_moe_grouped_matmul(
     output = grouped_matmul(fused_input, cum_group_range, fused_group_b,
                             activation)
     diff = torch.abs(ref_output - output)
-    mean = torch.mean(diff)
-    max = torch.max(diff)
-    print(f"{mean=}, {max=}")
 
     assert torch.allclose(output, ref_output, atol=1e-2, rtol=0)
