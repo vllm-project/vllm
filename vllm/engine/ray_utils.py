@@ -55,7 +55,7 @@ def initialize_cluster(
     parallel_config: ParallelConfig,
     engine_use_ray: bool = False,
     ray_address: Optional[str] = None,
-) -> Tuple[str, Optional["PlacementGroup"]]:
+) -> Optional["PlacementGroup"]:
     """Initialize the distributed cluster probably with Ray.
 
     Args:
