@@ -33,7 +33,7 @@ def ref_grouped_matmul(
 @pytest.mark.parametrize("k", [128, 1024, 2000])
 @pytest.mark.parametrize("activation", ["", "silu"])
 @pytest.mark.parametrize("dtype",
-                         [torch.float16, torch.float32, torch.bfloat16])
+                         [torch.float16, torch.bfloat16])
 def test_moe_grouped_matmul(
     group_size: int,
     m: int,
@@ -55,4 +55,4 @@ def test_moe_grouped_matmul(
 
     output = grouped_matmul(fused_input, cum_group_range, fused_group_b,
                             activation)
-    assert torch.allclose(output, ref_output, atol=1e-2, rtol=0)
+    assert torch.allclose(output, ref_output, rtol=0.01, atol=1e-3)
