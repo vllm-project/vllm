@@ -2,8 +2,6 @@ import argparse
 import json
 from typing import AsyncGenerator
 
-from aioprometheus import MetricsMiddleware
-from aioprometheus.asgi.starlette import metrics
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 import uvicorn
@@ -14,11 +12,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
+TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
 engine = None
-
-app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
-app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 
 
 @app.get("/health")
