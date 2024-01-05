@@ -1,7 +1,7 @@
 steps:
   - label: ":docker: build image"
     commands:
-      - "docker build --tag us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT --target test"
+      - "docker build --tag us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT --target test ."
       - "docker push us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
     env:
       DOCKER_BUILDKIT: "1"
