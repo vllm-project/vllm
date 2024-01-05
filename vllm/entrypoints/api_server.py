@@ -21,6 +21,7 @@ engine = None
 app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
 app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 
+
 @app.get("/health")
 async def health() -> Response:
     """Health check."""
