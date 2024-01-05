@@ -65,20 +65,27 @@ class Worker:
 
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        
-        # This caused problem for rank non-0 (for example, 1 when -tp 2), when calling torch.cuda.set_device(self.device) in ROCm.
-        # HIP Error invalid device ordial
-        # where CUDA_VISIABLE_DEVICES=0,1, and set_device with cuda:1.
+
         try:
             self.device = torch.device(f"cuda:{self.local_rank}")
             torch.cuda.set_device(self.device)
         except RuntimeError as re:
+            # On certain versions, we experienced RuntimeError for rank non-0 when running with tensor-parallel option on ROCm.
+            # For example, for option, -tp 2, calling torch.cuda.set_device(self.device) for device 1 would throw the following error:
+            # HIP Error invalid device ordial
+            # By debugging, we found that CUDA_VISIABLE_DEVICES=0,1, but device_count is 1 and env HIP_VISIBLE_DEVICES is None.
+            # below is a work around when that happens so that we can continue
+            device_count = torch.cuda.device_count()
             print(
-                f"RuntimeError {re} in cuda.set_device {self.device}, visible device={os.environ.get('CUDA_VISIBLE_DEVICES')}. "
+                f"RuntimeError {re} in cuda.set_device {self.device}, device_count={device_count}. "
             )
-            self.device = torch.device("cuda:0")
-            print(f"Trying get around by set_device to {self.device}")
-            torch.cuda.set_device(self.device)
+            if device_count > 0:
+                self.device = torch.device("cuda:0")
+                print(f"Trying get around by set_device to {self.device}")
+                torch.cuda.set_device(self.device)
+            else:
+                # no work around is available
+                raise
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 

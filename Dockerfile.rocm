@@ -1,15 +1,14 @@
 # default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
 
 FROM $BASE_IMAGE
 
-ARG BASE_IMAGE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
 
 RUN echo "Base image is $BASE_IMAGE"
 
 # BASE_IMAGE for ROCm_5.7: "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
-# BASE_IMAGE for ROCm_6.0: "rocm/pytorch:rocm6.0_ubuntu22.04_py3.9_pytorch_2.0.1"
-# Testing image: "compute-artifactory.amd.com:5000/rocm-plus-docker/framework/release-public:rocm6.0_ubuntu20.04_py3.9_pytorch_rocm6.0_internal_testing"
+# BASE_IMAGE for ROCm_6.0: "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
 
 # this does not always work for all rocm versions
 RUN LLVM_GFX_ARCH=$(/opt/rocm/llvm/bin/amdgpu-offload-arch) && \
@@ -25,7 +24,6 @@ RUN echo "FA_BRANCH is $FA_BRANCH"
 
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -y
-
 
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
@@ -72,7 +70,12 @@ RUN mkdir libs \
 COPY ./ /app/vllm
 
 RUN python3 -m pip install --upgrade pip
-RUN pip install xformers==0.0.23 --no-deps
+RUN python3 -m pip install xformers==0.0.23 --no-deps
+
+# Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
+# Manually removed it so that later steps of numpy upgrade can continue
+RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
+    rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
 
 RUN cd /app \
     && cd vllm \
