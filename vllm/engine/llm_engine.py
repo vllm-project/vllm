@@ -641,6 +641,9 @@ class LLMEngine:
 
         return self._process_model_outputs(output, scheduler_outputs)
 
+    def do_log_stats(self) -> None:
+        self._log_system_stats(False, 0)
+
     def _log_system_stats(
         self,
         prompt_run: bool,

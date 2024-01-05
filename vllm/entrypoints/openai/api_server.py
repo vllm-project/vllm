@@ -6,6 +6,7 @@ import asyncio
 import codecs
 import json
 import time
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import AsyncGenerator, Dict, List, Optional, Tuple, Union
 
@@ -38,9 +39,26 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 logger = init_logger(__name__)
 served_model = None
-app = fastapi.FastAPI()
+engine_args = None
 engine = None
 response_role = None
+
+
+@asynccontextmanager
+async def lifespan(app: fastapi.FastAPI):
+
+    async def _force_log():
+        while True:
+            await asyncio.sleep(10)
+            await engine.do_log_stats()
+
+    if not engine_args.disable_log_stats:
+        asyncio.create_task(_force_log())
+
+    yield
+
+
+app = fastapi.FastAPI(lifespan=lifespan)
 
 
 def parse_args():
