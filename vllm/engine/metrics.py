@@ -1,12 +1,14 @@
 from aioprometheus import Counter, Gauge, Histogram
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Union, List, Dict, Callable, Optional
+from typing import Union, List, Dict, Callable
 
 labels = {}
 
+
 def add_global_metrics_labels(**kwargs):
     labels.update(kwargs)
+
 
 # Stats defintions.
 # These are the interface between the LLMEngine and the Logger/Metrics.
@@ -20,18 +22,21 @@ class Stats:
     num_running: int
     num_waiting: int
     num_swapped: int
-    
+
     # Raw stats from most recent model iteration.
     prompt_run: bool
     num_batched_tokens: int
     iter_timings: List[float]
     e2e_timings: List[float]
 
+
 class PrometheusMetric(ABC):
     """Log Stats to a Prometheus Metric."""
+
     @abstractmethod
     def log(self, stats: Stats, labels: Dict[str, str]) -> None:
         raise NotImplementedError
+
 
 @dataclass
 class CounterMetric(PrometheusMetric):
@@ -42,6 +47,7 @@ class CounterMetric(PrometheusMetric):
     def log(self, stats: Stats, labels: Dict[str, str]) -> None:
         self.counter.add(labels, self.fn(stats))
 
+
 @dataclass
 class GaugeMetric(PrometheusMetric):
     """Compute and log Gauge"""
@@ -50,6 +56,7 @@ class GaugeMetric(PrometheusMetric):
 
     def log(self, stats: Stats, labels: Dict[str, str]) -> None:
         self.gauge.set(labels, self.fn(stats))
+
 
 @dataclass
 class HistogramMetric(PrometheusMetric):
@@ -101,9 +108,11 @@ histogram_e2e_request_latency = Histogram(
 
 # end-metrics-definitions
 
+
 # Functions to extract Metric from Stats.
 def _cache_usage(num_total: int, num_free: int) -> float:
     return 1.0 - num_free / num_total if num_total > 0 else 0.
+
 
 prompt_tokens_fn = lambda stats: stats.num_batched_tokens if stats.prompt_run else 0
 generation_tokens_fn = lambda stats: stats.num_batched_tokens if not stats.prompt_run else 0
@@ -111,15 +120,19 @@ scheduler_running_fn = lambda stats: stats.num_running
 scheduler_swapped_fn = lambda stats: stats.num_swapped
 scheduler_waiting_fn = lambda stats: stats.num_waiting
 gpu_cache_usage_fn = lambda stats: _cache_usage(stats.total_gpu_blocks, stats.
-                                                 free_gpu_blocks)
+                                                free_gpu_blocks)
 cpu_cache_usage_fn = lambda stats: _cache_usage(stats.total_cpu_blocks, stats.
-                                                 free_cpu_blocks)
-time_to_first_token_fn = lambda stats: stats.iter_timings if stats.prompt_run else []
-inter_token_latency_fn = lambda stats: stats.iter_timings if not stats.prompt_run else []
+                                                free_cpu_blocks)
+time_to_first_token_fn = lambda stats: stats.iter_timings if stats.prompt_run else [
+]
+inter_token_latency_fn = lambda stats: stats.iter_timings if not stats.prompt_run else [
+]
 e2e_request_latency_fn = lambda stats: stats.e2e_timings
+
 
 class PrometheusLogger:
     """PrometheusLogger used by LLMEngine to log stats to Prom."""
+
     def __init__(self) -> None:
         self.metrics: List[PrometheusMetric] = [
             GaugeMetric(gauge_scheduler_running, scheduler_running_fn),
@@ -129,9 +142,12 @@ class PrometheusLogger:
             GaugeMetric(gauge_cpu_cache_usage, cpu_cache_usage_fn),
             CounterMetric(counter_prompt_tokens, prompt_tokens_fn),
             CounterMetric(counter_generation_tokens, generation_tokens_fn),
-            HistogramMetric(histogram_time_to_first_token, time_to_first_token_fn),
-            HistogramMetric(histogram_inter_token_latency, inter_token_latency_fn),
-            HistogramMetric(histogram_e2e_request_latency, e2e_request_latency_fn),
+            HistogramMetric(histogram_time_to_first_token,
+                            time_to_first_token_fn),
+            HistogramMetric(histogram_inter_token_latency,
+                            inter_token_latency_fn),
+            HistogramMetric(histogram_e2e_request_latency,
+                            e2e_request_latency_fn),
         ]
 
     def log(self, stats: Stats) -> None:

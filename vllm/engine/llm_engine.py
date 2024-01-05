@@ -605,8 +605,7 @@ class LLMEngine:
         # Log iteration and system statistics to Prometheus.
         if self.log_stats:
             self.prometheus_logger.log(
-                stats=self._get_stats(scheduler_outputs)
-            )
+                stats=self._get_stats(scheduler_outputs))
 
         return request_outputs
 
@@ -654,21 +653,19 @@ class LLMEngine:
                 e2e_timings.append(seq_group.get_e2e_latency(now))
 
         # Parse stats.
-        stats = Stats(
-            total_gpu_blocks=self.cache_config.num_gpu_blocks,
-            total_cpu_blocks=self.cache_config.num_cpu_blocks,
-            free_gpu_blocks=self.scheduler.block_manager.
-            get_num_free_gpu_blocks(),
-            free_cpu_blocks=self.scheduler.block_manager.
-            get_num_free_cpu_blocks(),
-            num_running=len(self.scheduler.running),
-            num_swapped=len(self.scheduler.swapped),
-            num_waiting=len(self.scheduler.waiting),
-            prompt_run=scheduler_outputs.prompt_run,
-            num_batched_tokens=scheduler_outputs.num_batched_tokens,
-            iter_timings=iter_timings,
-            e2e_timings=e2e_timings
-        )
+        stats = Stats(total_gpu_blocks=self.cache_config.num_gpu_blocks,
+                      total_cpu_blocks=self.cache_config.num_cpu_blocks,
+                      free_gpu_blocks=self.scheduler.block_manager.
+                      get_num_free_gpu_blocks(),
+                      free_cpu_blocks=self.scheduler.block_manager.
+                      get_num_free_cpu_blocks(),
+                      num_running=len(self.scheduler.running),
+                      num_swapped=len(self.scheduler.swapped),
+                      num_waiting=len(self.scheduler.waiting),
+                      prompt_run=scheduler_outputs.prompt_run,
+                      num_batched_tokens=scheduler_outputs.num_batched_tokens,
+                      iter_timings=iter_timings,
+                      e2e_timings=e2e_timings)
 
         return stats
 
