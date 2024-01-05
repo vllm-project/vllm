@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import PrometheusLogger, IterationStats, SystemStats
+from vllm.engine.metrics import PrometheusLogger, Stats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -116,7 +116,7 @@ class LLMEngine:
 
         # Metric Logging.
         if self.log_stats:
-            self.prom_logger = PrometheusLogger()
+            self.prometheus_logger = PrometheusLogger()
 
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -602,9 +602,11 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
 
-        # Log the iteration and system stats if logging enabled.
+        # Log iteration and system statistics to Prometheus.
         if self.log_stats:
-            self._log_stats(scheduler_outputs=scheduler_outputs)
+            self.prometheus_logger.log(
+                stats=self._get_stats(scheduler_outputs)
+            )
 
         return request_outputs
 
@@ -637,38 +639,22 @@ class LLMEngine:
 
         return self._process_model_outputs(output, scheduler_outputs)
 
-    def _log_stats(self, scheduler_outputs: SchedulerOutputs) -> None:
+    def _get_stats(self, scheduler_outputs: SchedulerOutputs) -> Stats:
+        """Get Stats to be Logged to Prometheus."""
         now = time.monotonic()
 
-        # Extract system and iteration stats.
-        system_stats, iteration_stats = self._get_stats(
-            now=now,
-            scheduler_outputs=scheduler_outputs,
-            should_log_system=self.prom_logger.should_log_system(now))
+        # Loop through requests to compute timings.
+        iter_timings = []
+        e2e_timings = []
+        for seq_group in scheduler_outputs.scheduled_seq_groups:
+            # Time since last token. (n.b. updates seq_group.last_token_time)
+            iter_timings.append(seq_group.get_last_latency(now))
+            # Time since arrival.
+            if seq_group.is_finished():
+                e2e_timings.append(seq_group.get_e2e_latency(now))
 
-        # Actually log to Prometheus.
-        self.prom_logger.log(now, system_stats, iteration_stats)
-
-    def _get_stats(
-        self,
-        now: float,
-        scheduler_outputs: SchedulerOutputs,
-        should_log_system: bool,
-    ) -> Tuple[Optional[SystemStats], IterationStats]:
-        """Get System and Iteration Stats."""
-        # Parse iteration stats.
-        iteration_stats = IterationStats(
-            prompt_run=scheduler_outputs.prompt_run,
-            num_batched_tokens=scheduler_outputs.num_batched_tokens,
-            latency_timings=[
-                seq_group.get_last_latency(now)
-                for seq_group in scheduler_outputs.scheduled_seq_groups
-            ])
-
-        # Parse system stats if past logging interval.
-        if not should_log_system:
-            return None, iteration_stats
-        system_stats = SystemStats(
+        # Parse stats.
+        stats = Stats(
             total_gpu_blocks=self.cache_config.num_gpu_blocks,
             total_cpu_blocks=self.cache_config.num_cpu_blocks,
             free_gpu_blocks=self.scheduler.block_manager.
@@ -678,8 +664,13 @@ class LLMEngine:
             num_running=len(self.scheduler.running),
             num_swapped=len(self.scheduler.swapped),
             num_waiting=len(self.scheduler.waiting),
+            prompt_run=scheduler_outputs.prompt_run,
+            num_batched_tokens=scheduler_outputs.num_batched_tokens,
+            iter_timings=iter_timings,
+            e2e_timings=e2e_timings
         )
-        return system_stats, iteration_stats
+
+        return stats
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
