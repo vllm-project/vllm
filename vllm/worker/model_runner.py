@@ -176,8 +176,8 @@ class ModelRunner:
                                         dtype=torch.long,
                                         device='cuda')
         prompt_lens_tensor = torch.tensor(prompt_lens,
-                                        dtype=torch.long,
-                                        device='cuda')
+                                          dtype=torch.long,
+                                          device='cuda')
 
         input_metadata = InputMetadata(
             is_prompt=True,
@@ -381,14 +381,15 @@ class ModelRunner:
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
-                (input_tokens, input_positions, input_metadata,
-                 prompt_lens, subquery_lens) = self._prepare_prompt(seq_group_metadata_list)
+                (input_tokens, input_positions, input_metadata, prompt_lens,
+                 subquery_lens) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                (input_tokens, input_positions, input_metadata, subquery_lens
-                 ) = self._prepare_decode(seq_group_metadata_list)
+                (input_tokens, input_positions, input_metadata,
+                 subquery_lens) = self._prepare_decode(seq_group_metadata_list)
                 prompt_lens = []
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens, subquery_lens)
+                                                     prompt_lens,
+                                                     subquery_lens)
 
             def get_size_or_none(x: Optional[torch.Tensor]):
                 return x.size() if x is not None else None
@@ -458,15 +459,15 @@ class ModelRunner:
                 slot_mapping = None
             if py_data["prompt_lens_size"] is not None:
                 prompt_lens = torch.empty(*py_data["prompt_lens_size"],
-                                           dtype=torch.long,
-                                           device="cuda")
+                                          dtype=torch.long,
+                                          device="cuda")
                 broadcast(prompt_lens, src=0)
             else:
                 prompt_lens = None
             if py_data["start_loc_size"] is not None:
                 start_loc = torch.empty(*py_data["start_loc_size"],
-                                           dtype=torch.long,
-                                           device="cuda")
+                                        dtype=torch.long,
+                                        device="cuda")
                 broadcast(start_loc, src=0)
             else:
                 start_loc = None
