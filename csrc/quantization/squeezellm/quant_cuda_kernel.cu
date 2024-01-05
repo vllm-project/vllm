@@ -200,6 +200,7 @@ void squeezellm_gemm(
     (width + BLOCKWIDTH - 1) / BLOCKWIDTH
   );
   dim3 threads(BLOCKWIDTH);
+
   const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vllm::squeezellm::NUQ4MatMulKernel<<<blocks, threads, 0, stream>>>(

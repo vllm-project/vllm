@@ -1610,7 +1610,7 @@ void reconstruct_gptq
     if (bit == 2) {
         kernel = reconstruct_gptq_kernel<MatrixView_q2_row, 2>;
     } else if (bit == 8) {
-       	kernel = reconstruct_gptq_kernel<MatrixView_q8_row, 8>;
+        kernel = reconstruct_gptq_kernel<MatrixView_q8_row, 8>;
     } else if (bit == 3) {
         kernel = reconstruct_gptq_3bit_kernel;
         gridDim.y = DIVIDE(height, 32);
