@@ -169,7 +169,7 @@ class PagedAttention(nn.Module):
                     value_cache,
                     input_metadata.block_tables,  # [BS, max_block_per_request]
                     input_metadata.start_loc,
-                    input_metadata.prompt_lens_tensor,
+                    input_metadata.prompt_lens,
                     input_metadata.context_lens,
                     input_metadata.max_seq_len,
                     getattr(self, "alibi_slopes", None),

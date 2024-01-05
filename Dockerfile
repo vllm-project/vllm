@@ -81,4 +81,3 @@ COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
-
