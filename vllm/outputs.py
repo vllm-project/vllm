@@ -108,7 +108,6 @@ class RequestOutput:
         prompt_token_ids = seq_group.prompt_token_ids
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
-
         return cls(seq_group.request_id, prompt, prompt_token_ids,
                    prompt_logprobs, outputs, finished)
 
