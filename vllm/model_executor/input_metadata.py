@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional,List
 
 import torch
 
@@ -22,23 +22,20 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         prefix_len_list: Optional[List[int]] = None,
-        prefix_slot_mapping: Optional[torch.Tensor] = None) -> None:
+        prefix_slot_mapping: Optional[torch.Tensor] = None,
     ) -> None:
+        self.is_prompt = is_prompt
         self.max_context_len = max_context_len
         self.slot_mapping = slot_mapping
         self.context_lens = context_lens
         self.block_tables = block_tables
         self.use_cuda_graph = use_cuda_graph
+        self.prefix_len_list = prefix_len_list
+        self.prefix_slot_mapping = prefix_slot_mapping
 
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
         self.attn_bias = None
-
-        self.prefix_len_list = prefix_len_list
-        self.prefix_slot_mapping = prefix_slot_mapping
-        self.max_prefix_prompt_len = self.max_context_len + max(
-            self.prefix_len_list
-        ) if self.prefix_len_list else self.max_context_len
 
     def __repr__(self) -> str:
         return ("InputMetadata("

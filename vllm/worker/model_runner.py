@@ -101,7 +101,7 @@ class ModelRunner:
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.append(list(range(prompt_len)))
+            input_positions.append(list(range(prefix_len, prompt_len + prefix_len)))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -147,6 +147,9 @@ class ModelRunner:
                                              max_prompt_len,
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long)
+        prefix_slot_mapping = torch.tensor(prefix_slot_mapping,
+                                           dtype=torch.int,
+                                           device="cuda")
 
         input_metadata = InputMetadata(
             is_prompt=True,
@@ -155,6 +158,8 @@ class ModelRunner:
             context_lens=None,
             block_tables=None,
             use_cuda_graph=False,
+            prefix_len_list=prefix_len_list,
+            prefix_slot_mapping=prefix_slot_mapping,
         )
         return input_tokens, input_positions, input_metadata, prompt_lens
 

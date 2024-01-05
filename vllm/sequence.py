@@ -246,6 +246,7 @@ class SequenceGroup:
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
         self.prompt_logprobs: Optional[PromptLogprobs] = None
+        self.prefix_seq = None
         self.prefix_name = prefix_name
         self.is_prefix = not request_id
 
@@ -253,9 +254,9 @@ class SequenceGroup:
         self.prefix_seq = prefix_seq
         for seq in self.seqs_dict.values():
             seq.logical_token_blocks = []
-            total_prompt_token_ids = prefix_seq.data.prompt_token_ids + seq.data.prompt_token_ids
-            seq._append_tokens_to_blocks(total_prompt_token_ids)
-            seq.data.prefix_len = self.prefix_seq.data.get_len()
+            seq._append_tokens_to_blocks(prefix_seq.data.prompt_token_ids +
+                                         seq.data.prompt_token_ids)
+            seq.data.prefix_len = self.prefix_seq.data.get_len() - 1
 
     @property
     def prompt(self) -> str:

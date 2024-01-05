@@ -343,6 +343,14 @@ class LLMEngine:
         if prompt_token_ids is None:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
+            if prefix_name:
+                special_tokens = self.tokenizer.build_inputs_with_special_tokens(
+                    [], [])
+                if special_tokens:
+                    for idex, token_id in enumerate(prompt_token_ids):
+                        if token_id not in special_tokens:
+                            prompt_token_ids = prompt_token_ids[idex:]
+                            break
 
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -374,6 +382,14 @@ class LLMEngine:
                 prefix_content = con
                 assert prefix_content is not None
                 prefix_token_ids = self.tokenizer.encode(prefix_content)
+                special_tokens = self.tokenizer.build_inputs_with_special_tokens(
+                    [], [])
+                if special_tokens:
+                    for idex in range(len(prefix_token_ids)):
+                        if prefix_token_ids[-idex] not in special_tokens:
+                            prefix_token_ids = prefix_token_ids[:len(
+                                prefix_token_ids) - idex + 1]
+                            break
             block_size = self.cache_config.block_size
             seq_id = next(self.seq_counter)
             seq = Sequence(seq_id, prefix_content, prefix_token_ids,

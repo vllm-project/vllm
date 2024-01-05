@@ -318,7 +318,7 @@ class Scheduler:
                 self._reuse_prefix_cache(
                     seq_group=seq_group,
                     block_table=block_tables[seq_id],
-                    blocks_to_copy=scheduler_outputs.blocks_to_copy
+                    blocks_to_copy=scheduler_outputs.blocks_to_copy if scheduler_outputs.prompt_run else None
                 )
 
             seq_group_metadata = SequenceGroupMetadata(
@@ -455,8 +455,10 @@ class Scheduler:
             ) % prefix_seq.block_size > 0
             prefix_block_num = len(
                 prefix_seq.block_table) - need_copy_last_block
-            block_table[:prefix_block_num] = prefix_seq.block_table
-            if need_copy_last_block:
+            block_table[:
+                        prefix_block_num] = prefix_seq.block_table[:
+                                                                   prefix_block_num]
+            if need_copy_last_block and blocks_to_copy is not None:
                 src_block, dst_block = prefix_seq.block_table[-1], block_table[
                     prefix_block_num]
                 if src_block in blocks_to_copy:
