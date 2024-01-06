@@ -1,5 +1,7 @@
 import argparse
+import asyncio
 import json
+from contextlib import asynccontextmanager
 from aioprometheus import MetricsMiddleware
 from aioprometheus.asgi.starlette import metrics
 import fastapi
@@ -24,22 +26,21 @@ openai_serving_chat: OpenAIServingChat = None
 openai_serving_completion: OpenAIServingCompletion = None
 logger = init_logger(__name__)
 
-# @asynccontextmanager
-# async def lifespan(app: fastapi.FastAPI):
-#
-#     async def _force_log():
-#         while True:
-#             await asyncio.sleep(10)
-#             await engine.do_log_stats()
-#
-#     if not engine_args.disable_log_stats:
-#         asyncio.create_task(_force_log())
-#
-#     yield
-#
-#
-# app = fastapi.FastAPI(lifespan=lifespan)
-app = fastapi.FastAPI()
+@asynccontextmanager
+async def lifespan(app: fastapi.FastAPI):
+
+    async def _force_log():
+        while True:
+            await asyncio.sleep(10)
+            await engine.do_log_stats()
+
+    if not engine_args.disable_log_stats:
+        asyncio.create_task(_force_log())
+
+    yield
+
+
+app = fastapi.FastAPI(lifespan=lifespan)
 
 
 def parse_args():
