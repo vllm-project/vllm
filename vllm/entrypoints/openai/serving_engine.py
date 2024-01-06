@@ -5,13 +5,17 @@ from typing import Dict, List, Optional, Tuple, Union
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (
-    CompletionRequest,  ChatCompletionRequest, ErrorResponse,
-    LogProbs, ModelCard, ModelList, ModelPermission)
+from vllm.entrypoints.openai.protocol import (CompletionRequest,
+                                              ChatCompletionRequest,
+                                              ErrorResponse, LogProbs,
+                                              ModelCard, ModelList,
+                                              ModelPermission)
 
 logger = init_logger(__name__)
 
+
 class OpenAIServing:
+
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
@@ -27,7 +31,8 @@ class OpenAIServing:
 
         if engine.engine_use_ray:
             post_init_task = asyncio.ensure_future(self._post_init())
-            asyncio.get_event_loop().run_until_complete(asyncio.gather(post_init_task))
+            asyncio.get_event_loop().run_until_complete(
+                asyncio.gather(post_init_task))
         else:
             asyncio.run(self._post_init())
 

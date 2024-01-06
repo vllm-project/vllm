@@ -15,17 +15,22 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 
 logger = init_logger(__name__)
 
+
 class OpenAIServingChat(OpenAIServing):
+
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
                  response_role: str,
                  chat_template=None):
-        super().__init__(engine=engine, served_model=served_model, response_role=response_role, chat_template=chat_template)
+        super().__init__(engine=engine,
+                         served_model=served_model,
+                         response_role=response_role,
+                         chat_template=chat_template)
 
-    async def create_chat_completion(self, request: ChatCompletionRequest,
-                                    raw_request: Request
-                                     ) -> Union[ErrorResponse, AsyncGenerator[str, None],
+    async def create_chat_completion(
+        self, request: ChatCompletionRequest, raw_request: Request
+    ) -> Union[ErrorResponse, AsyncGenerator[str, None],
                ChatCompletionResponse]:
         """Completion API similar to OpenAI's API.
 
@@ -43,7 +48,7 @@ class OpenAIServingChat(OpenAIServing):
         if request.logit_bias is not None and len(request.logit_bias) > 0:
             # TODO: support logit_bias in vLLM engine.
             return self.create_error_response(
-                                        "logit_bias is not currently supported")
+                "logit_bias is not currently supported")
 
         try:
             prompt = self.tokenizer.apply_chat_template(
@@ -51,10 +56,12 @@ class OpenAIServingChat(OpenAIServing):
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt)
         except Exception as e:
-            logger.error(f"Error in applying chat template from request: {str(e)}")
+            logger.error(
+                f"Error in applying chat template from request: {str(e)}")
             return self.create_error_response(str(e))
 
-        token_ids, error_check_ret = await self._check_length(request, prompt=prompt)
+        token_ids, error_check_ret = await self._check_length(request,
+                                                              prompt=prompt)
         if error_check_ret is not None:
             return error_check_ret
 
@@ -82,8 +89,8 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator = self.engine.generate(prompt, sampling_params, request_id,
-                                        token_ids)
+        result_generator = self.engine.generate(prompt, sampling_params,
+                                                request_id, token_ids)
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
@@ -113,10 +120,10 @@ class OpenAIServingChat(OpenAIServing):
             choice_data = ChatCompletionResponseStreamChoice(
                 index=i, delta=DeltaMessage(role=role), finish_reason=None)
             chunk = ChatCompletionStreamResponse(id=request_id,
-                                                object=chunk_object_type,
-                                                created=created_time,
-                                                choices=[choice_data],
-                                                model=model_name)
+                                                 object=chunk_object_type,
+                                                 created=created_time,
+                                                 choices=[choice_data],
+                                                 model=model_name)
             data = chunk.json(exclude_unset=True, ensure_ascii=False)
             yield f"data: {data}\n\n"
 
@@ -191,8 +198,8 @@ class OpenAIServingChat(OpenAIServing):
                     if final_usage is not None:
                         chunk.usage = final_usage
                     data = chunk.json(exclude_unset=True,
-                                    exclude_none=True,
-                                    ensure_ascii=False)
+                                      exclude_none=True,
+                                      ensure_ascii=False)
                     yield f"data: {data}\n\n"
                     finish_reason_sent[i] = True
         # Send the final done message after all response.n are finished

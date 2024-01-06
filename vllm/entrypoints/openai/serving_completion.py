@@ -4,25 +4,31 @@ from typing import AsyncGenerator, Optional
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from .protocol import (
-    CompletionRequest, CompletionResponse, CompletionResponseChoice,
-    CompletionResponseStreamChoice, CompletionStreamResponse,
-    LogProbs, UsageInfo)
+from .protocol import (CompletionRequest, CompletionResponse,
+                       CompletionResponseChoice,
+                       CompletionResponseStreamChoice,
+                       CompletionStreamResponse, LogProbs, UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 
 logger = init_logger(__name__)
 
+
 class OpenAIServingCompletion(OpenAIServing):
+
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
                  response_role: str,
                  chat_template=None):
-        super().__init__(engine=engine, served_model=served_model, response_role=response_role, chat_template=chat_template)
+        super().__init__(engine=engine,
+                         served_model=served_model,
+                         response_role=response_role,
+                         chat_template=chat_template)
 
-    async def create_completion(self, request: CompletionRequest, raw_request: Request):
+    async def create_completion(self, request: CompletionRequest,
+                                raw_request: Request):
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/completions/create
@@ -43,11 +49,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
         if request.suffix is not None:
             # The language models we currently support do not support suffix.
-            return self.create_error_response("suffix is not currently supported")
+            return self.create_error_response(
+                "suffix is not currently supported")
 
         if request.logit_bias is not None and len(request.logit_bias) > 0:
             # TODO: support logit_bias in vLLM engine.
-            return self.create_error_response("logit_bias is not currently supported")
+            return self.create_error_response(
+                "logit_bias is not currently supported")
 
         model_name = request.model
         request_id = f"cmpl-{random_uuid()}"
@@ -55,7 +63,8 @@ class OpenAIServingCompletion(OpenAIServing):
         use_token_ids = False
         if isinstance(request.prompt, list):
             if len(request.prompt) == 0:
-                return self.create_error_response("please provide at least one prompt")
+                return self.create_error_response(
+                    "please provide at least one prompt")
             first_element = request.prompt[0]
             if isinstance(first_element, int):
                 use_token_ids = True
@@ -63,16 +72,20 @@ class OpenAIServingCompletion(OpenAIServing):
             elif isinstance(first_element, (str, list)):
                 # TODO: handles multiple prompt case in list[list[int]]
                 if len(request.prompt) > 1:
-                    return self.create_error_response("multiple prompts in a batch is not currently supported")
+                    return self.create_error_response(
+                        "multiple prompts in a batch is not currently supported"
+                    )
                 use_token_ids = not isinstance(first_element, str)
                 prompt = request.prompt[0]
         else:
             prompt = request.prompt
 
         if use_token_ids:
-            _, error_check_ret = await self._check_length(request, prompt_ids=prompt)
+            _, error_check_ret = await self._check_length(request,
+                                                          prompt_ids=prompt)
         else:
-            token_ids, error_check_ret = await self._check_length(request, prompt=prompt)
+            token_ids, error_check_ret = await self._check_length(
+                request, prompt=prompt)
         if error_check_ret is not None:
             return error_check_ret
 
@@ -105,18 +118,18 @@ class OpenAIServingCompletion(OpenAIServing):
 
         if use_token_ids:
             result_generator = self.engine.generate(None,
-                                            sampling_params,
-                                            request_id,
-                                            prompt_token_ids=prompt)
+                                                    sampling_params,
+                                                    request_id,
+                                                    prompt_token_ids=prompt)
         else:
-            result_generator = self.engine.generate(prompt, sampling_params, request_id,
-                                            token_ids)
+            result_generator = self.engine.generate(prompt, sampling_params,
+                                                    request_id, token_ids)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
         # results. In addition, we do not stream the results when use beam search.
         stream = (request.stream
-                and (request.best_of is None or request.n == request.best_of)
-                and not request.use_beam_search)
+                  and (request.best_of is None or request.n == request.best_of)
+                  and not request.use_beam_search)
 
         def create_stream_response_json(
             index: int,
@@ -139,7 +152,8 @@ class OpenAIServingCompletion(OpenAIServing):
             )
             if usage is not None:
                 response.usage = usage
-            response_json = response.json(exclude_unset=True, ensure_ascii=False)
+            response_json = response.json(exclude_unset=True,
+                                          ensure_ascii=False)
 
             return response_json
 

@@ -101,6 +101,7 @@ async def validation_exception_handler(_, exc):
     err = openai_serving_chat.create_error_response(message=str(exc))
     return JSONResponse(err.dict(), status_code=HTTPStatus.BAD_REQUEST)
 
+
 @app.get("/health")
 async def health() -> Response:
     """Health check."""
