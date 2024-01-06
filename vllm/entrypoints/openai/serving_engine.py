@@ -29,11 +29,15 @@ class OpenAIServing:
         self.max_model_len = 0
         self.tokenizer = None
 
-        if engine.engine_use_ray:
-            post_init_task = asyncio.ensure_future(self._post_init())
-            asyncio.get_event_loop().run_until_complete(
-                asyncio.gather(post_init_task))
-        else:
+        try:
+            event_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            event_loop = None
+
+        if event_loop is not None and event_loop.is_running(
+        ):  # If the current is instanced by Ray Serve, there is already a running event loop
+            event_loop.create_task(self._post_init())
+        else:  # When using single vLLM without engine_use_ray
             asyncio.run(self._post_init())
 
     async def _post_init(self):
