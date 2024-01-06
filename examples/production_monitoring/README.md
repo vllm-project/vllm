@@ -78,4 +78,4 @@ Navigate to [`http://localhost:3000/dashboard/import`](http://localhost:3000/das
 
 You should see a screen that looks like the following:
 
-![Grafana Dashboard Image](images/grafana-dashboard.png)
+![Grafana Dashboard Image](images/vllm-grafana-dashboard.png)

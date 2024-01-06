@@ -224,7 +224,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Number of prompt tokens processed per second",
+      "description": "Number of tokens processed per second",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -333,7 +333,7 @@
           "useBackend": false
         }
       ],
-      "title": "Total Token Throughput",
+      "title": "Token Throughput",
       "type": "timeseries"
     },
     {
@@ -341,7 +341,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "P50, P90, P95, and P99 TTFT latency in seconds.",
+      "description": "Inter token latency in seconds.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -403,7 +403,7 @@
         "x": 0,
         "y": 8
       },
-      "id": 5,
+      "id": 10,
       "options": {
         "legend": {
           "calcs": [],
@@ -424,9 +424,8 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.99, sum by(le) (rate(vllm_time_to_first_token_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le) (rate(vllm_time_per_output_tokens_seconds_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
-          "hide": false,
           "includeNullMetadata": false,
           "instant": false,
           "legendFormat": "P99",
@@ -441,8 +440,9 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.95, sum by(le) (rate(vllm_time_to_first_token_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by(le) (rate(vllm_time_per_output_tokens_seconds_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
+          "hide": false,
           "includeNullMetadata": false,
           "instant": false,
           "legendFormat": "P95",
@@ -457,7 +457,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.9, sum by(le) (rate(vllm_time_to_first_token_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.9, sum by(le) (rate(vllm_time_per_output_tokens_seconds_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": false,
@@ -474,7 +474,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.5, sum by(le) (rate(vllm_time_to_first_token_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by(le) (rate(vllm_time_per_output_tokens_seconds_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": false,
@@ -490,15 +490,15 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "rate(vllm_time_to_first_token_seconds_sum[$__rate_interval])\n/\nrate(vllm_time_to_first_token_seconds_count[$__rate_interval])",
+          "expr": "rate(vllm_time_per_output_tokens_seconds_sum[$__rate_interval])\n/\nrate(vllm_time_per_output_tokens_seconds_count[$__rate_interval])",
           "hide": false,
           "instant": false,
-          "legendFormat": "Average",
+          "legendFormat": "Mean",
           "range": true,
           "refId": "E"
         }
       ],
-      "title": "Time To First Token Latency",
+      "title": "Time Per Output Token Latency",
       "type": "timeseries"
     },
     {
@@ -629,7 +629,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "P50, P90, P95, P99 inter-token latency measured in seconds",
+      "description": "P50, P90, P95, and P99 TTFT latency in seconds.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -691,7 +691,7 @@
         "x": 0,
         "y": 16
       },
-      "id": 6,
+      "id": 5,
       "options": {
         "legend": {
           "calcs": [],
@@ -712,7 +712,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.99, sum by(le) (rate(vllm_inter_token_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le) (rate(vllm_time_to_first_token_seconds_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": false,
@@ -729,7 +729,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.95, sum by(le) (rate(vllm_inter_token_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by(le) (rate(vllm_time_to_first_token_seconds_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "includeNullMetadata": false,
           "instant": false,
@@ -745,7 +745,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.9, sum by(le) (rate(vllm_inter_token_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.9, sum by(le) (rate(vllm_time_to_first_token_seconds_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": false,
@@ -762,7 +762,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.5, sum by(le) (rate(vllm_inter_token_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by(le) (rate(vllm_time_to_first_token_seconds_bucket[$__rate_interval])))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": false,
@@ -778,7 +778,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "rate(vllm_inter_token_latency_seconds_sum[$__rate_interval])\n/\nrate(vllm_inter_token_latency_seconds_count[$__rate_interval])",
+          "expr": "rate(vllm_time_to_first_token_seconds_sum[$__rate_interval])\n/\nrate(vllm_time_to_first_token_seconds_count[$__rate_interval])",
           "hide": false,
           "instant": false,
           "legendFormat": "Average",
@@ -786,7 +786,7 @@
           "refId": "E"
         }
       ],
-      "title": "Inter Token Latency",
+      "title": "Time To First Token Latency",
       "type": "timeseries"
     },
     {
@@ -914,6 +914,6 @@
   "timezone": "",
   "title": "vLLM",
   "uid": "b281712d-8bff-41ef-9f3f-71ad43c05e9b",
-  "version": 2,
+  "version": 1,
   "weekStart": ""
 }

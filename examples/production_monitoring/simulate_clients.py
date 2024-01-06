@@ -4,8 +4,8 @@ from threading import Thread
 from openai import OpenAI
 from datasets import load_dataset
 
-N_CLIENTS = 1
-N_CYCLES = 1
+N_CLIENTS = 32
+N_CYCLES = 10
 MAX_SLEEP_TIME = 10.
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
