@@ -357,8 +357,6 @@ class LLMEngine:
                     hash(tuple(truncated_prefix_token_ids)))
                 if prefix is not None:
                     seq.prefix = prefix
-                    # print("prefix status: ", "on gpu" if prefix.get_status() else "on cpu")
-                    # prefix.update_freq(1.0)
                 else:
                     # create a new prefix
                     seq.prefix = self.scheduler.prefix_pool.add_prefix(

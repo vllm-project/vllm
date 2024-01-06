@@ -152,7 +152,6 @@ if triton.__version__ >= "2.1.0":
                         mask=(start_n + offs_n[None, :]) <
                         cur_batch_seq_len - cur_batch_ctx_len,
                         other=0.0)
-            # mask = tl.load(mask_ptrs + start_n, mask=start_n + offs_n < cur_batch_end_loc, other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -341,7 +340,6 @@ if triton.__version__ >= "2.1.0":
                         mask=(start_n + offs_n[None, :]) <
                         cur_batch_seq_len - cur_batch_ctx_len,
                         other=0.0)
-            # mask = tl.load(mask_ptrs + start_n, mask=start_n + offs_n < cur_batch_end_loc, other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -427,8 +425,6 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_h,
         stride_v_cache_d,
         stride_v_cache_bl,
-        # debuger,
-        # stride_db_head, stride_db_q, stride_db_k,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,
         BLOCK_N: tl.constexpr,
@@ -506,12 +502,6 @@ if triton.__version__ >= "2.1.0":
             qk += alibi
             alibi_start_k += BLOCK_N
 
-            # # debuger alibi
-            # offset_db = stride_db_head * cur_head + offset_db_q[:, None] * stride_db_q + offset_db_k[None, :] * stride_db_k
-            # mask_db = (offset_db_q < cur_batch_seq_len - cur_batch_ctx_len)[:, None] & (offset_db_k < cur_batch_seq_len)[None, :]
-            # tl.store(debuger + offset_db, alibi, mask=mask_db)
-            # offset_db_k += BLOCK_N
-
             # -- compute m_ij, p, l_ij
             m_ij = tl.max(qk, 1)
             m_i_new = tl.maximum(m_i, m_ij)
@@ -566,7 +556,6 @@ if triton.__version__ >= "2.1.0":
                         mask=(start_n + offs_n[None, :]) <
                         cur_batch_seq_len - cur_batch_ctx_len,
                         other=0.0)
-            # mask = tl.load(mask_ptrs + start_n, mask=start_n + offs_n < cur_batch_end_loc, other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k, allow_tf32=False)
@@ -582,12 +571,6 @@ if triton.__version__ >= "2.1.0":
                 alibi, float("-inf"))
             qk += alibi
             alibi_start_k += BLOCK_N
-
-            # # debuger alibi
-            # offset_db = stride_db_head * cur_head + offset_db_q[:, None] * stride_db_q + offset_db_k[None, :] * stride_db_k
-            # mask_db = (offset_db_q < cur_batch_seq_len - cur_batch_ctx_len)[:, None] & (offset_db_k < cur_batch_seq_len)[None, :]
-            # tl.store(debuger + offset_db, alibi, mask=mask_db)
-            # offset_db_k += BLOCK_N
 
             # -- compute m_ij, p, l_ij
             m_ij = tl.max(qk, 1)

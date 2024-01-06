@@ -70,12 +70,13 @@ class PrefixPool:
         self.block_size = block_size
 
     def add_prefix(self, token_ids: List[int]) -> Prefix:
+        prefix_hash = hash(tuple(token_ids))
+        assert prefix_hash not in self.prefixes_hash
         # generate prefix_id
         prefix_id = len(self.prefixes)
         # create a new prefix
         prefix = Prefix(prefix_id, token_ids, self.block_size)
         self.prefixes.append(prefix)
-        prefix_hash = hash(tuple(prefix.token_ids))
         self.prefixes_hash[prefix_hash] = prefix.prefix_id
         return prefix
 
