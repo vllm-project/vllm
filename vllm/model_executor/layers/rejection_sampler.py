@@ -25,7 +25,7 @@ class RejectionSampler(nn.Module):
         self.token_id_dtype = torch.int64
         self._strict_mode = strict_mode
 
-        # A "bonus token" is token accepted iff all proposal tokens are
+        # NOTE: A "bonus token" is accepted iff all proposal tokens are
         # accepted. There is always only one possible bonus token. We store this
         # value in a variable for readability.
         self._num_bonus_tokens = 1
