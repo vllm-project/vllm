@@ -42,8 +42,10 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     max_shared_mem = cuda_utils.get_device_attribute(
         cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
     if max_shared_mem == 0 and is_hip():
-        # got 0 sometimes when using 74
-        print("get_max_shared_memory_bytes got 0, trying to use value 97 for ROCm")
+        # got 0 sometimes when using 74 on certain ROCm versions on torch 2.0.1
+        print(
+            "ROCm get_max_shared_memory_bytes got 0, trying to use value 97 instead"
+        )
         cudaDevAttrMaxSharedMemoryPerBlockOptin = 97
         max_shared_mem = cuda_utils.get_device_attribute(
             cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)

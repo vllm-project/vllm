@@ -15,11 +15,9 @@ RUN LLVM_GFX_ARCH=$(/opt/rocm/llvm/bin/amdgpu-offload-arch) && \
     echo "LLVM_GFX_ARCH is $LLVM_GFX_ARCH"
 
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
-
 RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
 
 ARG FA_BRANCH="3d2b6f5"
-
 RUN echo "FA_BRANCH is $FA_BRANCH"
 
 # Install some basic utilities
