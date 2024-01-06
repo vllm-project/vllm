@@ -26,6 +26,7 @@ openai_serving_chat: OpenAIServingChat = None
 openai_serving_completion: OpenAIServingCompletion = None
 logger = init_logger(__name__)
 
+
 @asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
 
