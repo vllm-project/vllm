@@ -1,5 +1,5 @@
 from aioprometheus import Counter, Gauge, Histogram
-from vllm.engine.metrics import (
+from vllm.engine.metrics.metrics import (
     CounterMetric, GaugeMetric, HistogramMetric
 )
 
@@ -55,28 +55,28 @@ METRICS_REGISTRY = [
     ),
     GaugeMetric(
         gauge=gauge_scheduler_running, 
-        attr="num_running"
+        attr="num_running",
         template="Running {} reqs"
     ),
     GaugeMetric(
         gauge=gauge_scheduler_swapped, 
-        attr="num_swapped"
+        attr="num_swapped",
         template="Swapped: {} reqs",
     ),
     GaugeMetric(
         gauge=gauge_scheduler_waiting, 
-        attr="num_waiting"
+        attr="num_waiting",
         template="Waiting: {} reqs",
     ),
     GaugeMetric(
         gauge=gauge_gpu_cache_usage, 
-        attr="gpu_cache_usage"
-        template="GPU KV cache usage: {}%",
+        attr="gpu_cache_usage",
+        template="GPU KV cache usage: {:0.1f}%",
     ),
     GaugeMetric(
         gauge=gauge_cpu_cache_usage, 
-        attr="cpu_cache_usage"
-        template="CPU KV cache usage: {}%",
+        attr="cpu_cache_usage",
+        template="CPU KV cache usage: {:0.1f}%",
     ),
     HistogramMetric(
         histogram=histogram_time_to_first_token,

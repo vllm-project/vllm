@@ -32,10 +32,10 @@ class TrackedStats:
     """Data to compute metrics for logging to StdOut"""
     def __init__(self):
         self.stats: Union[List[int], List[float]] = []
-        self.last_reset_time: float = time.now()
+        self.last_reset_time: float = time.monotonic()
 
-    def append(self, new_stat: Union[int, float]) -> None:
-        self.stats.append(new_item)
+    def append(self, stat: Union[int, float]) -> None:
+        self.stats.append(stat)
 
     def reset(self, now: float) -> None:
         self.stats = []
@@ -77,9 +77,9 @@ class PrometheusMetric(ABC):
         return self.template.format(self._compute_metric(now))
 
     # Track stat for local logging.
-    def track_stat(self, stat: Union[int. float]) -> None:
+    def track_stat(self, stat: Union[int, float]) -> None:
         if self.log_local:
-            self.tracked_stats.append(now)
+            self.tracked_stats.append(stat)
     
     # Reset tracked stats for next local logging interval.
     def reset_stats(self, now: float) -> None:
@@ -91,12 +91,12 @@ class CounterMetric(PrometheusMetric):
         super().__init__(*args, **kwargs)
 
     def log(self, stats: Stats, labels: Dict[str, str], now: float) -> None:
-        stat = getattr(stats, self.stats_attr, 0)
+        stat = getattr(stats, self.attr, 0)
         self.counter.add(labels, stat)
         self.track_stat(stat)
 
     def _compute_metric(self, now: float) -> Union[int, float]:
-        return self.tracked_data.get_throughput(now)
+        return self.tracked_stats.get_throughput(now)
 
 class GaugeMetric(PrometheusMetric):
     def __init__(self, gauge: Gauge, *args, **kwargs) -> None:
@@ -104,7 +104,7 @@ class GaugeMetric(PrometheusMetric):
         super().__init__(*args, **kwargs)
 
     def log(self, stats: Stats, labels: Dict[str, str], now: float) -> None:
-        stat = getattr(stats, self.stats_attr, 0)
+        stat = getattr(stats, self.attr, 0)
         self.gauge.set(labels, stat)
         self.track_stat(stat)
 
@@ -122,14 +122,14 @@ class HistogramMetric(PrometheusMetric):
             self.track_stat(stat)
 
     def _compute_metric(self, now: float) -> Union[int, float]:
-        return self.tracked_data.get_mean()
+        return self.tracked_stats.get_mean()
         
 class MetricsLogger:
     """Used LLMEngine to log metrics to Promethus and Stdout."""
     def __init__(self, metrics: List[PrometheusMetric], local_logger: logging.Logger, local_interval: float) -> None:
         self.metrics = metrics
         self.local_logger = local_logger
-        self.last_local_log = time.now()
+        self.last_local_log = time.monotonic()
         self.local_interval = local_interval
     
     def _interval_elasped(self, now: float):
@@ -138,15 +138,17 @@ class MetricsLogger:
     def log(self, now: float, stats: Stats) -> None:
         # Log locally if local_interval sec elapsed. 
         log_local = self._interval_elasped(now)
-        
+        log_str = ""
+
         for metric in self.metrics:
             # Log to Prometheus.
             metric.log(labels=labels, stats=stats, now=now)
 
             # Log to StdOut and reset local tracked stats.
             if log_local and metric.log_local:
-                self.local_logger.info(metric.get_str(now=now))
-                metric.reset_stats()
+                log_str += f", {metric.get_str(now=now)}"
+                metric.reset_stats(now=now)
         
         if log_local:
+            self.local_logger.info(log_str)
             self.last_local_log = now
