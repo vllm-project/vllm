@@ -1,7 +1,6 @@
 from aioprometheus import Counter, Gauge, Histogram
-from vllm.engine.metrics.metrics import (
-    CounterMetric, GaugeMetric, HistogramMetric
-)
+from vllm.engine.metrics.metrics import (CounterMetric, GaugeMetric,
+                                         HistogramMetric)
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the metrics definitions.
@@ -34,13 +33,14 @@ histogram_time_to_first_token = Histogram(
 histogram_time_per_output_tokens = Histogram(
     "vllm_time_per_output_tokens_seconds",
     "Histogram of time per output token in seconds.",
-    buckets=[0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5])
+    buckets=[
+        0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5
+    ])
 histogram_e2e_request_latency = Histogram(
     "vllm_e2e_request_latency_seconds",
     "Histogram of end to end request latency in seconds.",
     buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
 # end-metrics-definitions
-
 
 METRICS_REGISTRY = [
     CounterMetric(
@@ -53,28 +53,26 @@ METRICS_REGISTRY = [
         attr="num_generation_tokens",
         template="Generation throughput: {:0.2f} tok/s",
     ),
+    GaugeMetric(gauge=gauge_scheduler_running,
+                attr="num_running",
+                template="Running: {} reqs"),
     GaugeMetric(
-        gauge=gauge_scheduler_running, 
-        attr="num_running",
-        template="Running: {} reqs"
-    ),
-    GaugeMetric(
-        gauge=gauge_scheduler_swapped, 
+        gauge=gauge_scheduler_swapped,
         attr="num_swapped",
         template="Swapped: {} reqs",
     ),
     GaugeMetric(
-        gauge=gauge_scheduler_waiting, 
+        gauge=gauge_scheduler_waiting,
         attr="num_waiting",
         template="Waiting: {} reqs",
     ),
     GaugeMetric(
-        gauge=gauge_gpu_cache_usage, 
+        gauge=gauge_gpu_cache_usage,
         attr="gpu_cache_usage",
         template="GPU KV cache usage: {:0.1f}%",
     ),
     GaugeMetric(
-        gauge=gauge_cpu_cache_usage, 
+        gauge=gauge_cpu_cache_usage,
         attr="cpu_cache_usage",
         template="CPU KV cache usage: {:0.1f}%",
     ),
