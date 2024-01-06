@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import PrometheusLogger, Stats
+from vllm.engine.metrics import METRICS_REGISTRY, MetricsLogger, Stats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
+_LOCAL_LOGGING_INTERVAL_SEC = 5
 
 
 class LLMEngine:
@@ -116,7 +117,11 @@ class LLMEngine:
 
         # Metric Logging.
         if self.log_stats:
-            self.prometheus_logger = PrometheusLogger()
+            self.metrics_logger = MetricsLogger(
+                metrics=METRICS_REGISTRY,
+                local_logger=logger,
+                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+            )
 
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -602,10 +607,12 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
 
-        # Log iteration and system statistics to Prometheus.
+        # Log stats.
         if self.log_stats:
-            self.prometheus_logger.log(
-                stats=self._get_stats(scheduler_outputs))
+            now = time.monotonic()
+            self.metrics_logger.log(now=now,
+                                    stats=self._get_stats(
+                                        now, scheduler_outputs))
 
         return request_outputs
 
@@ -638,36 +645,51 @@ class LLMEngine:
 
         return self._process_model_outputs(output, scheduler_outputs)
 
-    def _get_stats(self, scheduler_outputs: SchedulerOutputs) -> Stats:
+    def _get_stats(self, now: float,
+                   scheduler_outputs: SchedulerOutputs) -> Stats:
         """Get Stats to be Logged to Prometheus."""
-        now = time.monotonic()
+        prompt_run = scheduler_outputs.prompt_run
+        num_prompt_tokens = scheduler_outputs.num_batched_tokens if prompt_run else 0
+        num_generation_tokens = 0 if prompt_run else scheduler_outputs.num_batched_tokens
 
-        # Loop through requests to compute timings.
-        iter_timings = []
-        e2e_timings = []
+        # Get Latency Timings.
+        time_last_iters = []
+        time_e2e_requests = []
         for seq_group in scheduler_outputs.scheduled_seq_groups:
             # Time since last token. (n.b. updates seq_group.last_token_time)
-            iter_timings.append(seq_group.get_last_latency(now))
-            # Time since arrival.
+            time_last_iters.append(seq_group.get_last_latency(now))
+            # Time since arrival for all finished requests.
             if seq_group.is_finished():
-                e2e_timings.append(seq_group.get_e2e_latency(now))
+                time_e2e_requests.append(seq_group.get_e2e_latency(now))
 
-        # Parse stats.
-        stats = Stats(total_gpu_blocks=self.cache_config.num_gpu_blocks,
-                      total_cpu_blocks=self.cache_config.num_cpu_blocks,
-                      free_gpu_blocks=self.scheduler.block_manager.
-                      get_num_free_gpu_blocks(),
-                      free_cpu_blocks=self.scheduler.block_manager.
-                      get_num_free_cpu_blocks(),
-                      num_running=len(self.scheduler.running),
-                      num_swapped=len(self.scheduler.swapped),
-                      num_waiting=len(self.scheduler.waiting),
-                      prompt_run=scheduler_outputs.prompt_run,
-                      num_batched_tokens=scheduler_outputs.num_batched_tokens,
-                      iter_timings=iter_timings,
-                      e2e_timings=e2e_timings)
+        time_to_first_tokens = time_last_iters if prompt_run else []
+        time_per_output_tokens = [] if prompt_run else time_last_iters
 
-        return stats
+        # Compute cache usage in %.
+        num_total_gpu = self.cache_config.num_gpu_blocks
+        num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
+        gpu_cache_usage = (1.0 - (num_free_gpu / num_total_gpu)) * 100
+
+        num_total_cpu = self.cache_config.num_cpu_blocks
+        cpu_cache_usage = 0.
+        if num_total_cpu > 0:
+            num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
+            )
+            cpu_cache_usage = (1.0 - (num_free_cpu / num_total_cpu)) * 100
+
+        # Parse Stats.
+        return Stats(
+            num_running=len(self.scheduler.running),
+            num_swapped=len(self.scheduler.swapped),
+            num_waiting=len(self.scheduler.waiting),
+            gpu_cache_usage=gpu_cache_usage,
+            cpu_cache_usage=cpu_cache_usage,
+            num_prompt_tokens=num_prompt_tokens,
+            num_generation_tokens=num_generation_tokens,
+            time_to_first_tokens=time_to_first_tokens,
+            time_per_output_tokens=time_per_output_tokens,
+            time_e2e_requests=time_e2e_requests,
+        )
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
