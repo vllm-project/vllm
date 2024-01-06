@@ -76,6 +76,7 @@ class Scheduler:
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window)
 
+        # Create the prefix pool to cache the prefixes.
         self.prefix_pool = PrefixPool(self.cache_config.block_size)
 
         # TODO(zhuohan): Use deque instead of list for better performance.

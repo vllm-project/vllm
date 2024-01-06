@@ -1,3 +1,6 @@
+# The kernels in this file are adapted from LightLLM's context_attention_fwd:
+# https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
+
 import torch
 import time
 import triton
@@ -749,6 +752,7 @@ if triton.__version__ >= "2.1.0":
         return
 
 
+# TODO move to a test file
 @torch.inference_mode()
 def test_contexted_kv_attention(
     num_heads: int,

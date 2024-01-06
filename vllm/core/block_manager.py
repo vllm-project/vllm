@@ -3,9 +3,9 @@ import enum
 from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import PhysicalTokenBlock
+from vllm.prefix import Prefix
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-from vllm.prefix import Prefix
 
 # Mapping: logical block number -> physical block.
 BlockTable = List[PhysicalTokenBlock]
@@ -137,19 +137,18 @@ class BlockSpaceManager:
         prefix_block_table: BlockTable = []
         num_prefix_blocks = 0
         if seq_group.prefix is not None:
-            # prefix is already on gpu or will be swapped in before the actual computation
+            # prefix is already on gpu or
+            # will be swapped in before the actual computation
             if seq_group.prefix.on_gpu:
-                num_prompt_blocks -= seq_group.prefix.get_length(
-                ) // self.block_size
+                num_prompt_blocks -= seq_group.prefix.get_num_blocks()
                 for block in seq_group.prefix.block_table:
                     block.ref_count += seq_group.num_seqs()
                     block_table.append(block)
-                # TODO: will need to perform the copy-on-write if prefix length is not a multiple of block size
 
-            # allocate blocks for the prefix, we need to calculate the prefix's kv in this run
+            # allocate blocks for the prefix,
+            # we need to calculate the prefix's kv in this run
             elif not seq_group.prefix.swap_to_gpu:
-                num_prefix_blocks = seq_group.prefix.get_length(
-                ) // self.block_size
+                num_prefix_blocks = seq_group.prefix.get_num_blocks()
                 seq_group.prefix.swap_to_gpu = True
 
         for logical_idx in range(num_prompt_blocks):
@@ -161,6 +160,10 @@ class BlockSpaceManager:
             # Set the reference counts of the token blocks.
             block.ref_count = seq_group.num_seqs()
             block_table.append(block)
+            # Store the blocks computed by
+            # the first seq group using this prefix
+            # the other seq groups in the same batch will also compute the prefix
+            # but those blocks won't be stored
             if logical_idx < num_prefix_blocks:
                 block.ref_count += 1
                 prefix_block_table.append(block)
@@ -169,6 +172,7 @@ class BlockSpaceManager:
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
 
+        # Record the prefix block table for the prefix
         if num_prefix_blocks > 0:
             seq_group.prefix.block_table = prefix_block_table.copy()
 
@@ -240,15 +244,6 @@ class BlockSpaceManager:
         num_required_blocks = len(blocks) + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
-    def can_swap_in_prefix(self, prefix: Prefix) -> bool:
-        blocks = prefix.block_table
-        num_free_blocks = self.gpu_allocator.get_num_free_blocks()
-        # NOTE: Conservatively, we assume that every sequence will allocate
-        # at least one free block right after the swap-in.
-        # NOTE: This should match the logic in can_append_slot().
-        num_required_blocks = len(blocks)
-        return num_free_blocks - num_required_blocks >= self.watermark_blocks
-
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # CPU block -> GPU block.
         if seq_group.prefix is not None:
@@ -282,34 +277,8 @@ class BlockSpaceManager:
         }
         return block_number_mapping
 
-    # currently not used
-    def swap_in_prefix(self, prefix: Prefix) -> Dict[int, int]:
-        # CPU block -> GPU block.
-        mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
-        new_block_table = []
-        block_table = prefix.block_table
-
-        for cpu_block in enumerate(block_table):
-            # ref_count = 1
-            gpu_block = self.gpu_allocator.allocate()
-            mapping[cpu_block] = gpu_block
-            new_block_table.append(gpu_block)
-            # Free the CPU block swapped in to GPU.
-            self.cpu_allocator.free(cpu_block)
-        prefix.block_table = new_block_table
-
-        block_number_mapping = {
-            cpu_block.block_number: gpu_block.block_number
-            for cpu_block, gpu_block in mapping.items()
-        }
-        return block_number_mapping
-
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
-        return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
-
-    def can_swap_out_prefix(self, prefix: Prefix) -> bool:
-        blocks = prefix.block_table
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:

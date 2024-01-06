@@ -96,11 +96,12 @@ class ModelRunner:
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             prefix_len = 0
-            if seq_group_metadata.prefix is not None and seq_group_metadata.prefix.on_gpu:
+            if (seq_group_metadata.prefix is not None
+                    and seq_group_metadata.prefix.on_gpu):
                 prefix_len = seq_group_metadata.prefix.get_length()
                 assert prefix_len % self.block_size == 0
                 prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_table = seq_group_metadata.prefix.get_block_table_num(
+                prefix_block_table = seq_group_metadata.prefix.get_block_numbers(
                 )
                 prefix_block_tables.append(prefix_block_table)
                 max_num_blocks_per_seq_prompt = max(

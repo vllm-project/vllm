@@ -410,10 +410,10 @@ class AsyncLLMEngine:
     async def generate(
         self,
         prompt: Optional[str],
-        prefix_pos: Optional[int],
         sampling_params: SamplingParams,
         request_id: str,
-        prompt_token_ids: Optional[List[int]] = None
+        prompt_token_ids: Optional[List[int]] = None,
+        prefix_pos: Optional[int] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
