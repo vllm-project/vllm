@@ -1,4 +1,5 @@
 from collections import deque
+from typing import Deque
 
 from vllm.sequence import SequenceGroup
 
@@ -15,8 +16,8 @@ class Policy:
     def sort_by_priority(
         self,
         now: float,
-        seq_groups: deque[SequenceGroup],
-    ) -> deque[SequenceGroup]:
+        seq_groups: Deque[SequenceGroup],
+    ) -> Deque[SequenceGroup]:
         return deque(
             sorted(
                 seq_groups,
