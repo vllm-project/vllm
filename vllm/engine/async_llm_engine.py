@@ -506,3 +506,9 @@ class AsyncLLMEngine:
                      max_log_len=engine_args.max_log_len,
                      start_engine_loop=start_engine_loop)
         return engine
+
+    async def do_log_stats(self) -> None:
+        if self.engine_use_ray:
+            await self.engine.do_log_stats.remote()
+        else:
+            self.engine.do_log_stats()
