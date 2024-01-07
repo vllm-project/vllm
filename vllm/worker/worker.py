@@ -8,6 +8,8 @@ import torch.distributed
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.parallel_utils.communication_op import (
+    broadcast_object_list)
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -28,17 +30,23 @@ class Worker:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        rank: Optional[int] = None,
-        distributed_init_method: Optional[str] = None,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.is_driver_worker = is_driver_worker
+        if self.is_driver_worker:
+            assert self.rank == 0, "The driver worker must have rank 0."
 
         self.model_runner = ModelRunner(model_config, parallel_config,
-                                        scheduler_config)
+                                        scheduler_config, is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None
@@ -57,13 +65,7 @@ class Worker:
 
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        # Env vars will be set by Ray.
-        self.rank = self.rank if self.rank is not None else int(
-            os.getenv("RANK", "-1"))
-        local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        self.device = torch.device(f"cuda:{local_rank}")
-        if self.rank < 0:
-            raise ValueError("Invalid or unspecified rank.")
+        self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
@@ -125,14 +127,12 @@ class Worker:
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    @torch.inference_mode()
-    def execute_model(
+    def cache_swap(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
-    ) -> SamplerOutput:
+    ) -> None:
         # Issue cache operations.
         issued_cache_op = False
         if blocks_to_swap_in:
@@ -152,8 +152,38 @@ class Worker:
         if cache_events is not None:
             for event in cache_events:
                 event.wait()
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
+        blocks_to_swap_in: Optional[Dict[int, int]] = None,
+        blocks_to_swap_out: Optional[Dict[int, int]] = None,
+        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+    ) -> Optional[SamplerOutput]:
+        if self.is_driver_worker:
+            assert seq_group_metadata_list is not None
+            num_seq_groups = len(seq_group_metadata_list)
+            assert blocks_to_swap_in is not None
+            assert blocks_to_swap_out is not None
+            assert blocks_to_copy is not None
+            block_swapping_info = [
+                blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy
+            ]
+            broadcast_object_list([num_seq_groups] + block_swapping_info,
+                                  src=0)
+        else:
+            # num_seq_groups, blocks_to_swap_in, blocks_to_swap_out,
+            # blocks_to_copy (4 elements)
+            recv_data = [None] * 4
+            broadcast_object_list(recv_data, src=0)
+            num_seq_groups = recv_data[0]
+            block_swapping_info = recv_data[1:]
+
+        self.cache_swap(*block_swapping_info)
+
         # If there is no input, we don't need to execute the model.
-        if not seq_group_metadata_list:
+        if num_seq_groups == 0:
             return {}
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
