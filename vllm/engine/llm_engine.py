@@ -646,26 +646,16 @@ class LLMEngine:
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
-        # Create empty scheduler
-        empty_scheduler_outputs = SchedulerOutputs(
-            scheduled_seq_groups=[],
-            prompt_run=False,
-            num_batched_tokens=0,
-            blocks_to_swap_in={},
-            blocks_to_swap_out={},
-            blocks_to_copy={},
-            ignored_seq_groups=[],
-        )
         if self.log_stats:
             now = time.monotonic()
             self.metrics_logger.log(now=now,
                                     stats=self._get_stats(
-                                        now, scheduler_outputs))
+                                        now=now, scheduler_outputs=None))
 
     def _get_stats(self, now: float,
                    scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
         """Get Stats to be Logged to Prometheus."""
-        
+
         # Compute System Stats.
         # KV Cache Usage in %.
         num_total_gpu = self.cache_config.num_gpu_blocks
@@ -678,27 +668,27 @@ class LLMEngine:
             num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
             )
             cpu_cache_usage = (1.0 - (num_free_cpu / num_total_cpu)) * 100
-        
+
         # Scheduler State
         num_running = len(self.scheduler.running)
         num_swapped = len(self.scheduler.swapped)
         num_waiting = len(self.scheduler.waiting)
-        
+
         # If no scheduler outputs, empty iteration stats.
         if scheduler_outputs is None:
-          return Stats(
-            num_running=num_running,
-            num_swapped=num_swapped,
-            num_waiting=num_waiting,
-            gpu_cache_usage=gpu_cache_usage,
-            cpu_cache_usage=cpu_cache_usage,
-            num_prompt_tokens=0,
-            num_generation_tokens=0,
-            time_to_first_tokens=[],
-            time_per_output_tokens=[],
-            time_e2e_requests=[],
-        )
-          
+            return Stats(
+                num_running=num_running,
+                num_swapped=num_swapped,
+                num_waiting=num_waiting,
+                gpu_cache_usage=gpu_cache_usage,
+                cpu_cache_usage=cpu_cache_usage,
+                num_prompt_tokens=0,
+                num_generation_tokens=0,
+                time_to_first_tokens=[],
+                time_per_output_tokens=[],
+                time_e2e_requests=[],
+            )
+
         # Compute IterationStats.
         prompt_run = scheduler_outputs.prompt_run
         num_prompt_tokens = scheduler_outputs.num_batched_tokens if prompt_run else 0
@@ -716,7 +706,7 @@ class LLMEngine:
 
         time_to_first_tokens = time_last_iters if prompt_run else []
         time_per_output_tokens = [] if prompt_run else time_last_iters
-       
+
         return Stats(
             num_running=num_running,
             num_swapped=num_swapped,
