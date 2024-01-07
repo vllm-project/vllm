@@ -8,7 +8,7 @@ from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
-from vllm.prefix import Prefix, PrefixPool
+from vllm.prefix import PrefixPool
 
 logger = init_logger(__name__)
 
@@ -193,10 +193,6 @@ class Scheduler:
                 seq_lens = new_seq_lens
 
                 seq_group = self.waiting.pop(0)
-                # swap in the prefix if it is on CPU
-                if seq_group.prefix is not None and seq_group.prefix.on_cpu:
-                    # prefix.on_gpu will be set inside this function
-                    self._swap_in_prefix(seq_group.prefix, blocks_to_swap_in)
 
                 self._allocate(seq_group)
                 self.running.append(seq_group)
@@ -421,28 +417,3 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
-
-    def _swap_in_prefix(
-        self,
-        prefix: Prefix,
-        blocks_to_swap_in: Dict[int, int],
-    ) -> None:
-        mapping = self.block_manager.swap_in_prefix(prefix)
-        blocks_to_swap_in.update(mapping)
-        prefix.on_gpu = True
-
-    def _swap_out_prefix(
-        self,
-        prefix: Prefix,
-        blocks_to_swap_out: Dict[int, int],
-    ) -> None:
-        if not self.block_manager.can_swap_out_prefix(prefix):
-            # FIXME(woosuk): Abort the sequence group instead of aborting the
-            # entire engine.
-            raise RuntimeError(
-                "Aborted due to the lack of CPU swap space. Please increase "
-                "the swap space to avoid this error.")
-        mapping = self.block_manager.swap_out_prefix(prefix)
-        blocks_to_swap_out.update(mapping)
-        prefix.on_cpu = True
-        prefix.on_gpu = False

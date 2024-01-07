@@ -311,28 +311,6 @@ class BlockSpaceManager:
         }
         return block_number_mapping
 
-    def swap_out_prefix(self, prefix: Prefix) -> Dict[int, int]:
-        # GPU block -> CPU block.
-        # make sure all the reference seq are finished or swapped out before swapping out the prefix
-        mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
-        new_block_table = []
-        block_table = prefix.block_table
-
-        for gpu_block in block_table:
-            cpu_block = self.cpu_allocator.allocate()
-            mapping[gpu_block] = cpu_block
-            new_block_table.append(cpu_block)
-            # Free the GPU block swapped out to CPU.
-            assert gpu_block.ref_count == 1
-            self.gpu_allocator.free(gpu_block)
-        prefix.block_table = new_block_table
-
-        block_number_mapping = {
-            gpu_block.block_number: cpu_block.block_number
-            for gpu_block, cpu_block in mapping.items()
-        }
-        return block_number_mapping
-
     def _free_block_table(self, block_table: BlockTable) -> None:
         for block in set(block_table):
             if block.device == Device.GPU:

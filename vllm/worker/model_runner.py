@@ -601,6 +601,7 @@ class ModelRunner:
             input_metadata = InputMetadata(
                 is_prompt=False,
                 slot_mapping=slot_mapping[:batch_size],
+                prompt_lens=None,
                 max_seq_len=None,
                 start_loc=None,
                 max_context_len=self.max_context_len_to_capture,
