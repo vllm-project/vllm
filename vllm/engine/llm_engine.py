@@ -648,10 +648,12 @@ class LLMEngine:
 
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
-        for seq_group in (scheduled_seq_groups +
-                          scheduler_outputs.ignored_seq_groups):
+        for seq_group in scheduled_seq_groups:
             if seq_group.is_prefix:
                 continue
+            request_output = RequestOutput.from_seq_group(seq_group)
+            request_outputs.append(request_output)
+        for seq_group in scheduler_outputs.ignored_seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
 
@@ -689,6 +691,9 @@ class LLMEngine:
             output = []
 
         return self._process_model_outputs(output, scheduler_outputs)
+
+    def do_log_stats(self) -> None:
+        self._log_system_stats(False, 0)
 
     def _log_system_stats(
         self,
