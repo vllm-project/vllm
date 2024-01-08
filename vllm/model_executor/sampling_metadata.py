@@ -184,7 +184,7 @@ class SamplingTensors:
             dtype=dtype,
             pin_memory=pin_memory,
         )
-        tails_free_t = torch.Tensor(
+        tails_free_t = torch.tensor(
             tails_free,
             device="cpu",
             dtype=dtype,
