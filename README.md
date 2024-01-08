@@ -69,6 +69,7 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - Phi (`microsoft/phi-1_5`, `microsoft/phi-2`, etc.)
 - Qwen (`Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.)
 - Yi (`01-ai/Yi-6B`, `01-ai/Yi-34B`, etc.)
+- StableLM(`stabilityai/stablelm-3b-4e1t/`, `https://huggingface.co/stabilityai/stablelm-base-alpha-7b-v2`, etc.)
 
 Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):
 

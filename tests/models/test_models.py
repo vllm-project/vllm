@@ -17,6 +17,7 @@ MODELS = [
     "bigscience/bloom-560m",
     "mosaicml/mpt-7b",
     "microsoft/phi-2",
+    "stabilityai/stablelm-3b-4e1t"
 ]
 
 
