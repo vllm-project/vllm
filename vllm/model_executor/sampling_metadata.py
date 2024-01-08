@@ -25,13 +25,13 @@ class SamplingMetadata:
     """
 
     def __init__(
-        self,
-        seq_groups: Optional[List[Tuple[List[int], SamplingParams]]],
-        seq_data: Optional[Dict[int, SequenceData]],
-        prompt_lens: Optional[List[int]],
-        selected_token_indices: torch.Tensor,
-        categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
-        perform_sampling: bool = True,
+            self,
+            seq_groups: Optional[List[Tuple[List[int], SamplingParams]]],
+            seq_data: Optional[Dict[int, SequenceData]],
+            prompt_lens: Optional[List[int]],
+            selected_token_indices: torch.Tensor,
+            categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
+            perform_sampling: bool = True,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
@@ -60,6 +60,7 @@ class SamplingTensors:
     temperatures: torch.Tensor
     top_ps: torch.Tensor
     top_ks: torch.Tensor
+    tails_free: torch.Tensor
     min_ps: torch.Tensor
     presence_penalties: torch.Tensor
     frequency_penalties: torch.Tensor
@@ -71,11 +72,12 @@ class SamplingTensors:
     def from_sampling_metadata(
             cls, sampling_metadata: "SamplingMetadata", vocab_size: int,
             device: torch.device,
-            dtype: torch.dtype) -> Tuple["SamplingTensors", bool, bool, bool]:
+            dtype: torch.dtype) -> Tuple["SamplingTensors", bool, bool, bool, bool]:
         prompt_tokens: List[List[int]] = []
         output_tokens: List[List[int]] = []
         top_ks: List[int] = []
         temperatures: List[float] = []
+        tails_free: List[float] = []
         top_ps: List[float] = []
         min_ps: List[float] = []
         presence_penalties: List[float] = []
@@ -84,12 +86,14 @@ class SamplingTensors:
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
+        do_tail_free_sampling = False
         for i, seq_group in enumerate(sampling_metadata.seq_groups):
             seq_ids, sampling_params = seq_group
             temperature = sampling_params.temperature
             p = sampling_params.presence_penalty
             f = sampling_params.frequency_penalty
             r = sampling_params.repetition_penalty
+            tail_free = sampling_params.tail_free
             top_p = sampling_params.top_p
             min_p = sampling_params.min_p
             # k should not be greater than the vocab size.
@@ -105,6 +109,8 @@ class SamplingTensors:
                 do_top_p_top_k = True
             if not do_min_p and min_p > _SAMPLING_EPS:
                 do_min_p = True
+            if not do_tail_free_sampling and tail_free < 1.0:
+                do_tail_free_sampling = True
             if not do_penalties and (abs(p) >= _SAMPLING_EPS
                                      or abs(f) >= _SAMPLING_EPS
                                      or abs(r - 1.0) >= _SAMPLING_EPS):
@@ -116,6 +122,7 @@ class SamplingTensors:
                 temperatures += [temperature] * (prompt_len - 1)
                 top_ps += [top_p] * (prompt_len - 1)
                 top_ks += [top_k] * (prompt_len - 1)
+                tails_free += [tail_free] * (prompt_len - 1)
                 min_ps += [min_p] * (prompt_len - 1)
                 presence_penalties += [0] * (prompt_len - 1)
                 frequency_penalties += [0] * (prompt_len - 1)
@@ -129,20 +136,21 @@ class SamplingTensors:
             temperatures += [temperature] * len(seq_ids)
             top_ps += [top_p] * len(seq_ids)
             top_ks += [top_k] * len(seq_ids)
+            tails_free += [tail_free] * len(seq_ids)
             min_ps += [min_p] * len(seq_ids)
             presence_penalties += [p] * len(seq_ids)
             frequency_penalties += [f] * len(seq_ids)
             repetition_penalties += [r] * len(seq_ids)
 
         sampling_tensors = SamplingTensors.from_lists(
-            temperatures, top_ps, top_ks, min_ps, presence_penalties,
+            temperatures, top_ps, top_ks, tails_free, min_ps, presence_penalties,
             frequency_penalties, repetition_penalties, prompt_tokens,
             output_tokens, vocab_size, device, dtype)
-        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p)
+        return sampling_tensors, do_penalties, do_top_p_top_k, do_tail_free_sampling, do_min_p
 
     @classmethod
     def from_lists(cls, temperatures: List[float], top_ps: List[float],
-                   top_ks: List[int], min_ps: List[float],
+                   top_ks: List[int], tails_free: List[float], min_ps: List[float],
                    presence_penalties: List[float],
                    frequency_penalties: List[float],
                    repetition_penalties: List[float],
@@ -172,6 +180,12 @@ class SamplingTensors:
         )
         top_ps_t = torch.tensor(
             top_ps,
+            device="cpu",
+            dtype=dtype,
+            pin_memory=pin_memory,
+        )
+        tails_free_t = torch.Tensor(
+            tails_free,
             device="cpu",
             dtype=dtype,
             pin_memory=pin_memory,
@@ -223,6 +237,7 @@ class SamplingTensors:
         return cls(
             temperatures=temperatures_t.to(device=device, non_blocking=True),
             top_ps=top_ps_t.to(device=device, non_blocking=True),
+            tails_free=tails_free_t.to(device=device, non_blocking=True),
             top_ks=top_ks_t.to(device=device, non_blocking=True),
             min_ps=min_ps_t.to(device=device, non_blocking=True),
             presence_penalties=presence_penalties_t.to(device=device,
