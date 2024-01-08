@@ -235,8 +235,12 @@ def _apply_tail_free(
     normalized_d2 = d2 / torch.sum(d2, dim=-1, keepdim=True)
     normalized_d2_cdf = torch.cumsum(normalized_d2, dim=-1)
 
+    # Ensure z has the same size as normalized_d2_cdf before comparison
+    if z.dim() == 1:
+        z = z.unsqueeze(dim=1)
+
     # Remove tokens with CDF value above the threshold
-    indices_to_remove = normalized_d2_cdf > z.unsqueeze(dim=1)
+    indices_to_remove = normalized_d2_cdf > z
 
     # Mask the logits
     logits = logits.masked_fill(indices_to_remove, -float('inf'))
