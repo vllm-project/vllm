@@ -235,9 +235,11 @@ class ModelRunner:
                     input_block_tables[i, :len(block_table)] = block_table
             block_tables = torch.tensor(input_block_tables, device="cuda")
         else:
+            max_block_table_len = (max_context_len + self.block_size -
+                                   1) // self.block_size
             block_tables = _make_tensor_with_pad(
                 block_tables,
-                max_len=max_context_len,
+                max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
                 device="cuda",
