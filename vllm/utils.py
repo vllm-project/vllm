@@ -43,6 +43,7 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
     return int(max_shared_mem)
 
+
 def get_cpu_memory() -> int:
     """Returns the total CPU memory of the node in bytes."""
     return psutil.virtual_memory().total
