@@ -32,11 +32,11 @@ class Sampler(nn.Module):
         self.vocab_size = vocab_size
 
     def forward(
-            self,
-            embedding: torch.Tensor,
-            hidden_states: torch.Tensor,
-            sampling_metadata: SamplingMetadata,
-            embedding_bias: Optional[torch.Tensor] = None,
+        self,
+        embedding: torch.Tensor,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
@@ -61,7 +61,7 @@ class Sampler(nn.Module):
         # Prepare sampling tensors with pinned memory to avoid blocking.
         (sampling_tensors, do_penalties, do_top_p_top_k, do_tail_free_sampling,
          do_min_p) = SamplingTensors.from_sampling_metadata(
-            sampling_metadata, vocab_size, logits.device, logits.dtype)
+             sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         # Apply presence and frequency penalties.
         if do_penalties:
@@ -116,8 +116,8 @@ def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
 
 
 def _prune_hidden_states(
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+    hidden_states: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
     hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
     return hidden_states.index_select(0,
@@ -125,9 +125,9 @@ def _prune_hidden_states(
 
 
 def _get_bin_counts_and_mask(
-        tokens: torch.Tensor,
-        vocab_size: int,
-        num_seqs: int,
+    tokens: torch.Tensor,
+    vocab_size: int,
+    num_seqs: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # Compute the bin counts for the tokens.
     # vocab_size + 1 for padding.
@@ -142,8 +142,8 @@ def _get_bin_counts_and_mask(
 
 
 def _apply_logits_processors(
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+    logits: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
     logits_row_idx = 0
     found_logits_processors = False
@@ -189,9 +189,9 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
 
 
 def _apply_top_p_top_k(
-        logits: torch.Tensor,
-        p: torch.Tensor,
-        k: torch.Tensor,
+    logits: torch.Tensor,
+    p: torch.Tensor,
+    k: torch.Tensor,
 ) -> torch.Tensor:
     logits_sort, logits_idx = logits.sort(dim=-1, descending=True)
 
@@ -220,10 +220,7 @@ def _apply_top_p_top_k(
     return logits
 
 
-def _apply_tail_free(
-        logits: torch.Tensor,
-        z: torch.Tensor
-) -> torch.Tensor:
+def _apply_tail_free(logits: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
     # Sort the logits in descending order.
     sorted_logits, sorted_indices = torch.sort(logits, descending=True)
 
@@ -234,23 +231,32 @@ def _apply_tail_free(
     normalized_d2 = d2 / d2.sum(dim=-1, keepdim=True)
 
     # Calculate the cumulative sum of the normalized second derivative.
-    normalized_d2_cdf = normalized_d2.cumsum(dim=-1)  # Fixed: Added a dummy dimension of size 1 to z
+    normalized_d2_cdf = normalized_d2.cumsum(
+        dim=-1)  # Fixed: Added a dummy dimension of size 1 to z
 
     # Remove tokens with a cumulative normalized absolute second finite difference larger than the TFS value.
-    sorted_indices_to_remove = normalized_d2_cdf > z.unsqueeze(-1)  # Fixed: Unsqueezed z to match the shape of normalized_d2_cdf
+    sorted_indices_to_remove = normalized_d2_cdf > z.unsqueeze(
+        -1)  # Fixed: Unsqueezed z to match the shape of normalized_d2_cdf
 
     # Centre the distribution around the cutoff as in the original implementation of the algorithm.
     sorted_indices_to_remove = torch.cat(
         (
-            torch.zeros(sorted_logits.shape[0], 1, dtype=torch.bool, device=sorted_logits.device),
+            torch.zeros(sorted_logits.shape[0],
+                        1,
+                        dtype=torch.bool,
+                        device=sorted_logits.device),
             sorted_indices_to_remove,
-            torch.ones(sorted_logits.shape[0], 1, dtype=torch.bool, device=sorted_logits.device),
+            torch.ones(sorted_logits.shape[0],
+                       1,
+                       dtype=torch.bool,
+                       device=sorted_logits.device),
         ),
         dim=-1,
     )
 
     # Mask the filtered logits.
-    filtered_logits = sorted_logits.masked_fill(sorted_indices_to_remove, float("-inf"))
+    filtered_logits = sorted_logits.masked_fill(sorted_indices_to_remove,
+                                                float("-inf"))
 
     # Unsort the filtered logits.
     _, unsorted_indices = torch.sort(sorted_indices)
@@ -260,8 +266,8 @@ def _apply_tail_free(
 
 
 def _apply_min_p(
-        logits: torch.Tensor,
-        min_p: torch.Tensor,
+    logits: torch.Tensor,
+    min_p: torch.Tensor,
 ) -> torch.Tensor:
     """
     Adapted from
@@ -277,8 +283,8 @@ def _apply_min_p(
 
 
 def _greedy_sample(
-        selected_seq_groups: List[Tuple[List[int], SamplingParams]],
-        samples: torch.Tensor,
+    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
+    samples: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
     samples = samples.tolist()
     sample_idx = 0
@@ -296,9 +302,9 @@ def _greedy_sample(
 
 
 def _random_sample(
-        selected_seq_groups: List[Tuple[List[int], SamplingParams]],
-        is_prompts: List[bool],
-        random_samples: torch.Tensor,
+    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
+    is_prompts: List[bool],
+    random_samples: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
     # Find the maximum best_of value of the prompt phase requests.
     random_samples = random_samples.cpu()
@@ -311,22 +317,22 @@ def _random_sample(
             # Prompt phase.
             parent_ids = [0] * sampling_params.best_of
             next_token_ids = random_samples[
-                             sample_idx, :sampling_params.best_of].tolist()
+                sample_idx, :sampling_params.best_of].tolist()
         else:
             # Generation phase.
             parent_ids = list(range(num_parent_seqs))
             next_token_ids = random_samples[sample_idx:sample_idx +
-                                                       num_parent_seqs, 0].tolist()
+                                            num_parent_seqs, 0].tolist()
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results
 
 
 def _beam_search_sample(
-        selected_seq_groups: List[Tuple[List[int], SamplingParams]],
-        is_prompts: List[bool],
-        seq_data: Dict[int, SequenceData],
-        logprobs: torch.Tensor,
+    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
+    is_prompts: List[bool],
+    seq_data: Dict[int, SequenceData],
+    logprobs: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
     # We sample 2 * beam_width candidates to make sure that with high
     # probability we can get `beam_width` candidates in addition to
@@ -381,8 +387,8 @@ def _beam_search_sample(
 # probs will be modified in place, but this is fine, as we pass
 # in a copy already.
 def _multinomial(
-        probs: torch.Tensor,
-        num_samples: int,
+    probs: torch.Tensor,
+    num_samples: int,
 ):
     if num_samples > 1:
         # This is equivalent to torch.repeat_interleaved (which also
@@ -392,15 +398,15 @@ def _multinomial(
         # batch sampling the resulting tensor.
         probs = probs[:, None, :].expand(probs.shape[0], num_samples,
                                          probs.shape[1]).contiguous().view(
-            -1, probs.shape[1])
+                                             -1, probs.shape[1])
     q = torch.empty_like(probs).exponential_(1)
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
 
 def _sample(
-        probs: torch.Tensor,
-        logprobs: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+    probs: torch.Tensor,
+    logprobs: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
 ) -> List[Tuple[List[int], List[int]]]:
     categorized_seq_group_ids = {t: [] for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
@@ -465,11 +471,11 @@ def _sample(
 
 
 def _get_logprobs(
-        logprobs: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-        sample_results: List[Tuple[List[int], List[int]]],
+    logprobs: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    sample_results: List[Tuple[List[int], List[int]]],
 ) -> Tuple[List[Optional[List[Optional[Dict[int, float]]]]], List[List[Dict[
-    int, float]]]]:
+        int, float]]]]:
     # Prepare query indices
     batched_logprobs_query_seq_indices: List[int] = []
     batched_logprobs_query_token_indices: List[int] = []
@@ -540,7 +546,7 @@ def _get_logprobs(
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
                     token_id:
-                        batched_logprobs_query_result[query_result_idx].item()
+                    batched_logprobs_query_result[query_result_idx].item()
                 }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
@@ -561,7 +567,7 @@ def _get_logprobs(
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
                 next_token_id:
-                    batched_logprobs_query_result[query_result_idx].item()
+                batched_logprobs_query_result[query_result_idx].item()
             }
             query_result_idx += 1
             if num_logprobs > 0:
@@ -579,10 +585,10 @@ def _get_logprobs(
 
 
 def _build_sampler_output(
-        sample_results: List[Tuple[List[int], List[int]]],
-        sampling_metadata: SamplingMetadata,
-        prompt_logprobs: List[Optional[PromptLogprobs]],
-        sample_logprobs: List[SampleLogprobs],
+    sample_results: List[Tuple[List[int], List[int]]],
+    sampling_metadata: SamplingMetadata,
+    prompt_logprobs: List[Optional[PromptLogprobs]],
+    sample_logprobs: List[SampleLogprobs],
 ) -> SamplerOutput:
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,

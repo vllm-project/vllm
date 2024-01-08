@@ -25,13 +25,13 @@ class SamplingMetadata:
     """
 
     def __init__(
-            self,
-            seq_groups: Optional[List[Tuple[List[int], SamplingParams]]],
-            seq_data: Optional[Dict[int, SequenceData]],
-            prompt_lens: Optional[List[int]],
-            selected_token_indices: torch.Tensor,
-            categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
-            perform_sampling: bool = True,
+        self,
+        seq_groups: Optional[List[Tuple[List[int], SamplingParams]]],
+        seq_data: Optional[Dict[int, SequenceData]],
+        prompt_lens: Optional[List[int]],
+        selected_token_indices: torch.Tensor,
+        categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
+        perform_sampling: bool = True,
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
@@ -70,9 +70,9 @@ class SamplingTensors:
 
     @classmethod
     def from_sampling_metadata(
-            cls, sampling_metadata: "SamplingMetadata", vocab_size: int,
-            device: torch.device,
-            dtype: torch.dtype) -> Tuple["SamplingTensors", bool, bool, bool, bool]:
+        cls, sampling_metadata: "SamplingMetadata", vocab_size: int,
+        device: torch.device, dtype: torch.dtype
+    ) -> Tuple["SamplingTensors", bool, bool, bool, bool]:
         prompt_tokens: List[List[int]] = []
         output_tokens: List[List[int]] = []
         top_ks: List[int] = []
@@ -143,15 +143,15 @@ class SamplingTensors:
             repetition_penalties += [r] * len(seq_ids)
 
         sampling_tensors = SamplingTensors.from_lists(
-            temperatures, top_ps, top_ks, tails_free, min_ps, presence_penalties,
-            frequency_penalties, repetition_penalties, prompt_tokens,
-            output_tokens, vocab_size, device, dtype)
+            temperatures, top_ps, top_ks, tails_free, min_ps,
+            presence_penalties, frequency_penalties, repetition_penalties,
+            prompt_tokens, output_tokens, vocab_size, device, dtype)
         return sampling_tensors, do_penalties, do_top_p_top_k, do_tail_free_sampling, do_min_p
 
     @classmethod
     def from_lists(cls, temperatures: List[float], top_ps: List[float],
-                   top_ks: List[int], tails_free: List[float], min_ps: List[float],
-                   presence_penalties: List[float],
+                   top_ks: List[int], tails_free: List[float],
+                   min_ps: List[float], presence_penalties: List[float],
                    frequency_penalties: List[float],
                    repetition_penalties: List[float],
                    prompt_tokens: List[List[int]],
