@@ -183,7 +183,7 @@ class PhiLayer(nn.Module):
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.ln = nn.LayerNorm(config.hidden_size,
-                               eps=config.layer_norm_epsilon)
+                               eps=config.layer_norm_eps)
         self.mixer = PhiAttention(config, linear_method)
         self.mlp = PhiMLP(config, linear_method)
 
@@ -245,7 +245,7 @@ class PhiCausalLMHead(nn.Module):
     def __init__(self, config: PretrainedConfig):
         super().__init__()
         self.ln = nn.LayerNorm(config.hidden_size,
-                               eps=config.layer_norm_epsilon)
+                               eps=config.layer_norm_eps)
         self.linear = ParallelLMHead(config.vocab_size,
                                      config.hidden_size,
                                      bias=True)
