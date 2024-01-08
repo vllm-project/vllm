@@ -6,6 +6,7 @@ import asyncio
 import codecs
 import json
 import time
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import AsyncGenerator, Dict, List, Optional, Tuple, Union
 
@@ -38,9 +39,26 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 logger = init_logger(__name__)
 served_model = None
-app = fastapi.FastAPI()
+engine_args = None
 engine = None
 response_role = None
+
+
+@asynccontextmanager
+async def lifespan(app: fastapi.FastAPI):
+
+    async def _force_log():
+        while True:
+            await asyncio.sleep(10)
+            await engine.do_log_stats()
+
+    if not engine_args.disable_log_stats:
+        asyncio.create_task(_force_log())
+
+    yield
+
+
+app = fastapi.FastAPI(lifespan=lifespan)
 
 
 def parse_args():
@@ -603,13 +621,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                     logprobs = None
                 previous_texts[i] = output.text
                 previous_num_tokens[i] = len(output.token_ids)
-                finish_reason = output.finish_reason
-                response_json = create_stream_response_json(
-                    index=i,
-                    text=delta_text,
-                    logprobs=logprobs,
-                    finish_reason=finish_reason,
-                )
 
                 if output.finish_reason is not None:
                     logprobs = (LogProbs()
@@ -621,13 +632,16 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                         completion_tokens=completion_tokens,
                         total_tokens=prompt_tokens + completion_tokens,
                     )
-                    response_json = create_stream_response_json(
-                        index=i,
-                        text="",
-                        logprobs=logprobs,
-                        finish_reason=output.finish_reason,
-                        usage=final_usage,
-                    )
+                else:
+                    final_usage = None
+
+                response_json = create_stream_response_json(
+                    index=i,
+                    text=delta_text,
+                    logprobs=logprobs,
+                    finish_reason=output.finish_reason,
+                    usage=final_usage)
+
                 yield f"data: {response_json}\n\n"
         yield "data: [DONE]\n\n"
 
