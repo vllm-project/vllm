@@ -61,6 +61,11 @@ from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+# check for layer_norm_eps in case of phi-1.5 and layer_norm_epsilon for phi-2
+layer_norm_eps = getattr(PretrainedConfig, "layer_norm_eps", None)
+if layer_norm_eps is None:
+    layer_norm_eps = PretrainedConfig.layer_norm_epsilon
+
 
 class PhiEmbedding(nn.Module):
 
@@ -183,7 +188,7 @@ class PhiLayer(nn.Module):
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.ln = nn.LayerNorm(config.hidden_size,
-                               eps=config.layer_norm_eps)
+                               eps=layer_norm_eps)
         self.mixer = PhiAttention(config, linear_method)
         self.mlp = PhiMLP(config, linear_method)
 
@@ -245,7 +250,7 @@ class PhiCausalLMHead(nn.Module):
     def __init__(self, config: PretrainedConfig):
         super().__init__()
         self.ln = nn.LayerNorm(config.hidden_size,
-                               eps=config.layer_norm_eps)
+                               eps=layer_norm_eps)
         self.linear = ParallelLMHead(config.vocab_size,
                                      config.hidden_size,
                                      bias=True)
