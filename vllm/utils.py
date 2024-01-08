@@ -36,23 +36,11 @@ def is_hip() -> bool:
 
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
-    # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
-    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97 if not is_hip() else 74
 
-    max_shared_mem = cuda_utils.get_device_attribute(
-        cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
-    if max_shared_mem == 0 and is_hip():
-        # got 0 sometimes when using 74 on certain ROCm versions on torch 2.0.1
-        print(
-            "ROCm get_max_shared_memory_bytes got 0, trying to use value 97 instead"
-        )
-        cudaDevAttrMaxSharedMemoryPerBlockOptin = 97
-        max_shared_mem = cuda_utils.get_device_attribute(
-            cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
+    max_shared_mem = cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu)
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
     return int(max_shared_mem)
-
 
 def get_cpu_memory() -> int:
     """Returns the total CPU memory of the node in bytes."""
