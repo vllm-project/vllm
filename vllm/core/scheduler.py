@@ -101,9 +101,8 @@ class Scheduler:
                         seq.block_size)
         self.waiting.append(seq_group)
 
-    def add_prefix_seq_groups(
-            self, 
-            seq_group_map: Dict[str, SequenceGroup]) -> None:
+    def add_prefix_seq_groups(self,
+                              seq_group_map: Dict[str, SequenceGroup]) -> None:
         self.prefix_cache.update(seq_group_map)
         for seq_group in seq_group_map.values():
             self.waiting.append(seq_group)
@@ -318,8 +317,8 @@ class Scheduler:
                 self._reuse_prefix_cache(
                     seq_group=seq_group,
                     block_table=block_tables[seq_id],
-                    blocks_to_copy=scheduler_outputs.blocks_to_copy if scheduler_outputs.prompt_run else None
-                )
+                    blocks_to_copy=scheduler_outputs.blocks_to_copy
+                    if scheduler_outputs.prompt_run else None)
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,

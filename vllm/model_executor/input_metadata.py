@@ -1,4 +1,4 @@
-from typing import Optional,List
+from typing import Optional, List
 
 import torch
 
@@ -13,6 +13,7 @@ class InputMetadata:
         context_lens: the length of attention context for each sequence.
         block_tables: The block tables. (Seq id -> list of physical block)
     """
+
     def __init__(
         self,
         is_prompt: bool,

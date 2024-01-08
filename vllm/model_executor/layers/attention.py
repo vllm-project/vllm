@@ -148,7 +148,6 @@ class PagedAttention(nn.Module):
                             self.alibi_slopes, self.num_kv_heads, batch_size,
                             seq_len, query.dtype)
 
-
             # TODO(woosuk): Too many view operations. Let's try to reduce them
             # in the future for code readability.
             if self.alibi_slopes is None:
@@ -321,19 +320,16 @@ def _concat_prefix_kvcache(
     max_prefix_prompt_len = max_prompt_seq_len + max(
         input_metadata.prefix_len_list)
     if len(set(input_metadata.prefix_len_list)) == 1:
-        total_key = torch.concat((prefix_key.view(batch_size,
-                                                  -1, num_kv_heads, head_size),
-                                  key.view(batch_size, -1,
-                                           num_kv_heads, head_size)),
-                                 dim=1).view(-1, num_kv_heads, head_size)
-        total_value = torch.concat((prefix_value.view(
-            batch_size, -1, num_kv_heads, head_size),
-                                    value.view(batch_size, -1,
-                                               num_kv_heads, head_size)),
-                                   dim=1).view(-1, num_kv_heads, head_size)
+        total_key = torch.concat(
+            (prefix_key.view(batch_size, -1, num_kv_heads, head_size),
+             key.view(batch_size, -1, num_kv_heads, head_size)),
+            dim=1).view(-1, num_kv_heads, head_size)
+        total_value = torch.concat(
+            (prefix_value.view(batch_size, -1, num_kv_heads, head_size),
+             value.view(batch_size, -1, num_kv_heads, head_size)),
+            dim=1).view(-1, num_kv_heads, head_size)
     else:
-        total_key = torch.zeros(batch_size *
-                                max_prefix_prompt_len,
+        total_key = torch.zeros(batch_size * max_prefix_prompt_len,
                                 num_kv_heads,
                                 head_size,
                                 dtype=key.dtype,
@@ -350,13 +346,14 @@ def _concat_prefix_kvcache(
                                                    prefix_len]
             total_index += prefix_len
             total_key[total_index:total_index +
-                      max_prompt_seq_len] = key[
-                          i * max_prompt_seq_len:(i + 1) *
-                          max_prompt_seq_len]
+                      max_prompt_seq_len] = key[i *
+                                                max_prompt_seq_len:(i + 1) *
+                                                max_prompt_seq_len]
             total_value[total_index:total_index +
-                        max_prompt_seq_len] = value[
-                            i * max_prompt_seq_len:(i + 1) *
-                            max_prompt_seq_len]
+                        max_prompt_seq_len] = value[i *
+                                                    max_prompt_seq_len:(i +
+                                                                        1) *
+                                                    max_prompt_seq_len]
             total_index += max_prefix_prompt_len - prefix_len
             prefix_index += prefix_len
     return total_key, total_value

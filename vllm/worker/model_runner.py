@@ -101,7 +101,8 @@ class ModelRunner:
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.append(list(range(prefix_len, prompt_len + prefix_len)))
+            input_positions.append(
+                list(range(prefix_len, prompt_len + prefix_len)))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
