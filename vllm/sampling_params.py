@@ -53,6 +53,11 @@ class SamplingParams:
             to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
         top_k: Integer that controls the number of top tokens to consider. Set
             to -1 to consider all tokens.
+        tail_free: The Tail-Free sampling algorithm is a sampling
+            technique that helps to improve the quality of text generation by
+            reducing the probability of generating rare or improbable tokens.
+            (https://www.trentonbricken.com/Tail-Free-Sampling/)
+            Must be in (0, 1]. 1.0 to disable Tail-Free.
         min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
@@ -100,7 +105,7 @@ class SamplingParams:
             temperature: float = 1.0,
             top_p: float = 1.0,
             top_k: int = -1,
-            tail_free: int = 1.0,
+            tail_free: float = 1.0,
             min_p: float = 0.0,
             use_beam_search: bool = False,
             length_penalty: float = 1.0,
