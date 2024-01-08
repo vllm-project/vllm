@@ -2,7 +2,7 @@
 #include <torch/extension.h>
 
 #include "dispatch_utils.h"
-#include "utils.cuh"
+#include "quant_utils.cuh"
 #include "reduction_utils.cuh"
 #include <cassert>
 
