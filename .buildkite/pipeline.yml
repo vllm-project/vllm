@@ -5,9 +5,8 @@ steps:
       - "docker push us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
     env:
       DOCKER_BUILDKIT: "1"
+  - wait
   - label: "Regresssion Test"
-    depends_on:
-      - ":docker: build image"
     agents:
       queue: kubernetes
     plugins:
