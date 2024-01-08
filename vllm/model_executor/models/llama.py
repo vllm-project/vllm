@@ -200,7 +200,10 @@ class LlamaAttention(nn.Module):
         k_cache, v_cache = kv_cache
         scale = None
         if self.use_int8:
-            q, k, v = self.rotary_emb(positions, q, k, v, self.attn.dequant_scale.item())
+            q, k, v = self.rotary_emb(positions, q, k, v,
+                                      self.attn.q_dequant_scale.item(),
+                                      self.attn.k_dequant_scale.item(),
+                                      self.attn.v_dequant_scale.item())
             attn_output, *scale = self.attn(q, k, v, k_cache,
                                             v_cache, input_metadata,
                                             cache_event)
@@ -299,7 +302,7 @@ class LlamaDecoderLayer(nn.Module):
                 hidden_states, residual = self.post_attention_layernorm(
                     hidden_states, residual, scale)
                 hidden_states, scale = self.mlp(hidden_states)
-                hidden_states = self.dequant_add_residual(residual, hidden_states, scale)
+                hidden_states, residual = self.dequant_add_residual(hidden_states, residual, scale)
         else:
             # Fully Connected
             hidden_states, residual = self.post_attention_layernorm(
@@ -414,13 +417,13 @@ class LlamaForCausalLM(nn.Module):
             int8_fusion = True
             # This is smoothquant param name map, you may need to modify it according to your situation when using smoothquant
             _int8_scale_params = {
-                "self_attn.q_proj.dequant_scale": "self_attn.attn.dequant_scale",
-                "self_attn.k_proj.dequant_scale": "self_attn.attn.dequant_scale",
-                "self_attn.v_proj.dequant_scale": "self_attn.attn.dequant_scale",
+                "self_attn.q_proj.dequant_scale": "self_attn.attn.q_dequant_scale",
+                "self_attn.k_proj.dequant_scale": "self_attn.attn.k_dequant_scale",
+                "self_attn.v_proj.dequant_scale": "self_attn.attn.v_dequant_scale",
                 "self_attn.o_proj.dequant_scale":
                 "post_attention_layernorm.dequant_scale",
-                "mlp.gate_proj.dequant_scale": "mlp.act_fn.dequant_scale",
-                "mlp.up_proj.dequant_scale": "mlp.act_fn.dequant_scale",
+                "mlp.gate_proj.dequant_scale": "mlp.act_fn.gate_dequant_scale",
+                "mlp.up_proj.dequant_scale": "mlp.act_fn.up_dequant_scale",
                 "mlp.down_proj.dequant_scale": "dequant_add_residual.dequant_scale"
             }
             tp_size = get_tensor_model_parallel_world_size()

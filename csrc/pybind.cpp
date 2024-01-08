@@ -114,6 +114,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     torch::Tensor&,
     torch::Tensor&,
     torch::Tensor&,
+    float,
     float>(&dequant_add_residual_rms_norm_quant),
     "Add the dequanted result and residual, then use RMS norm and quant output.");
   ops.def(
@@ -142,7 +143,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     torch::Tensor&,
     torch::Tensor&,
     torch::Tensor&,
-    torch::Tensor&>(&dequant_add_residual),
+    torch::Tensor&,
+    float>(&dequant_add_residual),
     "Add the per-token dequanted result and residual.");
   ops.def(
     "dequant",
@@ -156,7 +158,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::overload_cast<
     torch::Tensor&,
     torch::Tensor&,
-    torch::Tensor&>(&dequant),
+    torch::Tensor&,
+    float>(&dequant),
     "Per-token dequant.");
   ops.def(
     "quant",

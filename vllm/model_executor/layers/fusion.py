@@ -38,4 +38,4 @@ class DequantAddResidual(nn.Module):
         else:
             ops.dequant_add_residual(
                 out, x, residual, self.dequant_scale.item())
-        return out
+        return out, None

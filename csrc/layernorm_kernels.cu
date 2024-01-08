@@ -78,7 +78,7 @@ __global__ void dequant_add_residual_rms_norm_quant_kernel(
 
   for (int i = tid; i < hidden_size; i += blockDim.x) {
     float x = (float) residual[blockIdx.x * hidden_size + i];
-    output[blockIdx.x * hidden_size + i] = float_to_int8_rn(
+    out[blockIdx.x * hidden_size + i] = float_to_int8_rn(
         x * s_variance * (float)(gamma[i]));
   }
 }
