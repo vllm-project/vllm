@@ -6,6 +6,8 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
   - label: "Regresssion Test"
+    depends_on:
+      - ":docker: build image"
     agents:
       queue: kubernetes
     plugins:
