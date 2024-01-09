@@ -50,7 +50,8 @@ COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY tests tests
 COPY vllm vllm
 
-ENTRYPOINT ["python3", "-m", "pytest", "tests"]
+# avoid /workspace due to testing system overrides
+RUN mv /workspace /vllm-workspace
 
 # use CUDA base as CUDA runtime dependencies are already installed via pip
 FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
