@@ -68,12 +68,12 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
-  * - :code:`YiForCausalLM`
-    - Yi
-    - :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
   * - :code:`StableLMEpochForCausalLM`
     - StableLM
     - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.
+  * - :code:`YiForCausalLM`
+    - Yi
+    - :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
