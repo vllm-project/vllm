@@ -51,7 +51,7 @@ COPY tests tests
 COPY vllm vllm
 
 # avoid /workspace due to testing system overrides
-RUN mv /workspace /vllm-workspace
+RUN mv /workspace /vllm-workspace && cd /vllm-workspace && python3 setup.py build_ext --inplace
 
 # use CUDA base as CUDA runtime dependencies are already installed via pip
 FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
