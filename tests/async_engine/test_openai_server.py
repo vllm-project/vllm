@@ -1,5 +1,6 @@
 from argparse import Namespace
 from dataclasses import dataclass
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -54,7 +55,8 @@ class MockTokenizer:
 
 def test_load_chat_template():
     # Testing chatml template
-    template = "../../examples/template_chatml.jinja"
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+    template = os.path.join(this_dir, "../../examples/template_chatml.jinja")
     mock_args = Namespace(chat_template=template)
     tokenizer = MockTokenizer()
 
