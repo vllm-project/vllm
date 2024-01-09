@@ -58,7 +58,7 @@ FROM dev AS test
 # when python code changes
 WORKDIR /vllm-workspace
 RUN pwd
-COPY . /vllm-workspace/
+ADD . /vllm-workspace/
 RUN ls
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
 RUN ls
