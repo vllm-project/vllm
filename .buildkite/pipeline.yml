@@ -17,4 +17,4 @@ steps:
                 command: ["bash"]
                 args:
                 - "-c"
-                - "cd /vllm-workspace/vllm/tests && ls"
+                - "'cd /vllm-workspace/vllm/tests && ls'"
