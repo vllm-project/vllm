@@ -1,3 +1,7 @@
+# The vLLM Dockerfile is used to construct vLLM image that can be directly used
+# to run the OpenAI compatible server.
+
+#################### BASE BUILD IMAGE ####################
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
@@ -14,8 +18,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-dev.txt
+#################### BASE BUILD IMAGE ####################
 
-# image to build pytorch extensions
+
+#################### EXTENSION BUILD IMAGE ####################
 FROM dev AS build
 
 # install build dependencies
@@ -30,6 +36,7 @@ COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
 
+# cuda arch list used by torch
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # max jobs used by Ninja to build extensions
@@ -40,17 +47,25 @@ ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
 RUN python3 setup.py build_ext --inplace
+#################### EXTENSION Build IMAGE ####################
 
+
+#################### TEST IMAGE ####################
 # image to run unit testing suite
 FROM dev AS test
 
 # copy pytorch extensions separately to avoid having to rebuild
 # when python code changes
 WORKDIR /vllm-workspace
-COPY tests tests
-COPY vllm vllm
+COPY * /vllm-workspace/
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
 
+ENV VLLM_USE_PRECOMPILED=1
+RUN pip install /vllm-workspace --verbose
+#################### TEST IMAGE ####################
+
+
+#################### RUNTIME BASE IMAGE ####################
 # use CUDA base as CUDA runtime dependencies are already installed via pip
 FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
 
@@ -62,14 +77,10 @@ WORKDIR /workspace
 COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
+#################### RUNTIME BASE IMAGE ####################
 
-FROM vllm-base AS vllm
-COPY --from=build /workspace/vllm/*.so /workspace/vllm/
-COPY vllm vllm
 
-EXPOSE 8000
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
-
+#################### OPENAI API SERVER ####################
 # openai api server alternative
 FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
@@ -80,3 +91,4 @@ COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+#################### OPENAI API SERVER ####################
