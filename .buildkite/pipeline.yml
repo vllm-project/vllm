@@ -15,8 +15,7 @@ steps:
             containers:
               - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT
                 workingDir: /workspace/vllm/tests
-                command: ["pytest"]
+                command: ["bash"]
                 args:
-                - "-v"
-                - "-s"
-                - "test_regression.py"
+                - "-c"
+                - "pytest -v -s test_regression.py"
