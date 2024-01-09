@@ -59,7 +59,8 @@ class OPTAttention(nn.Module):
         self.out_proj = RowParallelLinear(embed_dim, embed_dim, bias=bias,
                                           input_is_parallel=True,
                                           perform_initialization=False)
-        self.attn = OPTCacheFlowAttention(scale=self.scaling)
+        self.attn = OPTCacheFlowAttention(
+            self.scaling, self.num_heads, self.head_dim)
 
     def forward(
         self,
@@ -72,7 +73,7 @@ class OPTAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(
-            q, k, v, key_cache, value_cache, input_metadata, cache_event)
+            q, k, v, key_cache, value_cache, qkv, input_metadata, cache_event)
         output, _ = self.out_proj(attn_output)
         return output
 

@@ -1,12 +1,12 @@
 import argparse
 from typing import List
-
+import os
 from cacheflow.master.simple_frontend import SimpleFrontend
 from cacheflow.master.server import (Server, add_server_arguments,
                                      initialize_ray_cluster)
 from cacheflow.sampling_params import SamplingParams
 from cacheflow.utils import get_gpu_memory, get_cpu_memory
-
+os.environ["NCCL_IGNORE_DISABLED_P2P"] = "1"
 def main(args: argparse.Namespace):
     # TODO(zhuohan): Support pipeline parallelism.
     assert args.pipeline_parallel_size == 1, (

@@ -59,7 +59,7 @@ def _prune_hidden_states(
 ) -> torch.Tensor:
     start_idx = 0
     last_token_indicies: List[int] = []
-    for prompt_len in input_metadata.prompt_lens:
+    for prompt_len in input_metadata.prompt_lens + input_metadata.query_lens:
         last_token_indicies.append(start_idx + prompt_len - 1)
         start_idx += prompt_len
     last_token_indicies.extend(
@@ -81,7 +81,7 @@ def _get_temperatures(
             # Set the temperature to 1 to avoid division by zero.
             temperature = 1.0
 
-        if i < input_metadata.num_prompts:
+        if i < input_metadata.num_prompts + input_metadata.num_query_tokens:
             # A prompt input.
             temperatures.append(temperature)
         else:
@@ -96,7 +96,7 @@ def _get_top_ps(
     top_ps: List[float] = []
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
-        if i < input_metadata.num_prompts:
+        if i < input_metadata.num_prompts + input_metadata.num_query_tokens:
             # A prompt input.
             top_ps.append(sampling_params.top_p)
         else:
@@ -234,7 +234,7 @@ def _sample(
     idx = 0
     for i, seq_group in enumerate(input_metadata.seq_groups):
         seq_ids, sampling_params = seq_group
-        if i < input_metadata.num_prompts:
+        if i < input_metadata.num_prompts + input_metadata.num_query_tokens:
             # Generate the next tokens for a prompt input.
             assert len(seq_ids) == sampling_params.n
             prob = probs[idx]

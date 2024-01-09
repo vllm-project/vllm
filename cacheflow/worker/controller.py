@@ -45,7 +45,7 @@ class Controller:
         for rank, node_resource, device_id in stage_devices:
             worker_cls = ray.remote(num_cpus=0,
                                     num_gpus=1,
-                                    resources={node_resource: 1e-5})(Worker)
+                                    resources={node_resource: 1e-3})(Worker)
             worker = worker_cls.remote(
                 model_name=model_name,
                 block_size=block_size,

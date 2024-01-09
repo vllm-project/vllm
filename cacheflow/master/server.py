@@ -97,6 +97,12 @@ class Server:
     ):
         self.scheduler.add_sequence_groups(sequence_groups)
 
+    def register_prefix(
+        self,
+        sequence_group: SequenceGroup,
+    ) -> None:
+        self.scheduler.register_prefix(sequence_group)
+
     def step(self):
         return self.scheduler.step()
 
@@ -173,7 +179,7 @@ def initialize_ray_cluster(
 
 def add_server_arguments(parser: argparse.ArgumentParser):
     # Model arguments
-    parser.add_argument('--model', type=str, default='facebook/opt-125m', help='model name')
+    parser.add_argument('--model', type=str, default='/mnt/data1/pzx/model/llama2-7b', help='model name')
     parser.add_argument('--model-path', type=str, default='~/.cacheflow/model_weights',
                         help='model path to download and load the weights')
     # Parallel arguments
