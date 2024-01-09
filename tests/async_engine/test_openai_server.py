@@ -8,13 +8,17 @@ from fastapi.testclient import TestClient
 
 from vllm.entrypoints.openai.api_server import *
 
+chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(__file__))).parent.parent / "examples/template_chatml.jinja"
+assert chatml_jinja_path.exists()
+
+
 # Define models, templates, and their corresponding expected outputs
 MODEL_TEMPLATE_GENERATON_OUTPUT = [
     ("facebook/opt-125m", None, True,
      "Hello</s>Hi there!</s>What is the capital of</s>"),
     ("facebook/opt-125m", None, False,
      "Hello</s>Hi there!</s>What is the capital of</s>"),
-    ("facebook/opt-125m", "../../examples/template_chatml.jinja", True,
+    ("facebook/opt-125m", chatml_jinja_path, True,
      """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
@@ -23,7 +27,7 @@ Hi there!<|im_end|>
 What is the capital of<|im_end|>
 <|im_start|>assistant
 """),
-    ("facebook/opt-125m", "../../examples/template_chatml.jinja", False,
+    ("facebook/opt-125m", chatml_jinja_path, False,
      """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
@@ -56,10 +60,7 @@ class MockTokenizer:
 
 def test_load_chat_template():
     # Testing chatml template
-    this_dir = pathlib.Path(os.path.dirname(os.path.abspath(__file__)))
-    template = this_dir.parent.parent / "examples/template_chatml.jinja"
-    assert template.exists()
-    mock_args = Namespace(chat_template=template)
+    mock_args = Namespace(chat_template=chatml_jinja_path)
     tokenizer = MockTokenizer()
 
     # Call the function with the mocked args
