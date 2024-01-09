@@ -46,11 +46,10 @@ FROM dev AS test
 
 # copy pytorch extensions separately to avoid having to rebuild
 # when python code changes
-COPY --from=build /workspace/vllm/*.so /workspace/vllm/
-COPY * /workspace/
-
-# avoid /workspace due to testing system overrides
-RUN pip3 install .
+WORKDIR /test-workspace
+COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
+COPY tests tests
+COPY vllm vllm
 
 # use CUDA base as CUDA runtime dependencies are already installed via pip
 FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
