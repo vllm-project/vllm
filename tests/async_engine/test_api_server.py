@@ -50,12 +50,15 @@ def test_api_server(api_server):
         # Wait until the server is ready
         prompts = ["warm up"] * 1
         result = None
+        max_tries = 10
         while not result:
             try:
                 for r in pool.map(_query_server, prompts):
                     result = r
                     break
-            except requests.exceptions.ConnectionError:
+            except requests.exceptions.ConnectionError as err:
+                if max_tries == 0:
+                    raise RuntimeError("Server did not start") from err
                 time.sleep(1)
 
         # Actual tests start here
