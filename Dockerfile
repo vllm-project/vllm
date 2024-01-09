@@ -60,8 +60,7 @@ WORKDIR /vllm-workspace
 COPY * /vllm-workspace/
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
 
-ENV VLLM_USE_PRECOMPILED=1
-RUN pip install /vllm-workspace --verbose
+RUN VLLM_USE_PRECOMPILED=1 pip install /vllm-workspace --verbose
 #################### TEST IMAGE ####################
 
 
