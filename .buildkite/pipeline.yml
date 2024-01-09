@@ -14,8 +14,9 @@ steps:
           podSpec:
             containers:
               - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT
+                workingDir: /workspace/vllm/tests
                 command: ["pytest"]
                 args:
                 - "-v"
                 - "-s"
-                - "tests/test_regression.py"
+                - "test_regression.py"
