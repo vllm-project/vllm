@@ -19,11 +19,12 @@ steps:
 - label: Models Test
   command: pytest -v -s models
 
-- label: Prompts Test
-  command: pytest -v -s prompts
-
 - label: Samplers Test
   command: pytest -v -s samplers
 
 - label: Worker Test
   command: pytest -v -s worker
+
+- label: Benchmarks
+  working_dir: "/vllm-workspace/.buildkite"
+  command: bash run-benchmarks.sh
