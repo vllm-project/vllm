@@ -15,6 +15,7 @@ SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
 QUERY_SCALE = [0.02, 0.08]
 KEY_SCALE = [0.02, 0.08]
+DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -25,6 +26,7 @@ KEY_SCALE = [0.02, 0.08]
 @pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_rotary_embedding(
     is_neox_style: bool,
@@ -35,6 +37,7 @@ def test_rotary_embedding(
     rotary_dim: Optional[int],
     dtype: torch.dtype,
     seed: int,
+    device: int,
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
@@ -42,20 +45,20 @@ def test_rotary_embedding(
         rotary_dim = head_size
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-
+    gpu_id = f"cuda:{device}"
     if rotary_dim is None:
         rotary_dim = head_size
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style)
-    rope = rope.to(dtype).cuda()
+    rope = rope.to(dtype=dtype, device=gpu_id)
 
     positions = torch.randint(0,
                               max_position, (batch_size, seq_len),
-                              device="cuda")
+                              device=gpu_id)
     query = torch.randn(batch_size,
                         seq_len,
                         num_heads * head_size,
                         dtype=dtype,
-                        device="cuda")
+                        device=gpu_id)
     key = torch.randn_like(query)
 
     # NOTE(woosuk): The reference implementation should be executed first

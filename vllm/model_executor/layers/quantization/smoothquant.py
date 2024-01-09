@@ -91,11 +91,14 @@ class SQLinearMethod(LinearMethodBase):
         i8_gemm = gemm()
         self.i8cugemm = i8_gemm.get_i8cugemm()
 
-    def create_weights(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> Dict[str, Tensor]:
+    def create_weights(self, input_size_per_partition: int,
+                       output_size_per_partition: int, input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype) -> Dict[str, Tensor]:
         weight = Parameter(
             torch.empty(
-                output_size,
-                input_size,
+                output_size_per_partition,
+                input_size_per_partition,
                 device="cuda",
                 dtype=torch.int8,
             ),

@@ -192,10 +192,8 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        # FIXME: currently qkv share same scale, plan to use seperate scales
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
         scale = None
@@ -205,14 +203,13 @@ class LlamaAttention(nn.Module):
                                       self.attn.k_dequant_scale.item(),
                                       self.attn.v_dequant_scale.item())
             attn_output, *scale = self.attn(q, k, v, k_cache,
-                                            v_cache, input_metadata,
-                                            cache_event)
+                                            v_cache, input_metadata)
             scale = scale[0] if scale is not None else None
             output, _ = self.o_proj(attn_output, scale)
         else:
             q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v, k_cache, v_cache,
-                                    input_metadata, cache_event)
+                                    input_metadata)
             output, _ = self.o_proj(attn_output)
         return output, scale
 
@@ -276,7 +273,6 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -291,7 +287,6 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
         if self.use_int8:
             if self.tp_size > 1:
@@ -343,19 +338,16 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for i in range(len(self.layers)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
-                cache_event,
                 residual,
             )
         if residual is not None:
@@ -390,17 +382,16 @@ class LlamaForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata, cache_events)
+                                   input_metadata)
         return hidden_states
 
     def sample(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
+    ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    sampling_metadata)
         return next_tokens
@@ -444,10 +435,14 @@ class LlamaForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
+                continue
             # bias is useless for llama
             if "bias" in name:
                 continue
-
             if int8_fusion:
                 is_fusion_weight = False
                 for weight_name, _ in _int8_scale_params.items():
@@ -459,15 +454,21 @@ class LlamaForCausalLM(nn.Module):
                     is_fusion_weight = True
                 if is_fusion_weight:
                     continue
-
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                param = params_dict[name.replace(weight_name, param_name)]
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

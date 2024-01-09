@@ -85,7 +85,7 @@ class DequantAddResidualI8RMSNormQuant(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
         self.dequant_scale = Parameter(
-            torch.tensor(dequant_scale, dtype=torch.float32),
+            torch.tensor(dequant_scale, dtype=torch.float32, device='cpu'),
             False
         )
         self.use_per_token_dequant = use_per_token_dequant

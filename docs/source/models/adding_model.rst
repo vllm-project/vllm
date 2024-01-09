@@ -26,7 +26,7 @@ This gives you the ability to modify the codebase and test your model.
 ------------------------
 
 Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the `vllm/model_executor/models <https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models>`_ directory.
-For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/opt.py>`_ was adpated from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
+For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/opt.py>`_ was adapted from the HuggingFace's `modeling_opt.py <https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py>`_ file.
 
 .. warning::
     When copying the model code, make sure to review and adhere to the code's copyright and licensing terms.
@@ -58,11 +58,10 @@ Next, you need to rewrite the :code:`forward` methods of your model by following
     +    positions: torch.Tensor,
     +    kv_caches: List[KVCache],
     +    input_metadata: InputMetadata,
-    +    cache_events: Optional[List[torch.cuda.Event]],
-    +) -> SamplerOutput:
+    +) -> Optional[SamplerOutput]:
 
-3. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
-4. Replace the attention operation with either :code:`PagedAttention`, :code:`PagedAttentionWithRoPE`, or :code:`PagedAttentionWithALiBi` depending on the model's architecture.
+1. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
+2. Replace the attention operation with either :code:`PagedAttention`, :code:`PagedAttentionWithRoPE`, or :code:`PagedAttentionWithALiBi` depending on the model's architecture.
 
 .. note::
     Currently, vLLM supports the basic multi-head attention mechanism and its variant with rotary positional embeddings.

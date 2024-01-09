@@ -56,15 +56,15 @@ class DequantSiluAndMulQuant(nn.Module):
                  use_per_token_quant: bool = True) -> None:
         super().__init__()
         self.gate_dequant_scale = Parameter(
-            torch.tensor(gate_dequant_scale, dtype=torch.float32),
+            torch.tensor(gate_dequant_scale, dtype=torch.float32, device='cpu'),
             False
         )
         self.up_dequant_scale = Parameter(
-            torch.tensor(up_dequant_scale, dtype=torch.float32),
+            torch.tensor(up_dequant_scale, dtype=torch.float32, device='cpu'),
             False
         )
         self.quant_scale = Parameter(
-            torch.tensor(quant_scale, dtype=torch.float32),
+            torch.tensor(quant_scale, dtype=torch.float32, device='cpu'),
             False
         )
         self.use_per_token_quant = use_per_token_quant

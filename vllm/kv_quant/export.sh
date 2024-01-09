@@ -1,0 +1,1 @@
+python3 export_kv_params.py ./work_dir ./kv_quant_weights

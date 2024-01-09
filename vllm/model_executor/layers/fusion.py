@@ -12,7 +12,7 @@ class DequantAddResidual(nn.Module):
                  use_per_token_dequant: bool = True) -> None:
         super().__init__()
         self.dequant_scale = Parameter(
-            torch.tensor(dequant_scale, dtype=torch.float32),
+            torch.tensor(dequant_scale, dtype=torch.float32, device='cpu'),
             False
         )
         self.use_per_token_dequant = use_per_token_dequant

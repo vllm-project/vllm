@@ -1,6 +1,8 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 
+#include "cuda_compat.h"
 #include "dispatch_utils.h"
 
 namespace vllm {
@@ -19,14 +21,14 @@ inline __device__ void apply_rotary_embedding(
     // GPT-NeoX style rotary embedding.
     x_index = rot_offset;
     y_index = embed_dim + rot_offset;
-    cos = __ldg(cos_ptr + x_index);
-    sin = __ldg(sin_ptr + x_index);
+    cos = VLLM_LDG(cos_ptr + x_index);
+    sin = VLLM_LDG(sin_ptr + x_index);
   } else {
     // GPT-J style rotary embedding.
     x_index = 2 * rot_offset;
     y_index = 2 * rot_offset + 1;
-    cos = __ldg(cos_ptr + x_index / 2);
-    sin = __ldg(sin_ptr + x_index / 2);
+    cos = VLLM_LDG(cos_ptr + x_index / 2);
+    sin = VLLM_LDG(sin_ptr + x_index / 2);
   }
   if constexpr (use_dequant) {
     const scalar_t x = (scalar_t)((float)arr[x_index] * scale);
@@ -48,8 +50,8 @@ __global__ void rotary_embedding_kernel(
   input_type* __restrict__ key,
   const scalar_t* __restrict__ cos_sin_cache,
   const int rot_dim,
-  const int query_stride,
-  const int key_stride,
+  const int64_t query_stride,
+  const int64_t key_stride,
   const int num_heads,
   const int num_kv_heads,
   const int head_size,
@@ -71,7 +73,7 @@ __global__ void rotary_embedding_kernel(
   const int nq = num_heads * embed_dim;
   for (int i = threadIdx.x; i < nq; i += blockDim.x) {
     const int head_idx = i / embed_dim;
-    const int token_head = token_idx * query_stride + head_idx * head_size;
+    const int64_t token_head = token_idx * query_stride + head_idx * head_size;
     const int rot_offset = i % embed_dim;
     if constexpr (use_dequant) {
       const int token_out_head =
@@ -88,7 +90,7 @@ __global__ void rotary_embedding_kernel(
   const int nk = num_kv_heads * embed_dim;
   for (int i = threadIdx.x; i < nk; i += blockDim.x) {
     const int head_idx = i / embed_dim;
-    const int token_head = token_idx * key_stride + head_idx * head_size;
+    const int64_t token_head = token_idx * key_stride + head_idx * head_size;
     const int rot_offset = i % embed_dim;
     if constexpr (use_dequant) {
       const int token_out_head =
@@ -120,11 +122,12 @@ void rotary_embedding(
   int rot_dim = cos_sin_cache.size(1);
   int num_heads = query.size(-1) / head_size;
   int num_kv_heads = key.size(-1) / head_size;
-  int query_stride = query.stride(-2);
-  int key_stride = key.stride(-2);
+  int64_t query_stride = query.stride(-2);
+  int64_t key_stride = key.stride(-2);
 
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * rot_dim / 2, 512));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       cos_sin_cache.scalar_type(), "rotary_embedding_kernel", [&] {

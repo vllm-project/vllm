@@ -15,15 +15,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include "../quant_utils.cuh"
+#include <c10/cuda/CUDAGuard.h>
+
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
 
 #include <algorithm>
 
+#ifndef USE_ROCM
 #define WARP_SIZE 32
+#else
+#define WARP_SIZE warpSize
+#endif
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
@@ -40,7 +50,7 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   // Compute the sum per warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
-    sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
+    sum += VLLM_SHFL_XOR_SYNC(sum, mask);
   }
 
   // Warp leaders store the data to shared memory.
@@ -59,11 +69,11 @@ inline __device__ float block_sum(float* red_smem, float sum) {
   // Parallel reduction inside the warp.
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-    sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
+    sum += VLLM_SHFL_XOR_SYNC(sum, mask);
   }
 
   // Broadcast to other threads.
-  return __shfl_sync(uint32_t(-1), sum, 0);
+  return VLLM_SHFL_SYNC(sum, 0);
 }
 
 // TODO(woosuk): Merge the last two dimensions of the grid.
@@ -83,7 +93,7 @@ __device__ void paged_attention_kernel(
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
   const cache_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
   const cache_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
-  const int* __restrict__ head_mapping,   // [num_heads]
+  const int num_kv_heads,                 // [num_heads]
   const float scale,
   const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
   const int* __restrict__ context_lens,   // [num_seqs]
@@ -130,7 +140,8 @@ __device__ void paged_attention_kernel(
 
   const int head_idx = blockIdx.x;
   const int num_heads = gridDim.x;
-  const int kv_head_idx = head_mapping[head_idx];
+  const int num_queries_per_kv = num_heads / num_kv_heads;
+  const int kv_head_idx = head_idx / num_queries_per_kv;
   const float alibi_slope = alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
 
   // A vector type to store a part of a key or a query.
@@ -237,7 +248,7 @@ __device__ void paged_attention_kernel(
   // The 0-th thread of each thread group already has its max qk value.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
-    qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
+    qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
   }
   if (lane == 0) {
     red_smem[warp_idx] = qk_max;
@@ -249,10 +260,10 @@ __device__ void paged_attention_kernel(
   qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-    qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
+    qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
   }
   // Broadcast the max qk value to all threads.
-  qk_max = __shfl_sync(uint32_t(-1), qk_max, 0);
+  qk_max = VLLM_SHFL_SYNC(qk_max, 0);
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -350,7 +361,7 @@ __device__ void paged_attention_kernel(
     float acc = accs[i];
 #pragma unroll
     for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
-      acc += __shfl_xor_sync(uint32_t(-1), acc, mask);
+      acc += VLLM_SHFL_XOR_SYNC(acc, mask);
     }
     accs[i] = acc;
   }
@@ -419,7 +430,7 @@ __global__ void paged_attention_v1_kernel(
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
   const cache_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
   const cache_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
-  const int* __restrict__ head_mapping,   // [num_heads]
+  const int num_kv_heads,                 // [num_heads]
   const float scale,
   const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
   const int* __restrict__ context_lens,   // [num_seqs]
@@ -434,7 +445,7 @@ __global__ void paged_attention_v1_kernel(
   const float v_zp) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT>(
     /* exp_sums */ nullptr, /* max_logits */ nullptr,
-    out, q, k_cache, v_cache, head_mapping, scale, block_tables, context_lens,
+    out, q, k_cache, v_cache, num_kv_heads, scale, block_tables, context_lens,
     max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride, k_scale, k_zp, v_scale, v_zp);
 }
 
@@ -454,7 +465,7 @@ __global__ void paged_attention_v2_kernel(
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
   const cache_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
   const cache_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
-  const int* __restrict__ head_mapping,   // [num_heads]
+  const int num_kv_heads,                 // [num_heads]
   const float scale,
   const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
   const int* __restrict__ context_lens,   // [num_seqs]
@@ -468,7 +479,7 @@ __global__ void paged_attention_v2_kernel(
   const float v_scale,
   const float v_zp) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT, PARTITION_SIZE>(
-    exp_sums, max_logits, tmp_out, q, k_cache, v_cache, head_mapping, scale,
+    exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
     block_tables, context_lens, max_num_blocks_per_seq, alibi_slopes,
     q_stride, kv_block_stride, kv_head_stride, k_scale, k_zp, v_scale, v_zp);
 }
@@ -528,7 +539,7 @@ __global__ void paged_attention_v2_reduce_kernel(
   // Reduce within the warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
-    max_logit = fmaxf(max_logit, __shfl_xor_sync(uint32_t(-1), max_logit, mask));
+    max_logit = fmaxf(max_logit, VLLM_SHFL_XOR_SYNC(max_logit, mask));
   }
   if (lane == 0) {
     red_smem[warp_idx] = max_logit;
@@ -538,10 +549,10 @@ __global__ void paged_attention_v2_reduce_kernel(
   max_logit = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-    max_logit = fmaxf(max_logit, __shfl_xor_sync(uint32_t(-1), max_logit, mask));
+    max_logit = fmaxf(max_logit, VLLM_SHFL_XOR_SYNC(max_logit, mask));
   }
   // Broadcast the max value to all threads.
-  max_logit = __shfl_sync(uint32_t(-1), max_logit, 0);
+  max_logit = VLLM_SHFL_SYNC(max_logit, 0);
 
   // Load rescaled exp sums to shared memory.
   float* shared_exp_sums = reinterpret_cast<float*>(shared_mem + sizeof(float) * num_partitions);
@@ -574,16 +585,16 @@ __global__ void paged_attention_v2_reduce_kernel(
 } // namespace vllm
 
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                                  \
-  cudaFuncSetAttribute(                                                                       \
-    vllm::paged_attention_v1_kernel<T, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT>,                   \
-    cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                            \
+  VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                                       \
+    ((void*)vllm::paged_attention_v1_kernel<T, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT>),          \
+    shared_mem_size);                                                                         \
   vllm::paged_attention_v1_kernel<T, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, ENABLE_QUANT>                      \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     out_ptr,                                                                                  \
     query_ptr,                                                                                \
     key_cache_ptr,                                                                            \
     value_cache_ptr,                                                                          \
-    head_mapping_ptr,                                                                         \
+    num_kv_heads,                                                                             \
     scale,                                                                                    \
     block_tables_ptr,                                                                         \
     context_lens_ptr,                                                                         \
@@ -609,7 +620,7 @@ void paged_attention_v1_launcher(
   torch::Tensor& query,
   torch::Tensor& key_cache,
   torch::Tensor& value_cache,
-  torch::Tensor& head_mapping,
+  int num_kv_heads,
   float scale,
   torch::Tensor& block_tables,
   torch::Tensor& context_lens,
@@ -638,7 +649,6 @@ void paged_attention_v1_launcher(
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   cache_t* key_cache_ptr = reinterpret_cast<cache_t*>(key_cache.data_ptr());
   cache_t* value_cache_ptr = reinterpret_cast<cache_t*>(value_cache.data_ptr());
-  int* head_mapping_ptr = reinterpret_cast<int*>(head_mapping.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* context_lens_ptr = context_lens.data_ptr<int>();
 
@@ -652,6 +662,7 @@ void paged_attention_v1_launcher(
 
   dim3 grid(num_heads, num_seqs, 1);
   dim3 block(NUM_THREADS);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
@@ -688,7 +699,7 @@ void paged_attention_v1_launcher(
     query,                                                          \
     key_cache,                                                      \
     value_cache,                                                    \
-    head_mapping,                                                   \
+    num_kv_heads,                                                   \
     scale,                                                          \
     block_tables,                                                   \
     context_lens,                                                   \
@@ -722,7 +733,7 @@ void paged_attention_v1(
   torch::Tensor& query,           // [num_seqs, num_heads, head_size]
   torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
   torch::Tensor& value_cache,     // [num_blocks, num_heads, head_size, block_size]
-  torch::Tensor& head_mapping,    // [num_heads]
+  int num_kv_heads,               // [num_heads]
   float scale,
   torch::Tensor& block_tables,    // [num_seqs, max_num_blocks_per_seq]
   torch::Tensor& context_lens,    // [num_seqs]
@@ -766,7 +777,7 @@ void paged_attention_v1(
     query_ptr,                                                                                \
     key_cache_ptr,                                                                            \
     value_cache_ptr,                                                                          \
-    head_mapping_ptr,                                                                         \
+    num_kv_heads,                                                                             \
     scale,                                                                                    \
     block_tables_ptr,                                                                         \
     context_lens_ptr,                                                                         \
@@ -803,7 +814,7 @@ void paged_attention_v2_launcher(
   torch::Tensor& query,
   torch::Tensor& key_cache,
   torch::Tensor& value_cache,
-  torch::Tensor& head_mapping,
+  int num_kv_heads,
   float scale,
   torch::Tensor& block_tables,
   torch::Tensor& context_lens,
@@ -836,7 +847,6 @@ void paged_attention_v2_launcher(
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   cache_t* key_cache_ptr = reinterpret_cast<cache_t*>(key_cache.data_ptr());
   cache_t* value_cache_ptr = reinterpret_cast<cache_t*>(value_cache.data_ptr());
-  int* head_mapping_ptr = reinterpret_cast<int*>(head_mapping.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* context_lens_ptr = context_lens.data_ptr<int>();
 
@@ -853,6 +863,7 @@ void paged_attention_v2_launcher(
   int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
 
   dim3 block(NUM_THREADS);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
@@ -891,7 +902,7 @@ void paged_attention_v2_launcher(
     query,                                                          \
     key_cache,                                                      \
     value_cache,                                                    \
-    head_mapping,                                                   \
+    num_kv_heads,                                                   \
     scale,                                                          \
     block_tables,                                                   \
     context_lens,                                                   \
@@ -928,7 +939,7 @@ void paged_attention_v2(
   torch::Tensor& query,           // [num_seqs, num_heads, head_size]
   torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
   torch::Tensor& value_cache,     // [num_blocks, num_heads, head_size, block_size]
-  torch::Tensor& head_mapping,    // [num_heads]
+  int num_kv_heads,               // [num_heads]
   float scale,
   torch::Tensor& block_tables,    // [num_seqs, max_num_blocks_per_seq]
   torch::Tensor& context_lens,    // [num_seqs]

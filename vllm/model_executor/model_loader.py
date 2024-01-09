@@ -8,41 +8,9 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig
-from vllm.model_executor.models import *
+from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
-
-# TODO(woosuk): Lazy-load the model classes.
-_MODEL_REGISTRY = {
-    "AquilaModel": AquilaForCausalLM,
-    "AquilaForCausalLM": AquilaForCausalLM,  # AquilaChat2
-    "BaiChuanForCausalLM": BaiChuanForCausalLM,  # baichuan-7b
-    "BaichuanForCausalLM": BaichuanForCausalLM,  # baichuan-13b
-    "BloomForCausalLM": BloomForCausalLM,
-    "ChatGLMModel": ChatGLMForCausalLM,
-    "FalconForCausalLM": FalconForCausalLM,
-    "GPT2LMHeadModel": GPT2LMHeadModel,
-    "GPTBigCodeForCausalLM": GPTBigCodeForCausalLM,
-    "GPTJForCausalLM": GPTJForCausalLM,
-    "GPTNeoXForCausalLM": GPTNeoXForCausalLM,
-    "InternLMForCausalLM": InternLMForCausalLM,
-    "LlamaForCausalLM": LlamaForCausalLM,
-    "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
-    "MistralForCausalLM": MistralForCausalLM,
-    # transformers's mpt class has lower case
-    "MptForCausalLM": MPTForCausalLM,
-    "MPTForCausalLM": MPTForCausalLM,
-    "OPTForCausalLM": OPTForCausalLM,
-    "PhiForCausalLM": PhiForCausalLM,
-    "QWenLMHeadModel": QWenLMHeadModel,
-    "RWForCausalLM": FalconForCausalLM,
-    "YiForCausalLM": YiForCausalLM,
-}
-
-# TODO(Zhang Ying): remove this when all models support kv quant
-_MODEL_REGISTRY_SUPPORT_KV_QUANT = {
-    LlamaForCausalLM
-}
 
 @contextlib.contextmanager
 def _set_default_torch_dtype(dtype: torch.dtype):
@@ -56,12 +24,17 @@ def _set_default_torch_dtype(dtype: torch.dtype):
 def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
-        if arch in _MODEL_REGISTRY:
-            return _MODEL_REGISTRY[arch]
+        model_cls = ModelRegistry.load_model_cls(arch)
+        if model_cls is not None:
+            return model_cls
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
+        f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
+def _is_support_kv_quant(config: PretrainedConfig) -> bool:
+    architectures = getattr(config, "architectures", [])
+    supported_archs = ModelRegistry.get_supported_kv_quant_archs()
+    return any(arch in supported_archs for arch in architectures)
 
 def get_model(model_config: ModelConfig, parallel_config: ParallelConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
@@ -104,7 +77,7 @@ def get_model(model_config: ModelConfig, parallel_config: ParallelConfig) -> nn.
                 kv_quant_params = list(np.fromfile(path, dtype=np.float32))
                 kv_quant_params_list.append(kv_quant_params)
         with torch.device("cuda"):
-            if model_class in _MODEL_REGISTRY_SUPPORT_KV_QUANT:
+            if _is_support_kv_quant(model_config.hf_config):
                 model = model_class(model_config.hf_config, linear_method, quant_config,
                                     model_config.quant_kv_cache,
                                     kv_quant_params_list)

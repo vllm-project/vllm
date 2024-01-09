@@ -10,6 +10,7 @@ HIDDEN_SIZES = [768, 5120, 8192]  # Arbitrary values for testing
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
 SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
+DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -17,6 +18,7 @@ SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_rms_norm(
     num_tokens: int,
@@ -24,14 +26,15 @@ def test_rms_norm(
     add_residual: bool,
     dtype: torch.dtype,
     seed: int,
+    device: int,
 ) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-
-    layer = RMSNorm(hidden_size).to(dtype).cuda()
+    gpu_id = f"cuda:{device}"
+    layer = RMSNorm(hidden_size).to(dtype=dtype, device=gpu_id)
     layer.weight.data.normal_(mean=1.0, std=0.1)
     scale = 1 / (2 * hidden_size)
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=gpu_id)
     x *= scale
     residual = torch.randn_like(x) * scale if add_residual else None
 
