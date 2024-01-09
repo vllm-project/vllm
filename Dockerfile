@@ -46,7 +46,7 @@ FROM dev AS test
 
 # copy pytorch extensions separately to avoid having to rebuild
 # when python code changes
-WORKDIR /test-workspace
+WORKDIR /vllm-workspace
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
 COPY tests tests
 COPY vllm vllm
