@@ -23,7 +23,6 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
-    block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
@@ -141,12 +140,6 @@ class EngineArgs:
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
-        # KV cache arguments
-        parser.add_argument('--block-size',
-                            type=int,
-                            default=EngineArgs.block_size,
-                            choices=[8, 16, 32],
-                            help='token block size')
         # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
         parser.add_argument('--seed',
                             type=int,
@@ -222,8 +215,9 @@ class EngineArgs:
                                    self.tokenizer_revision, self.max_model_len,
                                    self.quantization, self.enforce_eager,
                                    self.max_context_len_to_capture)
-        cache_config = CacheConfig(self.block_size,
-                                   self.gpu_memory_utilization,
+        from flash_attn.flash_attn_interface import get_kvcache_block_size
+        block_size = get_kvcache_block_size(model_config.get_head_size())
+        cache_config = CacheConfig(block_size, self.gpu_memory_utilization,
                                    self.swap_space,
                                    model_config.get_sliding_window())
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
