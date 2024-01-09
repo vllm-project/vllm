@@ -23,3 +23,20 @@ steps:
                     nvidia.com/gpu: 1
                   limits:
                     nvidia.com/gpu: 1
+  - label: "AsyncEngine Test"
+    agents:
+      queue: kubernetes
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT
+                command: ["bash"]
+                args:
+                - "-c"
+                - "'cd /vllm-workspace/tests && pytest -v -s async_engine'"
+                resources:
+                  requests:
+                    nvidia.com/gpu: 1
+                  limits:
+                    nvidia.com/gpu: 1
