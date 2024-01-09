@@ -1,6 +1,5 @@
 {% set docker_image = "us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT" %}
-{% set gpu_request = 1 %}
-{% set gpu_limit = 1 %}
+{% set default_num_gpu = 1 %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
@@ -27,7 +26,7 @@ steps:
                 - "'cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command | safe }}'"
                 resources:
                   requests:
-                    nvidia.com/gpu: "{{ gpu_request }}"
+                    nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
                   limits:
-                    nvidia.com/gpu: "{{ gpu_limit }}"
+                    nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
   {% endfor %}

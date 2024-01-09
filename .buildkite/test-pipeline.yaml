@@ -2,5 +2,28 @@ steps:
 - label: Regression Test
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
+
 - label: AsyncEngine Test
   command: pytest -v -s async_engine
+
+- label: Distributed Test
+  command: pytest -v -s distributed
+  num_gpus: 2 # only support 1 or 2 for now.
+
+- label: Engine Test
+  command: pytest -v -s engine
+
+- label: Kernels Test
+  command: pytest -v -s kernels
+
+- label: Models Test
+  command: pytest -v -s models
+
+- label: Prompts Test
+  command: pytest -v -s prompts
+
+- label: Samplers Test
+  command: pytest -v -s samplers
+
+- label: Worker Test
+  command: pytest -v -s worker
