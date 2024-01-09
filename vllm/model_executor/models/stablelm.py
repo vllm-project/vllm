@@ -16,7 +16,7 @@
 # This code is based off the following work:
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt_neox/modeling_gpt_neox.py
-""" PyTorch StableLM Epoch model. """
+"""Inference-only StabeLM model compatible with HuggingFace weights."""
 from typing import List, Optional, Tuple
 
 import torch
