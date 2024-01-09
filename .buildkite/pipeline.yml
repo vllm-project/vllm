@@ -12,6 +12,9 @@ steps:
     plugins:
       - kubernetes:
           podSpec:
+            resources:
+              limits:
+                nvidia.com/gpu: 1
             containers:
               - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT
                 command: ["bash"]
