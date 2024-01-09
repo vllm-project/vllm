@@ -58,6 +58,7 @@ FROM dev AS test
 # when python code changes
 WORKDIR /vllm-workspace
 COPY * *
+RUN ls
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
 
 RUN VLLM_USE_PRECOMPILED=1 pip install . --verbose
