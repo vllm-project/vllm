@@ -60,7 +60,8 @@ WORKDIR /vllm-workspace
 # ADD is used to preserve directory structure
 ADD . /vllm-workspace/
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
-
+# ignore build dependencies installation because we are using pre-complied extensions
+RUN rm pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
 #################### TEST IMAGE ####################
 
