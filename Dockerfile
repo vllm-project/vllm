@@ -57,10 +57,10 @@ FROM dev AS test
 # copy pytorch extensions separately to avoid having to rebuild
 # when python code changes
 WORKDIR /vllm-workspace
-COPY * /vllm-workspace/
+COPY * *
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
 
-RUN VLLM_USE_PRECOMPILED=1 pip install /vllm-workspace --verbose
+RUN VLLM_USE_PRECOMPILED=1 pip install . --verbose
 #################### TEST IMAGE ####################
 
 
