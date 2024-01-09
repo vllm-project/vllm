@@ -1,0 +1,6 @@
+steps:
+- label: Regression Test
+  command: pytest -v -s test_regression.py
+  working_dir: "/vllm-workspace/tests" # optional
+- label: AsyncEngine Test
+  command: pytest -v -s async_engine
