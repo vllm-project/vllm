@@ -61,7 +61,7 @@ WORKDIR /vllm-workspace
 ADD . /vllm-workspace/
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
 
-RUN VLLM_USE_PRECOMPILED=1 pip install . --verbose
+RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
 #################### TEST IMAGE ####################
 
 
