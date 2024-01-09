@@ -14,9 +14,7 @@ steps:
           podSpec:
             containers:
               - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT
-                workingDir: /vllm-workspace/tests
-                command: ["ls"]
-                # command: ["bash"]
-                # args:
-                # - "-c"
-                # - "'cd /vllm-workspace/tests && ls'"
+                command: ["bash"]
+                args:
+                - "-c"
+                - "'cd /vllm-workspace/tests && pytest -v -s test_regression.py'"
