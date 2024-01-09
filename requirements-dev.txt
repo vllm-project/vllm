@@ -13,4 +13,5 @@ types-setuptools
 pytest
 pytest-forked
 pytest-asyncio
+httpx
 
