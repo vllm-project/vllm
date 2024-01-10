@@ -12,3 +12,4 @@ pytest-asyncio
 tensorizer>=2.9.0
 runai-model-streamer==0.11.0
 runai-model-streamer-s3==0.11.0
+loguru==0.7.3

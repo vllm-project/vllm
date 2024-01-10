@@ -1,0 +1,10 @@
+{
+  "logger": {
+    "structured_log_file_path": "/logs/vllm/application_structured.log",
+    "unstructured_log_file_path": "/logs/vllm/application.log",
+    "level": "info",
+    "rotation": "1 days",
+    "retention": "1 months",
+    "format": "<level>{level: <8}</level> <green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> - <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>"
+  }
+}
