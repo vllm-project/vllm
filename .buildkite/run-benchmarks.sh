@@ -5,7 +5,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # run benchmarks and upload the result to buildkite
 python3 benchmarks/benchmark_latency.py 2>&1 | tee benchmark_latency.txt
-python3 benchmarks/benchmark_throughput.py 2>&1 | tee benchmark_throughput.txt
+
+python3 benchmarks/benchmark_throughput.py --input-len 256 2>&1 | tee benchmark_throughput.txt
 
 python3 -m vllm.entrypoints.api_server &
 API_SERVER_PID=$!
