@@ -8,6 +8,7 @@ from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from vllm._C import ops
 from vllm.utils import get_max_shared_memory_bytes
+from vllm.utils import is_hip
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -15,12 +16,16 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 NUM_BLOCKS = 40000  # Arbitrary values for testing
 PARTITION_SIZE = 512
-
-DTYPES = [torch.half, torch.bfloat16, torch.float]
+# flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
+DTYPES = [torch.half, torch.bfloat16, torch.float
+          ] if not is_hip() else [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80, 96, 112, 128, 256]
+# FlashAttention forward only supports head dimension at most 128
+HEAD_SIZES = [64, 80, 96, 112, 128, 256
+              ] if not is_hip() else [64, 80, 96, 112, 128]
+
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
 SEEDS = [0]

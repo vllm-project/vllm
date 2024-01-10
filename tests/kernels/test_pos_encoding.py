@@ -2,6 +2,7 @@ from typing import Optional
 
 import pytest
 import torch
+from torch.testing._internal.common_utils import skipIfRocm
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
@@ -26,6 +27,7 @@ DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
+@skipIfRocm
 def test_rotary_embedding(
     is_neox_style: bool,
     batch_size: int,
