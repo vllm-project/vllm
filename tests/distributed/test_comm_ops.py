@@ -22,7 +22,6 @@ def init_test_distributed_environment(pipeline_parallel_size: int,
                                      tensor_parallel_size,
                                      worker_use_ray=True)
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
-    torch.cuda.set_device(rank)
     _init_distributed_environment(parallel_config, rank,
                                   distributed_init_method)
 

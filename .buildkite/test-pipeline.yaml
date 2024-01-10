@@ -7,7 +7,8 @@ steps:
   command: pytest -v -s async_engine
 
 - label: Distributed Test
-  command: pytest -v -s distributed --forked
+  commands: pytest -v -s test_comm_ops.py
+  working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
 
 - label: Engine Test
