@@ -14,6 +14,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
+from sphinx.ext import autodoc
+import logging
+
+logger = logging.getLogger(__name__)
 
 # -- Project information -----------------------------------------------------
 
@@ -56,7 +60,6 @@ html_title = project
 html_theme = 'sphinx_book_theme'
 html_logo = 'assets/logos/vllm-logo-text-light.png'
 html_theme_options = {
-    'logo_only': True,
     'path_to_docs': 'docs/source',
     'repository_url': 'https://github.com/vllm-project/vllm',
     'use_repository_button': True,
@@ -65,4 +68,26 @@ html_theme_options = {
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['_static']
+# html_static_path = ['_static']
+
+# Mock out external dependencies here.
+autodoc_mock_imports = ["torch", "transformers", "psutil", "vllm.cuda_utils"]
+
+for mock_target in autodoc_mock_imports:
+    if mock_target in sys.modules:
+        logger.info(
+            f"Potentially problematic mock target ({mock_target}) found; "
+            "autodoc_mock_imports cannot mock modules that have already "
+            "been loaded into sys.modules when the sphinx build starts.")
+
+
+class MockedClassDocumenter(autodoc.ClassDocumenter):
+    """Remove note about base class when a class is derived from object."""
+
+    def add_line(self, line: str, source: str, *lineno: int) -> None:
+        if line == "   Bases: :py:class:`object`":
+            return
+        super().add_line(line, source, *lineno)
+
+
+autodoc.ClassDocumenter = MockedClassDocumenter
