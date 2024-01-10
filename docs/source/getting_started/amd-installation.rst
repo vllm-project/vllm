@@ -99,11 +99,11 @@ Build a docker image from `Dockerfile.rocm`, and launch a docker container.
 
 The `Dokerfile.rocm` is designed to support both ROCm 5.7 and ROCm 6.0 and later versions. It provides flexibility to customize the build of docker image using the following arguments:
 
-* `BASE_IMAGE`: specifies the base image used when running `docker build`, specifically the PyTorch on ROCm base image. We have tested ROCm 5.7 and ROCm 6.0. The default is `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`
+* `BASE_IMAGE`: specifies the base image used when running ``docker build``, specifically the PyTorch on ROCm base image. We have tested ROCm 5.7 and ROCm 6.0. The default is `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`
 * `FX_GFX_ARCHS`: specifies the GFX architecture that is used to build flash-attention, for example, `gfx90a;gfx942` for MI200 and MI300. The default is `gfx90a;gfx942`
 * `FA_BRANCH`: specifies the branch used to build the flash-attention in `ROCmSoftwarePlatform's flash-attention repo <https://github.com/ROCmSoftwarePlatform/flash-attention>`_. The default is `3d2b6f5`
 
-Their values can be passed in when running `docker build` with `--build-arg` options.
+Their values can be passed in when running ``docker build`` with ``--build-arg`` options.
 
 For example, to build docker image for vllm on ROCm 5.7, you can run:
 
@@ -164,5 +164,5 @@ Alternatively, if you plan to install vLLM-ROCm on a local machine or start from
 
 .. note::
 
-    - You may need to turn on the "--enforce-eager" flag if you experience process hang when running the `run_benchmark.py` script to test your installation.
+    - You may need to turn on the ``--enforce-eager`` flag if you experience process hang when running the `benchmark_thoughput.py` script to test your installation.
 
