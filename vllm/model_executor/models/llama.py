@@ -274,7 +274,10 @@ class LlamaForCausalLM(nn.Module):
         self.linear_method = linear_method
         self.model = LlamaModel(config, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
-        self.sampler = Sampler(config.vocab_size)
+        if hasattr(config, "sampler_vocab_size"):
+            self.sampler = Sampler(config.sampler_vocab_size)
+        else:
+            self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,

@@ -223,7 +223,10 @@ class GPTJForCausalLM(nn.Module):
             config.n_embd,
             bias=True,
         )
-        self.sampler = Sampler(config.vocab_size)
+        if hasattr(config, "sampler_vocab_size"):
+            self.sampler = Sampler(config.sampler_vocab_size)
+        else:
+            self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,

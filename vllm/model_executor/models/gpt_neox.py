@@ -238,7 +238,10 @@ class GPTNeoXForCausalLM(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
-        self.sampler = Sampler(config.vocab_size)
+        if hasattr(config, "sampler_vocab_size"):
+            self.sampler = Sampler(config.sampler_vocab_size)
+        else:
+            self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,

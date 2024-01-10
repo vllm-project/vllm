@@ -259,7 +259,10 @@ class MPTForCausalLM(nn.Module):
 
         self.transformer = MPTModel(config, linear_method)
         self.lm_head_weight = self.transformer.wte.weight
-        self.sampler = Sampler(config.vocab_size)
+        if hasattr(config, "sampler_vocab_size"):
+            self.sampler = Sampler(config.sampler_vocab_size)
+        else:
+            self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,

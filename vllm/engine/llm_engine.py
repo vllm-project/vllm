@@ -86,18 +86,20 @@ class LLMEngine:
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
-        self.cache_config = cache_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.log_stats = log_stats
-        self._verify_args()
-
         self.tokenizer = get_tokenizer(
             model_config.tokenizer,
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code,
             tokenizer_revision=model_config.tokenizer_revision,
             revision=model_config.revision)
+        model_config.hf_config.sampler_vocab_size = min(
+            len(self.tokenizer), model_config.hf_config.vocab_size)
+        self.cache_config = cache_config
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        self.log_stats = log_stats
+        self._verify_args()
+
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.

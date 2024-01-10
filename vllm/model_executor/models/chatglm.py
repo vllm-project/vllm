@@ -332,7 +332,10 @@ class ChatGLMForCausalLM(nn.Module):
         self.linear_method = linear_method
         self.transformer = ChatGLMModel(config, linear_method)
         self.lm_head_weight = self.transformer.output_layer.weight
-        self.sampler = Sampler(config.padded_vocab_size)
+        if hasattr(config, "sampler_vocab_size"):
+            self.sampler = Sampler(config.sampler_vocab_size)
+        else:
+            self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,

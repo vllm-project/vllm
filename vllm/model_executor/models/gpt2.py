@@ -218,7 +218,10 @@ class GPT2LMHeadModel(nn.Module):
         self.linear_method = linear_method
         self.transformer = GPT2Model(config, linear_method)
         self.lm_head_weight = self.transformer.wte.weight
-        self.sampler = Sampler(config.vocab_size)
+        if hasattr(config, "sampler_vocab_size"):
+            self.sampler = Sampler(config.sampler_vocab_size)
+        else:
+            self.sampler = Sampler(config.vocab_size)
 
     def forward(
         self,
