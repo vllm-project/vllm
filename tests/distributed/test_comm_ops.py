@@ -75,7 +75,7 @@ def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
     refs = []
     for rank in range(tensor_parallel_size):
         refs.append(
-            ray.remote(test_target).options(num_gpus=1, max_calls=1).remote(tensor_parallel_size,
+            ray.remote(num_gpus=1, max_calls=1)(test_target).remote(tensor_parallel_size,
                                                    rank,
                                                    distributed_init_port))
     ray.get(refs)
