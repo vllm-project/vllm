@@ -29,4 +29,10 @@ steps:
                     nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
                   limits:
                     nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+                env:
+                  - name: HF_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: hf-token-secret
+                        key: token
   {% endfor %}
