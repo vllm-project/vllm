@@ -26,7 +26,7 @@ def init_test_distributed_environment(pipeline_parallel_size: int,
     _init_distributed_environment(parallel_config, rank,
                                   distributed_init_method)
 
-
+@ray.remote(num_gpus=1, max_calls=1)
 def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
                            distributed_init_port: str):
     init_test_distributed_environment(1, tensor_parallel_size, rank,
@@ -41,7 +41,7 @@ def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
     t = tensor_model_parallel_all_reduce(t)
     assert torch.allclose(t, expected)
 
-
+@ray.remote(num_gpus=1, max_calls=1)
 def all_gather_test_worker(tensor_parallel_size: int, rank: int,
                            distributed_init_port: str):
     init_test_distributed_environment(1, tensor_parallel_size, rank,
@@ -75,7 +75,7 @@ def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
     refs = []
     for rank in range(tensor_parallel_size):
         refs.append(
-            ray.remote(num_gpus=1, max_calls=1)(test_target).remote(tensor_parallel_size,
+            test_target.remote(tensor_parallel_size,
                                                    rank,
                                                    distributed_init_port))
     ray.get(refs)
