@@ -7,7 +7,7 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 from flash_attn import flash_attn_func
 
-from vllm._C import ops
+from vllm._C import ops, cache_ops
 from vllm.utils import get_max_shared_memory_bytes
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
@@ -24,7 +24,7 @@ NUM_HEADS = [(64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64]
 BLOCK_SIZES = [16]
 USE_ALIBI = [False, True]
-USE_FLASH_ATTN = [False, True]
+USE_FP8_KV_CACHE = [False, True]
 SEEDS = [0]
 DEVICES = [6]
 
@@ -107,6 +107,7 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("use_alibi", USE_ALIBI)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("use_fp8_kv_cache", USE_FP8_KV_CACHE)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 def test_paged_attention(
@@ -118,6 +119,7 @@ def test_paged_attention(
     use_alibi: bool,
     block_size: int,
     dtype: torch.dtype,
+    use_fp8_kv_cache: bool,
     seed: int,
     device: int,
 ) -> None:
@@ -159,9 +161,10 @@ def test_paged_attention(
     block_tables = torch.tensor(block_tables, dtype=torch.int, device=gpu_id)
 
     # Create the KV caches.
+    cache_dtype = dtype if not use_fp8_kv_cache else torch.uint8
     key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
-                                                num_kv_heads, head_size, dtype,
-                                                seed, gpu_id)
+                                                num_kv_heads, head_size,
+                                                cache_dtype, seed, gpu_id)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Call the paged attention kernel.
@@ -179,6 +182,7 @@ def test_paged_attention(
             block_size,
             max_context_len,
             alibi_slopes,
+            use_fp8_kv_cache,
         )
     elif version == "v2":
         num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
@@ -211,11 +215,29 @@ def test_paged_attention(
             block_size,
             max_context_len,
             alibi_slopes,
+            use_fp8_kv_cache,
         )
     else:
         raise AssertionError(f"Unknown version: {version}")
 
     # Run the reference implementation.
+    if use_fp8_kv_cache:
+        # Convert cache data back to dtype.
+        x = 16 // torch.tensor([], dtype=dtype).element_size()
+        key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x,
+                           block_size, x)
+        value_cache_shape = value_cache.shape
+        converted_key_cache = torch.empty(size=key_cache_shape,
+                                          dtype=dtype,
+                                          device="cuda")
+        converted_value_cache = torch.empty(size=value_cache_shape,
+                                            dtype=dtype,
+                                            device="cuda")
+        cache_ops.convert_fp8(key_cache, converted_key_cache)
+        cache_ops.convert_fp8(value_cache, converted_value_cache)
+        key_cache = converted_key_cache
+        value_cache = converted_value_cache
+
     ref_output = torch.empty_like(query)
     ref_single_query_cached_kv_attention(
         ref_output,
@@ -234,7 +256,10 @@ def test_paged_attention(
     # outputs. Thus, we use a relaxed tolerance for the test.
     # NOTE(zhaoyang): FP8 KV Cache will introduce quantization error,
     # so we use a relaxed tolerance for the test.
-    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+    atol, rtol = 1e-3, 1e-5
+    if use_fp8_kv_cache:
+        atol, rtol = 1e-2, 1e-5
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
 
 
 def ref_multi_query_kv_attention(
@@ -281,9 +306,9 @@ def ref_multi_query_kv_attention(
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("use_flash_attn", USE_FLASH_ATTN)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("use_flash_attn", [False, True])
 @torch.inference_mode()
 def test_multi_query_kv_attention(
     num_seqs: int,
