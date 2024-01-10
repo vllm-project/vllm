@@ -2,10 +2,9 @@
 
 Run `pytest tests/distributed/test_comm_ops.py --forked`.
 """
-from multiprocessing import Process, set_start_method
-
 import pytest
 import torch
+import ray
 
 from vllm.config import ParallelConfig
 from vllm.utils import get_open_port
@@ -70,14 +69,15 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
 @pytest.mark.parametrize("test_target",
                          [all_reduce_test_worker, all_gather_test_worker])
 def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
-    set_start_method("spawn", force=True)
+    ray.init() # use ray helps debugging the error when it failed.
+
     distributed_init_port = get_open_port()
-    processes = []
+    refs = []
     for rank in range(tensor_parallel_size):
-        p = Process(target=test_target,
-                    args=(tensor_parallel_size, rank, distributed_init_port))
-        p.start()
-        processes.append(p)
-    for p in processes:
-        p.join()
-    assert all(p.exitcode == 0 for p in processes)
+        refs.append(
+            ray.remote(test_target).options(num_gpus=1, max_calls=1).remote(tensor_parallel_size,
+                                                   rank,
+                                                   distributed_init_port))
+    ray.get(refs)
+
+    ray.shutdown()

@@ -22,7 +22,7 @@ steps:
     - pytest -v -s models --forked
 
 - label: Samplers Test
-  command: pytest -v -s samplers
+  command: pytest -v -s samplers --forked
 
 - label: Worker Test
   command: pytest -v -s worker
