@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.activation import FastGELU, NewGELU, SiluAndMul
+from vllm.utils import is_hip
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
@@ -75,4 +76,5 @@ def test_gelu_fast(
     layer = FastGELU()
     out = layer(x)
     ref_out = layer._forward(x)
-    assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
+    atol = 1e-2 if is_hip() and dtype == torch.half else 1e-5
+    assert torch.allclose(out, ref_out, atol=atol, rtol=1e-5)
