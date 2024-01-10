@@ -3,7 +3,7 @@
 Load Balancing Across Multiple vLLM Endpoints
 ===============
 
-In scenarios where multiple GPUs or nodes are necessary to handle the model serving workload, it is advisable to initiate several vLLM server instances and distribute incoming requests amongst them using an HTTP load balancer.
+You can distribute incoming requests among multiple vLLM server instances, each running on a separate set of GPUs, using an HTTP load balancer. This method is typically more efficient than tensor parallel for load balancing. For instance, having 8 individual vLLM instances each on a single GPU is preferable to running a single vLLM instance with tensor parallel over 8 GPUs.
 
 For instances where vLLM is deployed via Docker, the `Traefik HTTP load balancer <https://doc.traefik.io/traefik/>`_ can be employed to evenly distribute the load across multiple vLLM server instances.
 
@@ -18,7 +18,6 @@ Below is a sample configuration:
        command:
          # static config
          --providers.docker
-
          --entrypoints.web.address=:80
 
        volumes:
@@ -27,13 +26,12 @@ Below is a sample configuration:
        restart: unless-stopped
 
      ### vLLM servers
-     # 0
      vllm-server-0:
        # ... Configuration of vLLM server
        image: vllm/vllm-openai:latest
        command: --model mistralai/Mistral-7B-v0.1
        volumes:
-         - ./huggingface_cache:/root/.cache/huggingface:rw
+         - ./huggingface_cache:/root/.cache/huggingface:rw  # HuggingFace model cache directory
 
        # Allocate GPU 0
        deploy:
@@ -49,13 +47,12 @@ Below is a sample configuration:
          traefik.http.routers.vllm.rule: Host(`your_domain_name.com`)  # Your domain name
          traefik.http.services.vllm-service.loadbalancer.server.port: 8000  # Port of vLLM server
 
-     # 1
      vllm-server-1:
        # ... Configuration of vLLM server
        image: vllm/vllm-openai:latest
        command: --model mistralai/Mistral-7B-v0.1
        volumes:
-         - ./huggingface_cache:/root/.cache/huggingface:rw
+         - ./huggingface_cache:/root/.cache/huggingface:rw  # HuggingFace model cache directory
 
        # Allocate GPU 1
        deploy:
