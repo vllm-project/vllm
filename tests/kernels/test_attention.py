@@ -14,19 +14,18 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-NUM_BLOCKS = 4000  # Arbitrary values for testing
+NUM_BLOCKS = 40000  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
-DTYPES = [torch.float16, torch.bfloat16]
+DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-NUM_HEADS = [(64, 8)]  # Arbitrary values for testing
-HEAD_SIZES = [64]
-BLOCK_SIZES = [16]
+NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
+HEAD_SIZES = [64, 80, 96, 112, 128, 256]
+BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
-USE_FLASH_ATTN = [False, True]
 SEEDS = [0]
-DEVICES = [6]
+DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 
 def ref_masked_attention(
@@ -232,8 +231,6 @@ def test_paged_attention(
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
     # outputs. Thus, we use a relaxed tolerance for the test.
-    # NOTE(zhaoyang): FP8 KV Cache will introduce quantization error,
-    # so we use a relaxed tolerance for the test.
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
@@ -281,7 +278,6 @@ def ref_multi_query_kv_attention(
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("use_flash_attn", USE_FLASH_ATTN)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
@@ -292,17 +288,16 @@ def test_multi_query_kv_attention(
     dtype: torch.dtype,
     seed: int,
     device: int,
-    use_flash_attn: bool,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f"cuda:0"
+    gpu_id = f"cuda:{device}"
     # MAX_SEQ_LEN sometimes causes OOM in the reference implementation.
     # As the xformers library is already tested with its own tests, we can use
     # a smaller MAX_SEQ_LEN here.
-    max_len = min(MAX_SEQ_LEN, 6)
-    seq_lens = [12] * num_seqs  # random.sample(range(1, max_len), num_seqs)
+    max_len = min(MAX_SEQ_LEN, 4096)
+    seq_lens = random.sample(range(1, max_len), num_seqs)
     num_tokens = sum(seq_lens)
 
     scale = float(1.0 / (head_size**0.5))
@@ -311,37 +306,86 @@ def test_multi_query_kv_attention(
                       num_query_heads + 2 * num_kv_heads,
                       head_size,
                       dtype=dtype,
-                      device=gpu_id)  # [num_tokens, num_heads, head_size]
+                      device=gpu_id)
     qkv.uniform_(-scale, scale)
     query, key, value = qkv.split(
         [num_query_heads, num_kv_heads, num_kv_heads], dim=1)
 
-    if use_flash_attn:
-        output = flash_attn_func(query.unflatten(0, (num_seqs, max(seq_lens))),
-                                 key.unflatten(0, (num_seqs, max(seq_lens))),
-                                 value.unflatten(0, (num_seqs, max(seq_lens))),
-                                 softmax_scale=scale,
-                                 causal=True)
-        output = output.reshape(num_seqs * max(seq_lens), num_query_heads,
-                                head_size)
-        print("flash output.shape: ", output.shape)
-    else:
-        num_queries_per_kv = num_query_heads // num_kv_heads
-        if num_queries_per_kv > 1:
-            # Handle MQA and GQA
-            key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
-            value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
-        attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
-        output = xops.memory_efficient_attention_forward(
-            query.unsqueeze(0),
-            key.unsqueeze(0),
-            value.unsqueeze(0),
-            attn_bias=attn_bias,
-            p=0.0,
-            scale=scale,
-        )
-        output = output.squeeze(0)
-        print("xformers output.shape: ", output.shape)
+    num_queries_per_kv = num_query_heads // num_kv_heads
+    if num_queries_per_kv > 1:
+        # Handle MQA and GQA
+        key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
+        value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
+    attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
+    output = xops.memory_efficient_attention_forward(
+        query.unsqueeze(0),
+        key.unsqueeze(0),
+        value.unsqueeze(0),
+        attn_bias=attn_bias,
+        p=0.0,
+        scale=scale,
+    )
+    output = output.squeeze(0)
+
+    cu_seq_lens = [0]
+    for seq_len in seq_lens:
+        cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
+    ref_output = ref_multi_query_kv_attention(
+        cu_seq_lens,
+        query,
+        key,
+        value,
+        scale,
+        dtype,
+    )
+    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+
+
+# TODO(zhaoyang): Add tests for USE_ALIBI=True.
+@pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_multi_query_kv_attention_flash_attn(
+    num_seqs: int,
+    num_heads: Tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: int,
+) -> None:
+    # FlashAttention only support fp16 and bf16.
+    if dtype is not torch.half or dtype is not torch.bfloat16:
+        return
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    gpu_id = f"cuda:{device}"
+    max_len = min(MAX_SEQ_LEN, 4096)
+    seq_lens = [max_len] * num_seqs
+    num_tokens = sum(seq_lens)
+
+    scale = float(1.0 / (head_size**0.5))
+    num_query_heads, num_kv_heads = num_heads
+    qkv = torch.empty(num_tokens,
+                      num_query_heads + 2 * num_kv_heads,
+                      head_size,
+                      dtype=dtype,
+                      device=gpu_id)
+    qkv.uniform_(-scale, scale)
+    query, key, value = qkv.split(
+        [num_query_heads, num_kv_heads, num_kv_heads], dim=1)
+
+    output = flash_attn_func(query.unflatten(0, (num_seqs, max(seq_lens))),
+                             key.unflatten(0, (num_seqs, max(seq_lens))),
+                             value.unflatten(0, (num_seqs, max(seq_lens))),
+                             softmax_scale=scale,
+                             causal=True)
+    output = output.reshape(num_seqs * max(seq_lens), num_query_heads,
+                            head_size)
 
     cu_seq_lens = [0]
     for seq_len in seq_lens:
