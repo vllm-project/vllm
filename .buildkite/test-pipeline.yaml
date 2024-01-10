@@ -7,7 +7,7 @@ steps:
   command: pytest -v -s async_engine
 
 - label: Distributed Test
-  command: pytest -v -s distributed
+  command: pytest -v -s distributed --forked
   num_gpus: 2 # only support 1 or 2 for now.
 
 - label: Engine Test
@@ -17,7 +17,9 @@ steps:
   command: pytest -v -s kernels
 
 - label: Models Test
-  command: pytest -v -s models
+  commands:
+    - pip install einops # required for MPT
+    - pytest -v -s models --forked
 
 - label: Samplers Test
   command: pytest -v -s samplers

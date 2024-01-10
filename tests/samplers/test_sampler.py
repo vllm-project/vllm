@@ -74,6 +74,8 @@ def test_sampler_all_greedy(seed: int):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token == expected[i].item()
 
+    del model_runner
+
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 def test_sampler_all_random(seed: int):
@@ -110,6 +112,8 @@ def test_sampler_all_random(seed: int):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token == i
 
+    del model_runner
+
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 def test_sampler_all_beam(seed: int):
@@ -143,6 +147,7 @@ def test_sampler_all_beam(seed: int):
     # the outputs are expected - in other words, this just tests
     # whether there are no exceptions in the sampler
     # when handling an all-beam search case.
+    del model_runner
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
@@ -197,6 +202,8 @@ def test_sampler_mixed(seed: int):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token in expected_tokens
 
+    del model_runner
+
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 def test_sampler_logits_processors(seed: int):
@@ -233,3 +240,5 @@ def test_sampler_logits_processors(seed: int):
     for _, sequence_output in enumerate(sampler_output):
         for idx, nth_output in enumerate(sequence_output.samples):
             assert nth_output.output_token == idx
+
+    del model_runner
