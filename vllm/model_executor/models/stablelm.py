@@ -14,9 +14,9 @@
 # limitations under the License.
 #
 # This code is based off the following work:
-# https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
-# https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt_neox/modeling_gpt_neox.py
-"""Inference-only StabeLM model compatible with HuggingFace weights."""
+# https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/modeling_stablelm_epoch.py
+# https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/config.json
+"""Inference-only StabeLM (https://github.com/Stability-AI/StableLM) model compatible with HuggingFace weights."""
 from typing import List, Optional, Tuple
 
 import torch
