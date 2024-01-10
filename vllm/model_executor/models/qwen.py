@@ -11,17 +11,19 @@ from torch import nn
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -80,7 +82,6 @@ class QWenAttention(nn.Module):
         self.num_heads = (self.total_num_heads //
                           tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
-
         self.c_attn = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -95,14 +96,15 @@ class QWenAttention(nn.Module):
             linear_method=linear_method,
         )
         self.scaling = self.head_dim**-0.5
-        self.attn = PagedAttentionWithRoPE(
-            self.num_heads,
+
+        self.rotary_emb = get_rope(
             self.head_dim,
-            self.scaling,
             rotary_dim=self.head_dim,
-            base=rope_theta,
             max_position=max_position_embeddings,
-            rope_scaling=rope_scaling)
+            base=rope_theta,
+            rope_scaling=rope_scaling,
+        )
+        self.attn = PagedAttention(self.num_heads, self.head_dim, self.scaling)
 
     def forward(
         self,
@@ -110,14 +112,12 @@ class QWenAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-
+        q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
 
         output, _ = self.c_proj(attn_output)
         return output
@@ -154,7 +154,6 @@ class QWenBlock(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -168,7 +167,6 @@ class QWenBlock(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
 
         # Fully Connected
@@ -204,19 +202,16 @@ class QWenModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
         residual = None
         for i in range(len(self.h)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
-                cache_event,
                 residual,
             )
         hidden_states, _ = self.ln_f(hidden_states, residual)
@@ -243,12 +238,18 @@ class QWenLMHeadModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
+                                         input_metadata)
+        return hidden_states
+
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata)
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(self,
@@ -269,11 +270,18 @@ class QWenLMHeadModel(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                param = params_dict[name.replace(weight_name, param_name)]
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

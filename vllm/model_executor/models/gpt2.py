@@ -35,6 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -81,13 +82,12 @@ class GPT2Attention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         key_cache, value_cache = kv_cache
         attn_output = self.attn(q, k, v, key_cache, value_cache,
-                                input_metadata, cache_event)
+                                input_metadata)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output
 
@@ -147,7 +147,6 @@ class GPT2Block(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -155,7 +154,6 @@ class GPT2Block(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
         # residual connection
         hidden_states = attn_output + residual
@@ -195,17 +193,14 @@ class GPT2Model(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         inputs_embeds = self.wte(input_ids)
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds
 
         for i in range(len(self.h)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
-            hidden_states = layer(hidden_states, kv_caches[i], input_metadata,
-                                  cache_event)
+            hidden_states = layer(hidden_states, kv_caches[i], input_metadata)
 
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
@@ -231,12 +226,18 @@ class GPT2LMHeadModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
+                                         input_metadata)
+        return hidden_states
+
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   input_metadata)
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(self,
@@ -267,7 +268,6 @@ class GPT2LMHeadModel(nn.Module):
                 if not name.endswith(".weight"):
                     continue
                 loaded_weight = loaded_weight.t()
-
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)

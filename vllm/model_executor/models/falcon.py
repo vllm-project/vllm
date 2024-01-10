@@ -28,13 +28,12 @@ from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import (PagedAttention,
-                                                  PagedAttentionWithALiBi,
-                                                  PagedAttentionWithRoPE)
+from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
@@ -42,6 +41,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -144,14 +144,16 @@ class FalconAttention(nn.Module):
             rope_theta = getattr(config, "rope_theta", 10000)
             max_position_embeddings = getattr(config,
                                               "max_position_embeddings", 8192)
-            self.attn = PagedAttentionWithRoPE(
-                self.num_heads,
+            self.rotary_emb = get_rope(
                 self.head_dim,
-                self.inv_norm_factor,
-                base=rope_theta,
-                max_position=max_position_embeddings,
                 rotary_dim=self.head_dim,
-                num_kv_heads=self.num_kv_heads)
+                max_position=max_position_embeddings,
+                base=rope_theta,
+            )
+            self.attn = PagedAttention(self.num_heads,
+                                       self.head_dim,
+                                       self.inv_norm_factor,
+                                       num_kv_heads=self.num_kv_heads)
         elif self.use_alibi:
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
@@ -159,11 +161,11 @@ class FalconAttention(nn.Module):
             alibi_slopes = (_get_alibi_slopes(self.total_num_heads) *
                             self.inv_norm_factor)
             alibi_slopes = alibi_slopes[head_start:head_end].tolist()
-            self.attn = PagedAttentionWithALiBi(self.num_heads,
-                                                self.head_dim,
-                                                self.inv_norm_factor,
-                                                alibi_slopes,
-                                                num_kv_heads=self.num_kv_heads)
+            self.attn = PagedAttention(self.num_heads,
+                                       self.head_dim,
+                                       self.inv_norm_factor,
+                                       num_kv_heads=self.num_kv_heads,
+                                       alibi_slopes=alibi_slopes)
         else:
             self.attn = PagedAttention(self.num_heads,
                                        self.head_dim,
@@ -176,19 +178,15 @@ class FalconAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, bias = self.query_key_value(hidden_states)
         if bias is not None:
             qkv += bias
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        k_cache, v_cache = kv_cache
         if self.use_rotary:
-            attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
-                                    input_metadata, cache_event)
-        else:
-            attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
-                                    cache_event)
+            q, k = self.rotary_emb(positions, q, k)
+        k_cache, v_cache = kv_cache
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         attn_output, bias = self.dense(attn_output)
         return attn_output, bias
 
@@ -266,8 +264,7 @@ class FalconDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
-    ):
+    ) -> torch.Tensor:
         residual = hidden_states
 
         if self.config.new_decoder_architecture:
@@ -282,7 +279,6 @@ class FalconDecoderLayer(nn.Module):
             hidden_states=attention_layernorm_out,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            cache_event=cache_event,
         )
         if self.reduce_row_parallel_results and attention_bias is not None:
             attention_output += attention_bias
@@ -311,7 +307,6 @@ class FalconDecoderLayer(nn.Module):
                 mlp_output += mlp_bias
 
         output = mlp_output + residual
-
         return output
 
 
@@ -349,18 +344,15 @@ class FalconModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         hidden_states = self.word_embeddings(input_ids)
         for i in range(len(self.h)):
-            cache_event = None if cache_events is None else cache_events[i]
             layer = self.h[i]
             hidden_states = layer(
                 positions,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
-                cache_event,
             )
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
@@ -389,18 +381,22 @@ class FalconForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
         hidden_states = self.transformer(
             input_ids,
             positions,
             kv_caches,
             input_metadata,
-            cache_events,
         )
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata)
+        return hidden_states
 
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(self,
@@ -419,27 +415,32 @@ class FalconForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
+                continue
             param = params_dict[name]
             if "query_key_value" in name:
                 output_dim = getattr(param, "output_dim", None)
                 loaded_weight_shape = loaded_weight.shape
-                loaded_weight = loaded_weight.view(
-                    loaded_weight_shape[:output_dim] +
-                    (total_num_kv_heads, num_query_heads_per_kv_head + 2, -1) +
-                    loaded_weight_shape[output_dim + 1:])
-                wq = loaded_weight.narrow(
-                    output_dim + 1, 0, num_query_heads_per_kv_head).reshape(
-                        *loaded_weight_shape[:output_dim], -1,
-                        *loaded_weight_shape[output_dim + 1:])
-                wk = loaded_weight.narrow(
-                    output_dim + 1, num_query_heads_per_kv_head,
-                    1).reshape(*loaded_weight_shape[:output_dim], -1,
-                               *loaded_weight_shape[output_dim + 1:])
-                wv = loaded_weight.narrow(
-                    output_dim + 1, num_query_heads_per_kv_head + 1,
-                    1).reshape(*loaded_weight_shape[:output_dim], -1,
-                               *loaded_weight_shape[output_dim + 1:])
-                loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
+                if output_dim is not None:
+                    loaded_weight = loaded_weight.view(
+                        loaded_weight_shape[:output_dim] +
+                        (total_num_kv_heads, num_query_heads_per_kv_head + 2,
+                         -1) + loaded_weight_shape[output_dim + 1:])
+                    wq = loaded_weight.narrow(
+                        output_dim + 1, 0,
+                        num_query_heads_per_kv_head).reshape(
+                            *loaded_weight_shape[:output_dim], -1,
+                            *loaded_weight_shape[output_dim + 1:])
+                    wk = loaded_weight.narrow(
+                        output_dim + 1, num_query_heads_per_kv_head,
+                        1).reshape(*loaded_weight_shape[:output_dim], -1,
+                                   *loaded_weight_shape[output_dim + 1:])
+                    wv = loaded_weight.narrow(
+                        output_dim + 1, num_query_heads_per_kv_head + 1,
+                        1).reshape(*loaded_weight_shape[:output_dim], -1,
+                                   *loaded_weight_shape[output_dim + 1:])
+                    loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
 
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
