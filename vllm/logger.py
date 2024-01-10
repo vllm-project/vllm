@@ -1,61 +1,145 @@
-# Adapted from
-# https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
+# Copyright © [2023,] 2023, Oracle and/or its affiliates.
 """Logging configuration for vLLM."""
+import json
 import logging
 import os
 import sys
+import time
+import traceback
+from pathlib import Path
 
-VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
-
-_FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
-_DATE_FORMAT = "%m-%d %H:%M:%S"
-
-
-class NewLineFormatter(logging.Formatter):
-    """Adds logging prefix to newlines to align multi-line messages."""
-
-    def __init__(self, fmt, datefmt=None):
-        logging.Formatter.__init__(self, fmt, datefmt)
-
-    def format(self, record):
-        msg = logging.Formatter.format(self, record)
-        if record.message != "":
-            parts = msg.split(record.message)
-            msg = msg.replace("\n", "\r\n" + parts[0])
-        return msg
+from loguru import logger
 
 
-_root_logger = logging.getLogger("vllm")
-_default_handler = None
+class InterceptHandler(logging.Handler):
+    loglevel_mapping = {
+        50: 'CRITICAL',
+        40: 'ERROR',
+        30: 'WARNING',
+        20: 'INFO',
+        10: 'DEBUG',
+        0: 'NOTSET',
+    }
+
+    def emit(self, record):
+        try:
+            level = logger.level(record.levelname).name
+        except AttributeError:
+            level = self.loglevel_mapping[record.levelno]
+
+        frame, depth = logging.currentframe(), 2
+        while frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+
+        log = logger.bind(name='app')
+        log.opt(depth=depth,
+                exception=record.exc_info).log(level, record.getMessage())
 
 
-def _setup_logger():
-    _root_logger.setLevel(logging.DEBUG)
-    global _default_handler
-    if _default_handler is None:
-        _default_handler = logging.StreamHandler(sys.stdout)
-        _default_handler.flush = sys.stdout.flush  # type: ignore
-        _default_handler.setLevel(logging.INFO)
-        _root_logger.addHandler(_default_handler)
-    fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
-    _default_handler.setFormatter(fmt)
-    # Setting this will avoid the message
-    # being propagated to the parent logger.
-    _root_logger.propagate = False
+class CustomizeLogger:
+
+    @classmethod
+    def make_logger(cls, config_path: Path):
+        config = cls.load_logging_config(config_path)
+        logging_config = config.get('logger')
+
+        logger = cls.customize_logging(
+            structured_filepath=logging_config.get('structured_log_file_path'),
+            unstructured_filepath=logging_config.get(
+                "unstructured_log_file_path"),
+            level=logging_config.get('level'),
+            retention=logging_config.get('retention'),
+            rotation=logging_config.get('rotation'),
+            format=logging_config.get('format'),
+        )
+
+        return logger
+
+    @classmethod
+    def serialize(cls, record):
+        error, exception = "", record["exception"]
+        if exception:
+            type, ex, tb = exception
+            error = f" {type.__name__}: {ex}\n{''.join(traceback.format_tb(tb))}"
+
+        subset = {
+            "module": record["module"],
+            "pathname": record["file"].name,
+            "lineno": record["line"],
+            "thread": record["thread"].id,
+            "extra_info": record["extra"],
+            "funcName": record["function"],
+            "ts": int(time.time() * 1000),
+            "level": record["level"].name,
+            "msg": record["message"] + error,
+        }
+        return json.dumps(subset)
+
+    @classmethod
+    def formatter(cls, record):
+        # Note this function returns the string to be formatted, not the actual message to be logged
+        record["extra"]["serialized"] = cls.serialize(record)
+        return "{extra[serialized]}\n"
+
+    @classmethod
+    def customize_logging(
+        cls,
+        structured_filepath: Path,
+        unstructured_filepath: Path,
+        level: str,
+        rotation: str,
+        retention: str,
+        format: str,
+    ):
+        logger.remove()
+        logger.add(
+            sys.stdout,
+            enqueue=True,
+            backtrace=True,
+            level=level.upper(),
+            format=format,
+        )
+        logger.add(
+            str(unstructured_filepath),
+            rotation=rotation,
+            retention=retention,
+            enqueue=True,
+            backtrace=True,
+            level=level.upper(),
+            serialize=False,
+            format=format,
+        )
+        logger.add(
+            str(structured_filepath),
+            rotation=rotation,
+            retention=retention,
+            enqueue=True,
+            backtrace=True,
+            level=level.upper(),
+            serialize=False,
+            format=cls.formatter,
+        )
+        logging.basicConfig(handlers=[InterceptHandler()], level=0)
+        logging.getLogger("uvicorn.access").handlers = [InterceptHandler()]
+        for _log in ['uvicorn', 'uvicorn.error', 'fastapi']:
+            _logger = logging.getLogger(_log)
+            _logger.handlers = [InterceptHandler()]
+
+        return logger.bind(name="vllm")
+
+    @classmethod
+    def load_logging_config(cls, config_path):
+        config = None
+        with open(config_path) as config_file:
+            config = json.load(config_file)
+        return config
 
 
-# The logger is initialized when the module is imported.
-# This is thread-safe as the module is only imported once,
-# guaranteed by the Python GIL.
-if VLLM_CONFIGURE_LOGGING:
-    _setup_logger()
+dir_path = os.path.dirname(os.path.realpath(__file__))
+config_path = f"{dir_path}/logging_config.json"
+_root_logger = CustomizeLogger.make_logger(config_path)
 
 
 def init_logger(name: str):
-    # Use the same settings as above for root logger
-    logger = logging.getLogger(name)
-    logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
-    if VLLM_CONFIGURE_LOGGING:
-        logger.addHandler(_default_handler)
-        logger.propagate = False
-    return logger
+    return _root_logger.bind(name=name)
