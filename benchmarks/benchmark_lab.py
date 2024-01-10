@@ -31,34 +31,43 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 REQUEST_LATENCY: List[Tuple[int, int, float]] = []
 
 
+def generate_a_string(length):
+    result_str = 'a' * length
+    return result_str
+
+
 def sample_requests(
-    dataset_path: str,
+    request_length: int,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, int, int]]:
-    # Load the dataset.
-    with open(dataset_path) as f:
-        dataset = json.load(f)
-    # Filter out the conversations with less than 2 turns.
-    dataset = [
-        data for data in dataset
-        if len(data["conversations"]) >= 2
-    ]
-    # Only keep the first two turns of each conversation.
-    dataset = [
-        (data["conversations"][0]["value"], data["conversations"][1]["value"])
-        for data in dataset
-    ]
+    # # Load the dataset.
+    # with open(dataset_path) as f:
+    #     dataset = json.load(f)
+    # # Filter out the conversations with less than 2 turns.
+    # dataset = [
+    #     data for data in dataset
+    #     if len(data["conversations"]) >= 2
+    # ]
+    # # Only keep the first two turns of each conversation.
+    # dataset = [
+    #     (data["conversations"][0]["value"], data["conversations"][1]["value"])
+    #     for data in dataset
+    # ]
 
     # Tokenize the prompts and completions.
-    prompts = [prompt for prompt, _ in dataset]
-    prompt_token_ids = tokenizer(prompts).input_ids
-    completions = [completion for _, completion in dataset]
-    completion_token_ids = tokenizer(completions).input_ids
+    # prompts = [prompt for prompt, _ in dataset]
+    # prompt_token_ids = tokenizer(prompts).input_ids
+    # completions = [completion for _, completion in dataset]
+    # completion_token_ids = tokenizer(completions).input_ids
     tokenized_dataset = []
-    for i in range(len(dataset)):
-        output_len = len(completion_token_ids[i])
-        tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
+    for i in range(2 * num_requests):
+        # output_len = len(completion_token_ids[i])
+        # tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
+        request = generate_a_string(np.random.poisson(request_length))
+        request_token_ids = tokenizer(request).input_ids
+        output_len = np.random.poisson(request_length)
+        tokenized_dataset.append((request, request_token_ids, output_len))
 
     # Filter out too long sequences.
     filtered_dataset: List[Tuple[str, int, int]] = []
@@ -91,7 +100,7 @@ async def get_request(
             # If the request rate is infinity, then we don't need to wait.
             continue
         # Sample the request interval from the exponential distribution.
-        interval = np.random.exponential(1.0 / request_rate)
+        interval = np.random.poisson(request_rate)
         # The next request will be sent after the interval.
         await asyncio.sleep(interval)
 
@@ -192,6 +201,8 @@ def main(args: argparse.Namespace):
     # Compute the latency statistics.
     avg_latency = np.mean([latency for _, _, latency in REQUEST_LATENCY])
     print(f"Average latency: {avg_latency:.2f} s")
+
+    print("---------------------output length = 100---------------------------------")
     avg_per_token_latency = np.mean([
         latency / (prompt_len + output_len)
         for prompt_len, output_len, latency in REQUEST_LATENCY
@@ -212,8 +223,8 @@ if __name__ == "__main__":
                         choices=["vllm", "tgi"])
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--dataset", type=str, required=True,
-                        help="Path to the dataset.")
+    parser.add_argument("--dataset", type=int,  default=30,
+                        help="length of per request.")
     parser.add_argument("--tokenizer", type=str, required=True,
                         help="Name or path of the tokenizer.")
     parser.add_argument("--best-of", type=int, default=1,
