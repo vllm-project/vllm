@@ -7,6 +7,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Optional
 
 from loguru import logger
 
@@ -137,9 +138,16 @@ class CustomizeLogger:
 
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
-config_path = f"{dir_path}/logging_config.json"
-_root_logger = CustomizeLogger.make_logger(config_path)
+default_config_path = f"{dir_path}/logging_config.json"
+_root_logger = None
+
+
+def setup_logger(config_path: Optional[Path] = default_config_path):
+    global _root_logger
+    _root_logger = CustomizeLogger.make_logger(config_path)
 
 
 def init_logger(name: str):
+    if _root_logger is None:
+        setup_logger()
     return _root_logger.bind(name=name)
