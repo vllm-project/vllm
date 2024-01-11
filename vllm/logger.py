@@ -12,8 +12,12 @@ from logging import Logger
 from logging.config import dictConfig
 from os import path
 from pathlib import Path
+<<<<<<< HEAD
 from types import MethodType
 from typing import Any, Optional, cast
+=======
+from typing import Optional
+>>>>>>> b41a85e2 (Add option to setup logging config from entrypoint)
 
 from loguru import logger
 
@@ -256,6 +260,7 @@ def _configure_vllm_root_logger() -> None:
 
 # Try to find the loguru config path
 dir_path = os.path.dirname(os.path.realpath(__file__))
+<<<<<<< HEAD
 loguru_config_path = f"{dir_path}/logging_config.json"
 _loguru_logger = None
 
@@ -362,3 +367,18 @@ def enable_trace_function_call(log_file_path: str,
         # by default, this is the vllm root directory
         root_dir = os.path.dirname(os.path.dirname(__file__))
     sys.settrace(partial(_trace_calls, log_file_path, root_dir))
+=======
+default_config_path = f"{dir_path}/logging_config.json"
+_root_logger = None
+
+
+def setup_logger(config_path: Optional[Path] = default_config_path):
+    global _root_logger
+    _root_logger = CustomizeLogger.make_logger(config_path)
+
+
+def init_logger(name: str):
+    if _root_logger is None:
+        setup_logger()
+    return _root_logger.bind(name=name)
+>>>>>>> b41a85e2 (Add option to setup logging config from entrypoint)
