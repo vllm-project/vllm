@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Tuple
 
 import pytest
@@ -7,22 +8,33 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-_TEST_PROMPTS = [
-    # pylint: disable=line-too-long
-    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
-    "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
-    "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
-    "Describe the basic components of a neural network and how it can be trained.",
-    "Write a short story about a robot that dreams for the first time.",
-    "Analyze the impact of the COVID-19 pandemic on global economic structures and future business models.",
-    "Explain the cultural significance of the Mona Lisa painting, and how its perception might vary in Western versus Eastern societies.",
-    "Translate the following English sentence into Japanese, French, and Swahili: 'The early bird catches the worm.'",
-]
+_TEST_DIR = os.path.dirname(__file__)
+_TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
+_LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
+
+
+def _read_prompts(filename: str) -> str:
+    prompts = []
+    with open(filename, "r") as f:
+        prompt = f.readline()
+        prompts.append(prompt)
+    return prompts
 
 
 @pytest.fixture
 def example_prompts() -> List[str]:
-    return _TEST_PROMPTS
+    prompts = []
+    for filename in _TEST_PROMPTS:
+        prompts += _read_prompts(filename)
+    return prompts
+
+
+@pytest.fixture
+def example_long_prompts() -> List[str]:
+    prompts = []
+    for filename in _LONG_PROMPTS:
+        prompts += _read_prompts(filename)
+    return prompts
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -106,6 +118,39 @@ class HfRunner:
                 ]
             outputs[i] = (output_ids, output_str)
         return outputs
+
+    def generate_greedy_logprobs(
+        self,
+        prompts: List[str],
+        max_tokens: int,
+    ) -> List[List[torch.Tensor]]:
+        all_logprobs = []
+        for prompt in prompts:
+            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+            output = self.model.generate(
+                input_ids.cuda(),
+                use_cache=True,
+                do_sample=False,
+                max_new_tokens=max_tokens,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+            )
+            seq_logprobs = []
+            for hidden_states in output.hidden_states:
+                last_hidden_states = hidden_states[-1][0]
+                logits = torch.matmul(
+                    last_hidden_states,
+                    self.model.get_output_embeddings().weight.t(),
+                )
+                if self.model.get_output_embeddings().bias is not None:
+                    logits += self.model.get_output_embeddings(
+                    ).bias.unsqueeze(0)
+                logprobs = torch.nn.functional.log_softmax(logits,
+                                                           dim=-1,
+                                                           dtype=torch.float32)
+                seq_logprobs.append(logprobs)
+            all_logprobs.append(seq_logprobs)
+        return all_logprobs
 
 
 @pytest.fixture

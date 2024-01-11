@@ -6,23 +6,25 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-from vllm import attention_ops
+from vllm._C import ops
 from vllm.utils import get_max_shared_memory_bytes
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-NUM_BLOCKS = 128  # Arbitrary values for testing
+NUM_BLOCKS = 40000  # Arbitrary values for testing
+PARTITION_SIZE = 512
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
-NUM_PREFILL_SEQS = [1, 3, 7]  # Arbitrary values for testing
+NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
-BLOCK_SIZES = [8, 16, 32]
+BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
 SEEDS = [0]
+DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 
 def ref_masked_attention(
@@ -86,7 +88,7 @@ def ref_single_query_cached_kv_attention(
         alibi_bias = None
         if alibi_slopes is not None:
             # Create the ALiBi bias used in the paged attention kernel.
-            position_ids = torch.arange(context_len, device="cuda").int()
+            position_ids = torch.arange(context_len, device=query.device).int()
             alibi_bias = (position_ids - context_len + 1).float()
             alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
                 1, 1, -1)
@@ -96,6 +98,7 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
+@pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -103,9 +106,10 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@torch.inference_mode()
-def test_single_query_cached_kv_attention(
+@pytest.mark.parametrize("device", DEVICES)
+def test_paged_attention(
     kv_cache_factory,
+    version: str,
     num_seqs: int,
     num_heads: Tuple[int, int],
     head_size: int,
@@ -113,35 +117,33 @@ def test_single_query_cached_kv_attention(
     block_size: int,
     dtype: torch.dtype,
     seed: int,
+    device: int,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-
+    gpu_id = f"cuda:{device}"
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
     query = torch.empty(num_seqs,
                         num_query_heads,
                         head_size,
                         dtype=dtype,
-                        device="cuda")
+                        device=gpu_id)
     query.uniform_(-scale, scale)
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
-    head_mapping = torch.repeat_interleave(
-        torch.arange(num_kv_heads, dtype=torch.int32, device="cuda"),
-        num_queries_per_kv)
     alibi_slopes = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads,
                                    dtype=torch.float,
-                                   device="cuda")
+                                   device=gpu_id)
 
     context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
     context_lens[-1] = MAX_SEQ_LEN
     max_context_len = max(context_lens)
-    context_lens = torch.tensor(context_lens, dtype=torch.int, device="cuda")
+    context_lens = torch.tensor(context_lens, dtype=torch.int, device=gpu_id)
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
@@ -152,29 +154,64 @@ def test_single_query_cached_kv_attention(
             for _ in range(max_num_blocks_per_seq)
         ]
         block_tables.append(block_table)
-    block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
+    block_tables = torch.tensor(block_tables, dtype=torch.int, device=gpu_id)
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
                                                 num_kv_heads, head_size, dtype,
-                                                seed)
+                                                seed, gpu_id)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    attention_ops.single_query_cached_kv_attention(
-        output,
-        query,
-        key_cache,
-        value_cache,
-        head_mapping,
-        scale,
-        block_tables,
-        context_lens,
-        block_size,
-        max_context_len,
-        alibi_slopes,
-    )
+    if version == "v1":
+        ops.paged_attention_v1(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale,
+            block_tables,
+            context_lens,
+            block_size,
+            max_context_len,
+            alibi_slopes,
+        )
+    elif version == "v2":
+        num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
+                          PARTITION_SIZE)
+        assert PARTITION_SIZE % block_size == 0
+        num_seqs, num_heads, head_size = output.shape
+        tmp_output = torch.empty(
+            size=(num_seqs, num_heads, num_partitions, head_size),
+            dtype=output.dtype,
+            device=output.device,
+        )
+        exp_sums = torch.empty(
+            size=(num_seqs, num_heads, num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        max_logits = torch.empty_like(exp_sums)
+        ops.paged_attention_v2(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale,
+            block_tables,
+            context_lens,
+            block_size,
+            max_context_len,
+            alibi_slopes,
+        )
+    else:
+        raise AssertionError(f"Unknown version: {version}")
 
     # Run the reference implementation.
     ref_output = torch.empty_like(query)
@@ -215,7 +252,7 @@ def ref_multi_query_kv_attention(
         attn_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=dtype),
                                diagonal=1)
         attn_mask = attn_mask * torch.finfo(dtype).min
-        attn_mask = attn_mask.to(dtype=dtype, device="cuda")
+        attn_mask = attn_mask.to(dtype=dtype, device=query.device)
 
         ref_output = ref_masked_attention(
             query[start_idx:end_idx],
@@ -235,6 +272,7 @@ def ref_multi_query_kv_attention(
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_multi_query_kv_attention(
     num_seqs: int,
@@ -242,11 +280,12 @@ def test_multi_query_kv_attention(
     head_size: int,
     dtype: torch.dtype,
     seed: int,
+    device: int,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-
+    gpu_id = f"cuda:{device}"
     # MAX_SEQ_LEN sometimes causes OOM in the reference implementation.
     # As the xformers library is already tested with its own tests, we can use
     # a smaller MAX_SEQ_LEN here.
@@ -260,7 +299,7 @@ def test_multi_query_kv_attention(
                       num_query_heads + 2 * num_kv_heads,
                       head_size,
                       dtype=dtype,
-                      device="cuda")
+                      device=gpu_id)
     qkv.uniform_(-scale, scale)
     query, key, value = qkv.split(
         [num_query_heads, num_kv_heads, num_kv_heads], dim=1)

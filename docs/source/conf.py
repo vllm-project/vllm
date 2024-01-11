@@ -12,10 +12,10 @@
 
 import os
 import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
 from sphinx.ext import autodoc
 import logging
+
+sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,10 @@ html_theme_options = {
 # html_static_path = ['_static']
 
 # Mock out external dependencies here.
-autodoc_mock_imports = ["torch", "transformers", "psutil", "vllm.cuda_utils"]
+autodoc_mock_imports = [
+    "torch", "transformers", "psutil", "aioprometheus", "sentencepiece",
+    "vllm.cuda_utils", "vllm._C"
+]
 
 for mock_target in autodoc_mock_imports:
     if mock_target in sys.modules:

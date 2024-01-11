@@ -4,11 +4,9 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizers import *
 
 logger = init_logger(__name__)
-
-# A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
-_FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
 
 
 def get_tokenizer(
@@ -26,13 +24,6 @@ def get_tokenizer(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
-    if ("llama" in tokenizer_name.lower() and kwargs.get("use_fast", True)
-            and tokenizer_name != _FAST_LLAMA_TOKENIZER):
-        logger.info(
-            "For some LLaMA V1 models, initializing the fast tokenizer may "
-            "take a long time. To reduce the initialization time, consider "
-            f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
-            "tokenizer.")
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name,
@@ -40,13 +31,6 @@ def get_tokenizer(
             trust_remote_code=trust_remote_code,
             tokenizer_revision=tokenizer_revision,
             **kwargs)
-    except TypeError as e:
-        # The LLaMA tokenizer causes a protobuf error in some environments.
-        err_msg = (
-            "Failed to load the tokenizer. If you are using a LLaMA V1 model "
-            f"consider using '{_FAST_LLAMA_TOKENIZER}' instead of the "
-            "original tokenizer.")
-        raise RuntimeError(err_msg) from e
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -61,6 +45,18 @@ def get_tokenizer(
             raise RuntimeError(err_msg) from e
         else:
             raise e
+    except AttributeError as e:
+        if "BaichuanTokenizer" in str(e):
+            # This is for the error "'BaichuanTokenizer' object has no
+            # attribute 'sp_model'".
+            tokenizer = BaichuanTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                tokenizer_revision=tokenizer_revision,
+                **kwargs)
+        else:
+            raise e
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.warning(
@@ -73,6 +69,7 @@ def _convert_tokens_to_string_with_added_encoders(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     output_tokens: List[str],
     skip_special_tokens: bool,
+    spaces_between_special_tokens: bool,
 ) -> str:
     # Adapted from
     # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
@@ -81,10 +78,11 @@ def _convert_tokens_to_string_with_added_encoders(
     # even when the loop body is very simple.
     sub_texts = []
     current_sub_text = []
+    all_special_tokens = set(tokenizer.all_special_tokens)
     for token in output_tokens:
-        if skip_special_tokens and token in tokenizer.all_special_tokens:
+        if skip_special_tokens and token in all_special_tokens:
             continue
-        if token in tokenizer.added_tokens_encoder:
+        if token in tokenizer.get_added_vocab():
             if current_sub_text:
                 sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
                 sub_texts.append(sub_text)
@@ -95,7 +93,10 @@ def _convert_tokens_to_string_with_added_encoders(
     if current_sub_text:
         sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
         sub_texts.append(sub_text)
-    return " ".join(sub_texts)
+    if spaces_between_special_tokens:
+        return " ".join(sub_texts)
+    else:
+        return "".join(sub_texts)
 
 
 # Based on
@@ -108,6 +109,7 @@ def detokenize_incrementally(
     prefix_offset: int = 0,
     read_offset: int = 0,
     skip_special_tokens: bool = False,
+    spaces_between_special_tokens: bool = True,
 ) -> Tuple[List[str], str, int, int]:
     new_token_id = all_input_ids[-1]
     # This is the first iteration for this sequence
@@ -119,7 +121,11 @@ def detokenize_incrementally(
         # tokenizers (bigger = more conservative).
         # Subtract 1 extra to account for the generated token.
         prefix_offset = max(len(output_tokens) - 6, 0)
-        read_offset = max(len(output_tokens) - 1, 0)
+        # If the first new token is a special token, we can't skip 1 extra token
+        if skip_special_tokens and new_token_id in tokenizer.all_special_ids:
+            read_offset = max(len(output_tokens), 0)
+        else:
+            read_offset = max(len(output_tokens) - 1, 0)
     else:
         # Put new_token_id in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(
@@ -129,7 +135,7 @@ def detokenize_incrementally(
     # The prefix text is necessary only to defeat cleanup algorithms in
     # the decode which decide to add a space or not depending on the
     # surrounding ids.
-    if not getattr(tokenizer, "added_tokens_encoder", {}):
+    if tokenizer.is_fast or not tokenizer.get_added_vocab():
         prefix_text = tokenizer.convert_tokens_to_string(
             output_tokens[prefix_offset:read_offset])
         new_text = tokenizer.convert_tokens_to_string(
@@ -138,11 +144,15 @@ def detokenize_incrementally(
         prefix_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,
             output_tokens[prefix_offset:read_offset],
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+        )
         new_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,
             output_tokens[prefix_offset:],
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+        )
 
     if len(new_text) > len(prefix_text) and not new_text.endswith("�"):
         # utf-8 char at the end means it's a potential unfinished byte sequence

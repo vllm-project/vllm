@@ -6,18 +6,20 @@ import time
 from typing import List, Optional, Tuple
 
 import torch
-from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          PreTrainedTokenizerBase)
 from tqdm import tqdm
-
-from vllm import LLM, SamplingParams
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
 def sample_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
+    fixed_output_len: Optional[int],
 ) -> List[Tuple[str, int, int]]:
+    if fixed_output_len is not None and fixed_output_len < 4:
+        raise ValueError("output_len too small")
+
     # Load the dataset.
     with open(dataset_path) as f:
         dataset = json.load(f)
@@ -35,6 +37,8 @@ def sample_requests(
     tokenized_dataset = []
     for i in range(len(dataset)):
         output_len = len(completion_token_ids[i])
+        if fixed_output_len is not None:
+            output_len = fixed_output_len
         tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
 
     # Filter out too long sequences.
@@ -65,7 +69,10 @@ def run_vllm(
     use_beam_search: bool,
     trust_remote_code: bool,
     dtype: str,
+    max_model_len: Optional[int],
+    enforce_eager: bool,
 ) -> float:
+    from vllm import LLM, SamplingParams
     llm = LLM(
         model=model,
         tokenizer=tokenizer,
@@ -74,6 +81,8 @@ def run_vllm(
         seed=seed,
         trust_remote_code=trust_remote_code,
         dtype=dtype,
+        max_model_len=max_model_len,
+        enforce_eager=enforce_eager,
     )
 
     # Add the requests to the engine.
@@ -94,7 +103,7 @@ def run_vllm(
         )
 
     start = time.perf_counter()
-    # FIXME(woosuk): Do use internal method.
+    # FIXME(woosuk): Do not use internal method.
     llm._run_engine(use_tqdm=True)
     end = time.perf_counter()
     return end - start
@@ -160,25 +169,52 @@ def run_hf(
     return end - start
 
 
+def run_mii(
+    requests: List[Tuple[str, int, int]],
+    model: str,
+    tensor_parallel_size: int,
+    output_len: int,
+) -> float:
+    from mii import pipeline
+    llm = pipeline(model, tensor_parallel=tensor_parallel_size)
+    prompts = [prompt for prompt, _, _ in requests]
+
+    start = time.perf_counter()
+    llm(prompts, max_new_tokens=output_len)
+    end = time.perf_counter()
+    return end - start
+
+
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
 
     # Sample the requests.
-    tokenizer = get_tokenizer(args.tokenizer,
-                              trust_remote_code=args.trust_remote_code)
-    requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.tokenizer, trust_remote_code=args.trust_remote_code)
+    if args.dataset is None:
+        # Synthesize a prompt with the given input length.
+        prompt = "hi" * (args.input_len - 1)
+        requests = [(prompt, args.input_len, args.output_len)
+                    for _ in range(args.num_prompts)]
+    else:
+        requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
+                                   args.output_len)
 
     if args.backend == "vllm":
         elapsed_time = run_vllm(requests, args.model, args.tokenizer,
                                 args.quantization, args.tensor_parallel_size,
                                 args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype)
+                                args.trust_remote_code, args.dtype,
+                                args.max_model_len, args.enforce_eager)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
                               args.use_beam_search, args.hf_max_batch_size,
                               args.trust_remote_code)
+    elif args.backend == "mii":
+        elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
+                               args.output_len)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
     total_num_tokens = sum(prompt_len + output_len
@@ -191,17 +227,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark the throughput.")
     parser.add_argument("--backend",
                         type=str,
-                        choices=["vllm", "hf"],
+                        choices=["vllm", "hf", "mii"],
                         default="vllm")
     parser.add_argument("--dataset",
                         type=str,
-                        required=True,
+                        default=None,
                         help="Path to the dataset.")
+    parser.add_argument("--input-len",
+                        type=int,
+                        default=None,
+                        help="Input prompt length for each request")
+    parser.add_argument("--output-len",
+                        type=int,
+                        default=None,
+                        help="Output length for each request. Overrides the "
+                        "output length from the dataset.")
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
     parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
-                        choices=['awq', None],
+                        choices=['awq', 'gptq', 'squeezellm', None],
                         default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n",
@@ -222,6 +267,12 @@ if __name__ == "__main__":
                         action='store_true',
                         help='trust remote code from huggingface')
     parser.add_argument(
+        '--max-model-len',
+        type=int,
+        default=None,
+        help='Maximum length of a sequence (including prompt and output). '
+        'If None, will be derived from the model.')
+    parser.add_argument(
         '--dtype',
         type=str,
         default='auto',
@@ -230,7 +281,17 @@ if __name__ == "__main__":
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
+    parser.add_argument("--enforce-eager",
+                        action="store_true",
+                        help="enforce eager execution")
     args = parser.parse_args()
+    if args.tokenizer is None:
+        args.tokenizer = args.model
+    if args.dataset is None:
+        assert args.input_len is not None
+        assert args.output_len is not None
+    else:
+        assert args.input_len is None
 
     if args.backend == "vllm":
         if args.hf_max_batch_size is not None:
@@ -240,7 +301,18 @@ if __name__ == "__main__":
             raise ValueError("HF max batch size is required for HF backend.")
         if args.quantization is not None:
             raise ValueError("Quantization is only for vLLM backend.")
-    if args.tokenizer is None:
-        args.tokenizer = args.model
-
+    elif args.backend == "mii":
+        if args.dtype != "auto":
+            raise ValueError("dtype must be auto for MII backend.")
+        if args.n != 1:
+            raise ValueError("n must be 1 for MII backend.")
+        if args.use_beam_search:
+            raise ValueError("Beam search is not supported for MII backend.")
+        if args.quantization is not None:
+            raise ValueError("Quantization is only for vLLM backend.")
+        if args.hf_max_batch_size is not None:
+            raise ValueError("HF max batch size is only for HF backend.")
+        if args.tokenizer != args.model:
+            raise ValueError("Tokenizer must be the same as the model for MII "
+                             "backend.")
     main(args)

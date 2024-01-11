@@ -6,19 +6,22 @@ import pytest
 
 MODELS = [
     "facebook/opt-125m",
+    "meta-llama/Llama-2-7b-hf",
+    "mistralai/Mistral-7B-v0.1",
+    "Deci/DeciLM-7b",
+    "tiiuae/falcon-7b",
     "gpt2",
     "bigcode/tiny_starcoder_py",
     "EleutherAI/gpt-j-6b",
     "EleutherAI/pythia-70m",
     "bigscience/bloom-560m",
     "mosaicml/mpt-7b",
-    "tiiuae/falcon-7b",
-    "meta-llama/Llama-2-7b-hf",
+    "microsoft/phi-2",
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(
     hf_runner,

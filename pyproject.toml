@@ -1,9 +1,34 @@
 [build-system]
+# Should be mirrored in requirements-build.txt
 requires = [
     "ninja",
     "packaging",
-    "setuptools",
-    "torch >= 2.0.0",
+    "setuptools >= 49.4.0",
+    "torch == 2.1.2",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    # "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    # "I",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # line too long, handled by black formatting
+    "E501",
+]
