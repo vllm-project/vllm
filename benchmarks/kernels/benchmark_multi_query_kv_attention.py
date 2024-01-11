@@ -56,19 +56,26 @@ def main(
                 output = output.reshape(num_seqs * max(seq_lens),
                                         num_query_heads, head_size)
             else:
+                query_expanded = query
                 key_expanded = key
                 value_expanded = value
                 num_queries_per_kv = num_query_heads // num_kv_heads
                 if num_queries_per_kv > 1:
                     # Handle MQA and GQA
-                    key_expanded = torch.repeat_interleave(key,
-                                                           num_queries_per_kv,
-                                                           dim=1)
-                    value_expanded = torch.repeat_interleave(
-                        value, num_queries_per_kv, dim=1)
+                    query_expanded = query_expanded.view(
+                        query_expanded.shape[0], num_kv_heads,
+                        num_queries_per_kv, query_expanded.shape[-1])
+                    key_expanded = key[:, :,
+                                       None, :].expand(key.shape[0],
+                                                       num_kv_heads,
+                                                       num_queries_per_kv,
+                                                       key.shape[-1])
+                    value_expanded = value[:, :, None, :].expand(
+                        value.shape[0], num_kv_heads, num_queries_per_kv,
+                        value.shape[-1])
                 attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
                 output = xops.memory_efficient_attention_forward(
-                    query.unsqueeze(0),
+                    query_expanded.unsqueeze(0),
                     key_expanded.unsqueeze(0),
                     value_expanded.unsqueeze(0),
                     attn_bias=attn_bias,

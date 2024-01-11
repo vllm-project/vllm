@@ -242,11 +242,17 @@ def ref_multi_query_kv_attention(
     scale: float,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    num_queries_per_kv = query.shape[-2] // key.shape[-2]
+    num_kv_heads = key.shape[-2]
+    num_queries_per_kv = query.shape[-2] // num_kv_heads
     if num_queries_per_kv > 1:
         # Handle MQA and GQA
-        key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
-        value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
+        query = query.view(query.shape[0], num_kv_heads, num_queries_per_kv,
+                           query.shape[-1])
+        key = key[:, :, None, :].expand(key.shape[0], num_kv_heads,
+                                        num_queries_per_kv, key.shape[-1])
+        value = value[:, :,
+                      None, :].expand(value.shape[0], num_kv_heads,
+                                      num_queries_per_kv, value.shape[-1])
 
     num_seqs = len(cu_seq_lens) - 1
     ref_outputs = []
@@ -312,15 +318,25 @@ def test_multi_query_kv_attention(
         [num_query_heads, num_kv_heads, num_kv_heads], dim=1)
 
     num_queries_per_kv = num_query_heads // num_kv_heads
+    query_expanded = query
+    key_expanded = key
+    value_expanded = value
     if num_queries_per_kv > 1:
         # Handle MQA and GQA
-        key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
-        value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
+        query_expanded = query.view(query.shape[0], num_kv_heads,
+                                    num_queries_per_kv, query.shape[-1])
+        key_expanded = key[:, :,
+                           None, :].expand(key.shape[0], num_kv_heads,
+                                           num_queries_per_kv, key.shape[-1])
+        value_expanded = value[:, :,
+                               None, :].expand(value.shape[0], num_kv_heads,
+                                               num_queries_per_kv,
+                                               value.shape[-1])
     attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
     output = xops.memory_efficient_attention_forward(
-        query.unsqueeze(0),
-        key.unsqueeze(0),
-        value.unsqueeze(0),
+        query_expanded.unsqueeze(0),
+        key_expanded.unsqueeze(0),
+        value_expanded.unsqueeze(0),
         attn_bias=attn_bias,
         p=0.0,
         scale=scale,
