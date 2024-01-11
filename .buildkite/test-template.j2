@@ -18,6 +18,10 @@ steps:
     plugins:
       - kubernetes:
           podSpec:
+            volumes:
+              - name: dshm
+                emptyDir:
+                  medium: Memory
             containers:
               - image: "{{ docker_image }}"
                 command: ["bash"]
@@ -35,8 +39,7 @@ steps:
                       secretKeyRef:
                         name: hf-token-secret
                         key: token
-                volumes:
-                  - name: dshm
-                    emptyDir:
-                      medium: Memory
+                volumeMounts:
+                  - mountPath: /dev/shm
+                    name: dshm
   {% endfor %}
