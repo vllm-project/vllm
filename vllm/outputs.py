@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import List, Optional
 import time
 
@@ -5,7 +6,7 @@ from vllm.sequence import (PromptLogprobs, SampleLogprobs, SequenceGroup,
                            SequenceStatus, RequestMetrics)
 from vllm.lora.request import LoRARequest
 
-
+@dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
 
@@ -20,37 +21,20 @@ class CompletionOutput:
         finish_reason: The reason why the sequence is finished.
         lora_request: The LoRA request that was used to generate the output.
     """
-
-    def __init__(
-        self,
-        index: int,
-        text: str,
-        token_ids: List[int],
-        cumulative_logprob: float,
-        logprobs: Optional[SampleLogprobs],
-        finish_reason: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> None:
-        self.index = index
-        self.text = text
-        self.token_ids = token_ids
-        self.cumulative_logprob = cumulative_logprob
-        self.logprobs = logprobs
-        self.finish_reason = finish_reason
-        self.lora_request = lora_request
+    index: int
+    text: str
+    token_ids: List[int]
+    cumulative_logprob: float
+    logprobs: Optional[SampleLogprobs] = None
+    probs: Optional[List[List[float]]] = None
+    finish_reason: Optional[str] = None
+    lora_request: Optional[LoRARequest] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
 
-    def __repr__(self) -> str:
-        return (f"CompletionOutput(index={self.index}, "
-                f"text={self.text!r}, "
-                f"token_ids={self.token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob}, "
-                f"logprobs={self.logprobs}, "
-                f"finish_reason={self.finish_reason})")
 
-
+@dataclass
 class RequestOutput:
     """The output data of a request to the LLM.
 
@@ -64,26 +48,14 @@ class RequestOutput:
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
     """
-
-    def __init__(
-        self,
-        request_id: str,
-        prompt: str,
-        prompt_token_ids: List[int],
-        prompt_logprobs: Optional[PromptLogprobs],
-        outputs: List[CompletionOutput],
-        finished: bool,
-        metrics: Optional[RequestMetrics] = None,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> None:
-        self.request_id = request_id
-        self.prompt = prompt
-        self.prompt_token_ids = prompt_token_ids
-        self.prompt_logprobs = prompt_logprobs
-        self.outputs = outputs
-        self.finished = finished
-        self.metrics = metrics
-        self.lora_request = lora_request
+    request_id: str
+    prompt: str
+    prompt_token_ids: List[int]
+    prompt_logprobs: Optional[PromptLogprobs]
+    outputs: List[CompletionOutput]
+    finished: bool
+    metrics: Optional[RequestMetrics] = None,
+    lora_request: Optional[LoRARequest] = None,
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
@@ -107,7 +79,7 @@ class RequestOutput:
                 # always has the logprobs of the sampled tokens even if the
                 # logprobs are not requested.
                 logprobs = None
-            finshed_reason = SequenceStatus.get_finished_reason(seq.status)
+            finshed_reason = SequenceStatus.get_finished_reason(seq.get_status())
             output = CompletionOutput(seqs.index(seq), seq.output_text,
                                       seq.get_output_token_ids(),
                                       seq.get_cumulative_logprob(), logprobs,
@@ -129,13 +101,3 @@ class RequestOutput:
                    finished,
                    seq_group.metrics,
                    lora_request=seq_group.lora_request)
-
-    def __repr__(self) -> str:
-        return (f"RequestOutput(request_id={self.request_id}, "
-                f"prompt={self.prompt!r}, "
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"prompt_logprobs={self.prompt_logprobs}, "
-                f"outputs={self.outputs}, "
-                f"finished={self.finished}, "
-                f"metrics={self.metrics}, "
-                f"lora_request={self.lora_request})")

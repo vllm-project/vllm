@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+                        ParallelConfig, BaseSchedulerConfig, VLLMSchedulerConfig, LoRAConfig)
 
 
 @dataclass
@@ -27,8 +27,6 @@ class EngineArgs:
     block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
-    max_num_batched_tokens: Optional[int] = None
-    max_num_seqs: int = 256
     max_paddings: int = 256
     disable_log_stats: bool = False
     revision: Optional[str] = None
@@ -45,6 +43,11 @@ class EngineArgs:
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'cuda'
+    # scheduler parameters
+    scheduler_type: str = "vllm"
+    max_num_seqs: int = 256
+    # vllm scheduler parameters
+    max_num_batched_tokens: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -188,6 +191,10 @@ class EngineArgs:
             help='the fraction of GPU memory to be used for '
             'the model executor, which can range from 0 to 1.'
             'If unspecified, will use the default value of 0.9.')
+        parser.add_argument('--scheduler-type',
+                            type=str,
+                            default=EngineArgs.scheduler_type,
+                            help='type of scheduler to use')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
                             default=EngineArgs.max_num_batched_tokens,
@@ -281,17 +288,33 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
+    def _get_scheduler_config(self, model_config: ModelConfig) -> BaseSchedulerConfig:
+        if self.scheduler_type == "vllm":
+            scheduler_config = VLLMSchedulerConfig(
+                self.max_num_seqs,
+                model_config.max_model_len,
+                self.max_paddings,
+                self.max_num_batched_tokens,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported scheduler type: {self.scheduler_type}"
+            )
+        
+        return scheduler_config
+
     def create_engine_configs(
         self,
-    ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
+    ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, BaseSchedulerConfig,
                DeviceConfig, Optional[LoRAConfig]]:
         device_config = DeviceConfig(self.device)
-        model_config = ModelConfig(
-            self.model, self.tokenizer, self.tokenizer_mode,
-            self.trust_remote_code, self.download_dir, self.load_format,
-            self.dtype, self.seed, self.revision, self.code_revision,
-            self.tokenizer_revision, self.max_model_len, self.quantization,
-            self.enforce_eager, self.max_context_len_to_capture)
+        model_config = ModelConfig(self.model, self.tokenizer,
+                                   self.tokenizer_mode, self.trust_remote_code,
+                                   self.download_dir, self.load_format,
+                                   self.dtype, self.seed, self.revision,
+                                   self.tokenizer_revision, self.max_model_len,
+                                   self.quantization, self.enforce_eager,
+                                   self.max_context_len_to_capture)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -301,10 +324,7 @@ class EngineArgs:
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
                                          self.disable_custom_all_reduce)
-        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
-                                           self.max_paddings)
+        scheduler_config = self._get_scheduler_config(model_config)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

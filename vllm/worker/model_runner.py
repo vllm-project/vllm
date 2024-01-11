@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
-                         SchedulerConfig)
+                         BaseSchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils import cupy_utils
@@ -39,7 +39,7 @@ class ModelRunner:
         self,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
+        scheduler_config: BaseSchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
@@ -630,6 +630,7 @@ class ModelRunner:
                 block_tables=None,
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
+                prompt_chunk_size=seq_len,
             )
             seqs.append(seq)
 

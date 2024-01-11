@@ -1,10 +1,11 @@
-from typing import Optional, Union, ClassVar
-from dataclasses import dataclass
 import os
-from packaging.version import Version
-
 import torch
+
+from abc import ABC
+from dataclasses import dataclass
+from packaging.version import Version
 from transformers import PretrainedConfig
+from typing import Optional, Union, ClassVar
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
@@ -111,6 +112,7 @@ class ModelConfig:
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
+        self.hf_config.dtype = self.dtype
         self.max_model_len = _get_and_verify_max_len(self.hf_config,
                                                      max_model_len)
         self._verify_load_format()
@@ -416,14 +418,12 @@ class ParallelConfig:
                 "resolved.")
 
 
-class SchedulerConfig:
-    """Scheduler configuration.
+class BaseSchedulerConfig:
+    """BaseScheduler configuration.
 
     Args:
-        max_num_batched_tokens: Maximum number of tokens to be processed in
-            a single iteration.
         max_num_seqs: Maximum number of sequences to be processed in a single
-            iteration.
+            iteration. a.k.a the batch size
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
         max_paddings: Maximum number of paddings to be added to a batch.
@@ -431,21 +431,21 @@ class SchedulerConfig:
 
     def __init__(
         self,
-        max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_paddings: int,
+        max_paddings: int, # TODO: ravianupindi, move out of base class?
     ) -> None:
-        if max_num_batched_tokens is not None:
-            self.max_num_batched_tokens = max_num_batched_tokens
-        else:
-            # If max_model_len is too short, use 2048 as the default value for
-            # higher throughput.
-            self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self.max_paddings = max_paddings
-        self._verify_args()
+
+    @property
+    def max_num_batched_tokens(self) -> int:
+        pass
+
+    @property
+    def type_name(self) -> str:
+        pass
 
     def _verify_args(self) -> None:
         if self.max_num_batched_tokens < self.max_model_len:
@@ -515,6 +515,33 @@ class LoRAConfig:
                 "Due to limitations of the custom LoRA CUDA kernel, "
                 "max_num_batched_tokens must be <= 65528 when "
                 "LoRA is enabled.")
+class VLLMSchedulerConfig(BaseSchedulerConfig):
+    """Scheduler configuration.
+
+    Args:
+        max_num_batched_tokens: Maximum number of tokens to be processed in a single iteration.
+                                This only takes into account number of tokens moving from WAITING
+                                to RUNNING states.
+    """
+
+    def __init__(self,
+                max_num_seqs: int,
+                max_model_len: int,
+                max_paddings: int,
+                max_num_batched_tokens: int) -> None:
+        super().__init__(max_num_seqs, max_model_len, max_paddings)
+        self._max_num_batched_tokens = (
+            max_num_batched_tokens if max_num_batched_tokens else max_model_len
+        )
+        self._verify_args()
+    
+    @property
+    def max_num_batched_tokens(self) -> int:
+        return self._max_num_batched_tokens
+    
+    @property
+    def type_name(self) -> str:
+        return "vllm"
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -618,6 +645,12 @@ def _get_and_verify_max_len(
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     if rope_scaling is not None:
+        if derived_max_model_len == float("inf"):
+            raise ValueError(
+                "When using rope_scaling, the model's config.json must "
+                "contain one of the following keys to determine the original "
+                f"maximum length of the model: {possible_keys}"
+            )
         assert "factor" in rope_scaling
         scaling_factor = rope_scaling["factor"]
         if rope_scaling["type"] == "yarn":
@@ -628,10 +661,13 @@ def _get_and_verify_max_len(
     if max_model_len is None:
         max_model_len = derived_max_model_len
     elif max_model_len > derived_max_model_len:
-        raise ValueError(
-            f"User-specified max_model_len ({max_model_len}) is greater than "
-            f"the derived max_model_len ({max_len_key}={derived_max_model_len}"
-            " in model's config.json). This may lead to incorrect model "
-            "outputs or CUDA errors. Make sure the value is correct and "
-            "within the model context size.")
+        logger.info(f"Applying rope_scaling to the maximum model length: "
+                    f"{derived_max_model_len} -> {max_model_len}")
+        
+        # Force rope_scaling
+        scaling_factor = max_model_len / derived_max_model_len
+        rope_scaling = {"type": "linear",
+                        "factor": scaling_factor}
+        hf_config.rope_scaling = rope_scaling
+
     return int(max_model_len)

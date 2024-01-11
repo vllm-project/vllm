@@ -1,4 +1,5 @@
 import copy
+import math
 from collections import defaultdict
 import os
 import time
@@ -8,8 +9,9 @@ from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
 
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
-from vllm.core.scheduler import Scheduler, SchedulerOutputs
+                         ParallelConfig, BaseSchedulerConfig, LoRAConfig)
+from vllm.core.scheduler.base_scheduler import SchedulerOutputs, BaseScheduler
+from vllm.core.scheduler.scheduler_registry import SchedulerRegistry
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
@@ -17,7 +19,8 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+                           SequenceGroupOutput, SequenceOutput)
+from vllm.sequence_status import SequenceStatus
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
@@ -70,7 +73,7 @@ class LLMEngine:
         model_config: ModelConfig,
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
+        scheduler_config: BaseSchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
         placement_group: Optional["PlacementGroup"],
@@ -100,6 +103,8 @@ class LLMEngine:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        assert self.cache_config.sliding_window == getattr(
+            self.model_config.hf_config, "sliding_window", None)
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -123,7 +128,7 @@ class LLMEngine:
         self._init_cache()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        self.scheduler: BaseScheduler = SchedulerRegistry.get_from_str(scheduler_config.type_name, scheduler_config, cache_config, lora_config)
 
         # Metric Logging.
         if self.log_stats:
@@ -453,11 +458,12 @@ class LLMEngine:
             prompt_token_ids=prompt_token_ids,
             lora_request=lora_request)
 
+        arrived_at = time.monotonic()
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
-                       lora_request)
+                       arrived_at, lora_request)
 
         # Check whether the input specifies prefix
         prefix = self.scheduler.prefix_pool.add_or_get_prefix(
@@ -582,7 +588,7 @@ class LLMEngine:
                 # This parent sequence has no children samples. Remove
                 # the parent sequence from the sequence group since it will
                 # not be used in the future iterations.
-                parent.status = SequenceStatus.FINISHED_ABORTED
+                parent.set_status(SequenceStatus.FINISHED_ABORTED)
                 seq_group.remove(parent.seq_id)
                 self.scheduler.free_seq(parent)
                 continue
@@ -591,17 +597,21 @@ class LLMEngine:
                 new_child_seq_id = next(self.seq_counter)
                 child = parent.fork(new_child_seq_id)
                 child.append_token_id(child_sample.output_token,
-                                      child_sample.logprobs)
+                                      child_sample.logprobs,
+                                      child_sample.probs)
                 child_seqs.append((child, parent))
             # Continue the parent sequence for the last child sample.
             # We reuse the parent sequence here to reduce redundant memory
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
             parent.append_token_id(last_child_sample.output_token,
-                                   last_child_sample.logprobs)
+                                   last_child_sample.logprobs,
+                                   last_child_sample.probs)
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
+            if not seq.is_prompt_processing_finished():
+                continue
             self._decode_sequence(seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
@@ -735,7 +745,7 @@ class LLMEngine:
             self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
-        self.scheduler.free_finished_seq_groups()
+        self.scheduler.on_step_completed(scheduler_outputs)
 
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
@@ -756,7 +766,6 @@ class LLMEngine:
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
-
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -823,6 +832,14 @@ class LLMEngine:
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
                 },
                 use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
+
+            for seq_group, prompt_chunk_len in zip(
+                scheduler_outputs.scheduled_seq_groups,
+                scheduler_outputs.prompt_chunk_lens):
+
+                #TODO:ravianupindi, Assuming only one sequence per sequence group
+                seq = seq_group.get_seqs()[0]
+                seq.update_prompt_tokens_processed(prompt_chunk_len)
 
             # Only the driver worker returns the sampling results.
             output = all_outputs[0]
@@ -942,12 +959,12 @@ class LLMEngine:
 
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            seq.set_status(SequenceStatus.FINISHED_LENGTH_CAPPED)
             return
 
         # Check if the sequence has reached max_tokens.
         if seq.get_output_len() == sampling_params.max_tokens:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            seq.set_status(SequenceStatus.FINISHED_LENGTH_CAPPED)
             return
 
         # Check if the sequence has generated the EOS token.

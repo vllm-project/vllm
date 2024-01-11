@@ -569,8 +569,9 @@ def _build_sampler_output(
         for parent_id, next_token_id, logprobs in zip(parent_ids,
                                                       next_token_ids,
                                                       group_sample_logprobs):
+            output_probs = None # TODO: ravianupindi - need to wire up output probabilities
             seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
+                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs, output_probs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
     return sampler_output

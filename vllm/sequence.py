@@ -8,47 +8,11 @@ from vllm.block import LogicalTokenBlock
 from vllm.prefix import Prefix
 from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
+from vllm.sequence_status import SequenceStatus
+from vllm.sequence_state import SequenceState
 
 PromptLogprobs = List[Optional[Dict[int, float]]]
 SampleLogprobs = List[Dict[int, float]]
-
-
-class SequenceStatus(enum.Enum):
-    """Status of a sequence."""
-    WAITING = enum.auto()
-    RUNNING = enum.auto()
-    SWAPPED = enum.auto()
-    FINISHED_STOPPED = enum.auto()
-    FINISHED_LENGTH_CAPPED = enum.auto()
-    FINISHED_ABORTED = enum.auto()
-    FINISHED_IGNORED = enum.auto()
-
-    @staticmethod
-    def is_finished(status: "SequenceStatus") -> bool:
-        return status in [
-            SequenceStatus.FINISHED_STOPPED,
-            SequenceStatus.FINISHED_LENGTH_CAPPED,
-            SequenceStatus.FINISHED_ABORTED,
-            SequenceStatus.FINISHED_IGNORED,
-        ]
-
-    @staticmethod
-    def get_finished_reason(status: "SequenceStatus") -> Union[str, None]:
-        if status == SequenceStatus.FINISHED_STOPPED:
-            finish_reason = "stop"
-        elif status == SequenceStatus.FINISHED_LENGTH_CAPPED:
-            finish_reason = "length"
-        elif status == SequenceStatus.FINISHED_ABORTED:
-            finish_reason = "abort"
-        elif status == SequenceStatus.FINISHED_IGNORED:
-            # The ignored sequences are the sequences whose prompt lengths
-            # are longer than the model's length cap. Therefore, the stop
-            # reason should also be "length" as in OpenAI API.
-            finish_reason = "length"
-        else:
-            finish_reason = None
-        return finish_reason
-
 
 @dataclass
 class RequestMetrics:
@@ -79,19 +43,56 @@ class SequenceData:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
+        prompt_tokens_processed: Number of prefill tokens previously processed, applicable to chunking
     """
 
     def __init__(
         self,
         prompt_token_ids: List[int],
+        prompt_tokens_processed: int = 0,
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
 
-    def append_token_id(self, token_id: int, logprob: float) -> None:
-        self.output_token_ids.append(token_id)
-        self.cumulative_logprob += logprob
+        self._prompt_processing_finished: bool = False
+        self._prompt_tokens_processed: int = prompt_tokens_processed
+    
+    @property
+    def prompt_processing_finished(self) -> bool:
+        return self._prompt_processing_finished
+
+    @prompt_processing_finished.setter
+    def prompt_processing_finished(self, value: bool) -> None:
+        self._prompt_processing_finished = value
+
+    @property
+    def prompt_tokens_processed(self) -> int:
+        return self._prompt_tokens_processed
+
+    @prompt_tokens_processed.setter
+    def prompt_tokens_processed(self, value: int) -> None:
+        self._prompt_tokens_processed = value
+
+    def update_prompt_tokens_processed(self, num_tokens: int) -> None:
+        if self.prompt_processing_finished:
+            return
+        
+        assert num_tokens > 0
+        self.prompt_tokens_processed += num_tokens
+        prompt_len = self.get_prompt_len()
+        assert self.prompt_tokens_processed <= prompt_len
+
+        if self.prompt_tokens_processed == prompt_len:
+            self.prompt_processing_finished = True
+
+    def append_token_id(self, token_id: int, logprob: float) -> bool:
+        if self.prompt_processing_finished:
+            self.output_token_ids.append(token_id)
+            self.cumulative_logprob += logprob
+            return True
+        
+        return False
 
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
@@ -105,10 +106,31 @@ class SequenceData:
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
 
+    def _get_next_prompt_chunk(self, chunk_size: int) -> List[int]:
+        start = self.prompt_tokens_processed
+        end = min(start + chunk_size, self.get_prompt_len())
+        return self.prompt_token_ids[start:end]
+
+    @property
+    def next_prompt_chunk_token_ids(self, chunk_size: int) -> List[int]:
+        return self._get_next_prompt_chunk(chunk_size)
+
+    @property
+    def next_prompt_chunk_len(self, chunk_size: int) -> int:
+        return len(self._get_next_prompt_chunk(chunk_size))
+
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
+
+    def reset_for_recompute(self) -> None:
+        # Note: some decode batches for this sequence may have completed
+        # in that case, we add those tokens into the prompt_token_ids and reset relevant metadata
+        self.prompt_tokens_processed = 0
+        self.prompt_processing_finished = False
+        self.prompt_token_ids = self.prompt_token_ids + self.output_token_ids
+        self.output_token_ids.clear()
 
     def __repr__(self) -> str:
         return (f"SequenceData("
@@ -136,6 +158,7 @@ class Sequence:
         prompt_token_ids: List[int],
         block_size: int,
         lora_request: Optional[LoRARequest] = None,
+        arrived_at: float,
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
@@ -144,22 +167,29 @@ class Sequence:
 
         self.data = SequenceData(prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
+        self.output_probs: List[List[float]] = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
         self._append_tokens_to_blocks(prompt_token_ids)
-        self.status = SequenceStatus.WAITING
 
         # Used for incremental detokenization
         self.prefix_offset = 0
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
-
+        self.state = SequenceState(seq_id, arrived_at, len(prompt_token_ids))
+    
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+
+    def get_status(self) -> SequenceStatus:
+        return self.state.status
+    
+    def set_status(self, status: SequenceStatus) -> None:
+        self.state.status = status
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
@@ -184,15 +214,31 @@ class Sequence:
                                                num_empty_slots])
             cursor += num_empty_slots
 
+    def update_prompt_tokens_processed(self, num_tokens: int) -> None:
+        self.data.update_prompt_tokens_processed(num_tokens)
+
     def append_token_id(
         self,
         token_id: int,
         logprobs: Dict[int, float],
+        probs: Optional[List[float]]
     ) -> None:
         assert token_id in logprobs
-        self._append_tokens_to_blocks([token_id])
-        self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id])
+
+        # Take a call whether to append the generated output token to a logical block,
+        # for all partial prefill chunks, we can discard the token
+        should_append_token = self.data.append_token_id(token_id, logprobs[token_id])
+
+        if should_append_token:
+            self._append_tokens_to_blocks([token_id])
+            self.output_logprobs.append(logprobs)
+            if probs is not None:
+                self.output_probs.append(probs)
+            
+            self.state.on_token_generated()
+            # We've generated one output, prompt phase is completed
+            if len(self.output_logprobs) == 1:
+                self.state.on_prompt_processing_completed()
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -202,6 +248,9 @@ class Sequence:
 
     def get_output_len(self) -> int:
         return self.data.get_output_len()
+
+    def get_num_prompt_tokens_processed(self) -> int:
+        return self.data.prompt_tokens_processed
 
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
@@ -234,17 +283,24 @@ class Sequence:
                 seq_len -= 1
         return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
+    def is_prompt_processing_finished(self) -> bool:
+        return self.data.prompt_processing_finished
+
     def is_finished(self) -> bool:
-        return SequenceStatus.is_finished(self.status)
+        return SequenceStatus.is_finished(self.get_status())
 
     def fork(self, new_seq_id: int) -> "Sequence":
         new_seq = copy.deepcopy(self)
         new_seq.seq_id = new_seq_id
         return new_seq
 
+    def reset_for_recompute(self) -> None:
+        self.set_status(SequenceStatus.WAITING)
+        self.data.reset_for_recompute()
+
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
-                f"status={self.status.name}, "
+                f"status={self.get_status().name}, "
                 f"num_blocks={len(self.logical_token_blocks)})")
 
 
@@ -352,7 +408,7 @@ class SequenceGroup:
             return list(self.seqs_dict.values())
         else:
             return [
-                seq for seq in self.seqs_dict.values() if seq.status == status
+                seq for seq in self.seqs_dict.values() if seq.get_status() == status
             ]
 
     def get_unfinished_seqs(self) -> List[Sequence]:
@@ -363,6 +419,14 @@ class SequenceGroup:
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
 
+    def get_running_or_paused_seqs(self) -> List[Sequence]:
+        return self.get_seqs(status=SequenceStatus.RUNNING) + self.get_seqs(
+            status=SequenceStatus.PAUSED)
+    
+    def get_waiting_or_paused_seqs(self) -> List[Sequence]:
+        return self.get_seqs(status=SequenceStatus.WAITING) + self.get_seqs(
+            status=SequenceStatus.PAUSED)
+
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
 
@@ -372,6 +436,18 @@ class SequenceGroup:
     def num_finished_seqs(self) -> int:
         return len(self.get_finished_seqs())
 
+    def is_prompt_processing_finished(self) -> bool:
+        count = sum(1 for _, seq in self.seqs_dict.items()
+                    if seq.is_prompt_processing_finished())
+        
+        if count == 0:
+            return False
+        elif count == len(self.seqs_dict):
+            return True
+        else:
+            raise ValueError(
+                f"Only {count} out of {len(self.seqs_dict)} have finished with their prompt phases, expected all to have completed."
+            )
     def find(self, seq_id: int) -> Sequence:
         if seq_id not in self.seqs_dict:
             raise ValueError(f"Sequence {seq_id} not found.")
@@ -393,7 +469,9 @@ class SequenceGroup:
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
                 f"sampling_params={self.sampling_params}, "
-                f"num_seqs={len(self.seqs_dict)})")
+                f"num_seqs={len(self.seqs_dict)}, "
+                f"is_prompt_processing_finished={self.is_prompt_processing_finished()}, "
+                f"is_finished={self.is_finished()})")
 
 
 class SequenceGroupMetadata:
@@ -418,6 +496,7 @@ class SequenceGroupMetadata:
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
+        prompt_chunk_size: int,
         lora_request: Optional[LoRARequest] = None,
         prefix: Optional[Prefix] = None,
         state: Optional[SequenceGroupState] = None,
@@ -430,6 +509,7 @@ class SequenceGroupMetadata:
         self.lora_request = lora_request
         self.prefix = prefix
         self.state = SequenceGroupState() if state is None else state
+        self.prompt_chunk_size = prompt_chunk_size
 
     @property
     def lora_int_id(self) -> int:
@@ -445,6 +525,8 @@ class SequenceOutput:
         output_token: The output token ID.
         logprobs: The logprobs of the output token.
             (Token id -> logP(x_i+1 | x_0, ..., x_i))
+        probs: The probabilities of all the `vocab_size` tokens that is used to generate
+               the output token
     """
 
     def __init__(
@@ -452,10 +534,12 @@ class SequenceOutput:
         parent_seq_id: int,
         output_token: int,
         logprobs: Dict[int, float],
+        probs: Optional[List[float]]
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
+        self.probs = probs
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "

@@ -1,13 +1,13 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, List, Tuple, Set, Optional
-
 import torch
 import torch.distributed
+from typing import Dict, List, Tuple, Set, Optional
+from typing import Dict, List, Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+                         ParallelConfig, BaseSchedulerConfig, LoRAConfig)
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -21,7 +21,6 @@ from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
 from vllm.utils import is_hip
 
-
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
 
@@ -34,7 +33,7 @@ class Worker:
         self,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
+        scheduler_config: BaseSchedulerConfig,
         device_config: DeviceConfig,
         local_rank: int,
         rank: int,
@@ -65,6 +64,7 @@ class Worker:
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None
+        self.sliding_window = None
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
@@ -121,6 +121,7 @@ class Worker:
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
+        # TODO: ravianupindi - add sarathi/dsarathi code path here
         self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
@@ -147,6 +148,7 @@ class Worker:
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
+        self.sliding_window = cache_config.sliding_window
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.cache_events = self.cache_engine.events

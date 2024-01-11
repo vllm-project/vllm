@@ -90,6 +90,8 @@ class SamplingParams:
             tokens in the output.  Defaults to True.
         logits_processors: List of functions that modify logits based on
             previously generated tokens.
+        export_probs: Whether to export the softmaxed logits which competed to be the next token.
+            For a response `CompletionOutput` object with output length D, probs is of shape (D, vocab_size)
     """
 
     def __init__(
@@ -117,6 +119,7 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
+        export_probs: bool = False,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -144,6 +147,7 @@ class SamplingParams:
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.logprobs = logprobs
+        self.export_probs = export_probs
         self.prompt_logprobs = prompt_logprobs
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
