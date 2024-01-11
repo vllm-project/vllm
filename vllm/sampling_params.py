@@ -92,7 +92,7 @@ class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
     """
 
     n: int = 1
-    best_of: Optional[int] = 0
+    best_of: Optional[int] = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
@@ -103,7 +103,7 @@ class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
     use_beam_search: bool = False
     length_penalty: float = 1.0
     early_stopping: Union[bool, str] = False
-    stop: List[str] = []
+    stop: Optional[Union[str, List[str]]] = None,
     stop_token_ids: List[int] = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -120,6 +120,7 @@ class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
                 (self.best_of is not None and self.best_of > 0) else self.n)
 
     def __post_init__(self):
+        self._verify_args()
         if self.use_beam_search:
             self._verify_beam_search()
         else:
@@ -134,9 +135,9 @@ class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
     def _verify_args(self) -> None:
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
-        if self.best_of < self.n:
+        if self.actual_best_of < self.n:
             raise ValueError(f"best_of must be greater than or equal to n, "
-                             f"got n={self.n} and best_of={self.best_of}.")
+                             f"got n={self.n} and best_of={self.actual_best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError("presence_penalty must be in [-2, 2], got "
                              f"{self.presence_penalty}.")
@@ -168,9 +169,9 @@ class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
                              f"{self.prompt_logprobs}.")
 
     def _verify_beam_search(self) -> None:
-        if self.best_of == 1:
+        if self.actual_best_of == 1:
             raise ValueError("best_of must be greater than 1 when using beam "
-                             f"search. Got {self.best_of}.")
+                             f"search. Got {self.actual_best_of}.")
         if self.temperature > _SAMPLING_EPS:
             raise ValueError("temperature must be 0 when using beam search.")
         if self.top_p < 1.0 - _SAMPLING_EPS:
@@ -193,9 +194,9 @@ class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
                 "default value of 1.0 when not using beam search.")
 
     def _verify_greedy_sampling(self) -> None:
-        if self.best_of > 1:
+        if self.actual_best_of > 1:
             raise ValueError("best_of must be 1 when using greedy sampling."
-                             f"Got {self.best_of}.")
+                             f"Got {self.actual_best_of}.")
 
     @property
     def sampling_type(self) -> SamplingType:
@@ -208,7 +209,7 @@ class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
     def __repr__(self) -> str:
         return (
             f"SamplingParams(n={self.n}, "
-            f"best_of={self.best_of}, "
+            f"best_of={self.actual_best_of}, "
             f"presence_penalty={self.presence_penalty}, "
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_gather)
+    tensor_model_parallel_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTensors
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
@@ -30,7 +30,6 @@ class Sampler(nn.Module):
     def __init__(self, vocab_size: int) -> None:
         super().__init__()
         self.vocab_size = vocab_size
-        self._copy_stream: torch.cuda.Stream = torch.cuda.Stream()
 
     def forward(
         self,
@@ -38,7 +37,7 @@ class Sampler(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
-    ) -> SamplerOutput:
+    ) -> Optional[SamplerOutput]:
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
 
@@ -46,19 +45,23 @@ class Sampler(nn.Module):
         logits = _get_logits(hidden_states, embedding, embedding_bias,
                              self.vocab_size)
 
+        # Only perform sampling in the driver worker.
+        # Note: `_get_logits` is still distributed across TP workers because
+        # the `embedding` weight is distributed across TP workers.
+        # TODO(zhuohan): Change the get_logits part to a separate stage.
+        if not sampling_metadata.perform_sampling:
+            return None
+
+        assert logits is not None
         _, vocab_size = logits.shape
 
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
 
-        # Prepare sampling tensors in another stream to overlap
-        # CPU<->GPU data transfer with GPU computation in forward pass.
-        with torch.cuda.stream(self._copy_stream):
-            (sampling_tensors, do_penalties, do_top_p_top_k,
-             do_min_p) = SamplingTensors.from_sampling_metadata(
-                 sampling_metadata, vocab_size, logits.device, logits.dtype)
-
-        torch.cuda.current_stream().wait_stream(self._copy_stream)
+        # Prepare sampling tensors with pinned memory to avoid blocking.
+        (sampling_tensors, do_penalties, do_top_p_top_k,
+         do_min_p) = SamplingTensors.from_sampling_metadata(
+             sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         # Apply presence and frequency penalties.
         if do_penalties:
@@ -97,14 +100,15 @@ class Sampler(nn.Module):
 
 def _get_logits(hidden_states: torch.Tensor, embedding: torch.Tensor,
                 embedding_bias: Optional[torch.Tensor],
-                vocab_size: int) -> torch.Tensor:
+                vocab_size: int) -> Optional[torch.Tensor]:
     # Get the logits for the next tokens.
     logits = torch.matmul(hidden_states, embedding.t())
     if embedding_bias is not None:
         logits += embedding_bias
-    logits = tensor_model_parallel_all_gather(logits)
+    logits = tensor_model_parallel_gather(logits)
     # Remove paddings in vocab (if any).
-    logits = logits[:, :vocab_size]
+    if logits is not None:
+        logits = logits[:, :vocab_size]
     return logits
 
 
@@ -115,27 +119,6 @@ def _prune_hidden_states(
     hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
     return hidden_states.index_select(0,
                                       sampling_metadata.selected_token_indices)
-
-
-def _get_prompt_and_output_tokens(
-    sampling_metadata: SamplingMetadata,
-) -> Tuple[List[List[int]], List[List[int]]]:
-    prompt_tokens: List[List[int]] = []
-    output_tokens: List[List[int]] = []
-    for i, seq_group in enumerate(sampling_metadata.seq_groups):
-        seq_ids, sampling_params = seq_group
-        if (i < sampling_metadata.num_prompts
-                and sampling_params.prompt_logprobs is not None):
-            # NOTE: prompt token positions do not need output tokens to
-            # compute penalties.
-            prompt_len = sampling_metadata.prompt_lens[i]
-            prompt_tokens.extend([] for _ in range(prompt_len - 1))
-            output_tokens.extend([] for _ in range(prompt_len - 1))
-        for seq_id in seq_ids:
-            seq_data = sampling_metadata.seq_data[seq_id]
-            prompt_tokens.append(seq_data.prompt_token_ids)
-            output_tokens.append(seq_data.output_token_ids)
-    return prompt_tokens, output_tokens
 
 
 def _get_bin_counts_and_mask(

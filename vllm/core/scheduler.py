@@ -1,6 +1,7 @@
+from collections import deque
 import enum
 import time
-from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
+from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union, Set
 
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.block_manager import AllocStatus, BlockSpaceManager
@@ -29,7 +30,7 @@ class SchedulerOutputs:
 
     def __init__(
         self,
-        scheduled_seq_groups: List[SequenceGroup],
+        scheduled_seq_groups: Iterable[SequenceGroup],
         prompt_run: bool,
         num_batched_tokens: int,
         blocks_to_swap_in: Dict[int, int],
@@ -77,11 +78,10 @@ class Scheduler:
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window)
 
-        # TODO(zhuohan): Use deque instead of list for better performance.
         # Sequence groups in the WAITING state.
-        self.waiting: List[SequenceGroup] = []
+        self.waiting: Deque[SequenceGroup] = deque()
         # Sequence groups in the RUNNING state.
-        self.running: List[SequenceGroup] = []
+        self.running: Deque[SequenceGroup] = deque()
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
         self.done_ids: Set[str] = set()
@@ -147,18 +147,20 @@ class Scheduler:
             while self.waiting:
                 seq_group = self.waiting[0]
 
-                assert seq_group.num_seqs() == 1, (
+                waiting_seqs = seq_group.get_seqs(
+                    status=SequenceStatus.WAITING)
+                assert len(waiting_seqs) == 1, (
                     "Waiting sequence group should have only one prompt "
                     "sequence.")
-                num_prompt_tokens = seq_group.get_seqs()[0].get_len()
+                num_prompt_tokens = waiting_seqs[0].get_len()
                 if num_prompt_tokens > self.prompt_limit:
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         f" and exceeds limit of {self.prompt_limit}")
-                    for seq in seq_group.get_seqs():
+                    for seq in waiting_seqs:
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
-                    self.waiting.pop(0)
+                    self.waiting.popleft()
                     continue
 
                 # If the sequence group cannot be allocated, stop.
@@ -169,10 +171,10 @@ class Scheduler:
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         f" and exceeds the capacity of block_manager")
-                    for seq in seq_group.get_seqs():
+                    for seq in waiting_seqs:
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
-                    self.waiting.pop(0)
+                    self.waiting.popleft()
                     continue
 
                 # If the number of batched tokens exceeds the limit, stop.
@@ -194,7 +196,7 @@ class Scheduler:
                     break
                 seq_lens = new_seq_lens
 
-                seq_group = self.waiting.pop(0)
+                seq_group = self.waiting.popleft()
                 self._allocate(seq_group)
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
@@ -222,14 +224,14 @@ class Scheduler:
         self.running = self.policy.sort_by_priority(now, self.running)
 
         # Reserve new token slots for the running sequence groups.
-        running: List[SequenceGroup] = []
+        running: Deque[SequenceGroup] = deque()
         preempted: List[SequenceGroup] = []
         while self.running:
-            seq_group = self.running.pop(0)
+            seq_group = self.running.popleft()
             while not self.block_manager.can_append_slot(seq_group):
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
-                    victim_seq_group = self.running.pop(-1)
+                    victim_seq_group = self.running.pop()
                     self._preempt(victim_seq_group, blocks_to_swap_out)
                     preempted.append(victim_seq_group)
                 else:
@@ -263,7 +265,7 @@ class Scheduler:
                         self.scheduler_config.max_num_seqs):
                     break
 
-                seq_group = self.swapped.pop(0)
+                seq_group = self.swapped.popleft()
                 self._swap_in(seq_group, blocks_to_swap_in)
                 self._append_slot(seq_group, blocks_to_copy)
                 num_curr_seqs += num_new_seqs
@@ -339,7 +341,7 @@ class Scheduler:
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
-        for seq in seq_group.get_seqs():
+        for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 
     def _append_slot(
@@ -396,7 +398,7 @@ class Scheduler:
             self.block_manager.free(seq)
         # NOTE: For FCFS, we insert the preempted sequence group to the front
         # of the waiting queue.
-        self.waiting.insert(0, seq_group)
+        self.waiting.appendleft(seq_group)
 
     def _preempt_by_swap(
         self,

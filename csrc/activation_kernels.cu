@@ -1,5 +1,6 @@
-#include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
@@ -36,6 +37,7 @@ void silu_and_mul(
 
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
     input.scalar_type(),
@@ -71,6 +73,7 @@ __global__ void activation_kernel(
   int64_t num_tokens = input.numel() / d;                                                 \
   dim3 grid(num_tokens);                                                                  \
   dim3 block(std::min(d, 1024));                                                          \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));                       \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                           \
   VLLM_DISPATCH_FLOATING_TYPES(                                                           \
     input.scalar_type(),                                                                  \

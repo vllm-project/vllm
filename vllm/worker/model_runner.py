@@ -1,5 +1,5 @@
 import time
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -8,8 +8,11 @@ import torch.nn as nn
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
+from vllm.model_executor.parallel_utils.communication_op import (
+    broadcast, broadcast_object_list)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata, SequenceGroupMetadataDelta
+from vllm.utils import in_wsl
 
 logger = init_logger(__name__)
 
@@ -27,10 +30,12 @@ class ModelRunner:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        is_driver_worker: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.is_driver_worker = is_driver_worker
 
         # model_config can be None in tests/samplers/test_sampler.py.
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
@@ -52,6 +57,8 @@ class ModelRunner:
         # The shape of the cached block table will be
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables = None  # Set after initial profiling.
+        # cache in_wsl result
+        self.in_wsl = in_wsl()
 
         # Used only when self.scheduler_config.use_deltas = True.
         self.seq_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
@@ -70,7 +77,7 @@ class ModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
@@ -141,14 +148,14 @@ class ModelRunner:
                                              dtype=torch.long)
 
         input_metadata = InputMetadata(
-            prompt_lens=prompt_lens,
+            is_prompt=True,
             slot_mapping=slot_mapping,
             max_context_len=None,
             context_lens=None,
             block_tables=None,
             use_cuda_graph=False,
         )
-        return input_tokens, input_positions, input_metadata
+        return input_tokens, input_positions, input_metadata, prompt_lens
 
     def _prepare_decode(
         self,
@@ -216,27 +223,24 @@ class ModelRunner:
                 block_tables.append([])
             batch_size = graph_batch_size
 
-        # When using CUDA graph, we don't need to make the tensors on the GPU
-        # because they will be eventually copied to the designated GPU buffer.
-        device = "cpu" if use_captured_graph else "cuda"
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_len=1,
                                              pad=0,
                                              dtype=torch.long,
-                                             device=device)
+                                             device="cuda")
         input_positions = _make_tensor_with_pad(input_positions,
                                                 max_len=1,
                                                 pad=0,
                                                 dtype=torch.long,
-                                                device=device)
+                                                device="cuda")
         slot_mapping = _make_tensor_with_pad(slot_mapping,
                                              max_len=1,
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long,
-                                             device=device)
+                                             device="cuda")
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
-                                    device=device)
+                                    device="cuda")
 
         if use_captured_graph:
             # The shape of graph_block_tables is
@@ -245,17 +249,20 @@ class ModelRunner:
             for i, block_table in enumerate(block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.from_numpy(input_block_tables).to(device)
+            block_tables = torch.tensor(input_block_tables, device="cuda")
         else:
+            max_block_table_len = (max_context_len + self.block_size -
+                                   1) // self.block_size
             block_tables = _make_tensor_with_pad(
                 block_tables,
-                max_len=max_context_len,
+                max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
+                device="cuda",
             )
 
         input_metadata = InputMetadata(
-            prompt_lens=[],
+            is_prompt=False,
             slot_mapping=slot_mapping,
             max_context_len=max_context_len,
             context_lens=context_lens,
@@ -313,11 +320,11 @@ class ModelRunner:
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
 
-        selected_token_indices = torch.tensor(selected_token_indices,
-                                              dtype=torch.long,
-                                              device="cuda")
+        selected_token_indices = _async_h2d(selected_token_indices,
+                                            dtype=torch.long,
+                                            pin_memory=not self.in_wsl)
         categorized_sample_indices = {
-            t: torch.tensor(seq_ids, dtype=torch.int, device="cuda")
+            t: _async_h2d(seq_ids, dtype=torch.int, pin_memory=not self.in_wsl)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -334,30 +341,135 @@ class ModelRunner:
         )
         return sampling_metadata
 
+    def prepare_input_tensors(
+        self,
+        seq_group_metadata_list: Optional[List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]]],
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata]:
+        if self.is_driver_worker:
+            # NOTE: We assume that all sequences in the group are all prompts or
+            # all decodes.
+            is_prompt = seq_group_metadata_list[0].is_prompt
+            # Prepare input tensors.
+            if is_prompt:
+                (input_tokens, input_positions, input_metadata,
+                 prompt_lens) = self._prepare_prompt(seq_group_metadata_list)
+            else:
+                (input_tokens, input_positions, input_metadata
+                 ) = self._prepare_decode(seq_group_metadata_list)
+                prompt_lens = []
+            sampling_metadata = self._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
+
+            def get_size_or_none(x: Optional[torch.Tensor]):
+                return x.size() if x is not None else None
+
+            # Broadcast the input data. For input tensors, we first broadcast
+            # its shape and then broadcast the tensor to avoid high
+            # serialization cost.
+            py_data = {
+                "input_tokens_size":
+                input_tokens.size(),
+                "input_positions_size":
+                input_positions.size(),
+                "is_prompt":
+                input_metadata.is_prompt,
+                "slot_mapping_size":
+                get_size_or_none(input_metadata.slot_mapping),
+                "max_context_len":
+                input_metadata.max_context_len,
+                "context_lens_size":
+                get_size_or_none(input_metadata.context_lens),
+                "block_tables_size":
+                get_size_or_none(input_metadata.block_tables),
+                "use_cuda_graph":
+                input_metadata.use_cuda_graph,
+                "selected_token_indices_size":
+                sampling_metadata.selected_token_indices.size(),
+            }
+            broadcast_object_list([py_data], src=0)
+            # TODO(zhuohan): Combine the broadcasts or set async_op=True.
+            broadcast(input_tokens, src=0)
+            broadcast(input_positions, src=0)
+            if input_metadata.slot_mapping is not None:
+                broadcast(input_metadata.slot_mapping, src=0)
+            if input_metadata.context_lens is not None:
+                broadcast(input_metadata.context_lens, src=0)
+            if input_metadata.block_tables is not None:
+                broadcast(input_metadata.block_tables, src=0)
+            broadcast(sampling_metadata.selected_token_indices, src=0)
+        else:
+            receving_list = [None]
+            broadcast_object_list(receving_list, src=0)
+            py_data = receving_list[0]
+            input_tokens = torch.empty(*py_data["input_tokens_size"],
+                                       dtype=torch.long,
+                                       device="cuda")
+            broadcast(input_tokens, src=0)
+            input_positions = torch.empty(*py_data["input_positions_size"],
+                                          dtype=torch.long,
+                                          device="cuda")
+            broadcast(input_positions, src=0)
+            if py_data["slot_mapping_size"] is not None:
+                slot_mapping = torch.empty(*py_data["slot_mapping_size"],
+                                           dtype=torch.long,
+                                           device="cuda")
+                broadcast(slot_mapping, src=0)
+            else:
+                slot_mapping = None
+            if py_data["context_lens_size"] is not None:
+                context_lens = torch.empty(*py_data["context_lens_size"],
+                                           dtype=torch.int,
+                                           device="cuda")
+                broadcast(context_lens, src=0)
+            else:
+                context_lens = None
+            if py_data["block_tables_size"] is not None:
+                block_tables = torch.empty(*py_data["block_tables_size"],
+                                           dtype=torch.int,
+                                           device="cuda")
+                broadcast(block_tables, src=0)
+            else:
+                block_tables = None
+            selected_token_indices = torch.empty(
+                *py_data["selected_token_indices_size"],
+                dtype=torch.long,
+                device="cuda")
+            broadcast(selected_token_indices, src=0)
+            input_metadata = InputMetadata(
+                is_prompt=py_data["is_prompt"],
+                slot_mapping=slot_mapping,
+                max_context_len=py_data["max_context_len"],
+                context_lens=context_lens,
+                block_tables=block_tables,
+                use_cuda_graph=py_data["use_cuda_graph"],
+            )
+            sampling_metadata = SamplingMetadata(
+                seq_groups=None,
+                seq_data=None,
+                prompt_lens=None,
+                selected_token_indices=selected_token_indices,
+                categorized_sample_indices=None,
+                perform_sampling=False,
+            )
+
+        return input_tokens, input_positions, input_metadata, sampling_metadata
+
     @torch.inference_mode()
     def execute_model(
         self,
         seq_group_metadata_list: List[Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
         finished_request_ids_list: List[int] = None,
-    ) -> SamplerOutput:
+    ) -> Optional[SamplerOutput]:
         # Clean up cache for finished ids.
         if self.seq_metadata_cache and finished_request_ids_list:
             for finished_request_id in finished_request_ids_list:
                 self.seq_metadata_cache.pop(finished_request_id, None)
 
-        # NOTE: We assume that all sequences in the group are all prompts or
-        # all decodes.
-        is_prompt = seq_group_metadata_list[0].is_prompt
-        # Prepare input tensors.
-        if is_prompt:
-            inputs = self._prepare_prompt(seq_group_metadata_list)
-            input_tokens, input_positions, input_metadata = inputs
-        else:
-            inputs = self._prepare_decode(seq_group_metadata_list)
-            input_tokens, input_positions, input_metadata = inputs
-        sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                 input_metadata.prompt_lens)
+        # Prepare input tensors
+        input_tokens, input_positions, input_metadata, sampling_metadata = (
+            self.prepare_input_tensors(seq_group_metadata_list))
+
         # Execute the model.
         if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
@@ -452,7 +564,7 @@ class ModelRunner:
         for batch_size in reversed(_BATCH_SIZES_TO_CAPTURE):
             # Create dummy input_metadata.
             input_metadata = InputMetadata(
-                prompt_lens=[],
+                is_prompt=False,
                 slot_mapping=slot_mapping[:batch_size],
                 max_context_len=self.max_context_len_to_capture,
                 context_lens=context_lens[:batch_size],
@@ -539,11 +651,14 @@ class CUDAGraphRunner:
         del kv_caches
 
         # Copy the input tensors to the input buffers.
-        self.input_buffers["input_ids"].copy_(input_ids)
-        self.input_buffers["positions"].copy_(positions)
-        self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping)
-        self.input_buffers["context_lens"].copy_(input_metadata.context_lens)
-        self.input_buffers["block_tables"].copy_(input_metadata.block_tables)
+        self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
+        self.input_buffers["positions"].copy_(positions, non_blocking=True)
+        self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping,
+                                                 non_blocking=True)
+        self.input_buffers["context_lens"].copy_(input_metadata.context_lens,
+                                                 non_blocking=True)
+        self.input_buffers["block_tables"].copy_(input_metadata.block_tables,
+                                                 non_blocking=True)
 
         # Run the graph.
         self.graph.replay()
@@ -566,9 +681,13 @@ def _make_tensor_with_pad(
     pad: int,
     dtype: torch.dtype,
     device: Union[str, torch.device] = "cuda",
+    pin_memory: bool = False,
 ) -> torch.Tensor:
     padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
-    return torch.tensor(padded_x, dtype=dtype, device=device)
+    return torch.tensor(padded_x,
+                        dtype=dtype,
+                        device=device,
+                        pin_memory=pin_memory and str(device) == "cpu")
 
 
 def _get_graph_batch_size(batch_size: int) -> int:
@@ -578,3 +697,8 @@ def _get_graph_batch_size(batch_size: int) -> int:
         return 4
     else:
         return (batch_size + 7) // 8 * 8
+
+
+def _async_h2d(data: list, dtype, pin_memory):
+    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory)
+    return t.to(device="cuda", non_blocking=True)
