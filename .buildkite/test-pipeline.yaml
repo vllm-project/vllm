@@ -20,6 +20,7 @@ steps:
 - label: Models Test
   commands:
     - pip install einops # required for MPT
+    - pip install flash_attn # required for HuggingFace's llama implementation
     - pytest -v -s models --forked
 
 - label: Samplers Test

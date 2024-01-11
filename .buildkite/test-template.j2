@@ -35,4 +35,8 @@ steps:
                       secretKeyRef:
                         name: hf-token-secret
                         key: token
+                volumes:
+                  - name: dshm
+                    emptyDir:
+                      medium: Memory
   {% endfor %}
