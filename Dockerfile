@@ -5,7 +5,7 @@
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip
+    && apt-get install -y python3-pip git
 
 WORKDIR /workspace
 
