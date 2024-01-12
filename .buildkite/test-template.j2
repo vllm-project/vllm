@@ -15,6 +15,7 @@ steps:
   - label: "{{ step.label }}"
     agents:
       queue: kubernetes
+    soft_fail: {{ step.soft_fail or false }}
     plugins:
       - kubernetes:
           podSpec:

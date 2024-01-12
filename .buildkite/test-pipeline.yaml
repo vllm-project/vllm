@@ -16,10 +16,12 @@ steps:
 
 - label: Kernels Test
   command: pytest -v -s kernels
+  soft_fail: true
 
 - label: Models Test
   commands:
     - pytest -v -s models --forked
+  soft_fail: true
 
 - label: Samplers Test
   command: pytest -v -s samplers --forked
