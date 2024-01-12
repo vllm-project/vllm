@@ -239,6 +239,6 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}."
-                f" You can explicitly specify the data type by using the --dtype option, for example: --dtype=half."
-            )
+                f"{compute_capability[0]}.{compute_capability[1]}. "
+                "You can use float16 instead by explicitly setting the"
+                "`dtype` flag in CLI, for example: --dtype=half.")
