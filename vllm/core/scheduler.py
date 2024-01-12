@@ -88,25 +88,40 @@ class Scheduler:
         self.waiting.append(seq_group)
 
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
+        """Aborts a sequence group with the given ID.
+
+        Check if the sequence group with the given ID
+            is present in any of the state queue.
+        If present, remove the sequence group from the state queue.
+            Also, if any of the sequences in the sequence group is not finished,
+                free the sequence with status `FINISHED_ABORTED`.
+        Otherwise, do nothing.
+
+        Args:
+            request_id: The ID(s) of the sequence group to abort.
+        """
         if isinstance(request_id, str):
             request_id = (request_id, )
         request_ids = set(request_id)
         for state_queue in [self.waiting, self.running, self.swapped]:
-            # We need to reverse the list as we are removing elements
-            # from it as we iterate over it. If we don't do it,
-            # indices will get messed up and we will skip over elements.
-            for seq_group in reversed(state_queue):
+            aborted_groups = []
+            for seq_group in state_queue:
+                if not request_ids:
+                    # Using 'break' here may add two extra iterations,
+                    # but is acceptable to reduce complexity .
+                    break
                 if seq_group.request_id in request_ids:
-                    # Remove the sequence group from the state queue.
-                    state_queue.remove(seq_group)
-                    for seq in seq_group.get_seqs():
-                        if seq.is_finished():
-                            continue
-                        seq.status = SequenceStatus.FINISHED_ABORTED
-                        self.free_seq(seq)
+                    # Appending aborted group into pending list.
+                    aborted_groups.append(seq_group)
                     request_ids.remove(seq_group.request_id)
-                    if not request_ids:
-                        return
+            for aborted_group in aborted_groups:
+                # Remove the sequence group from the state queue.
+                state_queue.remove(aborted_group)
+                for seq in seq_group.get_seqs():
+                    if seq.is_finished():
+                        continue
+                    seq.status = SequenceStatus.FINISHED_ABORTED
+                    self.free_seq(seq)
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
