@@ -11,6 +11,14 @@ This guide shows how to use vLLM to:
 
 Be sure to complete the :ref:`installation instructions <installation>` before continuing with this guide.
 
+.. note::
+
+    By default, vLLM downloads model from `HuggingFace <https://huggingface.co/>`_. For all of the following examples, if you would like to use models from `ModelScope <www.modelscope.cn>`_. Please set the environment variable:
+
+    .. code-block:: shell
+
+        export VLLM_USE_MODELSCOPE=True
+
 Offline Batched Inference
 -------------------------
 
@@ -39,12 +47,6 @@ Initialize vLLM's engine for offline inference with the ``LLM`` class and the `O
 .. code-block:: python
 
     llm = LLM(model="facebook/opt-125m")
-
-Use model from www.modelscope.cn
-
-.. code-block:: shell
-
-    export VLLM_USE_MODELSCOPE=True
 
 .. code-block:: python
 
@@ -77,16 +79,6 @@ Start the server:
 
     $ python -m vllm.entrypoints.api_server
 
-Use model from www.modelscope.cn
-
-.. code-block:: console
-
-    $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.api_server \
-    $    --model="qwen/Qwen-7B-Chat" \
-    $    --revision="v1.1.8" \
-    $    --trust-remote-code
-
-
 By default, this command starts the server at ``http://localhost:8000`` with the OPT-125M model.
 
 Query the model in shell:
@@ -115,13 +107,6 @@ Start the server:
 
     $ python -m vllm.entrypoints.openai.api_server \
     $     --model facebook/opt-125m
-
-Use model from www.modelscope.cn
-
-.. code-block:: console
-
-    $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.openai.api_server \
-    $     --model="qwen/Qwen-7B-Chat" --revision="v1.1.8" --trust-remote-code
 
 By default, the server uses a predefined chat template stored in the tokenizer. You can override this template by using the ``--chat-template`` argument:
 
