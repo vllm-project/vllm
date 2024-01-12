@@ -132,7 +132,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
 async def create_completion(request: CompletionRequest, raw_request: Request):
     generator = await openai_serving_completion.create_completion(
         request, raw_request)
-    logger.info("TYPE COMPLETION : %s" % str(type(generator)))
     if request.stream and not isinstance(generator, ErrorResponse):
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
@@ -164,7 +163,7 @@ if __name__ == "__main__":
                                             args.response_role,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, served_model, args.response_role, args.chat_template)
+        engine, served_model, args.response_role)
 
     # Register labels for metrics
     add_global_metrics_labels(model_name=engine_args.model)

@@ -1,5 +1,4 @@
 import asyncio
-import codecs
 from http import HTTPStatus
 from typing import Dict, List, Optional, Tuple, Union
 from vllm.logger import init_logger
@@ -16,14 +15,10 @@ logger = init_logger(__name__)
 
 class OpenAIServing:
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model: str,
-                 response_role: str,
-                 chat_template=None):
+    def __init__(self, engine: AsyncLLMEngine, served_model: str,
+                 response_role: str):
         self.engine = engine
         self.served_model = served_model
-        self.chat_template = chat_template
         self.response_role = response_role
 
         self.max_model_len = 0
@@ -49,7 +44,6 @@ class OpenAIServing:
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
             trust_remote_code=engine_model_config.trust_remote_code)
-        self._load_chat_template(self.chat_template)
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -136,25 +130,3 @@ class OpenAIServing:
                 f"Please reduce the length of the messages or completion.", )
         else:
             return input_ids, None
-
-    def _load_chat_template(self, chat_template):
-        if chat_template is not None:
-            try:
-                with open(chat_template, "r") as f:
-                    self.tokenizer.chat_template = f.read()
-            except OSError:
-                # If opening a file fails, set chat template to be args to
-                # ensure we decode so our escape are interpreted correctly
-                self.tokenizer.chat_template = codecs.decode(
-                    chat_template, "unicode_escape")
-
-            logger.info(
-                f"Using supplied chat template:\n{self.tokenizer.chat_template}"
-            )
-        elif self.tokenizer.chat_template is not None:
-            logger.info(
-                f"Using default chat template:\n{self.tokenizer.chat_template}"
-            )
-        else:
-            logger.warning(
-                "No chat template provided. Chat API will not work.")

@@ -1,4 +1,5 @@
 import time
+import codecs
 from fastapi import Request
 from typing import AsyncGenerator, AsyncIterator, Union
 from vllm.logger import init_logger
@@ -25,8 +26,8 @@ class OpenAIServingChat(OpenAIServing):
                  chat_template=None):
         super().__init__(engine=engine,
                          served_model=served_model,
-                         response_role=response_role,
-                         chat_template=chat_template)
+                         response_role=response_role)
+        self._load_chat_template(chat_template)
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -261,3 +262,25 @@ class OpenAIServingChat(OpenAIServing):
         )
 
         return response
+
+    def _load_chat_template(self, chat_template):
+        if chat_template is not None:
+            try:
+                with open(chat_template, "r") as f:
+                    self.tokenizer.chat_template = f.read()
+            except OSError:
+                # If opening a file fails, set chat template to be args to
+                # ensure we decode so our escape are interpreted correctly
+                self.tokenizer.chat_template = codecs.decode(
+                    chat_template, "unicode_escape")
+
+            logger.info(
+                f"Using supplied chat template:\n{self.tokenizer.chat_template}"
+            )
+        elif self.tokenizer.chat_template is not None:
+            logger.info(
+                f"Using default chat template:\n{self.tokenizer.chat_template}"
+            )
+        else:
+            logger.warning(
+                "No chat template provided. Chat API will not work.")

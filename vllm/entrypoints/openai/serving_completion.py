@@ -17,15 +17,11 @@ logger = init_logger(__name__)
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model: str,
-                 response_role: str,
-                 chat_template=None):
+    def __init__(self, engine: AsyncLLMEngine, served_model: str,
+                 response_role: str):
         super().__init__(engine=engine,
                          served_model=served_model,
-                         response_role=response_role,
-                         chat_template=chat_template)
+                         response_role=response_role)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):
