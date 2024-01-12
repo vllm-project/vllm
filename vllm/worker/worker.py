@@ -87,6 +87,14 @@ class Worker:
         gpu_memory_utilization: float,
         cpu_swap_space: int,
     ) -> Tuple[int, int]:
+        """Profiles the peak memory usage of the model and returns the maximum
+        number of GPU and CPU cache blocks that can be allocated.
+
+        Args:
+            block_size: The size of the cache block.
+            gpu_memory_utilization: The fraction of the total GPU memory to use.
+            cpu_swap_space: The size of the CPU swap space in bytes.
+        """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
