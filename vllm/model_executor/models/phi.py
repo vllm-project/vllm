@@ -93,7 +93,8 @@ class PhiAttention(nn.Module):
         )
 
         scaling = self.head_size**-0.5
-        rotary_dim = int(config.partial_rotary_factor * (config.hidden_size // config.num_attention_heads))
+        rotary_dim = int(config.partial_rotary_factor *
+                         (config.hidden_size // config.num_attention_heads))
         assert rotary_dim % 2 == 0
 
         # pylint: disable=C0301
@@ -146,8 +147,7 @@ class PhiMLP(nn.Module):
             linear_method=linear_method,
         )
         quant_config = getattr(linear_method, "quant_config", None)
-        self.act = get_act_fn(config.hidden_act, quant_config,
-                              n_inner)
+        self.act = get_act_fn(config.hidden_act, quant_config, n_inner)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.fc1(hidden_states)
@@ -163,7 +163,7 @@ class PhiLayer(nn.Module):
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
-                               eps=config.layer_norm_eps)
+                                            eps=config.layer_norm_eps)
         self.self_attn = PhiAttention(config, linear_method)
         self.mlp = PhiMLP(config, linear_method)
 
@@ -195,13 +195,14 @@ class PhiModel(nn.Module):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
+                                                   config.hidden_size)
         self.layers = nn.ModuleList([
             PhiLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
-                                 eps=config.layer_norm_eps)
+                                            eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -219,7 +220,7 @@ class PhiModel(nn.Module):
                 kv_caches[i],
                 input_metadata,
             )
-        
+
         hidden_states = self.final_layernorm(hidden_states)
 
         return hidden_states
@@ -235,8 +236,10 @@ class PhiForCausalLM(nn.Module):
         self.linear_method = linear_method
 
         self.model = PhiModel(config, linear_method)
-        
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, bias=True)
+
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      bias=True)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -246,7 +249,8 @@ class PhiForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches, input_metadata)
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   input_metadata)
 
         return hidden_states
 
