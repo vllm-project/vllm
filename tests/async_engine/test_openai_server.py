@@ -8,9 +8,9 @@ from fastapi.testclient import TestClient
 
 from vllm.entrypoints.openai.api_server import *
 
-chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(__file__))).parent.parent / "examples/template_chatml.jinja"
+chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(
+    __file__))).parent.parent / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
-
 
 # Define models, templates, and their corresponding expected outputs
 MODEL_TEMPLATE_GENERATON_OUTPUT = [
@@ -18,8 +18,7 @@ MODEL_TEMPLATE_GENERATON_OUTPUT = [
      "Hello</s>Hi there!</s>What is the capital of</s>"),
     ("facebook/opt-125m", None, False,
      "Hello</s>Hi there!</s>What is the capital of</s>"),
-    ("facebook/opt-125m", chatml_jinja_path, True,
-     """<|im_start|>user
+    ("facebook/opt-125m", chatml_jinja_path, True, """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
@@ -27,8 +26,7 @@ Hi there!<|im_end|>
 What is the capital of<|im_end|>
 <|im_start|>assistant
 """),
-    ("facebook/opt-125m", chatml_jinja_path, False,
-     """<|im_start|>user
+    ("facebook/opt-125m", chatml_jinja_path, False, """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>

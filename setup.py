@@ -292,11 +292,11 @@ def get_requirements() -> List[str]:
             requirements = f.read().strip().split("\n")
     return requirements
 
+
 package_data = {"vllm": ["py.typed"]}
 if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
     package_data["vllm"].append("*.so")
-
 
 setuptools.setup(
     name="vllm",

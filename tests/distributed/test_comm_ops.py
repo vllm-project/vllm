@@ -25,6 +25,7 @@ def init_test_distributed_environment(pipeline_parallel_size: int,
     _init_distributed_environment(parallel_config, rank,
                                   distributed_init_method)
 
+
 @ray.remote(num_gpus=1, max_calls=1)
 def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
                            distributed_init_port: str):
@@ -39,6 +40,7 @@ def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
     t = all_tensors[rank]
     t = tensor_model_parallel_all_reduce(t)
     assert torch.allclose(t, expected)
+
 
 @ray.remote(num_gpus=1, max_calls=1)
 def all_gather_test_worker(tensor_parallel_size: int, rank: int,
@@ -68,15 +70,14 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
 @pytest.mark.parametrize("test_target",
                          [all_reduce_test_worker, all_gather_test_worker])
 def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
-    ray.init() # use ray helps debugging the error when it failed.
+    ray.init()  # use ray helps debugging the error when it failed.
 
     distributed_init_port = get_open_port()
     refs = []
     for rank in range(tensor_parallel_size):
         refs.append(
-            test_target.remote(tensor_parallel_size,
-                                                   rank,
-                                                   distributed_init_port))
+            test_target.remote(tensor_parallel_size, rank,
+                               distributed_init_port))
     ray.get(refs)
 
     ray.shutdown()
