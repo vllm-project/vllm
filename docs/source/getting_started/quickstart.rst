@@ -13,7 +13,7 @@ Be sure to complete the :ref:`installation instructions <installation>` before c
 
 .. note::
 
-    By default, vLLM downloads model from `HuggingFace <https://huggingface.co/>`_. For all of the following examples, if you would like to use models from `ModelScope <www.modelscope.cn>`_. Please set the environment variable:
+    By default, vLLM downloads model from `HuggingFace <https://huggingface.co/>`_. If you would like to use models from `ModelScope <www.modelscope.cn>`_ in the following examples, please set the environment variable:
 
     .. code-block:: shell
 
