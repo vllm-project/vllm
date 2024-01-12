@@ -2,7 +2,7 @@
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2023 DeepSeek-AI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its
@@ -22,12 +22,12 @@
 # limitations under the License.
 """Inference-only Deepseek model."""
 from typing import Any, Dict, List, Optional, Tuple
+from transformers import PretrainedConfig
 
 import torch
 import torch.nn.functional as F
 
 from torch import nn
-from vllm.transformers_utils.configs.deepseek import DeepseekConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -91,7 +91,7 @@ class DeepseekMoE(nn.Module):
 
     def __init__(
         self,
-        config: DeepseekConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -264,7 +264,7 @@ class DeepseekDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: DeepseekConfig,
+        config: PretrainedConfig,
         layer_idx: int,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
@@ -331,7 +331,7 @@ class DeepseekModel(nn.Module):
 
     def __init__(
         self,
-        config: DeepseekConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -372,7 +372,7 @@ class DeepseekForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: DeepseekConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()

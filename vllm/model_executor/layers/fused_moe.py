@@ -30,8 +30,6 @@ def fused_moe_kernel(
     stride_bn,
     stride_cm,
     stride_cn,
-    stride_weight,
-    stride_token_id,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -112,7 +110,7 @@ def fused_moe_kernel(
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(topk_weights_ptr + offs_token * stride_weight,
+        moe_weight = tl.load(topk_weights_ptr + offs_token,
                              mask=token_mask,
                              other=0)
         accumulator = accumulator * moe_weight[:, None]
@@ -178,6 +176,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                             expert_ids: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
                             mul_routed_weight: bool, top_k: int, config: dict):
+    
+    assert topk_weights.stride(1) == 1
+    assert sorted_token_ids.stride(0) == 1
+
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
 
@@ -200,8 +202,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         B.stride(1),
         C.stride(1),
         C.stride(2),
-        topk_weights.stride(1),
-        sorted_token_ids.stride(0),
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=tl.bfloat16 if A.dtype == torch.bfloat16 else tl.float16,
