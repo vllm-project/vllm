@@ -11,6 +11,14 @@ This guide shows how to use vLLM to:
 
 Be sure to complete the :ref:`installation instructions <installation>` before continuing with this guide.
 
+.. note::
+
+    By default, vLLM downloads model from `HuggingFace <https://huggingface.co/>`_. If you would like to use models from `ModelScope <https://www.modelscope.cn>`_ in the following examples, please set the environment variable:
+
+    .. code-block:: shell
+
+        export VLLM_USE_MODELSCOPE=True
+
 Offline Batched Inference
 -------------------------
 
@@ -40,16 +48,6 @@ Initialize vLLM's engine for offline inference with the ``LLM`` class and the `O
 
     llm = LLM(model="facebook/opt-125m")
 
-Use model from www.modelscope.cn
-
-.. code-block:: shell
-
-    export VLLM_USE_MODELSCOPE=True
-
-.. code-block:: python
-
-    llm = LLM(model="qwen/Qwen-7B-Chat", revision="v1.1.8", trust_remote_code=True)
-
 Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of ``RequestOutput`` objects, which include all the output tokens.
 
 .. code-block:: python
@@ -76,16 +74,6 @@ Start the server:
 .. code-block:: console
 
     $ python -m vllm.entrypoints.api_server
-
-Use model from www.modelscope.cn
-
-.. code-block:: console
-
-    $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.api_server \
-    $    --model="qwen/Qwen-7B-Chat" \
-    $    --revision="v1.1.8" \
-    $    --trust-remote-code
-
 
 By default, this command starts the server at ``http://localhost:8000`` with the OPT-125M model.
 
@@ -115,13 +103,6 @@ Start the server:
 
     $ python -m vllm.entrypoints.openai.api_server \
     $     --model facebook/opt-125m
-
-Use model from www.modelscope.cn
-
-.. code-block:: console
-
-    $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.openai.api_server \
-    $     --model="qwen/Qwen-7B-Chat" --revision="v1.1.8" --trust-remote-code
 
 By default, the server uses a predefined chat template stored in the tokenizer. You can override this template by using the ``--chat-template`` argument:
 
