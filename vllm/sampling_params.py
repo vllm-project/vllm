@@ -103,7 +103,7 @@ class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
     use_beam_search: bool = False
     length_penalty: float = 1.0
     early_stopping: Union[bool, str] = False
-    stop: Optional[Union[str, List[str]]] = None,
+    stop: List[str] = []
     stop_token_ids: List[int] = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -127,9 +127,6 @@ class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
             self._verify_non_beam_search()
             if self.temperature < _SAMPLING_EPS:
                 # Zero temperature means greedy sampling.
-                # self.top_p = 1.0
-                # self.top_k = -1
-                # self.min_p = 0.0
                 self._verify_greedy_sampling()
 
     def _verify_args(self) -> None:
