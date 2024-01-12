@@ -56,6 +56,37 @@ def test_gelu_new(
     ref_out = layer._forward(x)
     assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
 
+# Found in torch/testing/_comparison.py
+default_atol = {torch.float16: 1e-3, torch.bfloat16: 1e-3, torch.float: 1e-5}
+default_rtol = {torch.float16: 1e-3, torch.bfloat16: 1.6e-2, torch.float: 1.3e-6}
+
+def get_rtol(computed_value: torch.Tensor, ref_value: torch.Tensor) -> float:
+    deviation = ref_value - computed_value
+    deviation = torch.abs(deviation / ref_value)
+    # Fill in the nans with the default rtol
+    torch.nan_to_num_(deviation, nan=default_rtol[computed_value.dtype])
+    return deviation.max().item()
+
+
+def get_atol(computed_value: torch.Tensor, ref_value: torch.Tensor) -> float:
+    deviation = ref_value - computed_value
+    atol = torch.abs(deviation).max().item()
+    return atol
+
+
+def get_tolerances(computed_value: torch.Tensor, ref_value: torch.Tensor):
+    """Returns the absolute and relative tolerances for comparing two tensors."""
+    atol = get_atol(ref_value, computed_value)
+    rtol = get_rtol(ref_value, computed_value)
+
+    atol = min(atol, default_atol[computed_value.dtype])
+    rtol = min(rtol, default_rtol[computed_value.dtype])
+    # torch.isclose() has weird behavior around see:
+    # https://github.com/pytorch/pytorch/issues/102400
+    if rtol > 1e30:
+        rtol = default_rtol[computed_value.dtype]
+    return atol, rtol
+
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
@@ -76,5 +107,8 @@ def test_gelu_fast(
     layer = FastGELU()
     out = layer(x)
     ref_out = layer._forward(x)
-    atol = 1e-2 if is_hip() and dtype == torch.half else 1e-5
-    assert torch.allclose(out, ref_out, atol=atol, rtol=1e-5)
+    atol = 1e-5
+    rtol = 1e-5
+    if is_hip():
+        atol, rtol = get_tolerances(out, ref_out)
+    assert torch.allclose(out, ref_out, atol=atol, rtol=rtol)
