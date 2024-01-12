@@ -61,11 +61,6 @@ from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
-# check for layer_norm_eps in case of phi-1.5 and layer_norm_epsilon for phi-2
-layer_norm_eps = getattr(PretrainedConfig, "layer_norm_eps", None)
-if layer_norm_eps is None:
-    layer_norm_eps = PretrainedConfig.layer_norm_epsilon
-
 
 class PhiEmbedding(nn.Module):
 
@@ -118,13 +113,17 @@ class PhiAttention(nn.Module):
         )
 
         scaling = self.head_size**-0.5
-        rotary_dim = config.rotary_dim
+
+        # https://huggingface.co/microsoft/phi-2/blob/cb2f4533604d8b67de604e7df03bfe6f3ca22869/modeling_phi.py#L278-L281
+        assert config.rope_scaling is None, "rope_scaling is not supported"
+        head_dim = config.hidden_size // config.num_attention_heads
+        rotary_dim = int(config.partial_rotary_factor * head_dim)
         assert rotary_dim % 2 == 0
 
         # pylint: disable=C0301
         # Refer to:
         # https://huggingface.co/microsoft/phi-1_5/blob/d212a789620c380ff32ca1d1ee9943a777360987/modeling_phi.py#L518
-        rope_theta = 10000
+        rope_theta = getattr(config, "rope_theta", 10000)
         max_position_embeddings = getattr(config, "n_positions", 2048)
         self.rotary_emb = get_rope(
             self.head_size,
@@ -171,7 +170,7 @@ class PhiMLP(nn.Module):
             linear_method=linear_method,
         )
         quant_config = getattr(linear_method, "quant_config", None)
-        self.act = get_act_fn(config.activation_function, quant_config,
+        self.act = get_act_fn(config.hidden_act, quant_config,
                               n_inner)
 
     def forward(self, hidden_states):
@@ -180,6 +179,12 @@ class PhiMLP(nn.Module):
         hidden_states, _ = self.fc2(hidden_states)
         return hidden_states
 
+def _get_layer_norm_eps(config: PretrainedConfig) -> float:
+    # check for layer_norm_eps in case of phi-1.5 and layer_norm_epsilon for phi-2
+    layer_norm_eps = getattr(config, "layer_norm_eps", None)
+    if layer_norm_eps is None:
+        layer_norm_eps = getattr(config, "layer_norm_epsilon", 1e-6)
+    return layer_norm_eps
 
 class PhiLayer(nn.Module):
 
@@ -188,7 +193,7 @@ class PhiLayer(nn.Module):
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.ln = nn.LayerNorm(config.hidden_size,
-                               eps=layer_norm_eps)
+                               eps=_get_layer_norm_eps(config))
         self.mixer = PhiAttention(config, linear_method)
         self.mlp = PhiMLP(config, linear_method)
 
@@ -250,7 +255,7 @@ class PhiCausalLMHead(nn.Module):
     def __init__(self, config: PretrainedConfig):
         super().__init__()
         self.ln = nn.LayerNorm(config.hidden_size,
-                               eps=layer_norm_eps)
+                               eps=_get_layer_norm_eps(config))
         self.linear = ParallelLMHead(config.vocab_size,
                                      config.hidden_size,
                                      bias=True)
@@ -299,6 +304,9 @@ class PhiForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
+            print(name)
+            continue
+
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -306,7 +314,9 @@ class PhiForCausalLM(nn.Module):
             if name.endswith(".bias") and name not in params_dict:
                 continue
             # pylint: disable=E1136
+            print(params_dict.keys())
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+        1/0
