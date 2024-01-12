@@ -56,9 +56,15 @@ def test_gelu_new(
     ref_out = layer._forward(x)
     assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
 
+
 # Found in torch/testing/_comparison.py
 default_atol = {torch.float16: 1e-3, torch.bfloat16: 1e-3, torch.float: 1e-5}
-default_rtol = {torch.float16: 1e-3, torch.bfloat16: 1.6e-2, torch.float: 1.3e-6}
+default_rtol = {
+    torch.float16: 1e-3,
+    torch.bfloat16: 1.6e-2,
+    torch.float: 1.3e-6
+}
+
 
 def get_rtol(computed_value: torch.Tensor, ref_value: torch.Tensor) -> float:
     deviation = ref_value - computed_value
