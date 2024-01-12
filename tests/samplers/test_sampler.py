@@ -305,5 +305,5 @@ def test_sampler_top_k_top_p(seed: int):
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
     assert torch.allclose(hf_probs, sample_probs, atol=1e-5)
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
-    
+
     del model_runner
