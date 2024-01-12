@@ -287,11 +287,13 @@ if __name__ == "__main__":
     parser.add_argument("--enforce-eager",
                         action="store_true",
                         help="enforce eager execution")
-    parser.add_argument('--kv-cache-dtype',
-                        type=str,
-                        choices=['fp8', None],
-                        default=None,
-                        help='Data type for kv cache storage.')
+    parser.add_argument(
+        '--kv-cache-dtype',
+        type=str,
+        choices=['fp8', None],
+        default=None,
+        help=
+        'Data type for kv cache storage. If None, will use model data type.')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

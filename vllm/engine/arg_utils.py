@@ -203,11 +203,14 @@ class EngineArgs:
                             help='maximum context length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode.')
-        parser.add_argument('--kv-cache-dtype',
-                            type=str,
-                            choices=['fp8', None],
-                            default=None,
-                            help='Data type for kv cache storage.')
+        parser.add_argument(
+            '--kv-cache-dtype',
+            type=str,
+            choices=['fp8', None],
+            default=None,
+            help=
+            'Data type for kv cache storage. If None, will use model data type.'
+        )
         return parser
 
     @classmethod
