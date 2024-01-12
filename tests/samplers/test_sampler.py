@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import GenerationConfig, GenerationMixin
 
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed
@@ -233,3 +234,65 @@ def test_sampler_logits_processors(seed: int):
     for _, sequence_output in enumerate(sampler_output):
         for idx, nth_output in enumerate(sequence_output.samples):
             assert nth_output.output_token == idx
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+def test_sampler_top_k_top_p(seed: int):
+    set_random_seed(seed)
+    batch_size = random.randint(1, 256)
+    top_k = random.randint(100, 500)
+    top_p = random.random() * 0.1
+    vocab_size = 32000
+    input_tensor = torch.rand((batch_size, 1024),
+                              device="cuda",
+                              dtype=torch.float16)
+    fake_logits = torch.normal(0,
+                               5,
+                               size=(batch_size, vocab_size),
+                               device=input_tensor.device,
+                               dtype=input_tensor.dtype)
+    sampler = MockLogitsSampler(32000, fake_logits)
+    model_runner = ModelRunner(None, None, None)
+
+    generation_model = GenerationMixin()
+    generation_config = GenerationConfig(top_k=top_k,
+                                         top_p=top_p,
+                                         do_sample=True)
+    warpers = generation_model._get_logits_warper(generation_config)
+    assert len(warpers) == 2  # top_p and top_k
+
+    seq_group_metadata_list = []
+    prompt_lens = []
+    for i in range(batch_size):
+        seq_group_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=f"test_{i}",
+                is_prompt=True,
+                seq_data={0: SequenceData([1, 2, 3])},
+                sampling_params=SamplingParams(
+                    temperature=1,
+                    top_k=top_k,
+                    top_p=top_p,
+                ),
+                block_tables={0: [1]},
+            ))
+        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
+
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens)
+
+    sample_probs = None
+
+    def mock_sample(probs, logprobs, sampling_metadata):
+        nonlocal sample_probs
+        sample_probs = probs
+        return [[prob.topk(1, dim=-1).indices.tolist(), [0]] for prob in probs]
+
+    with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
+        sampler(embedding=None,
+                hidden_states=input_tensor,
+                sampling_metadata=sampling_metadata)
+    hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
+    hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
+    assert torch.allclose(hf_probs, sample_probs, atol=1e-5)
+    assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
