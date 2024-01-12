@@ -70,7 +70,9 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
 @pytest.mark.parametrize("test_target",
                          [all_reduce_test_worker, all_gather_test_worker])
 def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
-    ray.init()  # use ray helps debugging the error when it failed.
+    # Using ray helps debugging the error when it failed
+    # as compared to multiprocessing.
+    ray.init()
 
     distributed_init_port = get_open_port()
     refs = []

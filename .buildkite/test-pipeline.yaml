@@ -1,3 +1,8 @@
+# In this fail, you can add more tests to run either by adding a new step or
+# adding a new command to an existing step. See different options here for examples.
+# This script will be feed into Jinja template in `test-template.j2` to generate
+# the final pipeline yaml file.
+
 steps:
 - label: Regression Test
   command: pytest -v -s test_regression.py

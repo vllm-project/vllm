@@ -16,11 +16,12 @@ MODELS = [
     "EleutherAI/pythia-70m",
     "bigscience/bloom-560m",
     "mosaicml/mpt-7b",
-    #"microsoft/phi-2", # TODO(simon): re-enable this, skipped due to #2383
+    "microsoft/phi-2",
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
+# half is required to get this working on CI's L4 GPU
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(
