@@ -1,4 +1,4 @@
-VLLM Engine
+vLLM Engine
 =================================
 
 .. automodule:: vllm.engine
@@ -7,7 +7,7 @@ VLLM Engine
 .. toctree::
    :maxdepth: 2
    :caption: Engines
-   
+
    llm_engine
    async_llm_engine
 
