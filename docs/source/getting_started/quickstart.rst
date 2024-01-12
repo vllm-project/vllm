@@ -48,10 +48,6 @@ Initialize vLLM's engine for offline inference with the ``LLM`` class and the `O
 
     llm = LLM(model="facebook/opt-125m")
 
-.. code-block:: python
-
-    llm = LLM(model="qwen/Qwen-7B-Chat", revision="v1.1.8", trust_remote_code=True)
-
 Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of ``RequestOutput`` objects, which include all the output tokens.
 
 .. code-block:: python
