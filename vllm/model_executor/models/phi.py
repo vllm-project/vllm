@@ -304,9 +304,6 @@ class PhiForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            print(name)
-            continue
-
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -314,9 +311,7 @@ class PhiForCausalLM(nn.Module):
             if name.endswith(".bias") and name not in params_dict:
                 continue
             # pylint: disable=E1136
-            print(params_dict.keys())
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-        1/0
