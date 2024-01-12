@@ -106,6 +106,11 @@ def parse_args():
                         type=str,
                         default=None,
                         help="The file path to the SSL cert file")
+    parser.add_argument(
+        "--root-path",
+        type=str,
+        default=None,
+        help="FastAPI root_path when app is behind a path based routing proxy")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
@@ -766,6 +771,7 @@ if __name__ == "__main__":
     # Register labels for metrics
     add_global_metrics_labels(model_name=engine_args.model)
 
+    app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,
