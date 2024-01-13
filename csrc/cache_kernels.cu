@@ -189,8 +189,8 @@ __global__ void reshape_and_cache_kernel(
     scalar_t tgt_key = VLLM_LDG(&key[src_key_idx]);
     scalar_t tgt_value = VLLM_LDG(&value[src_value_idx]);
     if constexpr (enable_fp8_kv_cache) {
-      key_cache[tgt_key_idx] = vec_conversion<uint8_t, scalar_t>(tgt_key);
-      value_cache[tgt_value_idx] = vec_conversion<uint8_t, scalar_t>(tgt_value);
+      key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
+      value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
     } else {
       key_cache[tgt_key_idx] = tgt_key;
       value_cache[tgt_value_idx] = tgt_value;
@@ -425,7 +425,7 @@ __global__ void convert_fp8_kernel(
   const int64_t block_idx = blockIdx.x;
   for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
     int64_t idx = block_idx * block_stride + i;
-    dst_cache[idx] = vec_conversion<Tout, Tin>(VLLM_LDG(&src_cache[idx]));
+    dst_cache[idx] = fp8_e5m2_unscaled::vec_conversion<Tout, Tin>(VLLM_LDG(&src_cache[idx]));
   }
 }
 

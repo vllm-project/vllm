@@ -9,15 +9,16 @@
 #include "../../attention/dtype_float16.cuh"
 #include "../../attention/dtype_bfloat16.cuh"
 
-using namespace vllm;
+#pragma once
 
+namespace vllm {
+namespace fp8_e5m2_unscaled {
 
 template<typename Tout, typename Tin>
 __inline__ __device__ Tout vec_conversion(const Tin& x)
 {
     return x;
 }
-
 
 // fp8 -> half
 template<>
@@ -269,3 +270,5 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, Float8_>(const Float8_ &
     return b;
 }
 
+} // namespace fp8_e5m2_unscaled
+} // namespace vllm
