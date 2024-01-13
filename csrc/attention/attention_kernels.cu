@@ -25,7 +25,7 @@
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
-#include "../quantization/kvcache/quant_utils.cuh"
+#include "../quantization/fp8_kvcache/quant_utils.cuh"
 
 #include <algorithm>
 

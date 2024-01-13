@@ -4,7 +4,7 @@
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
-#include "quantization/kvcache/quant_utils.cuh"
+#include "quantization/fp8_kvcache/quant_utils.cuh"
 
 #include <algorithm>
 #include <cassert>
@@ -132,7 +132,7 @@ void copy_blocks(
   dim3 block(std::min(1024, numel_per_block));
   const at::cuda::OptionalCUDAGuard device_guard(cache_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_BYTE_TYPES(
+  VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
     key_caches[0].scalar_type(), "copy_blocks_kernel", ([&] {
       vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
         key_cache_ptrs_tensor.data_ptr<int64_t>(),
@@ -396,7 +396,7 @@ void gather_cached_kv(
   dim3 block(std::min(num_heads * head_size, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_BYTE_TYPES(
+  VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
     key.scalar_type(),
     "gather_cached_kv_kernel_optimized",
     [&] {

@@ -3,7 +3,24 @@ from typing import List, Tuple
 import pytest
 import torch
 
-from vllm._C import cache_ops
+
+def generate_random_fp8(
+    tensor: torch.tensor,
+    low: float,
+    high: float,
+) -> None:
+    # NOTE(zhaoyang): Due to NaN and Inf representation for fp8 data type,
+    # it may occur Inf or NaN if we directly use torch.randint
+    # to generate random data for fp8 data.
+    # For example, s.11111.00 in fp8e5m2 format repesents Inf.
+    #     | E4M3        | E5M2
+    #-----|-------------|-------------------
+    # Inf | N/A         | s.11111.00
+    # NaN | s.1111.111  | s.11111.{01,10,11}
+    from vllm._C import cache_ops
+    tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
+    tensor_tmp.uniform_(low, high)
+    cache_ops.convert_fp8(tensor_tmp, tensor)
 
 
 def create_kv_caches(
@@ -30,17 +47,7 @@ def create_kv_caches(
         if dtype != torch.uint8:
             key_cache.uniform_(-scale, scale)
         else:
-            # NOTE(zhaoyang): Due to NaN and Inf representation for fp8 data type,
-            # it may occur Inf or NaN if we directly use torch.randint
-            # to generate random data for fp8 cache.
-            # For example, s.11111.00 in fp8e5m2 format repesents Inf.
-            #     | E4M3        | E5M2
-            #-----|-------------|-------------------
-            # Inf | N/A         | s.11111.00
-            # NaN | s.1111.111  | s.11111.{01,10,11}
-            key_cache_tmp = torch.empty_like(key_cache, dtype=torch.float16)
-            key_cache_tmp.uniform_(-scale, scale)
-            cache_ops.convert_fp8(key_cache_tmp, key_cache)
+            generate_random_fp8(key_cache, -scale, scale)
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
@@ -52,10 +59,7 @@ def create_kv_caches(
         if dtype != torch.uint8:
             value_cache.uniform_(-scale, scale)
         else:
-            value_cache_tmp = torch.empty_like(value_cache,
-                                               dtype=torch.float16)
-            value_cache_tmp.uniform_(-scale, scale)
-            cache_ops.convert_fp8(value_cache_tmp, value_cache)
+            generate_random_fp8(value_cache, -scale, scale)
         value_caches.append(value_cache)
     return key_caches, value_caches
 
