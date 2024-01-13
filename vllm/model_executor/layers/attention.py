@@ -10,7 +10,8 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 from vllm._C import ops
 from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.triton_kernel.prefix_prefill import context_attention_fwd
+from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
+    context_attention_fwd)
 from vllm.utils import is_hip
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
@@ -119,8 +120,8 @@ class PagedAttention(nn.Module):
             # normal attention
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
-                # Set attention bias if not provided. This typically happens at the
-                # very attention layer of every iteration.
+                # Set attention bias if not provided. This typically happens at
+                # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
                 if input_metadata.attn_bias is None:
                     if self.alibi_slopes is None:
@@ -135,8 +136,8 @@ class PagedAttention(nn.Module):
                             self.alibi_slopes, self.num_kv_heads, batch_size,
                             seq_len, query.dtype)
 
-                # TODO(woosuk): Too many view operations. Let's try to reduce them
-                # in the future for code readability.
+                # TODO(woosuk): Too many view operations. Let's try to reduce
+                # them in the future for code readability.
                 if self.alibi_slopes is None:
                     query = query.unsqueeze(0)
                     key = key.unsqueeze(0)
