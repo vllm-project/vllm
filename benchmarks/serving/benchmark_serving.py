@@ -21,7 +21,7 @@ import json
 import random
 import time
 from datetime import datetime
-from typing import AsyncGenerator, List, Tuple
+from typing import AsyncGenerator, Dict, List, Tuple, Union
 
 import numpy as np
 from transformers import PreTrainedTokenizerBase
@@ -92,7 +92,12 @@ async def get_request(
         await asyncio.sleep(interval)
 
 
-def calculate_metrics(input_requests, outputs, dur_s, tokenizer):
+def calculate_metrics(
+    input_requests: List[Tuple[str, int, int]],
+    outputs: Dict[str, Union[str, bool, float]],
+    dur_s: float,
+    tokenizer: PreTrainedTokenizerBase,
+) -> Tuple[int, int, int, float, float, float, float, float]:
     total_output = 0
     total_input = 0
     completed = 0
@@ -126,10 +131,10 @@ def calculate_metrics(input_requests, outputs, dur_s, tokenizer):
 async def throughput_benchmark(
     backend: str,
     api_url: str,
-    tokenizer,
-    input_requests,
-    best_of,
-    use_beam_search,
+    tokenizer: PreTrainedTokenizerBase,
+    input_requests: List[Tuple[str, int, int]],
+    best_of: int,
+    use_beam_search: bool,
     request_rate: float,
 ):
     if backend in ASYNC_QUERY_FUNCS:
