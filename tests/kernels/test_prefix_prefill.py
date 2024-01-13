@@ -1,20 +1,27 @@
+import random
+import pytest
 import time
+
 import torch
+from vllm.model_executor.layers.triton_kernel.prefix_prefill import (context_attention_fwd)
+from xformers import ops as xops
+from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
 
-from vllm.model_executor.layers.triton_kernel.prefix_prefill import context_attention_fwd
+NUM_HEADS = [12]
+HEAD_SIZES = [128]
+DTYPES = [torch.float16]
 
-
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode()
 def test_contexted_kv_attention(
     num_heads: int,
     head_size: int,
     dtype: torch.dtype,
 ) -> None:
-    import random
     random.seed(0)
     torch.manual_seed(0)
-    from xformers import ops as xops
-    from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
     MAX_SEQ_LEN = 1024
     MAX_CTX_LEN = 1024
     BS = 10
@@ -107,10 +114,12 @@ def test_contexted_kv_attention(
                 value[start_loc:end_loc])
             cur_ctx += block_size
             block_id += 1
-    # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size] to K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
+    # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
+    # to K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
     k_cache = k_cache.view(-1, block_size, num_heads, head_size // 8,
                            8).permute(0, 2, 3, 1, 4).contiguous()
-    # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size] to V_cache[num_blocks, num_kv_heads, head_size, block_size]
+    # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
+    # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
     v_cache = v_cache.view(-1, block_size, num_heads,
                            head_size).permute(0, 2, 3, 1).contiguous()
 
@@ -154,11 +163,6 @@ def test_contexted_kv_attention(
     end_time = time.time()
     print(f"xformers Time: {(end_time - start_time)*1000:.2f} ms")
     output_ref = output_ref.squeeze(0)
-    print(output_ref.shape)
-    print("max ", torch.max(torch.abs(output_ref - output)))
-    print("mean ", torch.mean(torch.abs(output_ref - output)))
-    print(output[0, 0, :10])
-    print(output_ref[0, 0, :10])
     assert torch.allclose(output_ref, output, atol=1e-6, rtol=0)
 
 
