@@ -3,13 +3,15 @@ import pytest
 import time
 
 import torch
-from vllm.model_executor.layers.triton_kernel.prefix_prefill import (context_attention_fwd)
+from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
+    context_attention_fwd)
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
 
 NUM_HEADS = [12]
 HEAD_SIZES = [128]
 DTYPES = [torch.float16]
+
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
