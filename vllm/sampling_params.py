@@ -19,7 +19,8 @@ LogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
 tokens and a tensor of the logits for the next token, and returns a modified
 tensor of logits to sample from."""
 
-
+AllowedTokensFn = Callable[[List[int], int], List[int]]
+ 
 class SamplingParams:
     """Sampling parameters for text generation.
 
@@ -114,6 +115,7 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
+        allowed_tokens_fn: Optional[AllowedTokensFn] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -144,6 +146,7 @@ class SamplingParams:
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
+        self.allowed_tokens_fn = allowed_tokens_fn
         self.include_stop_str_in_output = include_stop_str_in_output
         self._verify_args()
         if self.use_beam_search:
