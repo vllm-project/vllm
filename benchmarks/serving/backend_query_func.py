@@ -1,10 +1,13 @@
+import os
 import time
 from typing import Dict, Union
 
 import aiohttp
+import openai
 
 
 async def async_query_tgi(
+    model: str,
     prompt: str,
     api_url: str,
     prompt_len: int,
@@ -44,6 +47,7 @@ async def async_query_tgi(
 
 
 async def async_query_vllm(
+    model: str,
     prompt: str,
     api_url: str,
     prompt_len: int,
@@ -83,7 +87,42 @@ async def async_query_vllm(
         return output
 
 
+async def async_query_openai_completions(
+    model: str,
+    prompt: str,
+    api_url: str,
+    prompt_len: int,
+    output_len: int,
+    best_of: int,
+    use_beam_search: bool,
+):
+    output = dict()
+    output["prompt_len"] = prompt_len
+    oai_client = openai.AsyncOpenAI(
+        base_url=api_url, api_key=os.environ.get("OPENAI_API_KEY")
+    )
+
+    st = time.perf_counter()
+    try:
+        resp = await oai_client.completions.create(
+            model=model,
+            prompt=prompt,
+            temperature=0,
+            max_tokens=output_len,
+        )
+        latency = time.perf_counter() - st
+        output["generated_text"] = resp.choices[0].text
+        output["success"] = True
+        output["latency"] = latency
+    except Exception as e:
+        output["generated_text"] = ""
+        output["success"] = False
+
+    return output
+
+
 ASYNC_QUERY_FUNCS = {
     "tgi": async_query_tgi,
     "vllm": async_query_vllm,
+    "openai": async_query_openai_completions,
 }

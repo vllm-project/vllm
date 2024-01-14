@@ -104,7 +104,7 @@ def calculate_metrics(
     per_token_latencies = []
     for i in range(len(outputs)):
         if outputs[i]["success"]:
-            output_len = len(tokenizer(outputs[i]["generated_text"]))
+            output_len = len(tokenizer.encode(outputs[i]["generated_text"]))
             total_output += output_len
             total_input += input_requests[i][1]
             per_token_latencies.append(outputs[i]["latency"] / output_len)
@@ -131,6 +131,7 @@ def calculate_metrics(
 async def throughput_benchmark(
     backend: str,
     api_url: str,
+    model_id: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: List[Tuple[str, int, int]],
     best_of: int,
@@ -142,7 +143,7 @@ async def throughput_benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    print(f"Traffic Request_rate={request_rate}")
+    print(f"Traffic request rate: {request_rate}")
 
     benchmark_start_time = time.perf_counter()
     tasks = []
@@ -151,6 +152,7 @@ async def throughput_benchmark(
         tasks.append(
             asyncio.create_task(
                 query_func(
+                    model_id,
                     prompt,
                     api_url,
                     prompt_len,
@@ -219,14 +221,17 @@ def main(args: argparse.Namespace):
     )
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
 
-    benchmark_result = throughput_benchmark(
-        backend=backend,
-        api_url=api_url,
-        tokenizer=tokenizer,
-        input_requests=input_requests,
-        best_of=args.best_of,
-        use_beam_search=args.use_beam_search,
-        request_rate=args.request_rate,
+    benchmark_result = asyncio.run(
+        throughput_benchmark(
+            backend=backend,
+            api_url=api_url,
+            model_id=model_id,
+            tokenizer=tokenizer,
+            input_requests=input_requests,
+            best_of=args.best_of,
+            use_beam_search=args.use_beam_search,
+            request_rate=args.request_rate,
+        )
     )
 
     # Save config and results to json
@@ -265,10 +270,15 @@ if __name__ == "__main__":
         description="Benchmark the online serving throughput."
     )
     parser.add_argument(
-        "--backend", type=str, default="vllm", choices=["vllm", "tgi"]
+        "--backend", type=str, default="vllm", choices=["vllm", "tgi", "openai"]
     )
     parser.add_argument("--version", type=str, default="N/A")
-    parser.add_argument("--api-url", type=str, defaulr=None)
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default=None,
+        help="Server url if not using host and port.",
+    )
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
