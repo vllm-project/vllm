@@ -234,35 +234,37 @@ def main(args: argparse.Namespace):
         )
     )
 
+    
     # Save config and results to json
-    result_json = {}
+    if args.save_result:
+        result_json = {}
 
-    # Setup
-    current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-    result_json["date"] = current_dt
-    result_json["backend"] = backend
-    result_json["version"] = args.version
-    result_json["model_id"] = model_id
-    result_json["tokenizer_id"] = tokenizer_id
-    result_json["best_of"] = args.best_of
-    result_json["use_beam_search"] = args.use_beam_search
-    result_json["num_prompts"] = args.num_prompts
+        # Setup
+        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+        result_json["date"] = current_dt
+        result_json["backend"] = backend
+        result_json["version"] = args.version
+        result_json["model_id"] = model_id
+        result_json["tokenizer_id"] = tokenizer_id
+        result_json["best_of"] = args.best_of
+        result_json["use_beam_search"] = args.use_beam_search
+        result_json["num_prompts"] = args.num_prompts
 
-    # Traffic
-    result_json["request_rate"] = (
-        args.request_rate if args.request_rate < float("inf") else "inf"
-    )
+        # Traffic
+        result_json["request_rate"] = (
+            args.request_rate if args.request_rate < float("inf") else "inf"
+        )
 
-    # Merge with benchmark result
-    result_json = {**result_json, **benchmark_result}
+        # Merge with benchmark result
+        result_json = {**result_json, **benchmark_result}
 
-    # Save to file
-    base_model_id = model_id.split("/")[-1]
-    file_name = (
-        f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
-    )
-    with open(file_name, "w") as outfile:
-        json.dump(result_json, outfile)
+        # Save to file
+        base_model_id = model_id.split("/")[-1]
+        file_name = (
+            f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+        )
+        with open(file_name, "w") as outfile:
+            json.dump(result_json, outfile)
 
 
 if __name__ == "__main__":
@@ -277,7 +279,7 @@ if __name__ == "__main__":
         "--api-url",
         type=str,
         default=None,
-        help="Server url if not using host and port.",
+        help="Server url or api base if not using host and port.",
     )
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
@@ -324,5 +326,11 @@ if __name__ == "__main__":
         action="store_true",
         help="trust remote code from huggingface",
     )
+    parser.add_argument(
+        "--save-result",
+        action="store_true",
+        help="save benchmark results to a json file",
+    )
+
     args = parser.parse_args()
     main(args)

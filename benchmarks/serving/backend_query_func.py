@@ -3,8 +3,7 @@ import time
 from typing import Dict, Union
 
 import aiohttp
-import openai
-
+from openai import AsyncOpenAI
 
 async def async_query_tgi(
     model: str,
@@ -98,7 +97,7 @@ async def async_query_openai_completions(
 ):
     output = dict()
     output["prompt_len"] = prompt_len
-    oai_client = openai.AsyncOpenAI(
+    oai_client = AsyncOpenAI(
         base_url=api_url, api_key=os.environ.get("OPENAI_API_KEY")
     )
 
