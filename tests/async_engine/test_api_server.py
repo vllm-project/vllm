@@ -64,6 +64,7 @@ def test_api_server(api_server):
             except requests.exceptions.ConnectionError as err:
                 if max_tries == 0:
                     raise RuntimeError("Server did not start") from err
+                max_tries -= 1
                 time.sleep(1)
 
         # Actual tests start here

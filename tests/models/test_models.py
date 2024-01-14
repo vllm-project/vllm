@@ -21,8 +21,7 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-# half is required to get this working on CI's L4 GPU
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(
     hf_runner,
