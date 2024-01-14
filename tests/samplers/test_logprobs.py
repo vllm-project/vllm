@@ -30,6 +30,7 @@ def test_get_prompt_logprobs(
                                           temperature=0.0)
     vllm_results = vllm_model.model.generate(
         example_prompts, sampling_params=vllm_sampling_params)
+    del vllm_model
 
     # Test whether logprobs are included in the results.
     for result in vllm_results:

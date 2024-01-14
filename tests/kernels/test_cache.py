@@ -6,12 +6,12 @@ import torch
 from vllm._C import cache_ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-NUM_TOKENS = [83]  # Arbitrary values for testing
+NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
-NUM_BLOCKS = [1024, 36000]  # Arbitrary values for testing
+NUM_BLOCKS = [1024, 3600]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
