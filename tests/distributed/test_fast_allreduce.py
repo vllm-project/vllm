@@ -3,6 +3,7 @@ import random
 import pytest
 import torch
 import torch.distributed as dist
+import ray
 
 from vllm.model_executor.parallel_utils import fast_allreduce as fast_ar
 from vllm.model_executor.parallel_utils.communication_op import tensor_model_parallel_all_reduce
@@ -14,6 +15,7 @@ for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
 
 
+@ray.remote(num_gpus=1, max_calls=1)
 def graph_registration(world_size, rank, distributed_init_port):
     init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
@@ -42,6 +44,7 @@ def graph_registration(world_size, rank, distributed_init_port):
             assert torch.allclose(out2, inp2)
 
 
+@ray.remote(num_gpus=1, max_calls=1)
 def manual_registration(world_size, rank, distributed_init_port):
     init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)

@@ -531,7 +531,7 @@ class ModelRunner:
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
         with fast_allreduce.capture(
-            enable=not self.parallel_config.disable_fast_allreduce):
+                enable=not self.parallel_config.disable_fast_allreduce):
             for batch_size in reversed(batch_size_capture_list):
                 # Create dummy input_metadata.
                 input_metadata = InputMetadata(

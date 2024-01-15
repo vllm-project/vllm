@@ -1,5 +1,4 @@
-from multiprocessing import Process, set_start_method
-import torch
+import ray
 
 from vllm.config import ParallelConfig
 from vllm.utils import get_open_port
@@ -13,20 +12,21 @@ def init_test_distributed_environment(pipeline_parallel_size: int,
                                      tensor_parallel_size,
                                      worker_use_ray=True)
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
-    torch.cuda.set_device(rank)
     _init_distributed_environment(parallel_config, rank,
                                   distributed_init_method)
 
 
 def multi_process_tensor_parallel(tensor_parallel_size, test_target):
-    set_start_method("spawn", force=True)
+    # Using ray helps debugging the error when it failed
+    # as compared to multiprocessing.
+    ray.init()
+
     distributed_init_port = get_open_port()
-    processes = []
+    refs = []
     for rank in range(tensor_parallel_size):
-        p = Process(target=test_target,
-                    args=(tensor_parallel_size, rank, distributed_init_port))
-        p.start()
-        processes.append(p)
-    for p in processes:
-        p.join()
-    assert all(p.exitcode == 0 for p in processes)
+        refs.append(
+            test_target.remote(tensor_parallel_size, rank,
+                               distributed_init_port))
+    ray.get(refs)
+
+    ray.shutdown()

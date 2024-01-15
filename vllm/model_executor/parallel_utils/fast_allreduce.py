@@ -52,7 +52,7 @@ def capture(enable: bool):
         yield
     finally:
         end_capture()
-        if enable:
+        if enable and get_handle() is not None:
             get_handle().register_graph_buffers()
 
 
