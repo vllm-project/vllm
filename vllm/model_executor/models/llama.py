@@ -296,6 +296,15 @@ class LlamaForCausalLM(nn.Module):
                                    sampling_metadata)
         return next_tokens
 
+    def can_skip_param(self, name: str):
+        # need to skip the names for model (e.g. llama2 70b) as those are not in the param_dict
+        # when loading weights
+        skip_name_list = [".bias", "g_idx", "qweight", "qzeros", "scales"]
+        for skip_name in skip_name_list:
+            if name.endswith(skip_name):
+                return True
+        return False
+
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
@@ -324,7 +333,7 @@ class LlamaForCausalLM(nn.Module):
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if name not in params_dict and self.can_skip_param(name):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -332,7 +341,7 @@ class LlamaForCausalLM(nn.Module):
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if name not in params_dict and self.can_skip_param(name):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
