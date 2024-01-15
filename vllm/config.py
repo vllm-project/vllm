@@ -297,7 +297,8 @@ class CacheConfig:
                 "Using fp8 data type to store kv cache. It reduces "
                 "the GPU memory footprint and boosts the performance. "
                 "But it may make slight accuray drop. "
-                "Currently we only support fp8 without scaling factors."
+                "Currently we only support fp8 without scaling factors and "
+                "make e5m2 as a default format."
             )
         self.sliding_window = sliding_window
         self._verify_args()
