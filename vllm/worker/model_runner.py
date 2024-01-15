@@ -236,9 +236,11 @@ class ModelRunner:
                     input_block_tables[i, :len(block_table)] = block_table
             block_tables = torch.tensor(input_block_tables, device="cuda")
         else:
+            max_block_table_len = (max_context_len + self.block_size -
+                                   1) // self.block_size
             block_tables = _make_tensor_with_pad(
                 block_tables,
-                max_len=max_context_len,
+                max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
                 device="cuda",
@@ -505,7 +507,9 @@ class ModelRunner:
                     "use '--enforce-eager' in the CLI.")
         logger.info("CUDA graphs can take additional 1~3 GiB memory per GPU. "
                     "If you are running out of memory, consider decreasing "
-                    "`gpu_memory_utilization` or enforcing eager mode.")
+                    "`gpu_memory_utilization` or enforcing eager mode. "
+                    "You can also reduce the `max_num_seqs` as needed "
+                    "to decrease memory usage.")
         start_time = time.perf_counter()
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
@@ -518,11 +522,17 @@ class ModelRunner:
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
+        graph_batch_size = _get_graph_batch_size(
+            self.scheduler_config.max_num_seqs)
+        batch_size_capture_list = [
+            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
+        ]
+
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
         with fast_allreduce.capture(
-                enable=not self.parallel_config.disable_fast_allreduce):
-            for batch_size in reversed(_BATCH_SIZES_TO_CAPTURE):
+            enable=not self.parallel_config.disable_fast_allreduce):
+            for batch_size in reversed(batch_size_capture_list):
                 # Create dummy input_metadata.
                 input_metadata = InputMetadata(
                     is_prompt=False,

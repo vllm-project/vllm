@@ -4,6 +4,7 @@ Run `pytest tests/distributed/test_comm_ops.py --forked`.
 """
 import pytest
 import torch
+import ray
 
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce,
@@ -12,6 +13,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from tests.distributed.comm_utils import init_test_distributed_environment, multi_process_tensor_parallel
 
 
+@ray.remote(num_gpus=1, max_calls=1)
 def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
                            distributed_init_port: str):
     init_test_distributed_environment(1, tensor_parallel_size, rank,
@@ -27,6 +29,7 @@ def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
     assert torch.allclose(t, expected)
 
 
+@ray.remote(num_gpus=1, max_calls=1)
 def all_gather_test_worker(tensor_parallel_size: int, rank: int,
                            distributed_init_port: str):
     init_test_distributed_environment(1, tensor_parallel_size, rank,
