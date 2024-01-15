@@ -16,6 +16,10 @@ steps:
     agents:
       queue: kubernetes
     soft_fail: {{ step.soft_fail or false }}
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
     plugins:
       - kubernetes:
           podSpec:
