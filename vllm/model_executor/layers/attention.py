@@ -220,7 +220,7 @@ def _paged_attention(
 ) -> torch.Tensor:
     output = torch.empty_like(query)
 
-    enable_fp8_kv_cache = key_cache.dtype == torch.uint8
+    use_fp8_kv_cache = input_metadata.use_fp8_kv_cache
 
     block_size = value_cache.shape[3]
     num_seqs, num_heads, head_size = query.shape
@@ -250,7 +250,7 @@ def _paged_attention(
             block_size,
             input_metadata.max_context_len,
             alibi_slopes,
-            enable_fp8_kv_cache,
+            use_fp8_kv_cache,
         )
     else:
         # Run PagedAttention V2.
@@ -281,6 +281,6 @@ def _paged_attention(
             block_size,
             input_metadata.max_context_len,
             alibi_slopes,
-            enable_fp8_kv_cache,
+            use_fp8_kv_cache,
         )
     return output

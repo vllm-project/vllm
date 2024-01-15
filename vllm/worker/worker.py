@@ -28,6 +28,7 @@ class Worker:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        cache_config: CacheConfig,
         rank: Optional[int] = None,
         distributed_init_method: Optional[str] = None,
     ) -> None:
@@ -38,7 +39,7 @@ class Worker:
         self.distributed_init_method = distributed_init_method
 
         self.model_runner = ModelRunner(model_config, parallel_config,
-                                        scheduler_config)
+                                        scheduler_config, cache_config)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None

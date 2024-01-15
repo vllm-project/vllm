@@ -140,6 +140,7 @@ class LLMEngine:
             self.model_config,
             self.parallel_config,
             self.scheduler_config,
+            self.cache_config,
             0,
             distributed_init_method,
         )
@@ -184,12 +185,14 @@ class LLMEngine:
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
+        cache_config = copy.deepcopy(self.cache_config)
         self._run_workers("init_worker",
                           get_all_outputs=True,
                           worker_init_fn=lambda: Worker(
                               model_config,
                               parallel_config,
                               scheduler_config,
+                              cache_config,
                               None,
                               None,
                           ))

@@ -292,10 +292,19 @@ class CacheConfig:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
+
         self.cache_dtype = cache_dtype
+        self.quant_method = None
         if cache_dtype and 'fp8' in cache_dtype.lower():
             # As fp8 is not a formal data type, we use torch.uint8 instead.
             self.cache_dtype = torch.uint8
+            self.quant_method = "fp8"
+            logger.info(
+                "Using fp8 data type to store kv cache. It reduces "
+                "the GPU memory footprint and boosts the performance. "
+                "But it may make slight accuray drop. "
+                "Currently we only support fp8 without scaling factors."
+            )
         self.sliding_window = sliding_window
         self._verify_args()
 

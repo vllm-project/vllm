@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
+from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -28,10 +28,12 @@ class ModelRunner:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        cache_config: CacheConfig,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.cache_config = cache_config
 
         # model_config can be None in tests/samplers/test_sampler.py.
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
@@ -55,6 +57,8 @@ class ModelRunner:
         self.graph_block_tables = None  # Set after initial profiling.
         # cache in_wsl result
         self.in_wsl = in_wsl()
+
+        self.use_fp8_kv_cache = True if 'fp8' in self.cache_config.quant_method else False
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
@@ -141,6 +145,7 @@ class ModelRunner:
             context_lens=None,
             block_tables=None,
             use_cuda_graph=False,
+            use_fp8_kv_cache=False,
         )
         return input_tokens, input_positions, input_metadata
 
@@ -253,6 +258,7 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            use_fp8_kv_cache=self.use_fp8_kv_cache,
         )
         return input_tokens, input_positions, input_metadata
 
@@ -430,6 +436,7 @@ class ModelRunner:
                 context_lens=context_lens[:batch_size],
                 block_tables=block_tables[:batch_size],
                 use_cuda_graph=True,
+                use_fp8_kv_cache=self.use_fp8_kv_cache,
             )
 
             graph_runner = CUDAGraphRunner(self.model)
