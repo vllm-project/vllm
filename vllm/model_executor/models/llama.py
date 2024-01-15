@@ -300,10 +300,7 @@ class LlamaForCausalLM(nn.Module):
         # need to skip the names for model (e.g. llama2 70b) as those are not in the param_dict
         # when loading weights
         skip_name_list = [".bias", "g_idx", "qweight", "qzeros", "scales"]
-        for skip_name in skip_name_list:
-            if name.endswith(skip_name):
-                return True
-        return False
+        return any(name.endswith(skip_name) for skip_name in skip_name_list)
 
     def load_weights(self,
                      model_name_or_path: str,
