@@ -215,17 +215,15 @@ __global__ void __launch_bounds__(512, 1)
                                int rank, int size) {
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
-  const P *ptrs[ngpus];
-#pragma unroll
-  for (int i = 0; i < ngpus; i++) {
-    int target = (rank + i) % ngpus;
-    ptrs[i] = (P *)_dp->ptrs[target];
-  }
+  // note: we don't reorder the address so the accumulation order is the same
+  // for all ranks, ensuring bitwise identical results
+  auto dp = *_dp;
   start_sync<ngpus>(sg, meta, rank);
   // do the actual reduction
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
-    ((P *)result)[idx] = packed_reduce<P, ngpus, A>(ptrs, idx);
+    ((P *)result)[idx] =
+        packed_reduce<P, ngpus, A>((const P **)&dp.ptrs[0], idx);
   }
   end_sync<ngpus, true>(sg, meta, rank);
 }
@@ -319,7 +317,7 @@ __global__ void __launch_bounds__(512, 1)
   end_sync<ngpus>(sg, meta, rank);
 
   auto src = get_tmp_buf<P>(sg.signals[(ngpus - 1) - rank % ngpus]);
-  // do the actual reduction
+  // do the cross group reduction
   for (int idx = tid; idx < size; idx += stride) {
     auto tmp = tmp_out[idx];
     packed_assign_add(tmp, src[idx]);

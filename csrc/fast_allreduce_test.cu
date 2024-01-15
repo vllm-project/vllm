@@ -1,12 +1,16 @@
 /**
- * This is a standalone test for fast allreduce. 
+ * This is a standalone test for fast allreduce.
  * To compile, make sure you have MPI and NCCL installed in your system.
  * export MPI_HOME=XXX
- * nvcc -O2 -arch=native -std=c++17 fast_allreduce_test.cu -o fast_allreduce_test -lnccl -I${MPI_HOME}/include -lmpi
- * 
+ * nvcc -O2 -arch=native -std=c++17 fast_allreduce_test.cu -o
+ * fast_allreduce_test -lnccl -I${MPI_HOME}/include -lmpi
+ *
+ * Warning: this C++ test is not designed to be very readable and was used
+ * during the rapid prototyping process.
+ *
  * To run:
  * mpirun -np 8 ./fast_allreduce_test
-*/
+ */
 #include <cuda.h>
 #include <curand_kernel.h>
 #include <stdio.h>
@@ -99,6 +103,17 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   cudaIpcMemHandle_t data_handles[8];
   vllm::Metadata *buffer;
   T *self_data_copy;
+  /**
+   * Allocate IPC buffer
+   *
+   * The first section is a temporary buffer for storing intermediate allreduce
+   * results, if a particular algorithm requires it. The second section is for
+   * the input to the allreduce. The actual API takes the input pointer as an
+   * argument (that is, they can and usually should be allocated separately).
+   * But since the input pointers and the temporary buffer all require IPC
+   * registration, they are allocated and registered together in the test for
+   * convenience.
+   */
   CUDACHECK(
       cudaMalloc(&buffer, 2 * data_size * sizeof(T) + sizeof(vllm::Metadata)));
   CUDACHECK(cudaMemset(buffer, 0,
@@ -133,12 +148,12 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
     fa.register_buffer(handles, offsets, self_data);
   }
 
-  double *verification_buffer;
-  CUDACHECK(cudaMallocHost(&verification_buffer, data_size * sizeof(double)));
+  double *ground_truth;
+  CUDACHECK(cudaMallocHost(&ground_truth, data_size * sizeof(double)));
   curandState_t *states;
   CUDACHECK(cudaMalloc(&states, sizeof(curandState_t) * nRanks * data_size));
   init_rand<<<108, 1024, 0, stream>>>(states, data_size, nRanks);
-  gen_data<T><<<108, 1024, 0, stream>>>(states, self_data, verification_buffer,
+  gen_data<T><<<108, 1024, 0, stream>>>(states, self_data, ground_truth,
                                         myRank, nRanks, data_size);
   CUDACHECK(cudaMemcpyAsync(self_data_copy, self_data, data_size * sizeof(T),
                             cudaMemcpyDeviceToDevice, stream));
@@ -214,8 +229,8 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   for (unsigned long j = 0; j < data_size; j++) {
     auto diff = abs(nccl_result[j] - my_result[j]);
     if (diff >= 1e-2) {
-      printf("Rank %d: Verification mismatch at %lld: %f != (my) %f\n", myRank,
-             j, nccl_result[j], my_result[j]);
+      printf("Rank %d: Verification mismatch at %lld: %f != (my) %f, gt=%f\n", myRank,
+             j, nccl_result[j], my_result[j], ground_truth[j]);
       break;
     }
   }
@@ -223,8 +238,8 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   long double nccl_diffs = 0.0;
   long double my_diffs = 0.0;
   for (int j = 0; j < data_size; j++) {
-    nccl_diffs += abs(nccl_result[j] - verification_buffer[j]);
-    my_diffs += abs(my_result[j] - verification_buffer[j]);
+    nccl_diffs += abs(nccl_result[j] - ground_truth[j]);
+    my_diffs += abs(my_result[j] - ground_truth[j]);
   }
   if (myRank == 0)
     std::cout << "average abs diffs: nccl: " << nccl_diffs / data_size
@@ -235,7 +250,7 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   CUDACHECK(cudaFree(rank_data));
   CUDACHECK(cudaFree(buffer));
   CUDACHECK(cudaFree(states));
-  CUDACHECK(cudaFreeHost(verification_buffer));
+  CUDACHECK(cudaFreeHost(ground_truth));
   CUDACHECK(cudaFreeHost(nccl_result));
   CUDACHECK(cudaFreeHost(my_result));
   CUDACHECK(cudaStreamDestroy(stream));
@@ -260,7 +275,7 @@ int main(int argc, char **argv) {
   //     run<half>(myRank, nRanks, comm, threads, block_limit, 4096 * 1024);
   //   }
   // }
-  for (int sz = 512; sz <= (4 << 20); sz *= 2) {
+  for (int sz = 512; sz <= (32 << 20); sz *= 2) {
     run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 50);
   }
 
