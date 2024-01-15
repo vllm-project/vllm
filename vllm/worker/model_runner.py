@@ -373,6 +373,8 @@ class ModelRunner:
                 get_size_or_none(input_metadata.block_tables),
                 "use_cuda_graph":
                 input_metadata.use_cuda_graph,
+                "use_fp8_kv_cache":
+                input_metadata.use_fp8_kv_cache,
                 "selected_token_indices_size":
                 sampling_metadata.selected_token_indices.size(),
             }
@@ -432,6 +434,7 @@ class ModelRunner:
                 context_lens=context_lens,
                 block_tables=block_tables,
                 use_cuda_graph=py_data["use_cuda_graph"],
+                use_fp8_kv_cache=py_data["use_fp8_kv_cache"],
             )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
