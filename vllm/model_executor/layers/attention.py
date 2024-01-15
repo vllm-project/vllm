@@ -156,20 +156,15 @@ class PagedAttention(nn.Module):
             output = out.view_as(query)
         else:
             # Decoding run.
-            if key_cache is not None and value_cache is not None:
-                output = _paged_attention(
-                    query,
-                    key_cache,
-                    value_cache,
-                    input_metadata,
-                    self.num_kv_heads,
-                    self.scale,
-                    self.alibi_slopes,
-                )
-            else:
-                # This happens during the initial memory profiling run for
-                # CUDA graphs.
-                output = torch.zeros_like(query)
+            output = _paged_attention(
+                query,
+                key_cache,
+                value_cache,
+                input_metadata,
+                self.num_kv_heads,
+                self.scale,
+                self.alibi_slopes,
+            )
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)

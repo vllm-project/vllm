@@ -8,11 +8,11 @@ import pytest
 import requests
 
 
-def _query_server(prompt: str) -> dict:
+def _query_server(prompt: str, max_tokens: int = 5) -> dict:
     response = requests.post("http://localhost:8000/generate",
                              json={
                                  "prompt": prompt,
-                                 "max_tokens": 100,
+                                 "max_tokens": max_tokens,
                                  "temperature": 0,
                                  "ignore_eos": True
                              })
@@ -20,13 +20,22 @@ def _query_server(prompt: str) -> dict:
     return response.json()
 
 
+def _query_server_long(prompt: str) -> dict:
+    return _query_server(prompt, max_tokens=500)
+
+
 @pytest.fixture
 def api_server():
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
     uvicorn_process = subprocess.Popen([
-        sys.executable, "-u",
-        str(script_path), "--model", "facebook/opt-125m"
+        sys.executable,
+        "-u",
+        str(script_path),
+        "--model",
+        "facebook/opt-125m",
+        "--host",
+        "127.0.0.1",
     ])
     yield
     uvicorn_process.terminate()
@@ -68,14 +77,18 @@ def test_api_server(api_server):
         for result in pool.map(_query_server, prompts):
             assert result
 
+    with Pool(32) as pool:
         # Cancel requests
         prompts = ["canceled requests"] * 100
-        pool.map_async(_query_server, prompts)
-        time.sleep(0.001)
+        pool.map_async(_query_server_long, prompts)
+        time.sleep(0.01)
         pool.terminate()
         pool.join()
 
         # check cancellation stats
+        # give it some times to update the stats
+        time.sleep(1)
+
         num_aborted_requests = requests.get(
             "http://localhost:8000/stats").json()["num_aborted_requests"]
         assert num_aborted_requests > 0
