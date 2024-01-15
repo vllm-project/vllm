@@ -114,11 +114,9 @@ class Sequence:
         prompt: str,
         prompt_token_ids: List[int],
         block_size: int,
-        prefix: Optional[Prefix] = None,
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
-        self.prefix = prefix
         self.block_size = block_size
 
         self.data = SequenceData(prompt_token_ids)
@@ -245,8 +243,8 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
+        self.prefix: Optional[Prefix] = None
         self.prompt_logprobs: Optional[PromptLogprobs] = None
-        self.prefix = prefix
 
     @property
     def prompt(self) -> str:
@@ -331,7 +329,6 @@ class SequenceGroup:
 
 class SequenceGroupMetadata:
     """Metadata for a sequence group. Used to create `InputMetadata`.
-
 
     Args:
         request_id: The ID of the request.

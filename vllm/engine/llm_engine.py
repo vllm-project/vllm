@@ -390,24 +390,13 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
 
-        # check prefix
-        if prefix_pos is not None:
-            # a temp workaround
-            prefix_pos = (prefix_pos // block_size) * block_size
-            if prefix_pos > 0:
-                truncated_prefix_token_ids = prompt_token_ids[:prefix_pos]
-                prefix = self.scheduler.prefix_pool.fixed_search(
-                    hash(tuple(truncated_prefix_token_ids)))
-                if prefix is not None:
-                    seq.prefix = prefix
-                else:
-                    # create a new prefix
-                    seq.prefix = self.scheduler.prefix_pool.add_prefix(
-                        truncated_prefix_token_ids)
+        # Check whether the input specifies prefix
+        prefix = self.scheduler.prefix_pool.add_or_get_prefix(
+            prompt_token_ids[:prefix_pos]) if prefix_pos is not None else None
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, seq.prefix)
+                                  arrival_time, prefix)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
@@ -677,12 +666,6 @@ class LLMEngine:
         for seq_group in scheduler_outputs.ignored_seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
-
-        # update prefix state
-        for seq_group in scheduled_seq_groups:
-            if seq_group.prefix is not None and seq_group.prefix.swap_to_gpu:
-                seq_group.prefix.on_gpu = True
-                seq_group.prefix.swap_to_gpu = False
 
         if self.log_stats:
             # Log the system stats.

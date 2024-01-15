@@ -1,36 +1,33 @@
-from typing import List, Optional
+from typing import Dict, List, Sequence, Tuple, Optional
+
+from vllm.block import BlockTable
 
 
 class Prefix:
-    """Data and states associated with a prefix of prompt tokens for multiple sequence groups.
+    """Data and states associated with a prefix of prompt tokens for multiple
+    sequence groups.
 
     Args:
         prefix_id: The id of the prefix in the prefix pool.
         token_ids: The token ids of the prefix.
         block_size: The block size of the executed model.
-    
-    Attributes:
-        on_gpu: True if the prefix will be on GPU before the execution of the model.
-        on_cpu: True if the prefix is on CPU.
-        swap_to_gpu: True when the prefix will be computed during the execution of the model.
     """
 
     def __init__(
         self,
-        prefix_id: int,
-        token_ids: List[int],
+        token_ids: Sequence[int],
         block_size: int,
     ) -> None:
-        self.prefix_id = prefix_id
-        self.token_ids = token_ids
+        self.token_ids = tuple(token_ids)
         self.block_size = block_size
         self.length = len(token_ids)
+        self.hash = hash(token_ids)
         assert self.length % block_size == 0
-        self.on_gpu = False
-        self.on_cpu = False
-        self.block_table: Optional[List[int]] = None
-        # a lock to prevent multiple sequence from calculating the same prefix
-        self.swap_to_gpu = False
+        self.block_table: Optional[BlockTable] = None
+
+    @property
+    def allocated(self) -> bool:
+        return self.block_table is not None
 
     def get_num_blocks(self) -> int:
         return self.length // self.block_size
@@ -38,15 +35,14 @@ class Prefix:
     def get_block_numbers(self) -> List[int]:
         return [block.block_number for block in self.block_table]
 
-    def match(self, tokens: List[int]) -> bool:
-        return tokens[:self.length] == self.token_ids
-
-    # whether the prefix is on GPU or not
-    def get_status(self) -> bool:
-        return self.on_gpu
-
     def get_length(self) -> int:
         return self.length
+
+    def __hash__(self) -> int:
+        return self.hash
+
+    def set_block_table(self, block_table: BlockTable) -> None:
+        self.block_table = block_table.copy()
 
 
 class PrefixPool:
@@ -54,10 +50,9 @@ class PrefixPool:
 
     Args:
         block_size: The block size of the executed model.
-    
+
     Attributes:
         prefixes: A list of all the prefixes.
-        prefixes_hash: Mapping from the hash of the prefix to the prefix id.
         block_size: The block size of the executed model.
     """
 
@@ -65,24 +60,20 @@ class PrefixPool:
         self,
         block_size: int,
     ) -> None:
-        self.prefixes = []
-        self.prefixes_hash = {}
+        self.prefixes: Dict[int, Prefix] = {}
         self.block_size = block_size
 
-    def add_prefix(self, token_ids: List[int]) -> Prefix:
-        prefix_hash = hash(tuple(token_ids))
-        assert prefix_hash not in self.prefixes_hash
-        # generate prefix_id
-        prefix_id = len(self.prefixes)
-        # create a new prefix
-        prefix = Prefix(prefix_id, token_ids, self.block_size)
-        self.prefixes.append(prefix)
-        self.prefixes_hash[prefix_hash] = prefix.prefix_id
-        return prefix
+    def _truncate_token_ids(self, token_ids: Sequence[int]) -> Tuple[int]:
+        new_length = len(token_ids) // self.block_size * self.block_size
+        return tuple(token_ids[:new_length])
 
-    # use this first, if we already know from the application which part of the tokens are prefix.
-    def fixed_search(self, prefix_hash: int) -> Optional[Prefix]:
-        if prefix_hash not in self.prefixes_hash:
+    def add_or_get_prefix(self, token_ids: Sequence[int]) -> Optional[Prefix]:
+        token_ids = self._truncate_token_ids(token_ids)
+        if len(token_ids) == 0:
+            # Prefix is empty.
             return None
-        prefix_id = self.prefixes_hash[prefix_hash]
-        return self.prefixes[prefix_id]
+        prefix = Prefix(token_ids, self.block_size)
+        prefix_hash = hash(prefix)
+        if prefix_hash not in self.prefixes:
+            self.prefixes[prefix_hash] = prefix
+        return self.prefixes[prefix_hash]
