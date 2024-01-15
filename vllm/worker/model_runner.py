@@ -84,7 +84,6 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        max_num_blocks_per_seq_prompt = 0
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -96,16 +95,11 @@ class ModelRunner:
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             prefix_len = 0
-            if (seq_group_metadata.prefix is not None
-                    and seq_group_metadata.prefix.on_gpu):
-                prefix_len = seq_group_metadata.prefix.get_length()
-                assert prefix_len % self.block_size == 0
+            prefix = seq_group_metadata.prefix
+            if prefix is not None and prefix.allocated:
+                prefix_len = prefix.get_length()
                 prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_table = seq_group_metadata.prefix.get_block_numbers(
-                )
-                prefix_block_tables.append(prefix_block_table)
-                max_num_blocks_per_seq_prompt = max(
-                    max_num_blocks_per_seq_prompt, len(prefix_block_table))
+                prefix_block_tables.append(prefix.get_block_numbers())
             else:
                 prefix_block_tables.append([])
             # actual prompt lens
@@ -134,7 +128,9 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
-                assert prefix_len == 0, "prefix caching is currently not supported when using sliding window"
+                assert prefix_len == 0, (
+                    "Prefix caching is currently not supported with "
+                    "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
             for i in range(prefix_len, prompt_len):
                 if i < start_idx:
@@ -162,15 +158,14 @@ class ModelRunner:
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device='cuda')
-
-        # prefix block tables
+        # Prepare prefix block tables
+        max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
         block_tables = _make_tensor_with_pad(
             prefix_block_tables,
-            max_len=max_num_blocks_per_seq_prompt,
+            max_len=max_prompt_block_table_len,
             pad=0,
             dtype=torch.int,
         )
-
         start_loc_tensor = torch.arange(0,
                                         len(prompt_lens) * max_prompt_len,
                                         max_prompt_len,
@@ -191,7 +186,8 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
         )
-        return input_tokens, input_positions, input_metadata, prompt_lens, subquery_lens
+        return (input_tokens, input_positions, input_metadata, prompt_lens,
+                subquery_lens)
 
     def _prepare_decode(
         self,
@@ -301,7 +297,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )
-        return input_tokens, input_positions, input_metadata, None
+        return input_tokens, input_positions, input_metadata
 
     def _prepare_sample(
         self,
@@ -315,7 +311,7 @@ class ModelRunner:
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
 
-        max_prompt_len = max(subquery_lens) if subquery_lens else 1
+        max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
@@ -323,10 +319,10 @@ class ModelRunner:
 
             if seq_group_metadata.is_prompt:
                 assert len(seq_ids) == 1
-                prompt_len = subquery_lens[i]
+                subquery_len = subquery_lens[i]
                 if sampling_params.prompt_logprobs is not None:
                     # NOTE: prompt token positions do not need sample, skip
-                    categorized_sample_indices_start_idx += prompt_len - 1
+                    categorized_sample_indices_start_idx += subquery_len - 1
 
                 categorized_sample_indices[
                     sampling_params.sampling_type].append(
@@ -336,10 +332,10 @@ class ModelRunner:
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
                         range(selected_token_start_idx,
-                              selected_token_start_idx + prompt_len - 1))
+                              selected_token_start_idx + subquery_len - 1))
                 selected_token_indices.append(selected_token_start_idx +
-                                              prompt_len - 1)
-                selected_token_start_idx += max_prompt_len
+                                              subquery_len - 1)
+                selected_token_start_idx += max_subquery_len
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -387,8 +383,9 @@ class ModelRunner:
                 (input_tokens, input_positions, input_metadata, prompt_lens,
                  subquery_lens) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                (input_tokens, input_positions, input_metadata,
-                 subquery_lens) = self._prepare_decode(seq_group_metadata_list)
+                (input_tokens, input_positions, input_metadata
+                 ) = self._prepare_decode(seq_group_metadata_list)
+                subquery_lens = None
                 prompt_lens = []
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,

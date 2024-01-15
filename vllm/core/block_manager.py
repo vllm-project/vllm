@@ -2,12 +2,9 @@
 import enum
 from typing import Dict, List, Optional, Set, Tuple
 
-from vllm.block import PhysicalTokenBlock
+from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-
-# Mapping: logical block number -> physical block.
-BlockTable = List[PhysicalTokenBlock]
 
 
 class BlockAllocator:
@@ -135,20 +132,14 @@ class BlockSpaceManager:
         block_table: BlockTable = []
         prefix_block_table: BlockTable = []
         num_prefix_blocks = 0
-        if seq_group.prefix is not None:
-            # prefix is already on gpu or
-            # will be swapped in before the actual computation
-            if seq_group.prefix.on_gpu:
-                num_prompt_blocks -= seq_group.prefix.get_num_blocks()
-                for block in seq_group.prefix.block_table:
-                    block.ref_count += seq_group.num_seqs()
-                    block_table.append(block)
 
-            # allocate blocks for the prefix,
-            # we need to calculate the prefix's kv in this run
-            elif not seq_group.prefix.swap_to_gpu:
-                num_prefix_blocks = seq_group.prefix.get_num_blocks()
-                seq_group.prefix.swap_to_gpu = True
+        prefix = seq_group.prefix
+        if prefix is not None and prefix.allocated:
+            # Prefix has already been allocated. Use the existing block table.
+            num_prompt_blocks -= prefix.get_num_blocks()
+            for block in prefix.block_table:
+                block.ref_count += seq_group.num_seqs()
+                block_table.append(block)
 
         for logical_idx in range(num_prompt_blocks):
             if (self.block_sliding_window is not None
@@ -159,21 +150,19 @@ class BlockSpaceManager:
             # Set the reference counts of the token blocks.
             block.ref_count = seq_group.num_seqs()
             block_table.append(block)
-            # Store the blocks computed by
-            # the first seq group using this prefix
-            # the other seq groups in the same batch will also compute the prefix
-            # but those blocks won't be stored
-            if logical_idx < num_prefix_blocks:
+
+        if prefix is not None and not prefix.allocated:
+            # Allocate blocks for the prefix, we will compute the prefix's
+            # KV cache in this run.
+            num_prefix_blocks = prefix.get_num_blocks()
+            prefix_block_table = block_table[:num_prefix_blocks]
+            for block in prefix_block_table:
                 block.ref_count += 1
-                prefix_block_table.append(block)
+            prefix.set_block_table(prefix_block_table)
 
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
-
-        # Record the prefix block table for the prefix
-        if num_prefix_blocks > 0:
-            seq_group.prefix.block_table = prefix_block_table.copy()
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
@@ -288,8 +277,9 @@ class BlockSpaceManager:
             block_table = self.block_tables[seq.seq_id]
 
             for gpu_block in block_table:
-                # do not swap out the prefix
-                if seq_group.prefix is not None and gpu_block in seq_group.prefix.block_table:
+                if (seq_group.prefix is not None
+                        and gpu_block in seq_group.prefix.block_table):
+                    # We do not swap out the prefix blocks.
                     self.gpu_allocator.free(gpu_block)
                     continue
 
