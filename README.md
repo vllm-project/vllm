@@ -16,12 +16,12 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
-**The Second vLLM Bay Area Meetup (Jan 24th 5pm-8pm PT)**
+**The Second vLLM Bay Area Meetup (Jan 31st 5pm-7:30pm PT)**
 
 We are thrilled to announce our second vLLM Meetup!
 The vLLM team will share recent updates and roadmap.
-We will also have IBM coming up to the stage to discuss their insights on optimizing LLM inference.
-Please register [here](https://lu.ma/first-vllm-meetup) and join us!
+We will also have vLLM collaborators from IBM coming up to the stage to discuss their insights on LLM optimizations.
+Please register [here](https://lu.ma/ygxbpzhl) and join us!
 
 ---
 
