@@ -74,7 +74,8 @@ class ModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int],
+               List[int]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
@@ -319,6 +320,7 @@ class ModelRunner:
 
             if seq_group_metadata.is_prompt:
                 assert len(seq_ids) == 1
+                assert subquery_lens is not None
                 subquery_len = subquery_lens[i]
                 if sampling_params.prompt_logprobs is not None:
                     # NOTE: prompt token positions do not need sample, skip
