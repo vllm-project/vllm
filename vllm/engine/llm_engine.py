@@ -22,6 +22,7 @@ from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port
 
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+    import msgspec
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -122,6 +123,11 @@ class LLMEngine:
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
+        if self.parallel_config.use_ray_compiled_dag:
+            self.forward_dag = self._compiled_dag_init_dag()
+
+        self.encoder = msgspec.msgpack.Encoder()
+        self.decoder = msgspec.msgpack.Decoder(SamplerOutput)
 
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -545,7 +551,7 @@ class LLMEngine:
         # Select the child sequences to keep in the sequence group.
         selected_child_seqs = []
         unselected_child_seqs = []
-        beam_width = seq_group.sampling_params.best_of
+        beam_width = seq_group.sampling_params.actual_best_of
         length_penalty = seq_group.sampling_params.length_penalty
 
         # Select the newly finished sequences with the highest scores
