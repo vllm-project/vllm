@@ -167,7 +167,7 @@ class Scheduler:
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
             leftover_waiting_sequences = deque()
-            if type(self.policy) is not FCFS:
+            if not isinstance(self.policy, FCFS):
                 self.waiting = self.policy.sort(self.waiting)
             while self.waiting:
                 seq_group = self.waiting[0]

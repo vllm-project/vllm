@@ -33,6 +33,7 @@ class Policy:
 
 
 class FCFS(Policy):
+
     def __init__(self, **kwargs) -> None:
         super().__init__()
 
@@ -65,7 +66,7 @@ class ReorderPolicy(Policy):
         self,
         seq_groups: Deque[SequenceGroup],
     ) -> Deque[SequenceGroup]:
-        """Sort head withing `max_delay` of the `seq_groups` by length. It reduces padding computation overhead."""
+        """Sort head withing `reorder_window` of the `seq_groups` by length. It reduces padding computation overhead."""
         if len(seq_groups) == 0:
             return seq_groups
         arrival_time_sorted = sorted(seq_groups, key=lambda x: x.metrics.arrival_time)

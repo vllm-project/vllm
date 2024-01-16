@@ -248,7 +248,9 @@ if __name__ == "__main__":
                         type=str,
                         choices=["fcfs", "reorder"],
                         default="fcfs")
-    parser.add_argument("--vllm-scheduler-reorder-window", type=float, default=0)
+    parser.add_argument("--vllm-scheduler-reorder-window",
+                        type=float,
+                        default=0)
     parser.add_argument("--dataset",
                         type=str,
                         default=None,

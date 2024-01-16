@@ -498,12 +498,12 @@ class SchedulerConfig:
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
         if self.reorder_window < 0:
-            raise ValueError(
-                f"reorder_window ({self.reorder_window}) must "
-                "be not be negative.")
+            raise ValueError(f"reorder_window ({self.reorder_window}) must "
+                             "be not be negative.")
         if self.reorder_window != 0 and self.policy == 'fcfs':
             raise ValueError(
-                f"fcfs policy doesn't support reorder_window ({self.reorder_window}).")
+                f"fcfs policy doesn't support reorder_window ({self.reorder_window})."
+            )
 
 
 class DeviceConfig:
