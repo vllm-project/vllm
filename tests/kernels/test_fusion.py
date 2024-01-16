@@ -1,6 +1,5 @@
 import pytest
 import torch
-import torch.nn as nn
 
 from vllm._C import ops
 
@@ -92,12 +91,14 @@ def test_dequant(num_tokens: int, hidden_size: int, dtype: torch.dtype,
     ops.dequant(out2, x, scale)
     assert torch.allclose(out1, out2, atol=0.001)
 
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def test_per_token_dequant(num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int) -> None:
+def test_per_token_dequant(num_tokens: int, hidden_size: int,
+                           dtype: torch.dtype, seed: int) -> None:
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     x = torch.randint(

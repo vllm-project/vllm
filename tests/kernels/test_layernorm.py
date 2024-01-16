@@ -51,6 +51,7 @@ def test_rms_norm(
     else:
         assert torch.allclose(out, ref_out, atol=1e-2, rtol=1e-2)
 
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
@@ -94,23 +95,11 @@ def test_rms_norm_quant(
     out1 = out1.clamp(-128, 127).round().to(torch.int8)
     out2 = torch.empty_like(x, dtype=torch.int8)
     if add_residual:
-        ops.ops.fused_add_rms_norm.add(
-            out2,
-            x,
-            residual2,
-            layer.weight.data,
-            layer.variance_epsilon,
-            True
-        )
+        ops.ops.fused_add_rms_norm.add(out2, x, residual2, layer.weight.data,
+                                       layer.variance_epsilon, True)
     else:
-        ops.rms_norm(
-            out2,
-            x,
-            layer.weight.data,
-            layer.variance_epsilon,
-            True
-        )
-    
+        ops.rms_norm(out2, x, layer.weight.data, layer.variance_epsilon, True)
+
     assert torch.allclose(out1, out2, atol=1.0)
     if add_residual:
         assert torch.allclose(residual1, residual2, atol=0.001)
@@ -147,8 +136,8 @@ def test_dequant_add_residual_rms_norm_quant(num_tokens: int, hidden_size: int,
     )
     out1 = out1.round().clamp(-128, 127).to(torch.int8)
     out2 = torch.empty_like(x, dtype=torch.int8)
-    ops.dequant_add_residual_rms_norm_quant(
-        out2, x, residual, ref.weight.data, scale, ref.variance_epsilon)
+    ops.dequant_add_residual_rms_norm_quant(out2, x, residual, ref.weight.data,
+                                            scale, ref.variance_epsilon)
     assert torch.allclose(out1, out2, atol=1.0)
 
 
@@ -183,7 +172,6 @@ def test_per_token_dequant_add_residual_rms_norm_quant(num_tokens: int,
     out1 = out1.round().clamp(-128, 127).to(torch.int8)
     out2 = torch.empty_like(x, dtype=torch.int8)
     scale = torch.squeeze(scale)
-    ops.dequant_add_residual_rms_norm_quant(
-        out2, x, residual, ref.weight.data, scale, ref.variance_epsilon)
+    ops.dequant_add_residual_rms_norm_quant(out2, x, residual, ref.weight.data,
+                                            scale, ref.variance_epsilon)
     assert torch.allclose(out1, out2, atol=1.0)
-    

@@ -59,12 +59,13 @@ class SmoothQuantConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         quant_type = cls.get_from_keys(config, ["quant_type", "q_type"])
         return cls(weight_bits, quant_type)
-    
+
     def get_linear_method(self) -> "SQLinearMethod":
         return SQLinearMethod(Int8GEMM)
 
     def get_scaled_act_names(self) -> List[str]:
         return []
+
 
 class Int8GEMM(object):
     _instance_lock = threading.Lock()
@@ -77,16 +78,17 @@ class Int8GEMM(object):
         if not hasattr(Int8GEMM, "_instance"):
             with Int8GEMM._instance_lock:
                 if not hasattr(Int8GEMM, "_instance"):
-                    Int8GEMM._instance = object.__new__(cls)  
+                    Int8GEMM._instance = object.__new__(cls)
         return Int8GEMM._instance
-    
+
     def get_i8cugemm(self):
         return self.i8cugemm
-        
+
 
 class SQLinearMethod(LinearMethodBase):
     """Linear method for SmoothQuant.
     """
+
     def __init__(self, gemm):
         i8_gemm = gemm()
         self.i8cugemm = i8_gemm.get_i8cugemm()
@@ -104,11 +106,10 @@ class SQLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        set_weight_attrs(
-            weight, {
-                "input_dim": 1,
-                "output_dim": 0,
-            })
+        set_weight_attrs(weight, {
+            "input_dim": 1,
+            "output_dim": 0,
+        })
         # q k v dequant_scales are used in QKVParallelLinear
         q_dequant_scale = Parameter(
             torch.tensor(1.0, dtype=torch.float32, device='cpu'),
@@ -136,11 +137,20 @@ class SQLinearMethod(LinearMethodBase):
             torch.tensor(1.0, dtype=torch.float32, device='cpu'),
             requires_grad=False,
         )
-        return {"weight": weight, "q_dequant_scale": q_dequant_scale, "k_dequant_scale": k_dequant_scale,
-                "v_dequant_scale": v_dequant_scale, "gate_dequant_scale": gate_dequant_scale,
-                "up_dequant_scale": up_dequant_scale, "dequant_scale": dequant_scale}
-    
-    def apply_weights(self, weights: Dict[str, Tensor], x: torch.Tensor, bias: Optional[torch.Tensor] = None) -> Tensor:
+        return {
+            "weight": weight,
+            "q_dequant_scale": q_dequant_scale,
+            "k_dequant_scale": k_dequant_scale,
+            "v_dequant_scale": v_dequant_scale,
+            "gate_dequant_scale": gate_dequant_scale,
+            "up_dequant_scale": up_dequant_scale,
+            "dequant_scale": dequant_scale
+        }
+
+    def apply_weights(self,
+                      weights: Dict[str, Tensor],
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> Tensor:
         assert bias is None
         weight = weights["weight"]
         x_shape = x.shape

@@ -45,13 +45,17 @@ class DequantSiluAndMulQuant(nn.Module):
     """
 
     # TODO(Zhang Ying): use_per_token_quant
-    def __init__(self,
-                 use_per_token_quant: bool = True) -> None:
+    def __init__(self, use_per_token_quant: bool = True) -> None:
         super().__init__()
         self.use_per_token_quant = use_per_token_quant
 
-    def forward(self, x: torch.Tensor, gate_dequant_scale: float, up_dequant_scale: float, 
-                quant_scale: float = 1.0) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        gate_dequant_scale: float,
+        up_dequant_scale: float,
+        quant_scale: float = 1.0
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         num_tokens = x.numel() // x.shape[-1]
         d = x.shape[-1] // 2
         out = torch.empty(*x.shape[:-1], d, dtype=torch.int8, device=x.device)
@@ -64,15 +68,13 @@ class DequantSiluAndMulQuant(nn.Module):
                               d,
                               dtype=torch.float32,
                               device=x.device)
-            ops.dequant_silu_and_mul_quant(
-                out, x, gate_dequant_scale, up_dequant_scale,
-                scale, tmp)
+            ops.dequant_silu_and_mul_quant(out, x, gate_dequant_scale,
+                                           up_dequant_scale, scale, tmp)
             return out, scale
         else:
-            ops.dequant_silu_and_mul_quant(
-                out, x, gate_dequant_scale, up_dequant_scale,
-                quant_scale)
-            return (out,)
+            ops.dequant_silu_and_mul_quant(out, x, gate_dequant_scale,
+                                           up_dequant_scale, quant_scale)
+            return (out, )
 
 
 class NewGELU(nn.Module):

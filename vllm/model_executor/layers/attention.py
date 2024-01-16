@@ -281,18 +281,17 @@ def _paged_attention(
         )
     return output
 
+
 class DequantPagedAttentionQuant(PagedAttention):
     """MHA/MQA/GQA layer with PagedAttention in SmoothQuant.
     It dequantizes query, key and value, then applies PagedAttention, finally quantize attention output into int8.
     """
-  
+
     # TODO(Zhang Ying): use_per_token_quant
-    def __init__(
-        self,
-        *args,
-        use_per_token_quant: bool = True,
-        **kwargs
-    ) -> None:
+    def __init__(self,
+                 *args,
+                 use_per_token_quant: bool = True,
+                 **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.use_per_token_quant = use_per_token_quant
         self.default_dtype = torch.get_default_dtype()
@@ -364,4 +363,4 @@ class DequantPagedAttentionQuant(PagedAttention):
             return quant_out, scale
         else:
             ops.quant(quant_out, out, quant_scale)
-            return (quant_out,)
+            return (quant_out, )

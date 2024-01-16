@@ -2,7 +2,7 @@ from typing import Optional
 
 import pytest
 import torch
-
+from vllm._C import ops
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
 IS_NEOX_STYLE = [True, False]
@@ -68,6 +68,7 @@ def test_rotary_embedding(
     # Compare the results.
     assert torch.allclose(out_query, ref_query, atol=1e-5, rtol=1e-5)
     assert torch.allclose(out_key, ref_key, atol=1e-5, rtol=1e-5)
+
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
