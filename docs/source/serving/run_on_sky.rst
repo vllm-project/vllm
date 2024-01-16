@@ -55,7 +55,7 @@ Start the serving the LLaMA-13B model on an A100 GPU:
 
     $ sky launch serving.yaml
 
-Check the output of the command. There will be a sharable gradio link (like the last line of the following). Open it in your browser to use the LLaMA model to do the text completion.
+Check the output of the command. There will be a shareable gradio link (like the last line of the following). Open it in your browser to use the LLaMA model to do the text completion.
 
 .. code-block:: console
 

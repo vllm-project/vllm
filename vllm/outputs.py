@@ -53,6 +53,7 @@ class RequestOutput:
         request_id: The unique ID of the request.
         prompt: The prompt string of the request.
         prompt_token_ids: The token IDs of the prompt.
+        prompt_logprobs: The log probabilities to return per prompt token.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
     """

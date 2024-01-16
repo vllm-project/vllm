@@ -38,8 +38,10 @@ class LLM:
             However, if the `torch_dtype` in the config is `float32`, we will
             use `float16` instead.
         quantization: The method used to quantize the model weights. Currently,
-            we support "awq". If None, we assume the model weights are not
-            quantized and use `dtype` to determine the data type of the weights.
+            we support "awq", "gptq" and "squeezellm". If None, we first check
+            the `quantization_config` attribute in the model config file. If
+            that is None, we assume the model weights are not quantized and use
+            `dtype` to determine the data type of the weights.
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id.
         tokenizer_revision: The specific tokenizer version to use. It can be a
@@ -55,6 +57,12 @@ class LLM:
             when their `best_of` sampling parameters are larger than 1. If all
             requests will have `best_of=1`, you can safely set this to 0.
             Otherwise, too small values may cause out-of-memory (OOM) errors.
+        enforce_eager: Whether to enforce eager execution. If True, we will
+            disable CUDA graph and always execute the model in eager mode.
+            If False, we will use CUDA graph and eager execution in hybrid.
+        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
+            When a sequence has context length larger than this, we fall back
+            to eager mode.
     """
 
     def __init__(
@@ -71,6 +79,8 @@ class LLM:
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
+        enforce_eager: bool = False,
+        max_context_len_to_capture: int = 8192,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -88,6 +98,8 @@ class LLM:
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             swap_space=swap_space,
+            enforce_eager=enforce_eager,
+            max_context_len_to_capture=max_context_len_to_capture,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
@@ -134,25 +146,21 @@ class LLM:
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
-        if prompts is not None and prompt_token_ids is not None:
-            if len(prompts) != len(prompt_token_ids):
-                raise ValueError("The lengths of prompts and prompt_token_ids "
-                                 "must be the same.")
+        if (prompts is not None and prompt_token_ids is not None
+                and len(prompts) != len(prompt_token_ids)):
+            raise ValueError("The lengths of prompts and prompt_token_ids "
+                             "must be the same.")
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
         # Add requests to the engine.
-        if prompts is not None:
-            num_requests = len(prompts)
-        else:
-            num_requests = len(prompt_token_ids)
+        num_requests = len(prompts) if prompts is not None else len(
+            prompt_token_ids)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
-            if prompt_token_ids is None:
-                token_ids = None
-            else:
-                token_ids = prompt_token_ids[i]
+            token_ids = None if prompt_token_ids is None else prompt_token_ids[
+                i]
             self._add_request(prompt, sampling_params, token_ids)
         return self._run_engine(use_tqdm)
 

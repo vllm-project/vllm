@@ -1,0 +1,13 @@
+--- /opt/conda/envs/py_3.10/lib/python3.10/site-packages/xformers/ops/fmha/common.py	2023-11-29 03:17:03.930103539 +0000
++++ common.py	2023-11-28 16:14:19.846233146 +0000
+@@ -298,8 +298,8 @@
+         dtype = d.query.dtype
+         if device_type not in cls.SUPPORTED_DEVICES:
+             reasons.append(f"device={device_type} (supported: {cls.SUPPORTED_DEVICES})")
+-        if device_type == "cuda" and not _built_with_cuda:
+-            reasons.append("xFormers wasn't build with CUDA support")
++        #if device_type == "cuda" and not _built_with_cuda:
++        #    reasons.append("xFormers wasn't build with CUDA support")
+         if device_type == "cuda":
+             device_capability = torch.cuda.get_device_capability(d.device)
+             if device_capability < cls.CUDA_MINIMUM_COMPUTE_CAPABILITY:
