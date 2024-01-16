@@ -15,7 +15,8 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupOutput,
+                           SequenceOutput, SequenceStatus, ExecuteModelData)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port
@@ -551,7 +552,7 @@ class LLMEngine:
         # Select the child sequences to keep in the sequence group.
         selected_child_seqs = []
         unselected_child_seqs = []
-        beam_width = seq_group.sampling_params.actual_best_of
+        beam_width = seq_group.sampling_params.best_of
         length_penalty = seq_group.sampling_params.length_penalty
 
         # Select the newly finished sequences with the highest scores
@@ -729,17 +730,27 @@ class LLMEngine:
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
-            all_outputs = self._run_workers(
-                "execute_model",
-                driver_kwargs={
-                    "seq_group_metadata_list": seq_group_metadata_list,
-                    "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
-                    "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
-                    "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-                })
-
-            # Only the driver worker returns the sampling results.
-            output = all_outputs[0]
+            if not self.parallel_config.use_ray_compiled_dag:
+                all_outputs = self._run_workers(
+                    "execute_model",
+                    driver_kwargs={
+                        "seq_group_metadata_list": seq_group_metadata_list,
+                        "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
+                        "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
+                        "blocks_to_copy": scheduler_outputs.blocks_to_copy,
+                    })
+                # Only the driver worker returns the sampling results.
+                output = all_outputs[0]
+            else:
+                output = self._execute_model_compiled_dag(
+                    seq_group_metadata_list=seq_group_metadata_list,
+                    blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+                    blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+                    blocks_to_copy=scheduler_outputs.blocks_to_copy,
+                    finished_request_ids_list=list(
+                    scheduler_outputs.done_seq_group_ids.intersection(
+                        self.prev_done_seq_group_ids))
+                )
         else:
             output = []
 
@@ -907,3 +918,47 @@ class LLMEngine:
             ray_worker_outputs = ray.get(ray_worker_outputs)
 
         return [driver_worker_output] + ray_worker_outputs
+
+    def _compiled_dag_init_dag(self):
+        from ray.dag import MultiOutputNode, InputNode
+        assert self.parallel_config.worker_use_ray
+        assert self.parallel_config.use_ray_compiled_dag
+
+        with InputNode() as input_data:
+            forward_dag = MultiOutputNode([
+                worker.execute_model_compiled_dag_remote.bind(input_data)
+                for worker in self.workers
+            ])
+        return forward_dag.experimental_compile()
+
+    def _execute_model_compiled_dag(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+        finished_request_ids_list: List[int],
+    ) -> Any:
+        """Runs the given method on all workers using static DAG APIs."""
+        data = ExecuteModelData(
+            seq_group_metadata_list=seq_group_metadata_list,
+            finished_request_ids_list=finished_request_ids_list,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+        )
+        data = self.encoder.encode(data)
+        output_channels = self.forward_dag.execute(data)
+        try:
+            # TODO(sang): Is it necessary to check all outputs
+            # are the same? It requires 3X unnecessary deserialization.
+
+            all_outputs_serialized = [
+                chan.begin_read() for chan in output_channels
+            ]
+            output = self.decoder.decode(all_outputs_serialized[0])
+            return output
+        finally:
+            # Has to call end_read in order to reuse the DAG.
+            for chan in output_channels:
+                chan.end_read()

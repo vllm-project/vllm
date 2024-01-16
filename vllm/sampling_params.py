@@ -1,8 +1,8 @@
 """Sampling parameters for text generation."""
 from enum import IntEnum
-from functools import cached_property
 from typing import Callable, List, Optional, Union
 
+import msgspec
 import torch
 
 _SAMPLING_EPS = 1e-5
@@ -20,7 +20,7 @@ tokens and a tensor of the logits for the next token, and returns a modified
 tensor of logits to sample from."""
 
 
-class SamplingParams:
+class SamplingParams(msgspec.Struct, array_like=True, omit_defaults=True):
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion
@@ -90,61 +90,31 @@ class SamplingParams:
             previously generated tokens.
     """
 
-    def __init__(
-        self,
-        n: int = 1,
-        best_of: Optional[int] = None,
-        presence_penalty: float = 0.0,
-        frequency_penalty: float = 0.0,
-        repetition_penalty: float = 1.0,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        top_k: int = -1,
-        min_p: float = 0.0,
-        use_beam_search: bool = False,
-        length_penalty: float = 1.0,
-        early_stopping: Union[bool, str] = False,
-        stop: Optional[Union[str, List[str]]] = None,
-        stop_token_ids: Optional[List[int]] = None,
-        include_stop_str_in_output: bool = False,
-        ignore_eos: bool = False,
-        max_tokens: int = 16,
-        logprobs: Optional[int] = None,
-        prompt_logprobs: Optional[int] = None,
-        skip_special_tokens: bool = True,
-        spaces_between_special_tokens: bool = True,
-        logits_processors: Optional[List[LogitsProcessor]] = None,
-    ) -> None:
-        self.n = n
-        self.best_of = best_of if best_of is not None else n
-        self.presence_penalty = presence_penalty
-        self.frequency_penalty = frequency_penalty
-        self.repetition_penalty = repetition_penalty
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
-        self.min_p = min_p
-        self.use_beam_search = use_beam_search
-        self.length_penalty = length_penalty
-        self.early_stopping = early_stopping
-        if stop is None:
-            self.stop = []
-        elif isinstance(stop, str):
-            self.stop = [stop]
-        else:
-            self.stop = list(stop)
-        if stop_token_ids is None:
-            self.stop_token_ids = []
-        else:
-            self.stop_token_ids = list(stop_token_ids)
-        self.ignore_eos = ignore_eos
-        self.max_tokens = max_tokens
-        self.logprobs = logprobs
-        self.prompt_logprobs = prompt_logprobs
-        self.skip_special_tokens = skip_special_tokens
-        self.spaces_between_special_tokens = spaces_between_special_tokens
-        self.logits_processors = logits_processors
-        self.include_stop_str_in_output = include_stop_str_in_output
+    n: int = 1
+    best_of: Optional[int] = None
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    repetition_penalty: float = 1.0
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: int = -1
+    min_p: float = 0.0
+    use_beam_search: bool = False
+    length_penalty: float = 1.0
+    early_stopping: Union[bool, str] = False
+    stop: List[str] = []
+    stop_token_ids: List[int] = []
+    include_stop_str_in_output: bool = False
+    ignore_eos: bool = False
+    max_tokens: int = 16
+    logprobs: Optional[int] = None
+    prompt_logprobs: Optional[int] = None
+    skip_special_tokens: bool = True
+    spaces_between_special_tokens: bool = True
+    logits_processors: Optional[List[LogitsProcessor]] = None
+
+    def __post_init__(self):
+        self.best_of = self.best_of if self.best_of is not None else self.n
         self._verify_args()
         if self.use_beam_search:
             self._verify_beam_search()
@@ -223,7 +193,7 @@ class SamplingParams:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
 
-    @cached_property
+    @property
     def sampling_type(self) -> SamplingType:
         if self.use_beam_search:
             return SamplingType.BEAM
