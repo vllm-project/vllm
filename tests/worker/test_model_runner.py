@@ -24,6 +24,7 @@ def test_prepare_prompt():
                 seq_data={0: SequenceData(seq_data)},
                 sampling_params=SamplingParams(temperature=0),
                 block_tables={0: [1]},
+                prompt_chunk_size=prompt_len,
             ))
 
     expected_selected_token_indices = []

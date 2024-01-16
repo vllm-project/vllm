@@ -70,7 +70,7 @@ class VLLMScheduler(BaseScheduler):
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         f" and exceeds limit of {self.prompt_limit}")
                     for seq in waiting_seqs:
-                        seq.status = SequenceStatus.FINISHED_IGNORED
+                        seq.set_status(SequenceStatus.FINISHED_IGNORED)
                     ignored_seq_groups.append(seq_group)
                     self.waiting.popleft()
                     continue
@@ -84,7 +84,7 @@ class VLLMScheduler(BaseScheduler):
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         f" and exceeds the capacity of block_manager")
                     for seq in waiting_seqs:
-                        seq.status = SequenceStatus.FINISHED_IGNORED
+                        seq.set_status(SequenceStatus.FINISHED_IGNORED)
                     ignored_seq_groups.append(seq_group)
                     self.waiting.popleft()
                     continue
