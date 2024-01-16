@@ -308,6 +308,7 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
 
             is_prompt = scheduler_outputs.prompt_run
+            print("SANG-TODO use deltas,", self._use_deltas)
             if not self._use_deltas or is_prompt:
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
