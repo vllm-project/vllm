@@ -1,6 +1,8 @@
-#include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
 
+#include "cuda_compat.h"
 #include "dispatch_utils.h"
 
 namespace vllm {
@@ -16,10 +18,10 @@ __global__ void silu_and_mul_kernel(
   scalar_t* __restrict__ out,               // [..., d]
   const scalar_t* __restrict__ input,       // [..., 2, d]
   const int d) {
-  const int token_idx = blockIdx.x;
-  for (int idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t x = __ldg(&input[token_idx * 2 * d + idx]);
-    const scalar_t y = __ldg(&input[token_idx * 2 * d + d + idx]);
+  const int64_t token_idx = blockIdx.x;
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
+    const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
     out[token_idx * d + idx] = silu(x) * y;
   }
 }
@@ -30,11 +32,12 @@ void silu_and_mul(
   torch::Tensor& out,      // [..., d]
   torch::Tensor& input)    // [..., 2 * d]
 {
-  int num_tokens = input.numel() / input.size(-1);
+  int64_t num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1) / 2;
 
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
     input.scalar_type(),
@@ -55,9 +58,9 @@ __global__ void activation_kernel(
   scalar_t* __restrict__ out,               // [..., d]
   const scalar_t* __restrict__ input,       // [..., d]
   const int d) {
-  const int token_idx = blockIdx.x;
-  for (int idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t x = __ldg(&input[token_idx * d + idx]);
+  const int64_t token_idx = blockIdx.x;
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    const scalar_t x = VLLM_LDG(&input[token_idx * d + idx]);
     out[token_idx * d + idx] = ACT_FN(x);
   }
 }
@@ -67,9 +70,10 @@ __global__ void activation_kernel(
 // Launch element-wise activation kernel.
 #define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                                  \
   int d = input.size(-1);                                                                 \
-  int num_tokens = input.numel() / d;                                                     \
+  int64_t num_tokens = input.numel() / d;                                                 \
   dim3 grid(num_tokens);                                                                  \
   dim3 block(std::min(d, 1024));                                                          \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));                       \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                           \
   VLLM_DISPATCH_FLOATING_TYPES(                                                           \
     input.scalar_type(),                                                                  \
