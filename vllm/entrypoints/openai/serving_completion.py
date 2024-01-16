@@ -16,9 +16,9 @@ logger = init_logger(__name__)
 
 
 class OpenAIServingCompletion(OpenAIServing):
+
     def __init__(self, engine: AsyncLLMEngine, served_model: str):
-        super().__init__(engine=engine,
-                         served_model=served_model)
+        super().__init__(engine=engine, served_model=served_model)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):

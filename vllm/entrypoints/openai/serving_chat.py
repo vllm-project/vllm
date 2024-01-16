@@ -18,13 +18,13 @@ logger = init_logger(__name__)
 
 
 class OpenAIServingChat(OpenAIServing):
+
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
                  response_role: str,
                  chat_template=None):
-        super().__init__(engine=engine,
-                         served_model=served_model)
+        super().__init__(engine=engine, served_model=served_model)
         self.response_role = response_role
         self._load_chat_template(chat_template)
 
@@ -162,11 +162,12 @@ class OpenAIServingChat(OpenAIServing):
                 if finish_reason_sent[i]:
                     continue
 
+                delta_text = output.text[len(previous_texts[i]):]
+                previous_texts[i] = output.text
+                previous_num_tokens[i] = len(output.token_ids)
+
                 if output.finish_reason is None:
                     # Send token-by-token response for each request.n
-                    delta_text = output.text[len(previous_texts[i]):]
-                    previous_texts[i] = output.text
-                    previous_num_tokens[i] = len(output.token_ids)
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=delta_text),
@@ -188,7 +189,9 @@ class OpenAIServingChat(OpenAIServing):
                         total_tokens=prompt_tokens + previous_num_tokens[i],
                     )
                     choice_data = ChatCompletionResponseStreamChoice(
-                        index=i, delta=[], finish_reason=output.finish_reason)
+                        index=i,
+                        delta=DeltaMessage(content=delta_text),
+                        finish_reason=output.finish_reason)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,

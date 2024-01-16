@@ -167,8 +167,7 @@ if __name__ == "__main__":
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
                                             args.chat_template)
-    openai_serving_completion = OpenAIServingCompletion(
-        engine, served_model)
+    openai_serving_completion = OpenAIServingCompletion(engine, served_model)
 
     # Register labels for metrics
     add_global_metrics_labels(model_name=engine_args.model)
