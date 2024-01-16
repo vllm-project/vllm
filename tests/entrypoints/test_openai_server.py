@@ -51,8 +51,6 @@ class ServerRunner:
 
 @pytest.fixture(scope="session")
 def server():
-    yield
-    return
     ray.init()
     server_runner = ServerRunner.remote([
         "--model",
