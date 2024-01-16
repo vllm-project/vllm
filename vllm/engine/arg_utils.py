@@ -236,8 +236,7 @@ class EngineArgs:
                                            self.max_num_seqs,
                                            model_config.max_model_len,
                                            self.max_paddings,
-                                        #    use_deltas=parallel_config.worker_use_ray)
-                                            use_deltas=False)
+                                           use_deltas=parallel_config.use_ray_compiled_dag)
         return model_config, cache_config, parallel_config, scheduler_config
 
 

@@ -494,7 +494,6 @@ class ModelRunner:
             seq_group_metadata.request_id
             for seq_group_metadata in seq_group_metadata_list
         ]
-
         if self.seq_metadata_cache is not None:
             for request_id, sampler_output in zip(seq_group_request_ids,
                                                     output):

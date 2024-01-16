@@ -741,6 +741,13 @@ class LLMEngine:
             >>>         break
         """
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
+
+        if scheduler_outputs.is_empty():
+            self.prev_done_seq_group_ids.update(
+                scheduler_outputs.done_seq_group_ids)
+
+            return ignored
+
         # Execute the model.
         if not self.parallel_config.use_ray_compiled_dag:
             all_outputs = self._run_workers(
