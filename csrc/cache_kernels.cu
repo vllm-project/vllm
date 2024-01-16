@@ -9,7 +9,7 @@
 #include <cassert>
 #include <map>
 #include <vector>
-#include "quant_utils.cuh"
+#include "quantization/smoothquant/quant_utils.cuh"
 
 void swap_blocks(
   torch::Tensor& src,
@@ -145,7 +145,7 @@ void copy_blocks(
 
 namespace vllm {
 
-template<typename attn_dtype, typename cache_dtype, bool use_quant>  // cache_dtype can only be int8_t for now
+template<typename attn_dtype, typename cache_dtype, bool use_quant>  // cache_dtype can be int8_t, vllm_floating_types for now
 __global__ void reshape_and_cache_kernel(
   const attn_dtype* __restrict__ key,     // [num_tokens, num_heads, head_size]
   const attn_dtype* __restrict__ value,   // [num_tokens, num_heads, head_size]

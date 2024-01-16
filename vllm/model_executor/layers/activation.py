@@ -39,54 +39,20 @@ class SiluAndMul(nn.Module):
 
 
 class DequantSiluAndMulQuant(nn.Module):
-    """An activation function for SwiGLU.
+    """An activation function for SwiGLU in SmoothQuant.
 
-    The function computes x -> silu(x[:d]) * x[d:] where d = x.shape[1] // 2.
-
-    Shapes:
-        x: (num_tokens, 2 * d)
-        return: (num_tokens, d)
+    The function dequantizes x and computes x -> silu(x[:d]) * x[d:] where d = x.shape[-1] // 2 in kernel function,
+    finally quantizes output into int8.
     """
 
     # TODO(Zhang Ying): use_per_token_quant
     def __init__(self,
-                 gate_dequant_scale: float = 1.0,
-                 up_dequant_scale: float = 1.0,
-                 quant_scale: float = 1.0,
                  use_per_token_quant: bool = True) -> None:
         super().__init__()
-        self.gate_dequant_scale = Parameter(
-            torch.tensor(gate_dequant_scale, dtype=torch.float32, device='cpu'),
-            False
-        )
-        self.up_dequant_scale = Parameter(
-            torch.tensor(up_dequant_scale, dtype=torch.float32, device='cpu'),
-            False
-        )
-        self.quant_scale = Parameter(
-            torch.tensor(quant_scale, dtype=torch.float32, device='cpu'),
-            False
-        )
         self.use_per_token_quant = use_per_token_quant
 
-    def _apply(self, fn):
-        super()._apply(fn)
-        self.gate_dequant_scale = self.gate_dequant_scale.cpu()
-        self.up_dequant_scale = self.up_dequant_scale.cpu()
-        self.quant_scale = self.quant_scale.cpu()
-        return self
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self.gate_dequant_scale = self.gate_dequant_scale.to(*args, **kwargs)
-        self.gate_dequant_scale = self.gate_dequant_scale.to(torch.float32)
-        self.up_dequant_scale = self.up_dequant_scale.to(*args, **kwargs)
-        self.up_dequant_scale = self.up_dequant_scale.to(torch.float32)
-        self.quant_scale = self.quant_scale.to(*args, **kwargs)
-        self.quant_scale = self.quant_scale.to(torch.float32)
-        return self
-
-    def forward(self, x: torch.Tensor) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+    def forward(self, x: torch.Tensor, gate_dequant_scale: float, up_dequant_scale: float, 
+                quant_scale: float = 1.0) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         num_tokens = x.numel() // x.shape[-1]
         d = x.shape[-1] // 2
         out = torch.empty(*x.shape[:-1], d, dtype=torch.int8, device=x.device)
@@ -100,13 +66,13 @@ class DequantSiluAndMulQuant(nn.Module):
                               dtype=torch.float32,
                               device=x.device)
             ops.dequant_silu_and_mul_quant(
-                out, x, self.gate_dequant_scale.item(), self.up_dequant_scale.item(),
+                out, x, gate_dequant_scale, up_dequant_scale,
                 scale, tmp)
             return out, scale
         else:
             ops.dequant_silu_and_mul_quant(
-                out, x, self.gate_dequant_scale.item(), self.up_dequant_scale.item(),
-                self.quant_scale.item())
+                out, x, gate_dequant_scale, up_dequant_scale,
+                quant_scale)
             return (out,)
 
 

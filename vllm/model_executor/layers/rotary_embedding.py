@@ -149,6 +149,9 @@ class RotaryEmbedding(nn.Module):
 
 
 class DequantRotaryEmbedding(RotaryEmbedding):
+    """Rotary positional embedding in SmoothQuant.
+    It dequantizes input, then applies rotary positional embedding.
+    """
 
     def forward(
         self,
@@ -167,7 +170,7 @@ class DequantRotaryEmbedding(RotaryEmbedding):
         value_dequant = torch.empty_like(value, dtype=self.cos_sin_cache.dtype)
 
         ops.dequant(value_dequant, value, v_dequant_scale)
-        ops.rotary_embedding(
+        ops.dequant_rotary_embedding(
             positions,
             query,
             key,
@@ -176,7 +179,6 @@ class DequantRotaryEmbedding(RotaryEmbedding):
             self.is_neox_style,
             query_dequant,
             key_dequant,
-            True,  # enable dequant
             q_dequant_scale,
             k_dequant_scale,
         )
@@ -221,6 +223,8 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
 
 class DequantLinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding,
                                           DequantRotaryEmbedding):
+    """RotaryEmbedding extended with linear scaling in SmoothQuant.
+    """
 
     def __init__(self, *args, **kwargs):
         LinearScalingRotaryEmbedding.__init__(self, *args, **kwargs)
@@ -274,6 +278,7 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
 
 class DequantDynamicNTKScalingRotaryEmbedding(DynamicNTKScalingRotaryEmbedding,
                                               DequantRotaryEmbedding):
+    """RotaryEmbedding extended with Dynamic NTK scaling in SmoothQuant."""
 
     def __init__(self, *args, **kwargs):
         DynamicNTKScalingRotaryEmbedding.__init__(self, *args, **kwargs)
@@ -387,6 +392,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         return cache
 
 class DequantYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding, DequantRotaryEmbedding):
+    """RotaryEmbedding extended with YaRN method in SmoothQuant."""
 
     def __init__(self, *args, **kwargs):
         YaRNScalingRotaryEmbedding.__init__(self, *args, **kwargs)
@@ -424,13 +430,15 @@ def get_rope(
         return _ROPE_DICT[key]
 
     if rope_scaling is None:
-        rotary_embedding_cls = _ROTARY_EMBEDDING_REGISTRY["origin"][1] if need_dequant else _ROTARY_EMBEDDING_REGISTRY["origin"][0]
+        rotary_embedding_cls = _ROTARY_EMBEDDING_REGISTRY["origin"][1] \
+        if need_dequant else _ROTARY_EMBEDDING_REGISTRY["origin"][0]
         rotary_emb = rotary_embedding_cls(head_size, rotary_dim, max_position, base,
                                      is_neox_style)
     else:
         scaling_type = rope_scaling["type"]
         scaling_factor = rope_scaling["factor"]
-        rotary_embedding_cls = _ROTARY_EMBEDDING_REGISTRY[scaling_type][1] if need_dequant else _ROTARY_EMBEDDING_REGISTRY[scaling_type][0]
+        rotary_embedding_cls = _ROTARY_EMBEDDING_REGISTRY[scaling_type][1] \
+        if need_dequant else _ROTARY_EMBEDDING_REGISTRY[scaling_type][0]
         if scaling_type == "linear":
             rotary_emb = rotary_embedding_cls(head_size, rotary_dim,
                                                       max_position, base,

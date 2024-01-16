@@ -56,9 +56,6 @@ class PagedAttention(nn.Module):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.quant_kv_cache = quant_kv_cache
         self.kv_quant_params = kv_quant_params if kv_quant_params is not None else [1.0, 0.0, 1.0, 0.0]
-        self.head_mapping = torch.repeat_interleave(
-            torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
-            self.num_queries_per_kv)
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
@@ -300,56 +297,20 @@ def _paged_attention(
     return output
 
 class DequantPagedAttentionQuant(PagedAttention):
+    """MHA/MQA/GQA layer with PagedAttention in SmoothQuant.
+    It dequantizes query, key and value, then applies PagedAttention, finally quantize attention output into int8.
+    """
+  
     # TODO(Zhang Ying): use_per_token_quant
     def __init__(
         self,
         *args,
-        q_dequant_scale: float = 1.0,
-        k_dequant_scale: float = 1.0,
-        v_dequant_scale: float = 1.0,
-        quant_scale: float = 1.0,
         use_per_token_quant: bool = True,
         **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.q_dequant_scale = Parameter(
-            torch.tensor(q_dequant_scale, dtype=torch.float32, device='cpu'),
-            False
-        )
-        self.k_dequant_scale = Parameter(
-            torch.tensor(k_dequant_scale, dtype=torch.float32, device='cpu'),
-            False
-        )
-        self.v_dequant_scale = Parameter(
-            torch.tensor(v_dequant_scale, dtype=torch.float32, device='cpu'),
-            False
-        )
-        self.quant_scale = Parameter(
-            torch.tensor(quant_scale, dtype=torch.float32, device='cpu'),
-            False
-        )
         self.use_per_token_quant = use_per_token_quant
         self.default_dtype = torch.get_default_dtype()
-
-    def _apply(self, fn):
-        super()._apply(fn)
-        self.q_dequant_scale = self.q_dequant_scale.cpu()
-        self.k_dequant_scale = self.k_dequant_scale.cpu()
-        self.v_dequant_scale = self.v_dequant_scale.cpu()
-        self.quant_scale = self.quant_scale.cpu()
-        return self
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self.q_dequant_scale = self.q_dequant_scale.to(*args, **kwargs)
-        self.q_dequant_scale = self.q_dequant_scale.to(torch.float32)
-        self.k_dequant_scale = self.k_dequant_scale.to(*args, **kwargs)
-        self.k_dequant_scale = self.k_dequant_scale.to(torch.float32)
-        self.v_dequant_scale = self.v_dequant_scale.to(*args, **kwargs)
-        self.v_dequant_scale = self.v_dequant_scale.to(torch.float32)
-        self.quant_scale = self.quant_scale.to(*args, **kwargs)
-        self.quant_scale = self.quant_scale.to(torch.float32)
-        return self
 
     def forward(
         self,
@@ -359,18 +320,26 @@ class DequantPagedAttentionQuant(PagedAttention):
         key_cache: Optional[torch.Tensor],
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
+        q_dequant_scale: float,
+        k_dequant_scale: float,
+        v_dequant_scale: float,
+        quant_scale: float = 1.0
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         """PagedAttention forward pass.
 
         Args:
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            value: shape = [batch_size, num_kv_heads * head_size]
+            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
                 block_size]
             input_metadata: metadata for the inputs.
+            q_dequant_scale: dequant scale for query.
+            k_dequant_scale: dequant scale for key.
+            v_dequant_scale: dequant scale for value.
+            quant_scale: dequant scale for output if using activation per-tensor quant.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
@@ -381,9 +350,9 @@ class DequantPagedAttentionQuant(PagedAttention):
             query_dequant = torch.empty_like(query, dtype=self.default_dtype)
             key_dequant = torch.empty_like(key, dtype=self.default_dtype)
             value_dequant = torch.empty_like(value, dtype=self.default_dtype)
-            ops.dequant(query_dequant, query, self.q_dequant_scale.item())
-            ops.dequant(key_dequant, key, self.k_dequant_scale.item())
-            ops.dequant(value_dequant, value, self.v_dequant_scale.item())
+            ops.dequant(query_dequant, query, q_dequant_scale)
+            ops.dequant(key_dequant, key, k_dequant_scale)
+            ops.dequant(value_dequant, value, v_dequant_scale)
             out = super().forward(
                 query_dequant,
                 key_dequant,
@@ -409,5 +378,5 @@ class DequantPagedAttentionQuant(PagedAttention):
             ops.quant(quant_out, out, scale)
             return quant_out, scale
         else:
-            ops.quant(quant_out, out, self.quant_scale.item())
+            ops.quant(quant_out, out, quant_scale)
             return (quant_out,)

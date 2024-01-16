@@ -45,8 +45,67 @@ void rms_norm(
   torch::Tensor& out,
   torch::Tensor& input,
   torch::Tensor& weight,
-  float epsilon,
-  bool use_quant);
+  float epsilon);
+
+void fused_add_rms_norm(
+  torch::Tensor& input,
+  torch::Tensor& residual,
+  torch::Tensor& weight,
+  float epsilon);
+
+void rotary_embedding(
+  torch::Tensor& positions,
+  torch::Tensor& query,
+  torch::Tensor& key,
+  int head_size,
+  torch::Tensor& cos_sin_cache,
+  bool is_neox);
+
+void silu_and_mul(
+  torch::Tensor& out,
+  torch::Tensor& input);
+
+void gelu_new(
+  torch::Tensor& out,
+  torch::Tensor& input);
+
+void gelu_fast(
+  torch::Tensor& out,
+  torch::Tensor& input);
+
+#ifndef USE_ROCM
+torch::Tensor awq_gemm(
+  torch::Tensor _in_feats,
+  torch::Tensor _kernel,
+  torch::Tensor _scaling_factors,
+  torch::Tensor _zeros,
+  int split_k_iters);
+#endif
+
+void squeezellm_gemm(
+  torch::Tensor vec,
+  torch::Tensor mat,
+  torch::Tensor mul,
+  torch::Tensor lookup_table);
+
+torch::Tensor gptq_gemm(
+  torch::Tensor a,
+  torch::Tensor b_q_weight,
+  torch::Tensor b_gptq_qzeros,
+  torch::Tensor b_gptq_scales,
+  torch::Tensor b_g_idx,
+  bool use_exllama);
+
+void gptq_shuffle(
+  torch::Tensor q_weight,
+  torch::Tensor q_perm);
+
+// These are kernels used by smoothquant
+void rms_norm_quant(
+  torch::Tensor& out,
+  torch::Tensor& input,
+  torch::Tensor& weight,
+  float epsilon);
 
 void dequant_add_residual_rms_norm_quant(
   torch::Tensor& out,
@@ -65,15 +124,14 @@ void dequant_add_residual_rms_norm_quant(
   float epsilon,
   float weight_dequant_scale);
 
-void fused_add_rms_norm(
+void add_residual_rms_norm_quant(
   torch::Tensor& out,
   torch::Tensor& input,
   torch::Tensor& residual,
   torch::Tensor& weight,
-  float epsilon,
-  bool use_quant);
+  float epsilon);
 
-void rotary_embedding(
+void dequant_rotary_embedding(
   torch::Tensor& positions,
   torch::Tensor& query,
   torch::Tensor& key,
@@ -82,21 +140,8 @@ void rotary_embedding(
   bool is_neox,
   torch::Tensor& query_out,
   torch::Tensor& key_out,
-  bool use_dequant = false,
-  float query_scale = 1.0f,
-  float key_scale = 1.0f);
-
-void silu_and_mul(
-  torch::Tensor& out,
-  torch::Tensor& input);
-
-void gelu_new(
-  torch::Tensor& out,
-  torch::Tensor& input);
-
-void gelu_fast(
-  torch::Tensor& out,
-  torch::Tensor& input);
+  float query_scale,
+  float key_scale);
 
 void dequant_silu_and_mul_quant(
   torch::Tensor& out,
@@ -111,7 +156,7 @@ void dequant_silu_and_mul_quant(
   float gate_scale,
   float up_scale,
   torch::Tensor& out_scale,
-  torch::Tensor& tmp); 
+  torch::Tensor& tmp);
 
 void dequant_add_residual(
   torch::Tensor& out,
@@ -146,30 +191,3 @@ void quant(
   torch::Tensor& out,
   torch::Tensor& input,
   torch::Tensor& scale);
-
-#ifndef USE_ROCM
-torch::Tensor awq_gemm(
-  torch::Tensor _in_feats,
-  torch::Tensor _kernel,
-  torch::Tensor _scaling_factors,
-  torch::Tensor _zeros,
-  int split_k_iters);
-#endif
-
-void squeezellm_gemm(
-  torch::Tensor vec,
-  torch::Tensor mat,
-  torch::Tensor mul,
-  torch::Tensor lookup_table);
-
-torch::Tensor gptq_gemm(
-  torch::Tensor a,
-  torch::Tensor b_q_weight,
-  torch::Tensor b_gptq_qzeros,
-  torch::Tensor b_gptq_scales,
-  torch::Tensor b_g_idx,
-  bool use_exllama);
-
-void gptq_shuffle(
-  torch::Tensor q_weight,
-  torch::Tensor q_perm);

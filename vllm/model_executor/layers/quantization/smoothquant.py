@@ -109,7 +109,36 @@ class SQLinearMethod(LinearMethodBase):
                 "input_dim": 1,
                 "output_dim": 0,
             })
-        return {"weight": weight}
+        # q k v dequant_scales are used in QKVParallelLinear
+        q_dequant_scale = Parameter(
+            torch.tensor(1.0, dtype=torch.float32, device='cpu'),
+            requires_grad=False,
+        )
+        k_dequant_scale = Parameter(
+            torch.tensor(1.0, dtype=torch.float32, device='cpu'),
+            requires_grad=False,
+        )
+        v_dequant_scale = Parameter(
+            torch.tensor(1.0, dtype=torch.float32, device='cpu'),
+            requires_grad=False,
+        )
+        # gate up dequant_scales are used in MergedColumnParallelLinear
+        gate_dequant_scale = Parameter(
+            torch.tensor(1.0, dtype=torch.float32, device='cpu'),
+            requires_grad=False,
+        )
+        up_dequant_scale = Parameter(
+            torch.tensor(1.0, dtype=torch.float32, device='cpu'),
+            requires_grad=False,
+        )
+        # dequant_scale is used in RowParallelLinear
+        dequant_scale = Parameter(
+            torch.tensor(1.0, dtype=torch.float32, device='cpu'),
+            requires_grad=False,
+        )
+        return {"weight": weight, "q_dequant_scale": q_dequant_scale, "k_dequant_scale": k_dequant_scale,
+                "v_dequant_scale": v_dequant_scale, "gate_dequant_scale": gate_dequant_scale,
+                "up_dequant_scale": up_dequant_scale, "dequant_scale": dequant_scale}
     
     def apply_weights(self, weights: Dict[str, Tensor], x: torch.Tensor, bias: Optional[torch.Tensor] = None) -> Tensor:
         assert bias is None

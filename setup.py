@@ -220,12 +220,15 @@ vllm_extension_sources = [
     "csrc/layernorm_kernels.cu",
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     "csrc/quantization/gptq/q_gemm.cu",
+    "csrc/quantization/smoothquant/int8gemm/cublasAlgoMap.cc",
+    "csrc/quantization/smoothquant/int8gemm/cublasINT8MMWrapper.cc",
+    "csrc/quantization/smoothquant/int8gemm/cuda_utils.cc",
+    "csrc/quantization/smoothquant/activation_kernels.cu",
+    "csrc/quantization/smoothquant/fused_kernels.cu",
+    "csrc/quantization/smoothquant/layernorm_kernels.cu",
+    "csrc/quantization/smoothquant/pos_encoding_kernels.cu",
     "csrc/cuda_utils_kernels.cu",
     "csrc/pybind.cpp",
-    "csrc/fused_kernels.cu",
-    "csrc/int8gemm/cublas/cublasAlgoMap.cc",
-    "csrc/int8gemm/cublas/cublasINT8MMWrapper.cc",
-    "csrc/int8gemm/cublas/cuda_utils.cc",
 ]
 
 if _is_cuda():

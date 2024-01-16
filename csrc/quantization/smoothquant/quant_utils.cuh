@@ -5,8 +5,8 @@
 #include <stdint.h>
 #include <float.h>
 #include <type_traits>
-#include "attention/attention_dtypes.h"
-#include "attention/dtype_float32.cuh"
+#include "../../attention/attention_dtypes.h"
+#include "../../attention/dtype_float32.cuh"
 using namespace vllm;
 
 // this function is for function matching, delete it after writing customized dispatch functions

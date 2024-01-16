@@ -1,17 +1,17 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
+#include <assert.h>
 
-#include "dispatch_utils.h"
+#include "../../dispatch_utils.h"
+#include "../../reduction_utils.cuh"
 #include "quant_utils.cuh"
-#include "reduction_utils.cuh"
-#include <cassert>
 
 namespace vllm {
-template <typename T, bool use_per_token_dequant>
+template <typename scalar_t, bool use_per_token_dequant>
 __global__ void dequant_add_residual_kernel(
   const int32_t* __restrict__ input,
-  const T* __restrict__ residual,
-  T* __restrict__ out,
+  const scalar_t* __restrict__ residual,
+  scalar_t* __restrict__ out,
   const float scale,
   const int num_tokens,
   const int hidden_size,
@@ -24,15 +24,15 @@ __global__ void dequant_add_residual_kernel(
   }
   for (int i = tid; i < hidden_size; i += blockDim.x) {
     out[token_idx * hidden_size + i] =
-      (T)((((float)input[token_idx * hidden_size + i]) * scale_) +
+      (scalar_t)((((float)input[token_idx * hidden_size + i]) * scale_) +
           (float)residual[token_idx * hidden_size + i]);
   }
 }
 
-template <typename T, bool use_per_token_dequant>
+template <typename scalar_t, bool use_per_token_dequant>
 __global__ void dequant_kernel(
   const int32_t* __restrict__ input,
-  T* __restrict__ out,
+  scalar_t* __restrict__ out,
   const float scale,
   const int m,
   const int hidden_size,
@@ -47,13 +47,13 @@ __global__ void dequant_kernel(
   }
   for (int i = tid; i < hidden_size; i += blockDim.x) {
     out[token_idx * out_stride + i] =
-    (T)(((float)input[token_idx * input_stride + i]) * scale_);
+    (scalar_t)(((float)input[token_idx * input_stride + i]) * scale_);
   }
 }
 
-template <typename T, typename scale_type, bool use_per_token_quant>
+template <typename scalar_t, typename scale_type, bool use_per_token_quant>
 __global__ void quant_kernel(
-  const T* __restrict__ input,
+  const scalar_t* __restrict__ input,
   int8_t* __restrict__ out,
   scale_type scale,
   const int num_tokens,

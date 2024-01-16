@@ -438,7 +438,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-
 class RowParallelLinear(torch.nn.Module):
     """Linear layer with row parallelism.
 
@@ -556,25 +555,9 @@ class RowParallelLinear(torch.nn.Module):
         return output, output_bias
 
 class SQRowParallelLinear(RowParallelLinear):
-    """SmoothQuant Linear layer with row parallelism.
+    """SmoothQuant linear layer with row parallelism.
+    It applies dequant on output_parallel before all_reduce if tp_size > 1.
     """
-    def __init__(self, *args, dequant_scale: float = 1.0, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.dequant_scale = Parameter(
-            torch.tensor(dequant_scale, dtype=torch.float32, device='cpu'),
-            False
-        )
-    
-    def _apply(self, fn):
-        super()._apply(fn)
-        self.dequant_scale = self.dequant_scale.cpu()
-        return self
-    
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        self.dequant_scale = self.dequant_scale.to(*args, **kwargs)
-        self.dequant_scale = self.dequant_scale.to(torch.float32)
-        return self
 
     def forward(self, input_, scale = None):
         # Set up backprop all-reduce.

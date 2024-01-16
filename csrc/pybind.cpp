@@ -1,7 +1,7 @@
 #include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
-#include "int8gemm/cublas/int8_gemm.h"
+#include "quantization/smoothquant/int8gemm/int8_gemm.h"
 #include <torch/extension.h>
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -84,49 +84,46 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     float,
     torch::Tensor&,
     torch::Tensor&>(&dequant_silu_and_mul_quant),
-    "Dequant input, apply silu act and quant output.");
+    "Dequant input, apply silu act and per-token quant output.");
 
   // Layernorm
   ops.def(
     "rms_norm",
     &rms_norm,
-    py::arg("out"),
-    py::arg("input"),
-    py::arg("weight"),
-    py::arg("epsilon"),
-    py::arg("use_quant") = false,
     "Apply Root Mean Square (RMS) Normalization to the input tensor.");
-  ops.def(
-    "dequant_add_residual_rms_norm_quant",
-    py::overload_cast<
-    torch::Tensor&,
-    torch::Tensor&,
-    torch::Tensor&,
-    torch::Tensor&,
-    float,
-    float>(&dequant_add_residual_rms_norm_quant),
-    "Add the dequanted result and residual, then use RMS norm and quant output.");
-  ops.def(
-    "dequant_add_residual_rms_norm_quant",
-    py::overload_cast<
-    torch::Tensor&,
-    torch::Tensor&,
-    torch::Tensor&,
-    torch::Tensor&,
-    torch::Tensor&,
-    float,
-    float>(&dequant_add_residual_rms_norm_quant),
-    "Add the dequanted result and residual, then use RMS norm and quant output.");
   ops.def(
     "fused_add_rms_norm",
     &fused_add_rms_norm,
-    py::arg("out"),
-    py::arg("input"),
-    py::arg("residual"),
-    py::arg("weight"),
-    py::arg("epsilon"),
-    py::arg("use_quant") = false,
     "In-place fused Add and RMS Normalization");
+  ops.def(
+    "rms_norm_quant",
+    &rms_norm_quant,
+    "Apply RMS norm and quant output.");
+  ops.def(
+    "dequant_add_residual_rms_norm_quant",
+    py::overload_cast<
+    torch::Tensor&,
+    torch::Tensor&,
+    torch::Tensor&,
+    torch::Tensor&,
+    float,
+    float>(&dequant_add_residual_rms_norm_quant),
+    "Add the dequanted result and residual, then use RMS norm and quant output.");
+  ops.def(
+    "dequant_add_residual_rms_norm_quant",
+    py::overload_cast<
+    torch::Tensor&,
+    torch::Tensor&,
+    torch::Tensor&,
+    torch::Tensor&,
+    torch::Tensor&,
+    float,
+    float>(&dequant_add_residual_rms_norm_quant),
+    "Add the per-token dequanted result and residual, then use RMS norm and quant output.");
+  ops.def(
+    "add_residual_rms_norm_quant",
+    &add_residual_rms_norm_quant,
+    "Add input and residual, and quant output.");
 
   // Fused ops
   ops.def(
@@ -181,18 +178,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def(
     "rotary_embedding",
     &rotary_embedding,
-    py::arg("positions"),
-    py::arg("query"),
-    py::arg("key"),
-    py::arg("head_size"),
-    py::arg("cos_sin_cache"),
-    py::arg("is_neox"),
-    py::arg("query_out") = torch::empty({}),
-    py::arg("key_out") = torch::empty({}),
-    py::arg("use_dequant") = false,
-    py::arg("query_scale") = 1.0f,
-    py::arg("key_scale") = 1.0f,
     "Apply GPT-NeoX or GPT-J style rotary embedding to query and key");
+  ops.def(
+    "dequant_rotary_embedding",
+    &dequant_rotary_embedding,
+    "Dequant query and key, then apply GPT-NeoX or GPT-J style rotary embedding to the dequanted query and the dequanted key");
 
 #ifndef USE_ROCM
   // Quantization ops

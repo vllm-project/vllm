@@ -21,11 +21,11 @@
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
-#include "../quant_utils.cuh"
 #include <c10/cuda/CUDAGuard.h>
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
+#include "../quantization/smoothquant/quant_utils.cuh"
 
 #include <algorithm>
 

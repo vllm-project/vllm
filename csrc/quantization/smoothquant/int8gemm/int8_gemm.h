@@ -2,7 +2,6 @@
   gemm methods are adapted from ft
 */
 #include <ATen/cuda/CUDAContext.h>
-// #include <torch/extension.h>
 #include "cublasAlgoMap.h"
 #include "cublasINT8MMWrapper.h"
 
