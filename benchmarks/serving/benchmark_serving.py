@@ -139,7 +139,7 @@ async def throughput_benchmark(
     request_rate: float,
 ):
     if backend in ASYNC_QUERY_FUNCS:
-        query_func = ASYNC_QUERY_FUNCS[backend]
+        query_func = ASYNC_QUERY_FUNCS.get(backend)
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -152,13 +152,13 @@ async def throughput_benchmark(
         tasks.append(
             asyncio.create_task(
                 query_func(
-                    model_id,
-                    prompt,
-                    api_url,
-                    prompt_len,
-                    output_len,
-                    best_of,
-                    use_beam_search,
+                    model=model_id,
+                    prompt=prompt,
+                    api_url=api_url,
+                    prompt_len=prompt_len,
+                    output_len=output_len,
+                    best_of=best_of,
+                    use_beam_search=use_beam_search,
                 )
             )
         )
@@ -182,8 +182,11 @@ async def throughput_benchmark(
     print(f"Benchmark duration: {benchmark_duration:2f} s")
     print(f"Total input tokens: {total_input}")
     print(f"Total generated tokens: {total_output}")
-    print(f"Input throughput: {input_throughput:.2f} tokens per second.")
-    print(f"Output throughput: {output_throughput:.2f} tokens per second.")
+    print(
+        f"Reuqest throughput: {completed / benchmark_duration:.2f} requests/s"
+    )
+    print(f"Input token throughput: {input_throughput:.2f} tokens/s")
+    print(f"Output token throughput: {output_throughput:.2f} tokens/s")
     print(f"Mean latency per output token: {mean_tpot_ms:.2f} ms")
     print(f"Median latency per output token: {median_tpot_ms:.2f} ms")
     print(f"P99 latency per output token: {p99_tpot_ms:.2f} ms")
@@ -214,7 +217,7 @@ def main(args: argparse.Namespace):
     if args.api_url is not None:
         api_url = args.api_url
     else:
-        api_url = f"http://{args.host}:{args.port}/generate"
+        api_url = f"http://{args.host}:{args.port}"
 
     tokenizer = get_tokenizer(
         tokenizer_id, trust_remote_code=args.trust_remote_code
@@ -234,7 +237,6 @@ def main(args: argparse.Namespace):
         )
     )
 
-    
     # Save config and results to json
     if args.save_result:
         result_json = {}
@@ -260,9 +262,7 @@ def main(args: argparse.Namespace):
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
-        file_name = (
-            f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
-        )
+        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
         with open(file_name, "w") as outfile:
             json.dump(result_json, outfile)
 
