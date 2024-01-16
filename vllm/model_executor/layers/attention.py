@@ -3,7 +3,12 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
+from xformers import ops as xops
+from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
+                                         LowerTriangularMaskWithTensorBias)
 
+from vllm._C import ops
+from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.utils import is_hip
 
@@ -74,10 +79,6 @@ class PagedAttention(nn.Module):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
-        from xformers import ops as xops
-        from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
-        from vllm._C import cache_ops
-
         batch_size, seq_len, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -175,9 +176,7 @@ def _make_alibi_bias(
     batch_size: int,
     seq_len: int,
     dtype: torch.dtype,
-):
-    from xformers.ops.fmha.attn_bias import LowerTriangularMaskWithTensorBias
-
+) -> LowerTriangularMaskWithTensorBias:
     bias = torch.arange(seq_len, dtype=dtype, device="cuda")
     # NOTE(zhuohan): HF uses
     #     `bias = bias[None, :].repeat(prompt_len, 1)`
@@ -214,8 +213,6 @@ def _paged_attention(
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    from vllm._C import ops
-
     output = torch.empty_like(query)
 
     block_size = value_cache.shape[3]

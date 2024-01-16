@@ -4,6 +4,8 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
+from vllm._C import ops
+
 
 class RMSNorm(nn.Module):
     """Root mean square normalization.
@@ -46,8 +48,6 @@ class RMSNorm(nn.Module):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        from vllm._C import ops
-
         if residual is not None:
             ops.fused_add_rms_norm(
                 x,

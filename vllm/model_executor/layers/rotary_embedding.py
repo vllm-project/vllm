@@ -27,6 +27,8 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
+from vllm._C import ops
+
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., :x.shape[-1] // 2]
@@ -139,8 +141,6 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        from vllm._C import ops
-
         # ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
         ops.rotary_embedding(positions, query, key, self.head_size,

@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -112,8 +113,6 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
                       weights: Dict[str, Any],
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        from vllm._C import ops
-
         qweight = weights["qweight"]
         lookup_table = weights["lookup_table"]
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
