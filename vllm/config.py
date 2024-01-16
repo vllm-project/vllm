@@ -394,6 +394,7 @@ class SchedulerConfig:
         self.max_model_len = max_model_len
         self.max_paddings = max_paddings
         self.use_deltas = use_deltas
+        print("SANG-TODO use deltas: ", use_deltas)
         self._verify_args()
 
     def _verify_args(self) -> None:

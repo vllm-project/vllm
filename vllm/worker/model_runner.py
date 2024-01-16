@@ -86,7 +86,6 @@ class ModelRunner:
         prompt_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
-            print("SANG-TODO block tables", seq_group_metadata.block_tables)
 
             # Prepare a cache so that decoding can use delta instead.
             if self.seq_metadata_cache is not None:
@@ -174,11 +173,9 @@ class ModelRunner:
 
             if (self.seq_metadata_cache is not None and
                     seq_group_metadata.request_id in self.seq_metadata_cache):
-                print("SANG-TODO hit cache")
                 seq_group_metadata = self.seq_metadata_cache[
                     seq_group_metadata.request_id].update_from_delta(
                         seq_group_metadata)
-                print("SANG-TODO block tables", seq_group_metadata.block_tables)
                 seq_group_metadata_list[seq_idx] = seq_group_metadata
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -196,9 +193,6 @@ class ModelRunner:
                 context_lens.append(context_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
-                print("SANG-TODO seq data, ", seq_data)
-                print("SANG-TODO 1", block_table)
-                print("SANG-TODO ", position // self.block_size)
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
@@ -355,14 +349,11 @@ class ModelRunner:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
             is_prompt = seq_group_metadata_list[0].is_prompt
-            print("SANG-TODO is prompt: ", is_prompt)
             # Prepare input tensors.
             if is_prompt:
-                print("SANG-TODO process prompt")
                 (input_tokens, input_positions, input_metadata,
                  prompt_lens) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                print("SANG-TODO process decode")
                 (input_tokens, input_positions, input_metadata
                  ) = self._prepare_decode(seq_group_metadata_list)
                 prompt_lens = []

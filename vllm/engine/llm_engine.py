@@ -743,7 +743,6 @@ class LLMEngine:
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
         # Execute the model.
         if not self.parallel_config.use_ray_compiled_dag:
-            print("SANG-TODO no compiled DAG")
             all_outputs = self._run_workers(
                 "execute_model",
                 driver_kwargs={
