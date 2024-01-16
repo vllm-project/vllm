@@ -97,25 +97,21 @@ def get_hipcc_rocm_version():
 
 
 def get_neuronxcc_version():
-    # Run the neuronx-cc --version command
-    result = subprocess.run(['neuronx-cc', '--version'],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True)
+    import sysconfig
+    site_dir = sysconfig.get_paths()["purelib"]
+    version_file = os.path.join(site_dir, "neuronxcc", "version", "__init__.py")
 
     # Check if the command was executed successfully
-    if result.returncode != 0:
-        print("Error running 'neuronx-cc --version'")
-        return None
+    with open(version_file, "rt") as fp:
+        content = fp.read()
 
     # Extract the version using a regular expression
-    match = re.search(r'NeuronX Compiler version (\S+)', result.stdout)
+    match = re.search(r"__version__ = '(\S+)'", content)
     if match:
         # Return the version string
         return match.group(1)
     else:
-        print("Could not find NeuronX Compiler version in the output")
-        return None
+        raise RuntimeError("Could not find HIP version in the output")
 
 
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
