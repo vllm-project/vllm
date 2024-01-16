@@ -298,8 +298,7 @@ class CacheConfig:
                 "the GPU memory footprint and boosts the performance. "
                 "But it may make slight accuray drop. "
                 "Currently we only support fp8 without scaling factors and "
-                "make e5m2 as a default format."
-            )
+                "make e5m2 as a default format.")
         self.sliding_window = sliding_window
         self._verify_args()
 
@@ -312,6 +311,11 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+        if self.quant_method == "fp8":
+            device_name = torch.cuda.get_device_name()
+            if "AMD" in device_name:
+                raise NotImplementedError(
+                    "FP8 KV Cache on AMD GPU has not been supported yet.")
 
     def verify_with_parallel_config(
         self,
