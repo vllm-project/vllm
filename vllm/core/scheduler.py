@@ -6,7 +6,7 @@ from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union, Set
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.block_manager import AllocStatus, BlockSpaceManager
 from vllm.lora.request import LoRARequest
-from vllm.core.policy import PolicyFactory, PreemptionMode
+from vllm.core.policy import PolicyFactory, PreemptionMode, FCFS
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
@@ -77,7 +77,7 @@ class Scheduler:
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(
             policy_name=self.scheduler_config.policy,
-            max_delay=self.scheduler_config.max_delay,
+            reorder_window=self.scheduler_config.reorder_window,
         )
         # Create the block space manager.
         self.block_manager = BlockSpaceManager(
@@ -163,11 +163,12 @@ class Scheduler:
                 for seq_group in self.running) if self.lora_enabled else None
             seq_lens: List[int] = []
 
-            # Optimization: We do not sort the waiting queue since the preempted
+            # Optimization: We do not sort the waiting queue when use FCFS policy since the preempted
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
             leftover_waiting_sequences = deque()
-            self.waiting = self.policy.sort_by_priority(self.waiting)
+            if type(self.policy) is not FCFS:
+                self.waiting = self.policy.sort(self.waiting)
             while self.waiting:
                 seq_group = self.waiting[0]
                 waiting_seqs = seq_group.get_seqs(
@@ -261,7 +262,7 @@ class Scheduler:
         # Reserve new token slots for the running sequence groups.
         running: Deque[SequenceGroup] = deque()
         preempted: List[SequenceGroup] = []
-        self.running = self.policy.sort_by_priority(self.running)
+        self.running = self.policy.sort(self.running)
         while self.running:
             seq_group = self.running.popleft()
             while not self.block_manager.can_append_slot(seq_group):
@@ -292,7 +293,7 @@ class Scheduler:
             leftover_swapped = deque()
 
             # Swap in the sequence groups in the SWAPPED state if possible.
-            self.swapped = self.policy.sort_by_priority(self.swapped)
+            self.swapped = self.policy.sort(self.swapped)
 
             while self.swapped:
                 seq_group = self.swapped[0]

@@ -74,6 +74,9 @@ def run_vllm(
     kv_cache_dtype: str,
     device: str,
     enable_prefix_caching: bool,
+    scheduler_policy: str,
+    scheduler_reorder_window: float,
+    swap_space: int,
     gpu_memory_utilization: float = 0.9,
 ) -> float:
     from vllm import LLM, SamplingParams
@@ -91,9 +94,8 @@ def run_vllm(
               device=device,
               enable_prefix_caching=enable_prefix_caching,
               scheduler_policy=scheduler_policy,
-              scheduler_max_delay=scheduler_max_delay,
+              scheduler_reorder_window=scheduler_reorder_window,
               swap_space=swap_space)
-
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
         sampling_params = SamplingParams(
@@ -218,9 +220,8 @@ def main(args: argparse.Namespace):
                                 args.max_model_len, args.enforce_eager,
                                 args.kv_cache_dtype, args.device,
                                 args.enable_prefix_caching,
-                                args.vllm_scheduler_policy,
-                                args.vllm_scheduler_max_delay, args.swap_space,
-                                 args.gpu_memory_utilization)
+                                args.vllm_scheduler_reorder_window, args.swap_space,
+                                args.swap_space, args.gpu_memory_utilization)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -245,9 +246,9 @@ if __name__ == "__main__":
                         default="vllm")
     parser.add_argument("--vllm-scheduler-policy",
                         type=str,
-                        choices=["fcfs", "throughput"],
+                        choices=["fcfs", "reorder"],
                         default="fcfs")
-    parser.add_argument("--vllm-scheduler-max-delay", type=float, default=0)
+    parser.add_argument("--vllm-scheduler-reorder-window", type=float, default=0)
     parser.add_argument("--dataset",
                         type=str,
                         default=None,

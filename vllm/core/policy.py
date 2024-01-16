@@ -22,7 +22,7 @@ class PreemptionMode(enum.Enum):
 class Policy:
     """Base class policy"""
 
-    def sort_by_priority(
+    def sort(
         self,
         seq_groups: Deque[SequenceGroup],
     ) -> Deque[SequenceGroup]:
@@ -33,12 +33,10 @@ class Policy:
 
 
 class FCFS(Policy):
-    """Default FIFO Policy"""
-
     def __init__(self, **kwargs) -> None:
         super().__init__()
 
-    def sort_by_priority(
+    def sort(
         self,
         seq_groups: Deque[SequenceGroup],
     ) -> Deque[SequenceGroup]:
@@ -46,25 +44,24 @@ class FCFS(Policy):
         return deque(sorted(seq_groups, key=lambda x: x.metrics.arrival_time))
 
     def get_preemption_mode(self, seq_group: SequenceGroup) -> PreemptionMode:
-        #Copa-pasted from previous implementation
         if seq_group.get_max_num_running_seqs() == 1:
             return PreemptionMode.RECOMPUTE
         else:
             return PreemptionMode.SWAP
 
 
-class MaxThroughput(Policy):
-    """MaxThroughput tries to maximize throughput by reordering incoming requests.
+class ReorderPolicy(Policy):
+    """ReorderPolicy tries to maximize throughput by reordering incoming requests by length.
     
     Args:
-        max_delay: maximum acceptable delay in sec while reorder `List[SequenceGroup]`. 0 means FIFO behavior. 
+        reorder_window: window size in sec within which `List[SequenceGroup]` is allowed to be reordered. 0 means no reorder. 
     """
 
-    def __init__(self, max_delay: float = 0, **kwargs) -> None:
+    def __init__(self, reorder_window: float = 0, **kwargs) -> None:
         super().__init__()
-        self.max_delay = max_delay
+        self.reorder_window = reorder_window
 
-    def sort_by_priority(
+    def sort(
         self,
         seq_groups: Deque[SequenceGroup],
     ) -> Deque[SequenceGroup]:
@@ -74,7 +71,7 @@ class MaxThroughput(Policy):
         arrival_time_sorted = sorted(seq_groups, key=lambda x: x.metrics.arrival_time)
         pos = bisect.bisect_left(arrival_time_sorted,
                                  arrival_time_sorted[0].metrics.arrival_time +
-                                 self.max_delay,
+                                 self.reorder_window,
                                  key=lambda x: x.metrics.arrival_time)
         return deque(
             sorted(arrival_time_sorted[:pos],
@@ -90,7 +87,7 @@ class PolicyFactory:
 
     _POLICY_REGISTRY = {
         'fcfs': FCFS,
-        'throughput': MaxThroughput,
+        'reorder': ReorderPolicy,
     }
 
     @classmethod

@@ -33,7 +33,7 @@ class EngineArgs:
     max_paddings: int = 256
     max_logprobs: int = 5  # OpenAI default value
     scheduler_policy: str = 'fcfs'
-    scheduler_max_delay: float = 0
+    scheduler_reorder_window: float = 0
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -224,12 +224,12 @@ class EngineArgs:
         parser.add_argument('--scheduler-policy',
                             type=str,
                             default=EngineArgs.scheduler_policy,
-                            choices=['fcfs', 'throughput'],
+                            choices=['fcfs', 'reorder'],
                             help='scheduler policy')
-        parser.add_argument('--scheduler_max_delay',
+        parser.add_argument('--scheduler_reorder_window',
                             type=float,
-                            default=EngineArgs.scheduler_max_delay,
-                            help='scheduler max delay')
+                            default=EngineArgs.scheduler_reorder_window,
+                            help='allowed sequences reorder window(in sec)')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
