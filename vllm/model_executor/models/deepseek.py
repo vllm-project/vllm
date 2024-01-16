@@ -1,6 +1,6 @@
 # coding=utf-8
 # Adapted from
-# https://huggingface.co/deepseek-ai/deepseek-moe-16b-chat/blob/main/modeling_deepseek.py
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -23,7 +23,10 @@
 """Inference-only Deepseek model."""
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+
 import torch
+import torch.nn.functional as F
 
 from torch import nn
 from vllm.transformers_utils.configs.deepseek import DeepseekConfig
@@ -41,6 +44,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -59,6 +64,7 @@ class DeepseekMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         linear_method: Optional[LinearMethodBase] = None,
+        reduce_results=True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -68,7 +74,38 @@ class DeepseekMLP(nn.Module):
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
-                                           linear_method=linear_method)
+                                           linear_method=linear_method,
+                                           reduce_results=reduce_results)
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class DeepseekExpertMLP(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        linear_method: Optional[LinearMethodBase] = None,
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = ReplicatedLinear(hidden_size,
+                                             intermediate_size * 2,
+                                             bias=False,
+                                             linear_method=linear_method)
+        self.down_proj = ReplicatedLinear(intermediate_size,
+                                          hidden_size,
+                                          bias=False,
+                                          linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -94,14 +131,25 @@ class DeepseekMoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.n_routed_experts = config.n_routed_experts
         self.top_k = config.num_experts_per_tok
+        if self.tp_size > self.n_routed_experts:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than "
+                f"the number of experts {self.n_routed_experts}.")
+        # Split experts equally between ranks
+        self.expert_indicies = np.array_split(range(
+            self.n_routed_experts), self.tp_size)[self.rank].tolist()
+        if not self.expert_indicies:
+            raise ValueError(
+                f"Rank {self.rank} has no experts assigned to it.")
 
         self.experts = nn.ModuleList([
-            DeepseekMLP(
+            DeepseekExpertMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
                 hidden_act=config.hidden_act,
                 linear_method=linear_method,
-            ) for _ in range(self.n_routed_experts)
+            ) if idx in self.expert_indicies else None
+            for idx in range(self.n_routed_experts)
         ])
         self.gate = ReplicatedLinear(config.hidden_size,
                                      self.n_routed_experts,
@@ -115,54 +163,44 @@ class DeepseekMoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 linear_method=linear_method,
+                reduce_results=False,
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        identity = hidden_states
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        routing_weights = router_logits.softmax(dim=-1)
-
-        ### select top-k experts
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights,
                                                        self.top_k,
-                                                       dim=-1,
-                                                       sorted=False)
+                                                       dim=-1)
+        if self.config.norm_topk_prob:
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        flat_expert_indices = selected_experts.view(-1)
-        flat_expert_weights = routing_weights.view(-1, 1)
-        final_hidden_states = self.moe_infer(
-            hidden_states, flat_expert_indices,
-            flat_expert_weights).view(batch_size, sequence_length, hidden_dim)
+        final_hidden_states = None
+        for expert_idx in self.expert_indicies:
+            expert_layer = self.experts[expert_idx]
+            expert_mask = (selected_experts == expert_idx)
+            expert_weights = (routing_weights * expert_mask).sum(dim=-1,
+                                                                 keepdim=True)
+
+            current_hidden_states = expert_layer(hidden_states).mul_(
+                expert_weights)
+            if final_hidden_states is None:
+                final_hidden_states = current_hidden_states
+            else:
+                final_hidden_states.add_(current_hidden_states)
+
         if self.config.n_shared_experts is not None:
             final_hidden_states = final_hidden_states + self.shared_experts(
-                identity)
-        return final_hidden_states
+                hidden_states)
+        final_hidden_states = tensor_model_parallel_all_reduce(
+            final_hidden_states)
 
-    def moe_infer(self, x, flat_expert_indices, flat_expert_weights):
-        expert_cache = torch.zeros_like(x)
-        idxs = flat_expert_indices.argsort()
-        tokens_per_expert = flat_expert_indices.bincount().cpu().numpy(
-        ).cumsum(0)
-        token_idxs = idxs // self.top_k
-        for i, end_idx in enumerate(tokens_per_expert):
-            start_idx = 0 if i == 0 else tokens_per_expert[i - 1]
-            if start_idx == end_idx:
-                continue
-            expert = self.experts[i]
-            exp_token_idx = token_idxs[start_idx:end_idx]
-            expert_tokens = x[exp_token_idx]
-            expert_out = expert(expert_tokens)
-            expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
-            expert_cache.scatter_reduce_(0,
-                                         exp_token_idx.view(-1, 1).repeat(
-                                             1, x.shape[-1]),
-                                         expert_out,
-                                         reduce='sum')
-        return expert_cache
+        return final_hidden_states.view(batch_size, sequence_length,
+                                        hidden_dim)
 
 
 class DeepseekAttention(nn.Module):
@@ -208,6 +246,7 @@ class DeepseekAttention(nn.Module):
             bias=False,
             linear_method=linear_method,
         )
+
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -286,23 +325,27 @@ class DeepseekDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
+        residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
         )
-        hidden_states = residual + hidden_states
-        residual = hidden_states
 
         # Fully Connected
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        return residual + hidden_states
+        return hidden_states, residual
 
 
 class DeepseekModel(nn.Module):
@@ -336,11 +379,13 @@ class DeepseekModel(nn.Module):
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
+        residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            hidden_states = layer(positions, hidden_states, kv_caches[i],
-                                  input_metadata)
-        hidden_states = self.norm(hidden_states)
+            hidden_states, residual = layer(positions, hidden_states,
+                                            kv_caches[i], input_metadata,
+                                            residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -392,6 +437,13 @@ class DeepseekForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        def merged_replicated_linear_loader(param, loaded_weight, shard_id):
+            assert isinstance(shard_id, int)
+            dim_out, din_in = param.shape
+            slice_size = dim_out // 2
+            param = param[shard_id * slice_size:(shard_id + 1) * slice_size]
+            param.copy_(loaded_weight)
+
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path,
@@ -413,7 +465,8 @@ class DeepseekForCausalLM(nn.Module):
                         and name not in params_dict):
                     continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader",
+                                        merged_replicated_linear_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
