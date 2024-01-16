@@ -14,12 +14,9 @@ logger = init_logger(__name__)
 
 
 class OpenAIServing:
-
-    def __init__(self, engine: AsyncLLMEngine, served_model: str,
-                 response_role: str):
+    def __init__(self, engine: AsyncLLMEngine, served_model: str):
         self.engine = engine
         self.served_model = served_model
-        self.response_role = response_role
 
         self.max_model_len = 0
         self.tokenizer = None

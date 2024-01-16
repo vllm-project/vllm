@@ -18,15 +18,14 @@ logger = init_logger(__name__)
 
 
 class OpenAIServingChat(OpenAIServing):
-
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
                  response_role: str,
                  chat_template=None):
         super().__init__(engine=engine,
-                         served_model=served_model,
-                         response_role=response_role)
+                         served_model=served_model)
+        self.response_role = response_role
         self._load_chat_template(chat_template)
 
     async def create_chat_completion(
