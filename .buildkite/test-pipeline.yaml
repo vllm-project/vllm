@@ -28,6 +28,10 @@ steps:
     - pytest -v -s models --forked
   soft_fail: true
 
+- label: Prefix Caching Test
+  commands:
+    - pytest -v -s prefix_caching
+
 - label: Samplers Test
   command: pytest -v -s samplers --forked
 
