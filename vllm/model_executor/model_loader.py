@@ -32,12 +32,15 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
+
 def _is_support_kv_quant(config: PretrainedConfig) -> bool:
     architectures = getattr(config, "architectures", [])
     supported_archs = ModelRegistry.get_supported_kv_quant_archs()
     return any(arch in supported_archs for arch in architectures)
 
-def get_model(model_config: ModelConfig, parallel_config: ParallelConfig) -> nn.Module:
+
+def get_model(model_config: ModelConfig,
+              parallel_config: ParallelConfig) -> nn.Module:
     model_class = _get_model_architecture(model_config.hf_config)
 
     # Get the (maybe quantized) linear method.

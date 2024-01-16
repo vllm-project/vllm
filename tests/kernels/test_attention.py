@@ -483,7 +483,7 @@ def test_single_query_cached_kv_attention_quantized(
         device="cuda")
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    attention_ops.paged_attention_v1(
+    ops.paged_attention_v1(
         output,
         query,
         key_cache,

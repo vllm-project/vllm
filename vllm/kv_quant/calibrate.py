@@ -79,7 +79,7 @@ def calibrate(model: str,
     # Infer device map
     device_map = infer_auto_device_map(model,
                                        no_split_module_classes=[layer_type])
-    for name in device_map.keys():
+    for name in device_map:
         if name in decoder_layers or 'lm_head' in name:
             device_map[name] = 'cpu'
         else:

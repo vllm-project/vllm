@@ -71,7 +71,8 @@ class ModelConfig:
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
-        kv_cache_dtype: str = None,  ## for kv cache quantization, only for int8 right now
+        kv_cache_dtype:
+        str = None,  ## for kv cache quantization, only for int8 right now
         kv_quant_params_path: str = None,  ## path for kv scales and zero points
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
@@ -108,7 +109,7 @@ class ModelConfig:
         ## for kv cache quantization
         self.kv_cache_dtype = _STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype] \
          if kv_cache_dtype else self.dtype
-        self.quant_kv_cache = not self.kv_cache_dtype == self.dtype
+        self.quant_kv_cache = self.kv_cache_dtype != self.dtype
         self.kv_quant_params_path = kv_quant_params_path
         self._verify_tokenizer_mode()
         self._verify_quantization()

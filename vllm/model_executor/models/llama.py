@@ -81,18 +81,16 @@ class LlamaMLP(nn.Module):
 
 class LlamaAttention(nn.Module):
 
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        linear_method: Optional[LinearMethodBase] = None,
-        quant_kv_cache: bool = False,
-        kv_quant_params: List[float] = None
-    ) -> None:
+    def __init__(self,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 rope_theta: float = 10000,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 max_position_embeddings: int = 8192,
+                 linear_method: Optional[LinearMethodBase] = None,
+                 quant_kv_cache: bool = False,
+                 kv_quant_params: List[float] = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -163,13 +161,11 @@ class LlamaAttention(nn.Module):
 
 class LlamaDecoderLayer(nn.Module):
 
-    def __init__(
-        self,
-        config: LlamaConfig,
-        linear_method: Optional[LinearMethodBase] = None,
-        quant_kv_cache: bool = False,
-        kv_quant_params: List[float] = None
-    ) -> None:
+    def __init__(self,
+                 config: LlamaConfig,
+                 linear_method: Optional[LinearMethodBase] = None,
+                 quant_kv_cache: bool = False,
+                 kv_quant_params: List[float] = None) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -286,7 +282,8 @@ class LlamaForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.model = LlamaModel(config, linear_method, quant_kv_cache, kv_quant_params_list)
+        self.model = LlamaModel(config, linear_method, quant_kv_cache,
+                                kv_quant_params_list)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)
 

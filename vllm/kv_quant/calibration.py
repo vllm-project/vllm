@@ -99,7 +99,7 @@ class CalibrationContext():
 
     def _init_kv_observers(self, name2mod):
         """Initialize KV observers for given modules."""
-        for name in name2mod.keys():
+        for name in name2mod:
             k_obs = KVCacheObserver(self.num_kv_heads, self.head_dim)
             v_obs = KVCacheObserver(self.num_kv_heads, self.head_dim)
             k_obs.global_available(name, group=self.key_obs_group)
@@ -118,7 +118,7 @@ class CalibrationContext():
             obs.observe(inp[0])
 
         group = ActivationObserver.find_group(self.inp_obs_group)
-        for name in group.keys():
+        for name in group:
             mod = self.name2mod[name]
             hook_fn = mod.register_forward_pre_hook(_input_hook)
             self._hooks.append(hook_fn)
@@ -136,7 +136,7 @@ class CalibrationContext():
             obs.observe(out)
 
         group = ActivationObserver.find_group(self.out_obs_group)
-        for name in group.keys():
+        for name in group:
             mod = self.name2mod[name]
             hook_fn = mod.register_forward_hook(_output_hook)
             self._hooks.append(hook_fn)

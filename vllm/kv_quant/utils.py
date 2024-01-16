@@ -107,7 +107,7 @@ def collect_target_modules(
         model: nn.Module,
         #    target: Union[str, type],
         target: str,
-        skip_names: List[str] = [],
+        skip_names: List[str] = None,
         prefix: str = '') -> Dict[str, nn.Module]:
     """Collects the specific target modules from the model.
 
@@ -124,7 +124,8 @@ def collect_target_modules(
 
     # if isinstance(target, LazyAttr):
     #     target = target.build()
-
+    if skip_names is None:
+        skip_names = []
     if not isinstance(target, (type, str)):
         raise TypeError('Target must be a string (name of the module) '
                         'or a type (class of the module)')
