@@ -64,7 +64,6 @@ class DeepseekMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         linear_method: Optional[LinearMethodBase] = None,
-        reduce_results=True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -74,8 +73,7 @@ class DeepseekMLP(nn.Module):
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
-                                           linear_method=linear_method,
-                                           reduce_results=reduce_results)
+                                           linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -98,10 +96,14 @@ class DeepseekExpertMLP(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = ReplicatedLinear(hidden_size,
-                                             intermediate_size * 2,
+        self.gate_proj = ReplicatedLinear(hidden_size,
+                                             intermediate_size,
                                              bias=False,
                                              linear_method=linear_method)
+        self.up_proj = ReplicatedLinear(hidden_size,
+                                        intermediate_size,
+                                        bias=False,
+                                        linear_method=linear_method)
         self.down_proj = ReplicatedLinear(intermediate_size,
                                           hidden_size,
                                           bias=False,
@@ -109,13 +111,15 @@ class DeepseekExpertMLP(nn.Module):
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+        self.act_fn = nn.SiLU()
 
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
+    def forward(self, hidden_states):
+        gate_out, _ = self.gate_proj(hidden_states)
+        gate_out = self.act_fn(gate_out)
+        up_out, _ = self.up_proj(hidden_states)
+        current_hidden_states = gate_out * up_out
+        current_hidden_states, _ = self.down_proj(current_hidden_states)
+        return current_hidden_states
 
 
 class DeepseekMoE(nn.Module):
@@ -158,12 +162,11 @@ class DeepseekMoE(nn.Module):
 
         if config.n_shared_experts is not None:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
-            self.shared_experts = DeepseekMLP(
+            self.shared_experts = DeepseekExpertMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 linear_method=linear_method,
-                reduce_results=False,
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -193,14 +196,12 @@ class DeepseekMoE(nn.Module):
             else:
                 final_hidden_states.add_(current_hidden_states)
 
-        if self.config.n_shared_experts is not None:
-            final_hidden_states = final_hidden_states + self.shared_experts(
-                hidden_states)
-        final_hidden_states = tensor_model_parallel_all_reduce(
-            final_hidden_states)
+        y = tensor_model_parallel_all_reduce(final_hidden_states)
 
-        return final_hidden_states.view(batch_size, sequence_length,
-                                        hidden_dim)
+        if self.config.n_shared_experts is not None:
+            y = y + self.shared_experts(hidden_states)
+
+        return y.view(batch_size, sequence_length, hidden_dim)
 
 
 class DeepseekAttention(nn.Module):
@@ -433,16 +434,9 @@ class DeepseekForCausalLM(nn.Module):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
+            ("mlp.gate_up_proj", "mlp.gate_proj", 0),
+            ("mlp.gate_up_proj", "mlp.up_proj", 1)
         ]
-
-        def merged_replicated_linear_loader(param, loaded_weight, shard_id):
-            assert isinstance(shard_id, int)
-            dim_out, din_in = param.shape
-            slice_size = dim_out // 2
-            param = param[shard_id * slice_size:(shard_id + 1) * slice_size]
-            param.copy_(loaded_weight)
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
@@ -460,13 +454,8 @@ class DeepseekForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Skip experts that are not assigned to this worker.
-                if (("mlp.experts." in name or "mlp.shared_experts." in name)
-                        and name not in params_dict):
-                    continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        merged_replicated_linear_loader)
+                weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -474,8 +463,7 @@ class DeepseekForCausalLM(nn.Module):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Skip experts that are not assigned to this worker.
-                if (("mlp.experts." in name or "mlp.shared_experts." in name)
-                        and name not in params_dict):
+                if ("mlp.experts." in name and name not in params_dict):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
