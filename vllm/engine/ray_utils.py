@@ -43,9 +43,9 @@ try:
 
         def execute_model_compiled_dag_remote(self, ignored):
             """Used only when compiled DAG is enabled."""
-            print("SANG-TODO execute_model_compiled_dag_remote")
+            import torch
+            torch.cuda.set_device(self.worker.device)
             output = self.worker.execute_model()
-            print("SANG-TODO execute_model_compiled_dag_remote finished")
             output = pickle.dumps(output)
             return output
 

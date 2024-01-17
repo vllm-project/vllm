@@ -124,7 +124,8 @@ class LLMEngine:
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
         # Only used for compiled DAG.
-        self.forward_dag = None
+        self.forward_dag = self._compiled_dag_init_dag()
+        # self.forward_dag = None
 
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -887,8 +888,6 @@ class LLMEngine:
                 "max_concurrent_workers is not supported yet.")
 
         if use_ray_compiled_dag:
-            if self.forward_dag is None:
-                self.forward_dag = self._compiled_dag_init_dag()
             output_channels = self.forward_dag.execute(1)
         else:
             # Start the ray workers first.
