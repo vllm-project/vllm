@@ -271,7 +271,7 @@ if __name__ == "__main__":
         description="Benchmark the online serving throughput."
     )
     parser.add_argument(
-        "--backend", type=str, default="vllm", choices=["vllm", "tgi", "openai"]
+        "--backend", type=str, default="vllm", choices=["vllm", "tgi", "openai", "deepspeed-mii", "tensorrt-llm"]
     )
     parser.add_argument("--version", type=str, default="N/A")
     parser.add_argument(

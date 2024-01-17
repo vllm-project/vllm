@@ -212,4 +212,5 @@ ASYNC_REQUEST_FUNCS = {
     "vllm": async_request_vllm,
     "deepspeed-mii": async_request_deepspeed_mii,
     "openai": async_request_openai_completions,
+    "tensorrt-llm": async_request_trt_llm,
 }
