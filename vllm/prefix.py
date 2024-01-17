@@ -24,6 +24,7 @@ class Prefix:
         self.hash = hash(token_ids)
         assert self.length % block_size == 0
         self.block_table: Optional[BlockTable] = None
+        self.computed = False
 
     @property
     def allocated(self) -> bool:

@@ -97,7 +97,7 @@ class ModelRunner:
             prompt_lens.append(prompt_len)
             prefix_len = 0
             prefix = seq_group_metadata.prefix
-            if prefix is not None and prefix.allocated:
+            if prefix is not None and prefix.computed:
                 prefix_len = prefix.get_length()
                 prompt_tokens = prompt_tokens[prefix_len:]
                 prefix_block_tables.append(prefix.get_block_numbers())
