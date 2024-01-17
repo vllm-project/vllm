@@ -77,16 +77,13 @@ class RotaryEmbedding(nn.Module):
         # create the cache on GPU for faster initialization. This may cause
         # a slight numerical difference between the HF implementation and ours.
         inv_freq = 1.0 / (base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float, device="cuda") /
-                                 self.rotary_dim))
+            0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         """Compute the cos and sin cache."""
         inv_freq = self._compute_inv_freq(self.base)
-        t = torch.arange(self.max_position_embeddings,
-                         dtype=torch.float,
-                         device="cuda")
+        t = torch.arange(self.max_position_embeddings, dtype=torch.float)
 
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()

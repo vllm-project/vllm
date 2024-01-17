@@ -52,6 +52,8 @@ class PagedAttention(nn.Module):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        self.cpu_only = torch.zeros((1)).is_cpu
+
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
@@ -126,8 +128,13 @@ class PagedAttention(nn.Module):
                     if self.sliding_window is not None:
                         attn_bias = attn_bias.make_local_attention(
                             self.sliding_window)
+                    if self.cpu_only:
+                        attn_bias = attn_bias.materialize(
+                            (1, seq_len * batch_size, seq_len * batch_size),
+                            dtype=query.dtype)
                     input_metadata.attn_bias = attn_bias
                 else:
+                    assert not self.cpu_only
                     input_metadata.attn_bias = _make_alibi_bias(
                         self.alibi_slopes, self.num_kv_heads, batch_size,
                         seq_len, query.dtype)
@@ -152,7 +159,14 @@ class PagedAttention(nn.Module):
                 scale=self.scale,
                 op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
                 (is_hip()) else None,
-            )
+            ) if not self.cpu_only else torch.nn.functional.scaled_dot_product_attention(
+                query.movedim(1,
+                              query.dim() -
+                              2), key.movedim(1,
+                                              query.dim() - 2),
+                value.movedim(1,
+                              value.dim() - 2), input_metadata.attn_bias,
+                0.0).movedim(query.dim() - 2, 1).contiguous()
             output = out.view_as(query)
         else:
             # Decoding run.
@@ -229,7 +243,7 @@ def _paged_attention(
     # For context len > 8192, use V2 kernel to avoid shared memory shortage.
     use_v1 = input_metadata.max_context_len <= 8192 and (
         max_num_partitions == 1 or num_seqs * num_heads > 512)
-    if use_v1:
+    if use_v1 or query.is_cpu:
         # Run PagedAttention V1.
         ops.paged_attention_v1(
             output,

@@ -21,6 +21,15 @@ def _set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
+@contextlib.contextmanager
+def _set_default_torch_device(device: torch.device):
+    """Sets the default torch dtype to the given dtype."""
+    old_device = torch.zeros((1, 1)).device
+    torch.set_default_device(device)
+    yield
+    torch.set_default_device(old_device)
+
+
 def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -58,11 +67,12 @@ def get_model(model_config: ModelConfig) -> nn.Module:
                 f"{supported_dtypes}")
         linear_method = quant_config.get_linear_method()
 
-    with _set_default_torch_dtype(model_config.dtype):
+    with _set_default_torch_dtype(
+            model_config.dtype), _set_default_torch_device(
+                model_config.device):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        with torch.device("cuda"):
-            model = model_class(model_config.hf_config, linear_method)
+        model = model_class(model_config.hf_config, linear_method)
         if model_config.load_format == "dummy":
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
