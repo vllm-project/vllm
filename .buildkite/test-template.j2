@@ -9,6 +9,10 @@ steps:
       - "docker push {{ docker_image }}"
     env:
       DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
   - wait
 
   {% for step in steps %}
