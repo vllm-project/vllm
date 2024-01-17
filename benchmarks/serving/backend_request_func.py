@@ -27,7 +27,7 @@ async def async_request_tgi(
             "max_new_tokens": output_len,
             "do_sample": True,
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
-            "top_p": 1.0,
+            "top_p": 0.99, # TGI does not accept 1.0 top_p.
         }
         payload = {
             "inputs": prompt,
