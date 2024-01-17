@@ -27,7 +27,7 @@ import numpy as np
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from backend_query_func import ASYNC_QUERY_FUNCS
+from backend_request_func import ASYNC_REQUEST_FUNCS
 
 
 def sample_requests(
@@ -110,6 +110,7 @@ def calculate_metrics(
             per_token_latencies.append(outputs[i]["latency"] / output_len)
             completed += 1
 
+    request_throughput = completed / dur_s
     input_throughput = total_input / dur_s
     output_throughput = total_output / dur_s
     mean_tpot_ms = np.mean(per_token_latencies) * 1000
@@ -120,6 +121,7 @@ def calculate_metrics(
         completed,
         total_input,
         total_output,
+        request_throughput,
         input_throughput,
         output_throughput,
         mean_tpot_ms,
@@ -138,8 +140,8 @@ async def throughput_benchmark(
     use_beam_search: bool,
     request_rate: float,
 ):
-    if backend in ASYNC_QUERY_FUNCS:
-        query_func = ASYNC_QUERY_FUNCS.get(backend)
+    if backend in ASYNC_REQUEST_FUNCS:
+        query_func = ASYNC_REQUEST_FUNCS.get(backend)
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -149,19 +151,16 @@ async def throughput_benchmark(
     tasks = []
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len = request
-        tasks.append(
-            asyncio.create_task(
-                query_func(
-                    model=model_id,
-                    prompt=prompt,
-                    api_url=api_url,
-                    prompt_len=prompt_len,
-                    output_len=output_len,
-                    best_of=best_of,
-                    use_beam_search=use_beam_search,
-                )
-            )
-        )
+        request_func_kwargs = {
+            "model": model_id,
+            "prompt": prompt,
+            "api_url": api_url,
+            "prompt_len": prompt_len,
+            "output_len": output_len,
+            "best_of": best_of,
+            "use_beam_search": use_beam_search,
+        }
+        tasks.append(asyncio.create_task(query_func(**request_func_kwargs)))
     outputs = await asyncio.gather(*tasks)
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
@@ -169,6 +168,7 @@ async def throughput_benchmark(
         completed,
         total_input,
         total_output,
+        request_throughput,
         input_throughput,
         output_throughput,
         mean_tpot_ms,
@@ -182,9 +182,7 @@ async def throughput_benchmark(
     print(f"Benchmark duration: {benchmark_duration:2f} s")
     print(f"Total input tokens: {total_input}")
     print(f"Total generated tokens: {total_output}")
-    print(
-        f"Reuqest throughput: {completed / benchmark_duration:.2f} requests/s"
-    )
+    print(f"Reuqest throughput: {request_throughput:.2f} requests/s")
     print(f"Input token throughput: {input_throughput:.2f} tokens/s")
     print(f"Output token throughput: {output_throughput:.2f} tokens/s")
     print(f"Mean latency per output token: {mean_tpot_ms:.2f} ms")
@@ -195,12 +193,13 @@ async def throughput_benchmark(
     result["completed"] = completed
     result["total_input"] = total_input
     result["total_output"] = total_output
+    result["request_throughput"] = request_throughput
     result["input_throughput"] = input_throughput
     result["output_throughput"] = output_throughput
     result["duration"] = benchmark_duration
-    result["mean_tpot"] = mean_tpot_ms
-    result["median_tpot"] = median_tpot_ms
-    result["p99_tpot"] = p99_tpot_ms
+    result["mean_tpot_ms"] = mean_tpot_ms
+    result["median_tpot_ms"] = median_tpot_ms
+    result["p99_tpot_ms"] = p99_tpot_ms
 
     return result
 

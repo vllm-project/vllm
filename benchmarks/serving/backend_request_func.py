@@ -6,14 +6,14 @@ import aiohttp
 from openai import AsyncOpenAI
 
 
-async def async_query_tgi(
-    model: str,
+async def async_request_tgi(
     prompt: str,
     api_url: str,
     prompt_len: int,
     output_len: int,
     best_of: int,
     use_beam_search: bool,
+    **kwargs,
 ) -> Dict[str, Union[str, bool, float]]:
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -51,14 +51,14 @@ async def async_query_tgi(
         return output
 
 
-async def async_query_vllm(
-    model: str,
+async def async_request_vllm(
     prompt: str,
     api_url: str,
     prompt_len: int,
     output_len: int,
     best_of: int,
     use_beam_search: bool,
+    **kwargs,
 ) -> Dict[str, Union[str, bool, float]]:
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -95,14 +95,56 @@ async def async_query_vllm(
         return output
 
 
-async def async_query_deepspeed_mii(
-    model: str,
+async def async_request_trt_llm(
     prompt: str,
     api_url: str,
     prompt_len: int,
     output_len: int,
     best_of: int,
     use_beam_search: bool,
+    **kwargs,
+) -> Dict[str, Union[str, bool, float]]:
+    timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
+
+    if not api_url.endswith("/generate"):
+        api_url += "/generate"
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        assert not use_beam_search
+        assert best_of == 1
+        payload = {
+            "text_input": prompt,
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_tokens": output_len,
+            "stream": False,
+        }
+        output = {}
+        output["prompt_len"] = prompt_len
+
+        st = time.perf_counter()
+        async with session.post(url=api_url, json=payload) as resp:
+            if resp.status == 200:
+                parsed_resp = await resp.json()
+                latency = time.perf_counter() - st
+                output["generated_text"] = parsed_resp["text_output"]
+                output["success"] = True
+                output["latency"] = latency
+            else:
+                output["generated_text"] = ""
+                output["success"] = False
+
+        return output
+
+
+async def async_request_deepspeed_mii(
+    prompt: str,
+    api_url: str,
+    prompt_len: int,
+    output_len: int,
+    best_of: int,
+    use_beam_search: bool,
+    **kwargs,
 ):
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -136,7 +178,7 @@ async def async_query_deepspeed_mii(
         return output
 
 
-async def async_query_openai_completions(
+async def async_request_openai_completions(
     model: str,
     prompt: str,
     api_url: str,
@@ -144,6 +186,7 @@ async def async_query_openai_completions(
     output_len: int,
     best_of: int,
     use_beam_search: bool,
+    **kwargs,
 ):
     output = {}
     output["prompt_len"] = prompt_len
@@ -173,9 +216,9 @@ async def async_query_openai_completions(
     return output
 
 
-ASYNC_QUERY_FUNCS = {
-    "tgi": async_query_tgi,
-    "vllm": async_query_vllm,
-    "deepspeed-mii": async_query_deepspeed_mii,
-    "openai": async_query_openai_completions,
+ASYNC_REQUEST_FUNCS = {
+    "tgi": async_request_tgi,
+    "vllm": async_request_vllm,
+    "deepspeed-mii": async_request_openai_completions,
+    "openai": async_request_deepspeed_mii,
 }
