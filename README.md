@@ -16,6 +16,15 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
+**The Second vLLM Bay Area Meetup (Jan 31st 5pm-7:30pm PT)**
+
+We are thrilled to announce our second vLLM Meetup!
+The vLLM team will share recent updates and roadmap.
+We will also have vLLM collaborators from IBM coming up to the stage to discuss their insights on LLM optimizations.
+Please register [here](https://lu.ma/ygxbpzhl) and join us!
+
+---
+
 *Latest News* 🔥
 - [2023/12] Added ROCm support to vLLM.
 - [2023/10] We hosted [the first vLLM meetup](https://lu.ma/first-vllm-meetup) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit?usp=sharing).
@@ -68,6 +77,7 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - OPT (`facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc.)
 - Phi (`microsoft/phi-1_5`, `microsoft/phi-2`, etc.)
 - Qwen (`Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.)
+- StableLM(`stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc.)
 - Yi (`01-ai/Yi-6B`, `01-ai/Yi-34B`, etc.)
 
 Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):

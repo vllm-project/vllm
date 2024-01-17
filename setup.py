@@ -295,6 +295,11 @@ def get_requirements() -> List[str]:
     return requirements
 
 
+package_data = {"vllm": ["py.typed"]}
+if os.environ.get("VLLM_USE_PRECOMPILED"):
+    ext_modules = []
+    package_data["vllm"].append("*.so")
+
 setuptools.setup(
     name="vllm",
     version=get_vllm_version(),
@@ -323,5 +328,5 @@ setuptools.setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
-    package_data={"vllm": ["py.typed"]},
+    package_data=package_data,
 )
