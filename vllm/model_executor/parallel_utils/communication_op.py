@@ -73,6 +73,8 @@ def tensor_model_parallel_gather(input_, dst=0, dim=-1):
                              gather_list,
                              dst=dst,
                              group=get_tensor_model_parallel_group())
+    print("SANG-TODO get_tensor_model_parallel_rank, ", get_tensor_model_parallel_rank())
+    print("SANG-TODO dst, ", dst)
     if get_tensor_model_parallel_rank() == dst:
         output_tensor = torch.cat(gather_list, dim=dim)
     else:

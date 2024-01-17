@@ -82,6 +82,7 @@ class CacheEngine:
                 dtype=self.dtype,
                 device="cuda",
             )
+            print("SANG-TODO key cache device, ", key_blocks.device)
             gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
 

@@ -113,6 +113,7 @@ class LLMEngine:
             self._init_workers()
 
         # Profile the memory usage and initialize the cache.
+        print("SANG-TODO init cache CUDA_VISIBLE_DEVICES, ", os.environ.get('CUDA_VISIBLE_DEVICES'))
         self._init_cache()
 
         # Create the scheduler.

@@ -129,6 +129,8 @@ class ModelRunner:
                                              max_prompt_len,
                                              pad=0,
                                              dtype=torch.long)
+        if input_tokens is not None:
+            print("SANG-TODO input tokens cuda, ", input_tokens.device)
         input_positions = _make_tensor_with_pad(input_positions,
                                                 max_prompt_len,
                                                 pad=0,
@@ -386,6 +388,7 @@ class ModelRunner:
         The driver should have called broadcast_input_tensors, otherwise
         this API can hang.
         """    
+        print("SANG-TODO default device broadcasting: ", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         receving_list = [None]
         broadcast_object_list(receving_list, src=0)
         py_data = receving_list[0]
@@ -442,10 +445,11 @@ class ModelRunner:
 
         return input_tokens, input_positions, input_metadata, sampling_metadata
 
-    def prepare_input_tensors(
+    def _prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata]:
+        print("SANG-TODO default device: ", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
@@ -468,7 +472,7 @@ class ModelRunner:
         """Prepare the input tensors and broadcast the inputs"""
         if self.is_driver_worker:
             (input_tokens, input_positions, input_metadata, sampling_metadata
-             ) = self.prepare_input_tensors(seq_group_metadata_list)
+             ) = self._prepare_input_tensors(seq_group_metadata_list)
             return self._broadcast_input_tensors(
                 input_tokens,
                 input_positions,
@@ -492,7 +496,7 @@ class ModelRunner:
             # If compiled DAG is used, all workers are getting the
             # same input from a remote call.
             input_tokens, input_positions, input_metadata, sampling_metadata = (
-                self.prepare_input_tensors(seq_group_metadata_list))
+                self._prepare_input_tensors(seq_group_metadata_list))
 
         # Execute the model.
         if input_metadata.use_cuda_graph:
@@ -500,6 +504,21 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+        import os
+        print("SANG-TODO CUDA_VISIBLE_DEVICES, ", os.environ.get('CUDA_VISIBLE_DEVICES'))
+        if input_tokens is not None:
+            print("SANG-TODO tensor on devices input_tokens", input_tokens.device)
+        if input_positions is not None:
+            print("SANG-TODO tensor on devices input_positions", input_positions.device)
+        if input_metadata is not None and input_metadata.block_tables is not None:
+            print("SANG-TODO tensor on devices input_metadata.block_tables", input_metadata.block_tables.device)
+            print("SANG-TODO tensor on devices input_metadata.context_lens", input_metadata.context_lens.device)
+            print("SANG-TODO tensor on devices input_metadata.slot_mapping", input_metadata.slot_mapping.device)
+        for kv_cache in kv_caches:
+            if kv_cache[0] is not None:
+                print("SANG-TODO tensor on devices kvcache[0]", kv_cache[0].device)
+            if kv_cache[1] is not None:
+                print("SANG-TODO tensor on devices kvcache[1]", kv_cache[1].device)
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,

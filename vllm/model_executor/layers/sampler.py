@@ -52,6 +52,8 @@ class Sampler(nn.Module):
         if not sampling_metadata.perform_sampling:
             return None
 
+        if logits is None:
+            return None
         assert logits is not None
         _, vocab_size = logits.shape
 

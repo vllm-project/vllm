@@ -46,6 +46,8 @@ try:
 
         def execute_model_compiled_dag_remote(self, args):
             """Used only when compiled DAG is enabled."""
+            import torch
+            torch.cuda.set_device(self.worker.device)
             print("SANG-TODO execute_model_compiled_dag_remote")
             args = self.decoder.decode(args)
             output = self.worker.execute_model(
