@@ -747,9 +747,6 @@ class LLMEngine:
                     blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
                     blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
                     blocks_to_copy=scheduler_outputs.blocks_to_copy,
-                    finished_request_ids_list=list(
-                    scheduler_outputs.done_seq_group_ids.intersection(
-                        self.prev_done_seq_group_ids))
                 )
         else:
             output = []
@@ -937,12 +934,10 @@ class LLMEngine:
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
-        finished_request_ids_list: List[int],
     ) -> Any:
         """Runs the given method on all workers using static DAG APIs."""
         data = ExecuteModelData(
             seq_group_metadata_list=seq_group_metadata_list,
-            finished_request_ids_list=finished_request_ids_list,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,

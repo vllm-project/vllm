@@ -45,16 +45,17 @@ try:
             set_cuda_visible_devices(device_ids)
 
         def execute_model_compiled_dag_remote(self, args):
-            """Used only when compiled DAG is enabled.
-            """
+            """Used only when compiled DAG is enabled."""
+            print("SANG-TODO execute_model_compiled_dag_remote")
             args = self.decoder.decode(args)
-            output = self.execute_model(
+            output = self.worker.execute_model(
                 args.seq_group_metadata_list,
                 args.blocks_to_swap_in,
                 args.blocks_to_swap_out,
                 args.blocks_to_copy,
-                finished_request_ids_list=args.finished_request_ids_list,
+                use_ray_compiled_dag=True,
             )
+            print("SANG-TODO execute_model_compiled_dag_remote finished")
             output = self.encoder.encode(output)
             return output
 

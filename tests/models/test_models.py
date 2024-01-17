@@ -23,6 +23,7 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("use_ray_compiled_dag", [True])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -30,12 +31,13 @@ def test_models(
     model: str,
     dtype: str,
     max_tokens: int,
+    use_ray_compiled_dag: bool,
 ) -> None:
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype)
+    vllm_model = vllm_runner(model, dtype=dtype, use_ray_compiled_dag=use_ray_compiled_dag)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 

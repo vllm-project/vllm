@@ -168,7 +168,36 @@ class Worker:
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+        use_ray_compiled_dag: bool = False,
     ) -> Optional[SamplerOutput]:
+        if not use_ray_compiled_dag:
+            return self._execute_model(
+                seq_group_metadata_list=seq_group_metadata_list,
+                blocks_to_swap_in=blocks_to_swap_in,
+                blocks_to_swap_out=blocks_to_swap_out,
+                blocks_to_copy=blocks_to_copy,
+            )
+        else:
+            return self._execute_model_compiled_dag(
+                seq_group_metadata_list=seq_group_metadata_list,
+                blocks_to_swap_in=blocks_to_swap_in,
+                blocks_to_swap_out=blocks_to_swap_out,
+                blocks_to_copy=blocks_to_copy,
+            )
+
+    def _execute_model(
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
+        blocks_to_swap_in: Optional[Dict[int, int]] = None,
+        blocks_to_swap_out: Optional[Dict[int, int]] = None,
+        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+    ) -> Optional[SamplerOutput]:
+        """Execute the model using the default implementation.
+        
+        If the function is called from a worker not a driver,
+        it assumes the driver broadcasts input using nccl broadcast and
+        broadcast_object_list.
+        """
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups = len(seq_group_metadata_list)
@@ -196,6 +225,32 @@ class Worker:
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache)
+        return output
+
+    def _execute_model_compiled_dag(
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
+        blocks_to_swap_in: Optional[Dict[int, int]] = None,
+        blocks_to_swap_out: Optional[Dict[int, int]] = None,
+        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+    ) -> Optional[SamplerOutput]:
+        assert seq_group_metadata_list is not None
+        num_seq_groups = len(seq_group_metadata_list)
+        assert blocks_to_swap_in is not None
+        assert blocks_to_swap_out is not None
+        assert blocks_to_copy is not None
+        block_swapping_info = [
+            blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy
+        ]
+        self.cache_swap(*block_swapping_info)
+
+        # If there is no input, we don't need to execute the model.
+        if num_seq_groups == 0:
+            return {}
+
+        output = self.model_runner.execute_model(seq_group_metadata_list,
+                                                 self.gpu_cache,
+                                                 use_ray_compiled_dag=True)
         return output
 
 

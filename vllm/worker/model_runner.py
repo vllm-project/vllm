@@ -325,127 +325,175 @@ class ModelRunner:
         )
         return sampling_metadata
 
+    def _broadcast_input_tensors(
+        self,
+        input_tokens: torch.Tensor,
+        input_positions: torch.Tensor,
+        input_metadata: InputMetadata,
+        sampling_metadata: SamplingMetadata
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata]:
+        """Broadcast input tensors to workers.
+        
+        It should be used only within a driver.
+        """
+        assert self.is_driver_worker
+
+        def get_size_or_none(x: Optional[torch.Tensor]):
+            return x.size() if x is not None else None
+
+        # Broadcast the input data. For input tensors, we first broadcast
+        # its shape and then broadcast the tensor to avoid high
+        # serialization cost.
+        py_data = {
+            "input_tokens_size":
+            input_tokens.size(),
+            "input_positions_size":
+            input_positions.size(),
+            "is_prompt":
+            input_metadata.is_prompt,
+            "slot_mapping_size":
+            get_size_or_none(input_metadata.slot_mapping),
+            "max_context_len":
+            input_metadata.max_context_len,
+            "context_lens_size":
+            get_size_or_none(input_metadata.context_lens),
+            "block_tables_size":
+            get_size_or_none(input_metadata.block_tables),
+            "use_cuda_graph":
+            input_metadata.use_cuda_graph,
+            "selected_token_indices_size":
+            sampling_metadata.selected_token_indices.size(),
+        }
+        broadcast_object_list([py_data], src=0)
+        # TODO(zhuohan): Combine the broadcasts or set async_op=True.
+        broadcast(input_tokens, src=0)
+        broadcast(input_positions, src=0)
+        if input_metadata.slot_mapping is not None:
+            broadcast(input_metadata.slot_mapping, src=0)
+        if input_metadata.context_lens is not None:
+            broadcast(input_metadata.context_lens, src=0)
+        if input_metadata.block_tables is not None:
+            broadcast(input_metadata.block_tables, src=0)
+        broadcast(sampling_metadata.selected_token_indices, src=0)
+
+        return input_tokens, input_positions, input_metadata, sampling_metadata
+
+    def _receive_broadcasted_input_tensors(
+        self,
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata]:    
+        """Receive input tensors broadcasted from a driver.
+        
+        The driver should have called broadcast_input_tensors, otherwise
+        this API can hang.
+        """    
+        receving_list = [None]
+        broadcast_object_list(receving_list, src=0)
+        py_data = receving_list[0]
+        input_tokens = torch.empty(*py_data["input_tokens_size"],
+                                    dtype=torch.long,
+                                    device="cuda")
+        broadcast(input_tokens, src=0)
+        input_positions = torch.empty(*py_data["input_positions_size"],
+                                        dtype=torch.long,
+                                        device="cuda")
+        broadcast(input_positions, src=0)
+        if py_data["slot_mapping_size"] is not None:
+            slot_mapping = torch.empty(*py_data["slot_mapping_size"],
+                                        dtype=torch.long,
+                                        device="cuda")
+            broadcast(slot_mapping, src=0)
+        else:
+            slot_mapping = None
+        if py_data["context_lens_size"] is not None:
+            context_lens = torch.empty(*py_data["context_lens_size"],
+                                        dtype=torch.int,
+                                        device="cuda")
+            broadcast(context_lens, src=0)
+        else:
+            context_lens = None
+        if py_data["block_tables_size"] is not None:
+            block_tables = torch.empty(*py_data["block_tables_size"],
+                                        dtype=torch.int,
+                                        device="cuda")
+            broadcast(block_tables, src=0)
+        else:
+            block_tables = None
+        selected_token_indices = torch.empty(
+            *py_data["selected_token_indices_size"],
+            dtype=torch.long,
+            device="cuda")
+        broadcast(selected_token_indices, src=0)
+        input_metadata = InputMetadata(
+            is_prompt=py_data["is_prompt"],
+            slot_mapping=slot_mapping,
+            max_context_len=py_data["max_context_len"],
+            context_lens=context_lens,
+            block_tables=block_tables,
+            use_cuda_graph=py_data["use_cuda_graph"],
+        )
+        sampling_metadata = SamplingMetadata(
+            seq_groups=None,
+            seq_data=None,
+            prompt_lens=None,
+            selected_token_indices=selected_token_indices,
+            categorized_sample_indices=None,
+            perform_sampling=False,
+        )
+
+        return input_tokens, input_positions, input_metadata, sampling_metadata
+
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata]:
-        if self.is_driver_worker:
-            # NOTE: We assume that all sequences in the group are all prompts or
-            # all decodes.
-            is_prompt = seq_group_metadata_list[0].is_prompt
-            # Prepare input tensors.
-            if is_prompt:
-                (input_tokens, input_positions, input_metadata,
-                 prompt_lens) = self._prepare_prompt(seq_group_metadata_list)
-            else:
-                (input_tokens, input_positions, input_metadata
-                 ) = self._prepare_decode(seq_group_metadata_list)
-                prompt_lens = []
-            sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
-
-            def get_size_or_none(x: Optional[torch.Tensor]):
-                return x.size() if x is not None else None
-
-            # Broadcast the input data. For input tensors, we first broadcast
-            # its shape and then broadcast the tensor to avoid high
-            # serialization cost.
-            py_data = {
-                "input_tokens_size":
-                input_tokens.size(),
-                "input_positions_size":
-                input_positions.size(),
-                "is_prompt":
-                input_metadata.is_prompt,
-                "slot_mapping_size":
-                get_size_or_none(input_metadata.slot_mapping),
-                "max_context_len":
-                input_metadata.max_context_len,
-                "context_lens_size":
-                get_size_or_none(input_metadata.context_lens),
-                "block_tables_size":
-                get_size_or_none(input_metadata.block_tables),
-                "use_cuda_graph":
-                input_metadata.use_cuda_graph,
-                "selected_token_indices_size":
-                sampling_metadata.selected_token_indices.size(),
-            }
-            broadcast_object_list([py_data], src=0)
-            # TODO(zhuohan): Combine the broadcasts or set async_op=True.
-            broadcast(input_tokens, src=0)
-            broadcast(input_positions, src=0)
-            if input_metadata.slot_mapping is not None:
-                broadcast(input_metadata.slot_mapping, src=0)
-            if input_metadata.context_lens is not None:
-                broadcast(input_metadata.context_lens, src=0)
-            if input_metadata.block_tables is not None:
-                broadcast(input_metadata.block_tables, src=0)
-            broadcast(sampling_metadata.selected_token_indices, src=0)
+        # NOTE: We assume that all sequences in the group are all prompts or
+        # all decodes.
+        is_prompt = seq_group_metadata_list[0].is_prompt
+        # Prepare input tensors.
+        if is_prompt:
+            (input_tokens, input_positions, input_metadata,
+                prompt_lens) = self._prepare_prompt(seq_group_metadata_list)
         else:
-            receving_list = [None]
-            broadcast_object_list(receving_list, src=0)
-            py_data = receving_list[0]
-            input_tokens = torch.empty(*py_data["input_tokens_size"],
-                                       dtype=torch.long,
-                                       device="cuda")
-            broadcast(input_tokens, src=0)
-            input_positions = torch.empty(*py_data["input_positions_size"],
-                                          dtype=torch.long,
-                                          device="cuda")
-            broadcast(input_positions, src=0)
-            if py_data["slot_mapping_size"] is not None:
-                slot_mapping = torch.empty(*py_data["slot_mapping_size"],
-                                           dtype=torch.long,
-                                           device="cuda")
-                broadcast(slot_mapping, src=0)
-            else:
-                slot_mapping = None
-            if py_data["context_lens_size"] is not None:
-                context_lens = torch.empty(*py_data["context_lens_size"],
-                                           dtype=torch.int,
-                                           device="cuda")
-                broadcast(context_lens, src=0)
-            else:
-                context_lens = None
-            if py_data["block_tables_size"] is not None:
-                block_tables = torch.empty(*py_data["block_tables_size"],
-                                           dtype=torch.int,
-                                           device="cuda")
-                broadcast(block_tables, src=0)
-            else:
-                block_tables = None
-            selected_token_indices = torch.empty(
-                *py_data["selected_token_indices_size"],
-                dtype=torch.long,
-                device="cuda")
-            broadcast(selected_token_indices, src=0)
-            input_metadata = InputMetadata(
-                is_prompt=py_data["is_prompt"],
-                slot_mapping=slot_mapping,
-                max_context_len=py_data["max_context_len"],
-                context_lens=context_lens,
-                block_tables=block_tables,
-                use_cuda_graph=py_data["use_cuda_graph"],
-            )
-            sampling_metadata = SamplingMetadata(
-                seq_groups=None,
-                seq_data=None,
-                prompt_lens=None,
-                selected_token_indices=selected_token_indices,
-                categorized_sample_indices=None,
-                perform_sampling=False,
-            )
-
+            (input_tokens, input_positions, input_metadata
+                ) = self._prepare_decode(seq_group_metadata_list)
+            prompt_lens = []
+        sampling_metadata = self._prepare_sample(seq_group_metadata_list,
+                                                    prompt_lens)
         return input_tokens, input_positions, input_metadata, sampling_metadata
+
+    def prepare_input_tensors_and_broadcast(
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata]:
+        """Prepare the input tensors and broadcast the inputs"""
+        if self.is_driver_worker:
+            (input_tokens, input_positions, input_metadata, sampling_metadata
+             ) = self.prepare_input_tensors(seq_group_metadata_list)
+            return self._broadcast_input_tensors(
+                input_tokens,
+                input_positions,
+                input_metadata,
+                sampling_metadata)
+        else:
+            return self._receive_broadcasted_input_tensors()
+
 
     @torch.inference_mode()
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        use_ray_compiled_dag: bool = False,
     ) -> Optional[SamplerOutput]:
-        input_tokens, input_positions, input_metadata, sampling_metadata = (
-            self.prepare_input_tensors(seq_group_metadata_list))
+        if not use_ray_compiled_dag:
+            input_tokens, input_positions, input_metadata, sampling_metadata = (
+                self.prepare_input_tensors_and_broadcast(seq_group_metadata_list))
+        else:
+            # If compiled DAG is used, all workers are getting the
+            # same input from a remote call.
+            input_tokens, input_positions, input_metadata, sampling_metadata = (
+                self.prepare_input_tensors(seq_group_metadata_list))
+
         # Execute the model.
         if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
