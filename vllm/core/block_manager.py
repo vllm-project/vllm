@@ -103,9 +103,8 @@ class BlockSpaceManager:
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = len(seq.logical_token_blocks)
 
-        if seq_group.prefix is not None and seq_group.prefix.on_gpu:
-            num_required_blocks -= seq_group.prefix.get_length(
-            ) // self.block_size
+        if seq_group.prefix is not None and seq_group.prefix.allocated:
+            num_required_blocks -= seq_group.prefix.get_num_blocks()
 
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
@@ -236,7 +235,7 @@ class BlockSpaceManager:
         # CPU block -> GPU block.
         if seq_group.prefix is not None:
             # make sure to swap in the prefix first
-            assert seq_group.prefix.on_gpu is True
+            assert seq_group.prefix.allocated
 
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
