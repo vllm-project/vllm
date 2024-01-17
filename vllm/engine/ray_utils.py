@@ -3,6 +3,7 @@ from typing import Optional, List, Tuple, TYPE_CHECKING
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import is_hip, set_cuda_visible_devices, get_ip
+import pickle
 
 logger = init_logger(__name__)
 
@@ -39,6 +40,14 @@ try:
 
         def set_cuda_visible_devices(self, device_ids) -> None:
             set_cuda_visible_devices(device_ids)
+
+        def execute_model_compiled_dag_remote(self, ignored):
+            """Used only when compiled DAG is enabled."""
+            print("SANG-TODO execute_model_compiled_dag_remote")
+            output = self.worker.execute_model()
+            print("SANG-TODO execute_model_compiled_dag_remote finished")
+            output = pickle.dumps(output)
+            return output
 
 except ImportError as e:
     logger.warning(f"Failed to import Ray with {e!r}. "
