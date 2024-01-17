@@ -3,7 +3,10 @@
 import time
 from typing import Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+try:
+    from pydantic.v1 import BaseModel, Field
+except ImportError:
+    from pydantic import BaseModel, Field
 
 from vllm.utils import random_uuid
 
