@@ -97,9 +97,9 @@ class DeepseekExpertMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.gate_proj = ReplicatedLinear(hidden_size,
-                                             intermediate_size,
-                                             bias=False,
-                                             linear_method=linear_method)
+                                          intermediate_size,
+                                          bias=False,
+                                          linear_method=linear_method)
         self.up_proj = ReplicatedLinear(hidden_size,
                                         intermediate_size,
                                         bias=False,
@@ -108,9 +108,6 @@ class DeepseekExpertMLP(nn.Module):
                                           hidden_size,
                                           bias=False,
                                           linear_method=linear_method)
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
         self.act_fn = nn.SiLU()
 
     def forward(self, hidden_states):
