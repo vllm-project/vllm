@@ -166,6 +166,3 @@ def test_contexted_kv_attention(
     print(f"xformers Time: {(end_time - start_time)*1000:.2f} ms")
     output_ref = output_ref.squeeze(0)
     assert torch.allclose(output_ref, output, atol=1e-6, rtol=0)
-
-
-test_contexted_kv_attention(12, 128, torch.float16)
