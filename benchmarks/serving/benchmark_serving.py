@@ -214,9 +214,9 @@ def main(args: argparse.Namespace):
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
 
     if args.api_url is not None:
-        api_url = args.api_url
+        api_url = f"{args.api_url}{args.endpoint}"
     else:
-        api_url = f"http://{args.host}:{args.port}"
+        api_url = f"http://{args.host}:{args.port}{args.endpoint}"
 
     tokenizer = get_tokenizer(
         tokenizer_id, trust_remote_code=args.trust_remote_code
@@ -282,6 +282,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--endpoint",
+        type=str,
+        required=True,
+        default="/generate",
+        help="API endpoint.",
+    )
     parser.add_argument(
         "--dataset", type=str, required=True, help="Path to the dataset."
     )

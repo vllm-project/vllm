@@ -17,9 +17,6 @@ async def async_request_tgi(
 ) -> Dict[str, Union[str, bool, float]]:
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
-    if not api_url.endswith("/generate"):
-        api_url += "/generate"
-
     async with aiohttp.ClientSession(timeout=timeout) as session:
         assert not use_beam_search
         params = {
@@ -27,7 +24,7 @@ async def async_request_tgi(
             "max_new_tokens": output_len,
             "do_sample": True,
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
-            "top_p": 0.99, # TGI does not accept 1.0 top_p.
+            "top_p": 0.99,  # TGI does not accept 1.0 top_p.
         }
         payload = {
             "inputs": prompt,
@@ -61,9 +58,6 @@ async def async_request_vllm(
     **kwargs,
 ) -> Dict[str, Union[str, bool, float]]:
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
-
-    if not api_url.endswith("/generate"):
-        api_url += "/generate"
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         payload = {
@@ -105,9 +99,6 @@ async def async_request_trt_llm(
     **kwargs,
 ) -> Dict[str, Union[str, bool, float]]:
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
-
-    if not api_url.endswith("/generate"):
-        api_url += "/generate"
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         assert not use_beam_search
@@ -219,6 +210,6 @@ async def async_request_openai_completions(
 ASYNC_REQUEST_FUNCS = {
     "tgi": async_request_tgi,
     "vllm": async_request_vllm,
-    "deepspeed-mii": async_request_openai_completions,
-    "openai": async_request_deepspeed_mii,
+    "deepspeed-mii": async_request_deepspeed_mii,
+    "openai": async_request_openai_completions,
 }
