@@ -36,7 +36,8 @@ _MODELS = {
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
-    "YiForCausalLM": ("yi", "YiForCausalLM"),
+    "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
+    "YiForCausalLM": ("yi", "YiForCausalLM")
 }
 
 # Models not supported by ROCm.
