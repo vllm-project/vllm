@@ -68,6 +68,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
+  * - :code:`StableLMEpochForCausalLM`
+    - StableLM
+    - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.
   * - :code:`YiForCausalLM`
     - Yi
     - :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
