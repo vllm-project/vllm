@@ -18,7 +18,7 @@ class ServerRunner:
 
     def __init__(self, args):
         self.proc = subprocess.Popen(
-            ["python", "-m", "vllm.entrypoints.openai.api_server"] + args,
+            ["python3", "-m", "vllm.entrypoints.openai.api_server"] + args,
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
