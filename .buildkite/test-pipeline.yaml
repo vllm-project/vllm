@@ -19,6 +19,9 @@ steps:
 - label: Engine Test
   command: pytest -v -s engine
 
+- label: Entrypoints Test
+  command: pytest -v -s entrypoints
+
 - label: Kernels Test
   command: pytest -v -s kernels
   soft_fail: true
