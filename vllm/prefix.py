@@ -60,6 +60,7 @@ class PrefixPool:
         self,
         block_size: int,
     ) -> None:
+        # TODO(zhuohan): Add a capacity limit to the prefix pool.
         self.prefixes: Dict[int, Prefix] = {}
         self.block_size = block_size
 
