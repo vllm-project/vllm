@@ -141,7 +141,7 @@ async def throughput_benchmark(
     request_rate: float,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
-        query_func = ASYNC_REQUEST_FUNCS.get(backend)
+        request_func = ASYNC_REQUEST_FUNCS.get(backend)
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -160,7 +160,7 @@ async def throughput_benchmark(
             "best_of": best_of,
             "use_beam_search": use_beam_search,
         }
-        tasks.append(asyncio.create_task(query_func(**request_func_kwargs)))
+        tasks.append(asyncio.create_task(request_func(**request_func_kwargs)))
     outputs = await asyncio.gather(*tasks)
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
@@ -271,7 +271,10 @@ if __name__ == "__main__":
         description="Benchmark the online serving throughput."
     )
     parser.add_argument(
-        "--backend", type=str, default="vllm", choices=["vllm", "tgi", "openai", "deepspeed-mii", "tensorrt-llm"]
+        "--backend",
+        type=str,
+        default="vllm",
+        choices=["vllm", "tgi", "openai", "deepspeed-mii", "tensorrt-llm"],
     )
     parser.add_argument("--version", type=str, default="N/A")
     parser.add_argument(
