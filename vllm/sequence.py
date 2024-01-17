@@ -243,7 +243,7 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
-        self.prefix: Optional[Prefix] = None
+        self.prefix: Optional[Prefix] = prefix
         self.prompt_logprobs: Optional[PromptLogprobs] = None
 
     @property
