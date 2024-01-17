@@ -70,6 +70,13 @@ torch::Tensor awq_gemm(
   torch::Tensor _scaling_factors,
   torch::Tensor _zeros,
   int split_k_iters);
+
+void marlin_gemm(
+  const torch::Tensor& input,
+  const torch::Tensor& weights,
+        torch::Tensor& output,
+  const torch::Tensor& scales,
+        torch::Tensor& workspace);
 #endif
 
 void squeezellm_gemm(
