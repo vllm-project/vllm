@@ -111,16 +111,17 @@ class MoE(nn.Module):
             expanded_hidden_states, experts_range, self.w1s.data,
             self.w2s.data, self.w3s.data)
 
-        # Step 3: apply weights to the output of each expert, and reduce
-        # across ranks.
+        # Step 3: apply weights to the output of each expert
         expanded_hidden_states.mul_(expanded_weights.unsqueeze(-1))
-        tensor_model_parallel_all_reduce(expanded_hidden_states)
 
         # Step 4: merge the output of each expert, according to the indices.
-        return self.merge_expert_outputs(expanded_hidden_states,
-                                         reverse_indices).view(
-                                             batch_size, sequence_length,
-                                             hidden_size)
+        merged_hidden_states = self.merge_expert_outputs(
+            expanded_hidden_states,
+            reverse_indices).view(batch_size, sequence_length, hidden_size)
+
+        # Step 5: reduce across ranks.
+        tensor_model_parallel_all_reduce(merged_hidden_states)
+        return merged_hidden_states
 
     def expand_and_permutate_hidden_states(
         self,
