@@ -40,8 +40,16 @@ print("-" * 80)
 # -1 since the last token can change when concatenating prompts.
 prefix_pos = len(llm.llm_engine.tokenizer.encode(prefix)) - 1
 
-# Generate with prefix
-outputs = llm.generate(generating_prompts, sampling_params,
+# The llm.generate call will batch all prompts and send the batch at once if resources allow.
+# The prefix will only be cached after the first batch is processed, so we need to call generate once
+# to calculate the prefix and cache it.
+outputs = llm.generate(generating_prompts[0],
+                       sampling_params,
+                       prefix_pos=[prefix_pos])
+
+# Subsequent batches can leverage the cached prefix
+outputs = llm.generate(generating_prompts,
+                       sampling_params,
                        prefix_pos=[prefix_pos] * len(generating_prompts))
 
 # Print the outputs. You should see the same outputs as before
