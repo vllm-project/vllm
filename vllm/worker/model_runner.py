@@ -74,13 +74,17 @@ class ModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int],
+               List[int]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
 
         prompt_lens: List[int] = []
+        context_lens: List[int] = []
+        subquery_lens: List[int] = []
+        prefix_block_tables: List[List[int]] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -91,11 +95,23 @@ class ModelRunner:
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
+            prefix_len = 0
+            prefix = seq_group_metadata.prefix
+            if prefix is not None and prefix.computed:
+                prefix_len = prefix.get_length()
+                prompt_tokens = prompt_tokens[prefix_len:]
+                prefix_block_tables.append(prefix.get_block_numbers())
+            else:
+                prefix_block_tables.append([])
+            # actual prompt lens
+            context_lens.append(prefix_len)
+            subquery_lens.append(prompt_len - prefix_len)
 
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.append(list(range(prompt_len)))
+            input_positions.append(
+                list(range(prefix_len, prefix_len + len(prompt_tokens))))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -113,8 +129,11 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
+                assert prefix_len == 0, (
+                    "Prefix caching is currently not supported with "
+                    "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
-            for i in range(prompt_len):
+            for i in range(prefix_len, prompt_len):
                 if i < start_idx:
                     slot_mapping[-1].append(_PAD_SLOT_ID)
                     continue
@@ -124,7 +143,7 @@ class ModelRunner:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping[-1].append(slot)
 
-        max_prompt_len = max(prompt_lens)
+        max_prompt_len = max(subquery_lens)
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_prompt_len,
                                              pad=0,
@@ -137,16 +156,39 @@ class ModelRunner:
                                              max_prompt_len,
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long)
+        context_lens_tensor = torch.tensor(context_lens,
+                                           dtype=torch.int,
+                                           device='cuda')
+        # Prepare prefix block tables
+        max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
+        block_tables = _make_tensor_with_pad(
+            prefix_block_tables,
+            max_len=max_prompt_block_table_len,
+            pad=0,
+            dtype=torch.int,
+        )
+        start_loc_tensor = torch.arange(0,
+                                        len(prompt_lens) * max_prompt_len,
+                                        max_prompt_len,
+                                        dtype=torch.long,
+                                        device='cuda')
+        prompt_lens_tensor = torch.tensor(prompt_lens,
+                                          dtype=torch.long,
+                                          device='cuda')
 
         input_metadata = InputMetadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
+            prompt_lens=prompt_lens_tensor,
+            max_seq_len=max_prompt_len,
+            start_loc=start_loc_tensor,
             max_context_len=None,
-            context_lens=None,
-            block_tables=None,
+            context_lens=context_lens_tensor,
+            block_tables=block_tables,
             use_cuda_graph=False,
         )
-        return input_tokens, input_positions, input_metadata, prompt_lens
+        return (input_tokens, input_positions, input_metadata, prompt_lens,
+                subquery_lens)
 
     def _prepare_decode(
         self,
@@ -248,6 +290,9 @@ class ModelRunner:
         input_metadata = InputMetadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
+            prompt_lens=None,
+            max_seq_len=None,
+            start_loc=None,
             max_context_len=max_context_len,
             context_lens=context_lens,
             block_tables=block_tables,
@@ -259,6 +304,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         prompt_lens: List[int],
+        subquery_lens: Optional[List[int]],
     ) -> SamplingMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
@@ -266,7 +312,7 @@ class ModelRunner:
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
 
-        max_prompt_len = max(prompt_lens) if prompt_lens else 1
+        max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
@@ -274,10 +320,11 @@ class ModelRunner:
 
             if seq_group_metadata.is_prompt:
                 assert len(seq_ids) == 1
-                prompt_len = prompt_lens[i]
+                assert subquery_lens is not None
+                subquery_len = subquery_lens[i]
                 if sampling_params.prompt_logprobs is not None:
                     # NOTE: prompt token positions do not need sample, skip
-                    categorized_sample_indices_start_idx += prompt_len - 1
+                    categorized_sample_indices_start_idx += subquery_len - 1
 
                 categorized_sample_indices[
                     sampling_params.sampling_type].append(
@@ -287,10 +334,10 @@ class ModelRunner:
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
                         range(selected_token_start_idx,
-                              selected_token_start_idx + prompt_len - 1))
+                              selected_token_start_idx + subquery_len - 1))
                 selected_token_indices.append(selected_token_start_idx +
-                                              prompt_len - 1)
-                selected_token_start_idx += max_prompt_len
+                                              subquery_len - 1)
+                selected_token_start_idx += max_subquery_len
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -335,14 +382,16 @@ class ModelRunner:
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
-                (input_tokens, input_positions, input_metadata,
-                 prompt_lens) = self._prepare_prompt(seq_group_metadata_list)
+                (input_tokens, input_positions, input_metadata, prompt_lens,
+                 subquery_lens) = self._prepare_prompt(seq_group_metadata_list)
             else:
                 (input_tokens, input_positions, input_metadata
                  ) = self._prepare_decode(seq_group_metadata_list)
+                subquery_lens = None
                 prompt_lens = []
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
+                                                     prompt_lens,
+                                                     subquery_lens)
 
             def get_size_or_none(x: Optional[torch.Tensor]):
                 return x.size() if x is not None else None
@@ -359,6 +408,12 @@ class ModelRunner:
                 input_metadata.is_prompt,
                 "slot_mapping_size":
                 get_size_or_none(input_metadata.slot_mapping),
+                "prompt_lens_size":
+                get_size_or_none(input_metadata.prompt_lens),
+                "max_seq_len":
+                input_metadata.max_seq_len,
+                "start_loc_size":
+                get_size_or_none(input_metadata.start_loc),
                 "max_context_len":
                 input_metadata.max_context_len,
                 "context_lens_size":
@@ -376,6 +431,10 @@ class ModelRunner:
             broadcast(input_positions, src=0)
             if input_metadata.slot_mapping is not None:
                 broadcast(input_metadata.slot_mapping, src=0)
+            if input_metadata.prompt_lens is not None:
+                broadcast(input_metadata.prompt_lens, src=0)
+            if input_metadata.start_loc is not None:
+                broadcast(input_metadata.start_loc, src=0)
             if input_metadata.context_lens is not None:
                 broadcast(input_metadata.context_lens, src=0)
             if input_metadata.block_tables is not None:
@@ -400,6 +459,20 @@ class ModelRunner:
                 broadcast(slot_mapping, src=0)
             else:
                 slot_mapping = None
+            if py_data["prompt_lens_size"] is not None:
+                prompt_lens = torch.empty(*py_data["prompt_lens_size"],
+                                          dtype=torch.long,
+                                          device="cuda")
+                broadcast(prompt_lens, src=0)
+            else:
+                prompt_lens = None
+            if py_data["start_loc_size"] is not None:
+                start_loc = torch.empty(*py_data["start_loc_size"],
+                                        dtype=torch.long,
+                                        device="cuda")
+                broadcast(start_loc, src=0)
+            else:
+                start_loc = None
             if py_data["context_lens_size"] is not None:
                 context_lens = torch.empty(*py_data["context_lens_size"],
                                            dtype=torch.int,
@@ -422,6 +495,9 @@ class ModelRunner:
             input_metadata = InputMetadata(
                 is_prompt=py_data["is_prompt"],
                 slot_mapping=slot_mapping,
+                prompt_lens=prompt_lens,
+                max_seq_len=py_data["max_seq_len"],
+                start_loc=start_loc,
                 max_context_len=py_data["max_context_len"],
                 context_lens=context_lens,
                 block_tables=block_tables,
@@ -534,6 +610,9 @@ class ModelRunner:
             input_metadata = InputMetadata(
                 is_prompt=False,
                 slot_mapping=slot_mapping[:batch_size],
+                prompt_lens=None,
+                max_seq_len=None,
+                start_loc=None,
                 max_context_len=self.max_context_len_to_capture,
                 context_lens=context_lens[:batch_size],
                 block_tables=block_tables[:batch_size],
