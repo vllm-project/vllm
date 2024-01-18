@@ -16,6 +16,15 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
+**The Second vLLM Bay Area Meetup (Jan 31st 5pm-7:30pm PT)**
+
+We are thrilled to announce our second vLLM Meetup!
+The vLLM team will share recent updates and roadmap.
+We will also have vLLM collaborators from IBM coming up to the stage to discuss their insights on LLM optimizations.
+Please register [here](https://lu.ma/ygxbpzhl) and join us!
+
+---
+
 *Latest News* 🔥
 - [2023/12] Added ROCm support to vLLM.
 - [2023/10] We hosted [the first vLLM meetup](https://lu.ma/first-vllm-meetup) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit?usp=sharing).
