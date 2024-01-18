@@ -807,7 +807,7 @@ void marlin_gemm(
   
   int prob_m = input.size(0);
   int prob_n = output.size(1);
-  int prob_k = weights.size(1);
+  int prob_k = input.size(1);
   int groupsize = (scales.size(0) == 1) ? -1 : prob_k / scales.size(0);
   if (groupsize != -1 && groupsize * scales.size(0) != prob_k)
     AT_ERROR("k=", prob_k, " not compatible with ", scales.size(0), " groups.");
