@@ -82,7 +82,7 @@ def tensor_model_parallel_gather(input_, dst=0, dim=-1):
 
 def broadcast(input_, src=0):
     """Broadcast the input tensor."""
-    world_size = torch.distributed.get_world_size()
+    world_size = get_tensor_model_parallel_world_size()
     assert 0 <= src < world_size, f"Invalid src rank ({src})"
 
     # Bypass the function if we are using only 1 GPU.
@@ -95,7 +95,7 @@ def broadcast(input_, src=0):
 
 def broadcast_object_list(obj_list, src=0):
     """Broadcast the input object list."""
-    world_size = torch.distributed.get_world_size()
+    world_size = get_tensor_model_parallel_world_size()
     assert 0 <= src < world_size, f"Invalid src rank ({src})"
 
     # Bypass the function if we are using only 1 GPU.

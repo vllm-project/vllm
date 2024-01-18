@@ -108,6 +108,7 @@ class LLMEngine:
                 os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
             self._init_workers_ray(placement_group)
         else:
+            self._init_single_gpu_config()
             self._init_workers()
 
         # Profile the memory usage and initialize the cache.
@@ -917,3 +918,20 @@ class LLMEngine:
             ray_worker_outputs = ray.get(ray_worker_outputs)
 
         return [driver_worker_output] + ray_worker_outputs
+
+    def _init_single_gpu_config(self) -> None:
+
+        def _parallel_rank_mp(*args, **kargs) -> int:
+            return 0
+
+        def _parallel_world_size_mp(*args, **kargs) -> int:
+            return 1
+
+        def _parallel_group_mp(*args, **kargs) -> int:
+            return 1
+
+        import vllm.model_executor.parallel_utils.parallel_state
+
+        vllm.model_executor.parallel_utils.parallel_state.get_tensor_model_parallel_world_size = _parallel_world_size_mp
+        vllm.model_executor.parallel_utils.parallel_state.get_tensor_model_parallel_rank = _parallel_rank_mp
+        vllm.model_executor.parallel_utils.parallel_state.get_tensor_model_parallel_group = _parallel_group_mp

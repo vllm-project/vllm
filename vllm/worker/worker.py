@@ -70,9 +70,10 @@ class Worker:
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 
-        # Initialize the distributed environment.
-        _init_distributed_environment(self.parallel_config, self.rank,
-                                      self.distributed_init_method)
+        if self.parallel_config.worker_use_ray:
+            # Initialize the distributed environment.
+            _init_distributed_environment(self.parallel_config, self.rank,
+                                          self.distributed_init_method)
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
