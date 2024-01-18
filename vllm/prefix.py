@@ -7,6 +7,9 @@ class Prefix:
     """Data and states associated with a prefix of prompt tokens for multiple
     sequence groups.
 
+    NOTE: This feature is experimental and may be replaced with automatic
+        prefix caching in the future.
+
     Args:
         prefix_id: The id of the prefix in the prefix pool.
         token_ids: The token ids of the prefix.
@@ -48,6 +51,9 @@ class Prefix:
 
 class PrefixPool:
     """Manages all the prompt prefixes.
+
+    NOTE: This feature is experimental and may be replaced with automatic
+        prefix caching in the future.
 
     Args:
         block_size: The block size of the executed model.
