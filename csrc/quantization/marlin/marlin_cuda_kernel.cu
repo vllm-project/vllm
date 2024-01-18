@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) Marlin.2024 Elias Frantar (elias.frantar@ist.ac.at)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *         http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
 #ifndef MARLIN_CUDA_KERNEL_CUH
 #define MARLIN_CUDA_KERNEL_CUH
 
@@ -13,8 +30,8 @@ constexpr int ceildiv(int a, int b) {
   return (a + b - 1) / b;
 }
 
-// Instances of `Vec` are used to organize groups of >>registers<<, as are for instance needed as inputs to tensor core
-// operations. Consequently, all corresponding index accesses must be compile time constants, which is why we
+// Instances of `Vec` are used to organize groups of >>registers<<, as needed for instance as inputs to tensor core
+// operations. Consequently, all corresponding index accesses must be compile-time constants, which is why we
 // extensively use `#pragma unroll` throughout the kernel code to guarantee this.
 template <typename T, int n>
 struct Vec {
@@ -110,7 +127,7 @@ __device__ inline int lop3(int a, int b, int c) {
 }
 
 // Efficiently dequantize an int32 value into a full B-fragment of 4 fp16 values.
-// We mostly follow the strategy in the link below, with some smaller changes:
+// We mostly follow the strategy in the link below, with some small changes:
 // https://github.com/NVIDIA/FasterTransformer/blob/main/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h
 __device__ inline FragB dequant(int q) {
   const int LO = 0x000f000f;
@@ -135,7 +152,7 @@ __device__ inline FragB dequant(int q) {
   return frag_b;
 }
 
-// Multiply dequantized values by the corresponding quantization scale; used only in group mode.
+// Multiply dequantized values by the corresponding quantization scale; used only for grouped quantization.
 __device__ inline void scale(FragB& frag_b, FragS& frag_s, int i) {
   half2 s = __half2half2(reinterpret_cast<__half*>(&frag_s)[i]);
   frag_b[0] = __hmul2(frag_b[0], s);
@@ -768,10 +785,10 @@ int marlin_cuda(
 const int ERR_PROB_SHAPE = 1;
 const int ERR_KERN_SHAPE = 2;
 
-// input: `torch.half` input matrix of shape `(m, k)` in standard row-major layout
-// weights: `torch.int` weight matrix of original shape `(k, n)` in Marlin format; see `Layer.pack()`
-// output: `torch.half` out matrix of shape `(m, n)` in standard row-major layout
-// scales: `torch.half` scales of shape `(m / groupsize, n)`
+// input:     `torch.half` input matrix of shape `(m, k)` in standard row-major layout
+// weights:   `torch.int` weight matrix of original shape `(k, n)` in Marlin format; see `Layer.pack()`
+// output:    `torch.half` out matrix of shape `(m, n)` in standard row-major layout
+// scales:    `torch.half` scales of shape `(m / groupsize, n)`
 // workspace: `torch.int` tensor with at least as many entries as there a GPU SMs (256 is usually safe)
 
 void marlin_gemm(
