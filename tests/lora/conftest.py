@@ -1,3 +1,4 @@
+import contextlib
 import gc
 import tempfile
 from collections import OrderedDict
@@ -23,6 +24,8 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 
 def cleanup():
     destroy_model_parallel()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
     gc.collect()
     torch.cuda.empty_cache()
     ray.shutdown()
