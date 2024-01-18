@@ -45,7 +45,7 @@ prefix_pos = len(llm.llm_engine.tokenizer.encode(prefix)) - 1
 # to calculate the prefix and cache it.
 outputs = llm.generate(generating_prompts[0],
                        sampling_params,
-                       prefix_pos=prefix_pos)
+                       prefix_pos=[prefix_pos])
 
 # Subsequent batches can leverage the cached prefix
 outputs = llm.generate(generating_prompts,
