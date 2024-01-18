@@ -253,7 +253,8 @@ class AsyncLLMEngine:
         log_requests: Whether to log the requests.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
-        *args, *kwargs: Arguments for LLMEngine.
+        *args: Arguments for LLMEngine.
+        *kwargs: Arguments for LLMEngine.
     """
 
     _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
@@ -370,6 +371,7 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        prefix_pos: Optional[int] = None,
     ) -> AsyncStream:
         if self.log_requests:
             shortened_prompt = prompt
@@ -382,6 +384,7 @@ class AsyncLLMEngine:
                                                               max_log_len]
             logger.info(f"Received request {request_id}: "
                         f"prompt: {shortened_prompt!r}, "
+                        f"prefix_pos: {prefix_pos},"
                         f"sampling params: {sampling_params}, "
                         f"prompt token ids: {shortened_token_ids}.")
 
@@ -400,7 +403,8 @@ class AsyncLLMEngine:
             prompt=prompt,
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
-            arrival_time=arrival_time)
+            arrival_time=arrival_time,
+            prefix_pos=prefix_pos)
 
         return stream
 
@@ -409,7 +413,8 @@ class AsyncLLMEngine:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         request_id: str,
-        prompt_token_ids: Optional[List[int]] = None
+        prompt_token_ids: Optional[List[int]] = None,
+        prefix_pos: Optional[int] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -424,10 +429,58 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
+            prefix_pos: If not None, we use the given position as the prefix
+                position for each prompt. We will cache the prefix's KV
+                cache and reuse it for the next request with the same prefix.
+                This is an experimental feature, and may be replaced with
+                automatic prefix caching in the future.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine for the
             request.
+
+        Details:
+            - If the engine is not running, start the background loop,
+              which iteratively invokes
+              :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
+              to process the waiting requests.
+            - Add the request to the engine's `RequestTracker`.
+              On the next background loop, this request will be sent to
+              the underlying engine.
+              Also, a corresponding `AsyncStream` will be created.
+            - Wait for the request outputs from `AsyncStream` and yield them.
+
+        Example:
+            >>> # Please refer to entrypoints/api_server.py for
+            >>> # the complete example.
+            >>>
+            >>> # initialize the engine and the example input
+            >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
+            >>> example_input = {
+            >>>     "prompt": "What is LLM?",
+            >>>     "stream": False, # assume the non-streaming case
+            >>>     "temperature": 0.0,
+            >>>     "request_id": 0,
+            >>> }
+            >>>
+            >>> # start the generation
+            >>> results_generator = engine.generate(
+            >>>    example_input["prompt"],
+            >>>    SamplingParams(temperature=example_input["temperature"]),
+            >>>    example_input["request_id"])
+            >>>
+            >>> # get the results
+            >>> final_output = None
+            >>> async for request_output in results_generator:
+            >>>     if await request.is_disconnected():
+            >>>         # Abort the request if the client disconnects.
+            >>>         await engine.abort(request_id)
+            >>>         # Return or raise an error
+            >>>         ...
+            >>>     final_output = request_output
+            >>>
+            >>> # Process and return the final output
+            >>> ...
         """
         # Preprocess the request.
         # This should not be used for logging, as it is monotonic time.
@@ -438,7 +491,8 @@ class AsyncLLMEngine:
                                             prompt,
                                             sampling_params,
                                             prompt_token_ids=prompt_token_ids,
-                                            arrival_time=arrival_time)
+                                            arrival_time=arrival_time,
+                                            prefix_pos=prefix_pos)
 
             async for request_output in stream:
                 yield request_output
@@ -506,3 +560,9 @@ class AsyncLLMEngine:
                      max_log_len=engine_args.max_log_len,
                      start_engine_loop=start_engine_loop)
         return engine
+
+    async def do_log_stats(self) -> None:
+        if self.engine_use_ray:
+            await self.engine.do_log_stats.remote()
+        else:
+            self.engine.do_log_stats()
