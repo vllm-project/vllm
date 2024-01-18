@@ -1,0 +1,48 @@
+# In this file, you can add more tests to run either by adding a new step or
+# adding a new command to an existing step. See different options here for examples.
+# This script will be feed into Jinja template in `test-template.j2` to generate
+# the final pipeline yaml file.
+
+steps:
+- label: Regression Test
+  command: pytest -v -s test_regression.py
+  working_dir: "/vllm-workspace/tests" # optional
+
+- label: AsyncEngine Test
+  command: pytest -v -s async_engine
+
+- label: Distributed Test
+  command: pytest -v -s test_comm_ops.py
+  working_dir: "/vllm-workspace/tests/distributed"
+  num_gpus: 2 # only support 1 or 2 for now.
+
+- label: Engine Test
+  command: pytest -v -s engine
+
+- label: Entrypoints Test
+  command: pytest -v -s entrypoints
+
+- label: Kernels Test
+  command: pytest -v -s kernels
+  soft_fail: true
+
+- label: Models Test
+  commands:
+    - pytest -v -s models --forked
+  soft_fail: true
+
+- label: Prefix Caching Test
+  commands:
+    - pytest -v -s prefix_caching
+
+- label: Samplers Test
+  command: pytest -v -s samplers --forked
+
+- label: Worker Test
+  command: pytest -v -s worker
+
+- label: Benchmarks
+  working_dir: "/vllm-workspace/.buildkite"
+  commands:
+  - pip install aiohttp
+  - bash run-benchmarks.sh

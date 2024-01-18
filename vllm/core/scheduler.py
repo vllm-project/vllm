@@ -10,6 +10,7 @@ from vllm.lora.request import LoRARequest
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
+from vllm.prefix import PrefixPool
 
 logger = init_logger(__name__)
 
@@ -96,6 +97,9 @@ class Scheduler:
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window)
 
+        # Create the prefix pool to cache the prefixes.
+        self.prefix_pool = PrefixPool(self.cache_config.block_size)
+
         # Sequence groups in the WAITING state.
         self.waiting: Deque[SequenceGroup] = deque()
         # Sequence groups in the RUNNING state.
@@ -128,21 +132,24 @@ class Scheduler:
             request_id = (request_id, )
         request_ids = set(request_id)
         for state_queue in [self.waiting, self.running, self.swapped]:
-            # We need to reverse the list as we are removing elements
-            # from it as we iterate over it. If we don't do it,
-            # indices will get messed up and we will skip over elements.
-            for seq_group in reversed(state_queue):
+            aborted_groups = []
+            for seq_group in state_queue:
+                if not request_ids:
+                    # Using 'break' here may add two extra iterations,
+                    # but is acceptable to reduce complexity .
+                    break
                 if seq_group.request_id in request_ids:
-                    # Remove the sequence group from the state queue.
-                    state_queue.remove(seq_group)
-                    for seq in seq_group.get_seqs():
-                        if seq.is_finished():
-                            continue
-                        seq.status = SequenceStatus.FINISHED_ABORTED
-                        self.free_seq(seq)
+                    # Appending aborted group into pending list.
+                    aborted_groups.append(seq_group)
                     request_ids.remove(seq_group.request_id)
-                    if not request_ids:
-                        return
+            for aborted_group in aborted_groups:
+                # Remove the sequence group from the state queue.
+                state_queue.remove(aborted_group)
+                for seq in seq_group.get_seqs():
+                    if seq.is_finished():
+                        continue
+                    seq.status = SequenceStatus.FINISHED_ABORTED
+                    self.free_seq(seq)
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
@@ -376,6 +383,7 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 lora_request=seq_group.lora_request,
+                prefix=seq_group.prefix,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
