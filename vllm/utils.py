@@ -8,8 +8,6 @@ from typing import List
 import psutil
 import torch
 
-from vllm._C import cuda_utils
-
 
 class Device(enum.Enum):
     GPU = enum.auto()
@@ -36,6 +34,10 @@ def is_hip() -> bool:
 
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
+    # NOTE: This import statement should be executed lazily since
+    # the Neuron-X backend does not have the `cuda_utils` module.
+    from vllm._C import cuda_utils
+
     # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
     cudaDevAttrMaxSharedMemoryPerBlockOptin = 97 if not is_hip() else 74
     max_shared_mem = cuda_utils.get_device_attribute(
