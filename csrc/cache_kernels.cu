@@ -186,8 +186,8 @@ __global__ void reshape_and_cache_kernel(
                                   + head_idx * head_size * block_size
                                   + head_offset * block_size
                                   + block_offset;
-    scalar_t tgt_key = VLLM_LDG(&key[src_key_idx]);
-    scalar_t tgt_value = VLLM_LDG(&value[src_value_idx]);
+    scalar_t tgt_key = key[src_key_idx];
+    scalar_t tgt_value = value[src_value_idx];
     if constexpr (enable_fp8_kv_cache) {
       key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
       value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
