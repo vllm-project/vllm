@@ -52,6 +52,9 @@ Option 2: Build from source
 
 You can build and install vLLM from source:
 
+Below instruction is for ROCm 5.7 only. 
+At the time of this documentation update, PyTorch on ROCm 6.0 wheel is not yet available on the PyTorch website.
+
 0. Install prerequisites (skip if you are already in an environment/docker with the following installed):
 
 - `ROCm <https://rocm.docs.amd.com/en/latest/deploy/linux/index.html>`_
