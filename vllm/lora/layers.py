@@ -514,54 +514,58 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
 
         # q, k, v
-        self.lora_a_stacked = (torch.zeros(
-            max_loras,
-            1,
-            lora_config.max_lora_rank,
-            self.base_layer.weight.shape[1],
-            dtype=lora_config.lora_dtype,
-            device=self.base_layer.weight.device,
-        ),
-                               torch.zeros(
-                                   max_loras,
-                                   1,
-                                   lora_config.max_lora_rank,
-                                   self.base_layer.weight.shape[1],
-                                   dtype=lora_config.lora_dtype,
-                                   device=self.base_layer.weight.device,
-                               ),
-                               torch.zeros(
-                                   max_loras,
-                                   1,
-                                   lora_config.max_lora_rank,
-                                   self.base_layer.weight.shape[1],
-                                   dtype=lora_config.lora_dtype,
-                                   device=self.base_layer.weight.device,
-                               ))
-        self.lora_b_stacked = (torch.zeros(
-            max_loras,
-            1,
-            self.q_proj_shard_size,
-            lora_config.max_lora_rank,
-            dtype=lora_config.lora_dtype,
-            device=self.base_layer.weight.device,
-        ),
-                               torch.zeros(
-                                   max_loras,
-                                   1,
-                                   self.kv_proj_shard_size,
-                                   lora_config.max_lora_rank,
-                                   dtype=lora_config.lora_dtype,
-                                   device=self.base_layer.weight.device,
-                               ),
-                               torch.zeros(
-                                   max_loras,
-                                   1,
-                                   self.kv_proj_shard_size,
-                                   lora_config.max_lora_rank,
-                                   dtype=lora_config.lora_dtype,
-                                   device=self.base_layer.weight.device,
-                               ))
+        self.lora_a_stacked = (
+            torch.zeros(
+                max_loras,
+                1,
+                lora_config.max_lora_rank,
+                self.base_layer.weight.shape[1],
+                dtype=lora_config.lora_dtype,
+                device=self.base_layer.weight.device,
+            ),
+            torch.zeros(
+                max_loras,
+                1,
+                lora_config.max_lora_rank,
+                self.base_layer.weight.shape[1],
+                dtype=lora_config.lora_dtype,
+                device=self.base_layer.weight.device,
+            ),
+            torch.zeros(
+                max_loras,
+                1,
+                lora_config.max_lora_rank,
+                self.base_layer.weight.shape[1],
+                dtype=lora_config.lora_dtype,
+                device=self.base_layer.weight.device,
+            ),
+        )
+        self.lora_b_stacked = (
+            torch.zeros(
+                max_loras,
+                1,
+                self.q_proj_shard_size,
+                lora_config.max_lora_rank,
+                dtype=lora_config.lora_dtype,
+                device=self.base_layer.weight.device,
+            ),
+            torch.zeros(
+                max_loras,
+                1,
+                self.kv_proj_shard_size,
+                lora_config.max_lora_rank,
+                dtype=lora_config.lora_dtype,
+                device=self.base_layer.weight.device,
+            ),
+            torch.zeros(
+                max_loras,
+                1,
+                self.kv_proj_shard_size,
+                lora_config.max_lora_rank,
+                dtype=lora_config.lora_dtype,
+                device=self.base_layer.weight.device,
+            ),
+        )
 
         self.output_slices = (self.q_proj_shard_size, self.kv_proj_shard_size,
                               self.kv_proj_shard_size)

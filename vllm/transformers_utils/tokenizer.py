@@ -88,7 +88,8 @@ def get_lora_tokenizer(lora_request: LoRARequest, *args,
 get_lora_tokenizer_async = make_async(get_lora_tokenizer)
 
 
-class MultiLoRATokenizer:
+class TokenizerGroup:
+    """A group of tokenizers that can be used for LoRA adapters."""
 
     def __init__(self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
                  max_input_length: Optional[int], **tokenizer_config):

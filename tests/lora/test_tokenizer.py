@@ -2,13 +2,13 @@ import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer import MultiLoRATokenizer, get_lora_tokenizer
+from vllm.transformers_utils.tokenizer import TokenizerGroup, get_lora_tokenizer
 
 
 @pytest.mark.asyncio
 async def test_transformers_tokenizer():
     reference_tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    tokenizer = MultiLoRATokenizer(
+    tokenizer = TokenizerGroup(
         tokenizer_id="gpt2",
         enable_lora=False,
         max_num_seqs=1,
@@ -29,7 +29,7 @@ async def test_transformers_tokenizer():
 @pytest.mark.asyncio
 async def test_transformers_tokenizer_lora(sql_lora_files):
     reference_tokenizer = AutoTokenizer.from_pretrained(sql_lora_files)
-    tokenizer = MultiLoRATokenizer(
+    tokenizer = TokenizerGroup(
         tokenizer_id="gpt2",
         enable_lora=True,
         max_num_seqs=1,

@@ -635,7 +635,7 @@ class ModelRunner:
             for idx in range(self.lora_config.max_loras):
                 lora_id = idx + 1
                 dummy_lora_request = LoRARequest(
-                    lora_id=f"warmup_{lora_id}",
+                    lora_name=f"warmup_{lora_id}",
                     lora_int_id=lora_id,
                     lora_local_path="/not/a/real/path",
                 )
