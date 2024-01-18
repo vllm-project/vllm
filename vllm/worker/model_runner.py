@@ -62,7 +62,7 @@ class ModelRunner:
         # cache in_wsl result
         self.in_wsl = in_wsl()
 
-        self.use_fp8_kv_cache = True if 'fp8' in self.cache_config.quant_method else False
+        self.use_fp8_kv_cache = 'fp8' in self.cache_config.quant_method if self.cache_config.quant_method else False
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
