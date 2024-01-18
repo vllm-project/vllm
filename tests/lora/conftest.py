@@ -140,4 +140,4 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
 @pytest.fixture
 def llama_2_7b_model_extra_embeddings(
         llama_2_7b_engine_extra_embeddings) -> nn.Module:
-    yield llama_2_7b_engine_extra_embeddings.workers[0].model_runner.model
+    yield llama_2_7b_engine_extra_embeddings.driver_worker.model_runner.model
