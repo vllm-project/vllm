@@ -229,6 +229,7 @@ class SequenceGroup:
         seqs: The list of sequences.
         sampling_params: The sampling parameters used to generate the outputs.
         arrival_time: The arrival time of the request.
+        prefix: The prefix of the prompt of the sequence group.
     """
 
     def __init__(

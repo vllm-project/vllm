@@ -11,7 +11,6 @@ class Prefix:
         prefix caching in the future.
 
     Args:
-        prefix_id: The id of the prefix in the prefix pool.
         token_ids: The token ids of the prefix.
         block_size: The block size of the executed model.
     """
