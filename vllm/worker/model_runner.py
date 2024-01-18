@@ -59,6 +59,7 @@ class ModelRunner:
         self.graph_block_tables = None  # Set after initial profiling.
         # cache in_wsl result
         self.in_wsl = in_wsl()
+        self.use_flash_attn_zte = model_config.use_flash_attn_zte
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
@@ -145,6 +146,7 @@ class ModelRunner:
             context_lens=None,
             block_tables=None,
             use_cuda_graph=False,
+            use_flash_attn_zte=self.use_flash_attn_zte,
         )
         return input_tokens, input_positions, input_metadata, prompt_lens
 
@@ -252,6 +254,7 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            use_flash_attn_zte=self.use_flash_attn_zte,
         )
         return input_tokens, input_positions, input_metadata
 
@@ -369,6 +372,8 @@ class ModelRunner:
                 input_metadata.use_cuda_graph,
                 "selected_token_indices_size":
                 sampling_metadata.selected_token_indices.size(),
+                "use_flash_attn_zte":
+                input_metadata.use_flash_attn_zte,
             }
             broadcast_object_list([py_data], src=0)
             # TODO(zhuohan): Combine the broadcasts or set async_op=True.
@@ -426,6 +431,7 @@ class ModelRunner:
                 context_lens=context_lens,
                 block_tables=block_tables,
                 use_cuda_graph=py_data["use_cuda_graph"],
+                use_flash_attn_zte=py_data["use_flash_attn_zte"],
             )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -538,6 +544,7 @@ class ModelRunner:
                 context_lens=context_lens[:batch_size],
                 block_tables=block_tables[:batch_size],
                 use_cuda_graph=True,
+                use_flash_attn_zte=self.use_flash_attn_zte,
             )
 
             graph_runner = CUDAGraphRunner(self.model)

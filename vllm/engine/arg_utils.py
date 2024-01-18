@@ -23,6 +23,7 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
+    block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
@@ -34,6 +35,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
+    use_flash_attn_zte: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -140,6 +142,12 @@ class EngineArgs:
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
+        # KV cache arguments
+        parser.add_argument('--block-size',
+                            type=int,
+                            default=EngineArgs.block_size,
+                            choices=[8, 16, 32],
+                            help='token block size')
         # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
         parser.add_argument('--seed',
                             type=int,
@@ -195,6 +203,12 @@ class EngineArgs:
                             help='maximum context length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode.')
+        parser.add_argument(
+            '--use-flash-attn-zte',
+            action='store_true',
+            help='Use original flash attention for prefill stage and '
+            'use blocked kv cache flash attention for decode stage. '
+            'Note this will rewrite block_size of kv cache.')
         return parser
 
     @classmethod
@@ -208,16 +222,18 @@ class EngineArgs:
     def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig]:
-        model_config = ModelConfig(self.model, self.tokenizer,
-                                   self.tokenizer_mode, self.trust_remote_code,
-                                   self.download_dir, self.load_format,
-                                   self.dtype, self.seed, self.revision,
-                                   self.tokenizer_revision, self.max_model_len,
-                                   self.quantization, self.enforce_eager,
-                                   self.max_context_len_to_capture)
-        from flash_attn.flash_attn_interface import get_kvcache_block_size
-        block_size = get_kvcache_block_size(model_config.get_head_size())
-        cache_config = CacheConfig(block_size, self.gpu_memory_utilization,
+        model_config = ModelConfig(
+            self.model, self.tokenizer, self.tokenizer_mode,
+            self.trust_remote_code, self.download_dir, self.load_format,
+            self.dtype, self.seed, self.revision, self.tokenizer_revision,
+            self.max_model_len, self.quantization, self.enforce_eager,
+            self.max_context_len_to_capture, self.use_flash_attn_zte)
+        if self.use_flash_attn_zte:
+            from flash_attn.flash_attn_interface import get_kvcache_block_size
+            self.block_size = get_kvcache_block_size(
+                model_config.get_head_size())
+        cache_config = CacheConfig(self.block_size,
+                                   self.gpu_memory_utilization,
                                    self.swap_space,
                                    model_config.get_sliding_window())
         parallel_config = ParallelConfig(self.pipeline_parallel_size,

@@ -3,6 +3,7 @@ import random
 import time
 
 import torch
+from flash_attn.flash_attn_interface import flash_attn_with_blocked_kvcache, get_kvcache_block_size
 
 from vllm._C import ops
 
@@ -24,6 +25,7 @@ def main(
     seed: int,
     do_profile: bool,
 ) -> None:
+    print('block_size: ', block_size)
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -61,9 +63,13 @@ def main(
     # Create the KV cache.
     x = 16 // torch.tensor([], dtype=dtype).element_size()
     key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x, block_size, x)
+    if version == "flash-attn-zte":
+        key_cache_shape = (NUM_BLOCKS, block_size, num_kv_heads, head_size)
     key_cache = torch.empty(size=key_cache_shape, dtype=dtype, device="cuda")
     key_cache.uniform_(-scale, scale)
     value_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size, block_size)
+    if version == "flash-attn-zte":
+        value_cache_shape = (NUM_BLOCKS, block_size, num_kv_heads, head_size)
     value_cache = torch.empty(size=value_cache_shape,
                               dtype=dtype,
                               device="cuda")
@@ -92,6 +98,7 @@ def main(
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.perf_counter()
 
+        nonlocal output
         for _ in range(num_iters):
             if version == "v1":
                 ops.paged_attention_v1(
@@ -124,6 +131,17 @@ def main(
                     max_context_len,
                     alibi_slopes,
                 )
+            elif version == "flash-attn-zte":
+                output = flash_attn_with_blocked_kvcache(
+                    query.unsqueeze(1),
+                    key_cache,
+                    value_cache,
+                    block_tables,
+                    context_lens,
+                    softmax_scale=scale,
+                    causal=True,
+                    alibi_slopes=alibi_slopes,
+                )
             else:
                 raise ValueError(f"Invalid version: {version}")
         torch.cuda.synchronize()
@@ -135,7 +153,7 @@ def main(
 
     # Warmup.
     print("Warming up...")
-    run_benchmark(num_iters=3, profile=False)
+    run_benchmark(num_iters=10, profile=False)
 
     # Benchmark.
     if do_profile:
@@ -150,7 +168,7 @@ if __name__ == '__main__':
         description="Benchmark the paged attention kernel.")
     parser.add_argument("--version",
                         type=str,
-                        choices=["v1", "v2"],
+                        choices=["v1", "v2", "flash-attn-zte"],
                         default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--context-len", type=int, default=4096)
@@ -178,6 +196,9 @@ if __name__ == '__main__':
         "bfloat16": torch.bfloat16,
         "float": torch.float,
     }
+    block_size = args.block_size
+    if args.version == "flash-attn-zte":
+        block_size = get_kvcache_block_size(args.head_size)
     main(
         version=args.version,
         num_seqs=args.batch_size,
@@ -185,7 +206,7 @@ if __name__ == '__main__':
         num_query_heads=args.num_query_heads,
         num_kv_heads=args.num_kv_heads,
         head_size=args.head_size,
-        block_size=args.block_size,
+        block_size=block_size,
         use_alibi=args.use_alibi,
         dtype=dtype_to_torch_dtype[args.dtype],
         seed=args.seed,

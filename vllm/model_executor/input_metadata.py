@@ -12,6 +12,7 @@ class InputMetadata:
         max_context_len: The maximum context length.
         context_lens: the length of attention context for each sequence.
         block_tables: The block tables. (Seq id -> list of physical block)
+        use_flash_attn_zte: Use blocked kv cache based on flash attention.
     """
 
     def __init__(
@@ -22,6 +23,7 @@ class InputMetadata:
         context_lens: Optional[torch.Tensor],
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
+        use_flash_attn_zte: Optional[bool] = False,
     ) -> None:
         self.is_prompt = is_prompt
         self.max_context_len = max_context_len
@@ -29,6 +31,7 @@ class InputMetadata:
         self.context_lens = context_lens
         self.block_tables = block_tables
         self.use_cuda_graph = use_cuda_graph
+        self.use_flash_attn_zte = use_flash_attn_zte
 
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
@@ -41,4 +44,5 @@ class InputMetadata:
                 f"slot_mapping={self.slot_mapping}, "
                 f"context_lens={self.context_lens}, "
                 f"block_tables={self.block_tables}, "
-                f"use_cuda_graph={self.use_cuda_graph})")
+                f"use_cuda_graph={self.use_cuda_graph}, "
+                f"use_flash_attn_zte={self.use_flash_attn_zte})")

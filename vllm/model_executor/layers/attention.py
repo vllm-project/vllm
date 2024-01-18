@@ -72,9 +72,11 @@ class PagedAttention(nn.Module):
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            key_cache: shape = [num_blocks, block_size, num_kv_heads,
+            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
+                block_size, x] or [num_blocks, block_size, num_kv_heads,
                 head_size]
-            value_cache: shape = [num_blocks, block_size, num_kv_heads,
+            value_cache: shape = [num_blocks, num_kv_heads, head_size,
+                block_size] or [num_blocks, block_size, num_kv_heads,
                 head_size]
             input_metadata: metadata for the inputs.
         Returns:
@@ -91,13 +93,22 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            cache_ops.cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                input_metadata.slot_mapping.flatten(),
-            )
+            if not input_metadata.use_flash_attn_zte:
+                cache_ops.reshape_and_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping.flatten(),
+                )
+            else:
+                cache_ops.cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping.flatten(),
+                )
 
         if input_metadata.is_prompt:
             # Prompt run.
@@ -157,16 +168,27 @@ class PagedAttention(nn.Module):
             output = out.view_as(query)
         else:
             # Decoding run.
-            output = flash_attn_with_blocked_kvcache(
-                query.unsqueeze(1),
-                key_cache,
-                value_cache,
-                input_metadata.block_tables,
-                input_metadata.context_lens,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-            )
+            if not input_metadata.use_flash_attn_zte:
+                output = _paged_attention(
+                    query,
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                )
+            else:
+                output = flash_attn_with_blocked_kvcache(
+                    query.unsqueeze(1),
+                    key_cache,
+                    value_cache,
+                    input_metadata.block_tables,
+                    input_metadata.context_lens,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                )
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)

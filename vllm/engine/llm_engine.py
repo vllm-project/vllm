@@ -82,6 +82,7 @@ class LLMEngine:
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
+            f"use_flash_attn_zte={model_config.use_flash_attn_zte}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
