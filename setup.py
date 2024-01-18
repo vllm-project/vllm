@@ -365,6 +365,6 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={} if _is_neuron() else {"build_ext": BuildExtension},
+    cmdclass={"build_ext": BuildExtension} if not _is_neuron() else {},
     package_data=package_data,
 )
