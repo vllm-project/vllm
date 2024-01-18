@@ -130,13 +130,13 @@ class MarlinLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        
         set_weight_attrs(
             qweight, {
                 "input_dim": 0,
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
+                "tile_size": TILE_SIZE,
             })
 
         # Scales in Float16.
@@ -174,11 +174,6 @@ class MarlinLinearMethod(LinearMethodBase):
             dtype=x.dtype, 
             device=x.device
         )
-
-        print(scales.shape)
-        print(qweight.shape)
-        print(x.shape)
-        
         ops.marlin_gemm(
             x.view(-1, x.shape[-1]),
             qweight,
