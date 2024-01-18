@@ -231,7 +231,7 @@ class ModelRunner:
                 block_tables.append(block_table)
 
         batch_size = len(input_tokens)
-        max_context_len = max(context_lens)
+        max_context_len = max(context_lens) if context_lens else 0
         use_captured_graph = (
             not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
