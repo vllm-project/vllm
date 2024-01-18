@@ -172,8 +172,8 @@ class ModelConfig:
                     f"({self.sparsity}).")
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "gptq", "squeezellm"]
-        rocm_not_supported_quantization = ["awq"]
+        supported_quantization = ["awq", "gptq", "squeezellm", "marlin"]
+        rocm_not_supported_quantization = ["awq", "marlin"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -200,9 +200,10 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not supported "
                     f"in ROCm.")
-            logger.warning(f"{self.quantization} quantization is not fully "
-                           "optimized yet. The speed can be slower than "
-                           "non-quantized models.")
+            if self.quantization != "marlin":
+                logger.warning(f"{self.quantization} quantization is not fully "
+                                "optimized yet. The speed can be slower than "
+                                "non-quantized models.")
 
     def _verify_cuda_graph(self) -> None:
         if self.max_context_len_to_capture is None:
