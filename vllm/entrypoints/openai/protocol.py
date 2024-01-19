@@ -6,6 +6,7 @@ from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 from vllm.utils import random_uuid
+from vllm.sampling_params import SamplingParams
 
 
 class ErrorResponse(BaseModel):
@@ -78,6 +79,26 @@ class ChatCompletionRequest(BaseModel):
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
 
+    def to_sampling_params(self) -> SamplingParams:
+        return SamplingParams(
+            n=self.n,
+            presence_penalty=self.presence_penalty,
+            frequency_penalty=self.frequency_penalty,
+            repetition_penalty=self.repetition_penalty,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            min_p=self.min_p,
+            stop=self.stop,
+            stop_token_ids=self.stop_token_ids,
+            max_tokens=self.max_tokens,
+            best_of=self.best_of,
+            top_k=self.top_k,
+            ignore_eos=self.ignore_eos,
+            use_beam_search=self.use_beam_search,
+            skip_special_tokens=self.skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
+        )
+
 
 class CompletionRequest(BaseModel):
     model: str
@@ -106,6 +127,30 @@ class CompletionRequest(BaseModel):
     spaces_between_special_tokens: Optional[bool] = True
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+
+    def to_sampling_params(self):
+        echo_without_generation = self.echo and self.max_tokens == 0
+
+        return SamplingParams(
+            n=self.n,
+            best_of=self.best_of,
+            presence_penalty=self.presence_penalty,
+            frequency_penalty=self.frequency_penalty,
+            repetition_penalty=self.repetition_penalty,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            min_p=self.min_p,
+            stop=self.stop,
+            stop_token_ids=self.stop_token_ids,
+            ignore_eos=self.ignore_eos,
+            max_tokens=self.max_tokens if not echo_without_generation else 1,
+            logprobs=self.logprobs,
+            use_beam_search=self.use_beam_search,
+            prompt_logprobs=self.logprobs if self.echo else None,
+            skip_special_tokens=self.skip_special_tokens,
+            spaces_between_special_tokens=(self.spaces_between_special_tokens),
+        )
 
 
 class LogProbs(BaseModel):
