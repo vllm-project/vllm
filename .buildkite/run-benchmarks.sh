@@ -14,7 +14,8 @@ bench_throughput_exit_code=$?
 
 python3 -m vllm.entrypoints.openai.api-server --model meta-llama/Llama-2-7b-chat-hf &
 server_pid=$!
-wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+curl -o ShareGPT_V3_unfiltered_cleaned_split.json https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+
 # wait for server to start, timeout after 600 seconds
 timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
 python3 benchmark_serving.py \
