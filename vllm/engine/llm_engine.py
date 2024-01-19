@@ -2,9 +2,11 @@ import copy
 from collections import defaultdict
 import os
 import time
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
+                    Union)
 
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, SchedulerConfig
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import record_metrics
@@ -12,15 +14,10 @@ from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (
-    SamplerOutput,
-    Sequence,
-    SequenceGroup,
-    SequenceGroupOutput,
-    SequenceOutput,
-    SequenceStatus,
-)
-from vllm.transformers_utils.tokenizer import detokenize_incrementally, get_tokenizer
+from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
+                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
+                                               get_tokenizer)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port
 
 if ray:
@@ -100,8 +97,7 @@ class LLMEngine:
             tokenizer_mode=model_config.tokenizer_mode,
             trust_remote_code=model_config.trust_remote_code,
             tokenizer_revision=model_config.tokenizer_revision,
-            revision=model_config.revision,
-        )
+            revision=model_config.revision)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -132,8 +128,8 @@ class LLMEngine:
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker
 
-        assert (self.parallel_config.world_size == 1
-                ), "Ray is required if parallel_config.world_size > 1."
+        assert self.parallel_config.world_size == 1, (
+            "Ray is required if parallel_config.world_size > 1.")
         self._init_single_gpu_config()
         self.workers: List[Worker] = []
         distributed_init_method = f"tcp://{get_ip()}:{get_open_port()}"
@@ -329,11 +325,9 @@ class LLMEngine:
         # Initialize the cluster.
         placement_group = initialize_cluster(parallel_config)
         # Create the LLM engine.
-        engine = cls(
-            *engine_configs,
-            placement_group,
-            log_stats=not engine_args.disable_log_stats,
-        )
+        engine = cls(*engine_configs,
+                     placement_group,
+                     log_stats=not engine_args.disable_log_stats)
         return engine
 
     def add_request(
@@ -402,8 +396,8 @@ class LLMEngine:
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
 
         # Check whether the input specifies prefix
-        prefix = (self.scheduler.prefix_pool.add_or_get_prefix(
-            prompt_token_ids[:prefix_pos]) if prefix_pos is not None else None)
+        prefix = self.scheduler.prefix_pool.add_or_get_prefix(
+            prompt_token_ids[:prefix_pos]) if prefix_pos is not None else None
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
@@ -455,13 +449,13 @@ class LLMEngine:
         if early_stopping is True:
             return True
 
-        current_worst_score = current_worst_seq.get_beam_search_score(
+        current_worst_score = (current_worst_seq.get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id)
+            eos_token_id=self.tokenizer.eos_token_id))
         if early_stopping is False:
-            highest_attainable_score = best_running_seq.get_beam_search_score(
+            highest_attainable_score = (best_running_seq.get_beam_search_score(
                 length_penalty=length_penalty,
-                eos_token_id=self.tokenizer.eos_token_id)
+                eos_token_id=self.tokenizer.eos_token_id))
         else:
             assert early_stopping == "never"
             if length_penalty > 0.0:
@@ -471,21 +465,20 @@ class LLMEngine:
                 max_possible_length = max(
                     best_running_seq.get_prompt_len() +
                     sampling_params.max_tokens,
-                    self.scheduler_config.max_model_len,
-                )
-                highest_attainable_score = best_running_seq.get_beam_search_score(
-                    length_penalty=length_penalty,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                    seq_len=max_possible_length,
-                )
+                    self.scheduler_config.max_model_len)
+                highest_attainable_score = (
+                    best_running_seq.get_beam_search_score(
+                        length_penalty=length_penalty,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                        seq_len=max_possible_length))
             else:
                 # Otherwise, beam search will prefer shorter sequences. The
                 # highest attainable score calculation is based on the current
                 # sequence length.
-                highest_attainable_score = best_running_seq.get_beam_search_score(
-                    length_penalty=length_penalty,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                )
+                highest_attainable_score = (
+                    best_running_seq.get_beam_search_score(
+                        length_penalty=length_penalty,
+                        eos_token_id=self.tokenizer.eos_token_id))
         return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
@@ -574,12 +567,10 @@ class LLMEngine:
                              if seq.is_finished()]
         all_finished_seqs = existing_finished_seqs + new_finished_seqs
         # Sort the finished sequences by their scores.
-        all_finished_seqs.sort(
-            key=lambda x: x[0].get_beam_search_score(
-                length_penalty=length_penalty,
-                eos_token_id=self.tokenizer.eos_token_id),
-            reverse=True,
-        )
+        all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
+            length_penalty=length_penalty,
+            eos_token_id=self.tokenizer.eos_token_id),
+                               reverse=True)
         for seq, parent, is_new in all_finished_seqs[:beam_width]:
             if is_new:
                 # A newly generated child sequence finishes and has a high
@@ -604,12 +595,10 @@ class LLMEngine:
         running_child_seqs = [(seq, parent) for seq, parent in child_seqs
                               if not seq.is_finished()]
         # Sort the running sequences by their scores.
-        running_child_seqs.sort(
-            key=lambda x: x[0].get_beam_search_score(
-                length_penalty=length_penalty,
-                eos_token_id=self.tokenizer.eos_token_id),
-            reverse=True,
-        )
+        running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
+            length_penalty=length_penalty,
+            eos_token_id=self.tokenizer.eos_token_id),
+                                reverse=True)
 
         # Check if we can stop the beam search.
         if len(running_child_seqs) == 0:
@@ -624,10 +613,7 @@ class LLMEngine:
             current_worst_seq = all_finished_seqs[beam_width - 1][0]
             stop_beam_search = self._check_beam_search_early_stopping(
                 seq_group.sampling_params.early_stopping,
-                seq_group.sampling_params,
-                best_running_seq,
-                current_worst_seq,
-            )
+                seq_group.sampling_params, best_running_seq, current_worst_seq)
 
         if stop_beam_search:
             # Stop the beam search and remove all the running sequences from
@@ -760,8 +746,7 @@ class LLMEngine:
                     "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
                     "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-                },
-            )
+                })
 
             # Only the driver worker returns the sampling results.
             output = all_outputs[0]
@@ -811,15 +796,15 @@ class LLMEngine:
             avg_generation_throughput = 0.0
 
         total_num_gpu_blocks = self.cache_config.num_gpu_blocks
-        num_free_gpu_blocks = self.scheduler.block_manager.get_num_free_gpu_blocks(
-        )
+        num_free_gpu_blocks = (
+            self.scheduler.block_manager.get_num_free_gpu_blocks())
         num_used_gpu_blocks = total_num_gpu_blocks - num_free_gpu_blocks
         gpu_cache_usage = num_used_gpu_blocks / total_num_gpu_blocks
 
         total_num_cpu_blocks = self.cache_config.num_cpu_blocks
         if total_num_cpu_blocks > 0:
-            num_free_cpu_blocks = self.scheduler.block_manager.get_num_free_cpu_blocks(
-            )
+            num_free_cpu_blocks = (
+                self.scheduler.block_manager.get_num_free_cpu_blocks())
             num_used_cpu_blocks = total_num_cpu_blocks - num_free_cpu_blocks
             cpu_cache_usage = num_used_cpu_blocks / total_num_cpu_blocks
         else:
@@ -848,20 +833,16 @@ class LLMEngine:
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
-        (
-            new_tokens,
-            new_output_text,
-            prefix_offset,
-            read_offset,
-        ) = detokenize_incrementally(
-            self.tokenizer,
-            all_input_ids=seq.get_token_ids(),
-            prev_tokens=seq.tokens,
-            prefix_offset=seq.prefix_offset,
-            read_offset=seq.read_offset,
-            skip_special_tokens=prms.skip_special_tokens,
-            spaces_between_special_tokens=prms.spaces_between_special_tokens,
-        )
+        (new_tokens, new_output_text, prefix_offset,
+         read_offset) = detokenize_incrementally(
+             self.tokenizer,
+             all_input_ids=seq.get_token_ids(),
+             prev_tokens=seq.tokens,
+             prefix_offset=seq.prefix_offset,
+             read_offset=seq.read_offset,
+             skip_special_tokens=prms.skip_special_tokens,
+             spaces_between_special_tokens=prms.spaces_between_special_tokens,
+         )
         if seq.tokens is None:
             seq.tokens = new_tokens
         else:
@@ -896,8 +877,8 @@ class LLMEngine:
             return
 
         # Check if the sequence has generated the EOS token.
-        if (not sampling_params.ignore_eos
-            ) and seq.get_last_token_id() == self.tokenizer.eos_token_id:
+        if ((not sampling_params.ignore_eos)
+                and seq.get_last_token_id() == self.tokenizer.eos_token_id):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
