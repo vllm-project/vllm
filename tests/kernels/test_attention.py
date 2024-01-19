@@ -13,7 +13,7 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-NUM_BLOCKS = 12000  # Arbitrary values for testing
+NUM_BLOCKS = 4321  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -149,11 +149,6 @@ def test_paged_attention(
     context_lens = torch.tensor(context_lens, dtype=torch.int, device=gpu_id)
 
     # Create the block tables.
-    if use_fp8_kv_cache:
-        # When using fp8 kv cache, we should convert cache data type to fp8
-        # in reference implementation. This may occur OOM in reference impl
-        # due to large NUM_BLOCKS.
-        NUM_BLOCKS //= 3
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables = []
     for _ in range(num_seqs):
@@ -227,6 +222,8 @@ def test_paged_attention(
     # Run the reference implementation.
     if use_fp8_kv_cache:
         # Convert cache data back to dtype.
+        # There may not be enough gpu memory due to large NUM_BLOCKS.
+        # You' better reduce NUM_BLOCKS when this happend.
         x = 16 // torch.tensor([], dtype=dtype).element_size()
         key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x,
                            block_size, x)
