@@ -2,6 +2,8 @@ from typing import Dict, List, Union, Optional, Literal
 from pydantic import BaseModel, Field, validator
 from fastapi.responses import JSONResponse
 from packaging import version
+from functools import cache
+from http import HTTPStatus
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, UsageInfo
 import importlib
 import time
@@ -14,6 +16,12 @@ try:
     _fastchat_available = True
 except ImportError:
     _fastchat_available = False
+
+# vllm:0.2.7
+try:
+    from vllm.entrypoints.openai.serving_engine import OpenAIServing
+except ImportError:
+    OpenAIServing = None
 
 
 class ChatMessageEx(BaseModel):
@@ -61,10 +69,14 @@ def get_conversation_stop_token_ids(conv: Conversation):
     return conv.stop_token_ids
 
 
+@cache
 def get_default_model_template():
-    from vllm.entrypoints.openai.api_server import parser
+    try:
+        from vllm.entrypoints.openai.api_server import parser
+        args = parser.parse_args()
+    except ImportError:
+        from vllm.entrypoints.openai.api_server_turbo import parse_args as args
 
-    args = parser.parse_args()
     default_model_template = getattr(args, 'default_model_template', None)
     print('default_model_template', default_model_template)
     return default_model_template
@@ -73,6 +85,21 @@ def get_default_model_template():
 async def patch_check_model(request) -> Optional[JSONResponse]:
     from vllm.entrypoints.openai.api_server import origin_check_model
     ret = await origin_check_model(request)
+    reset_default_request(request=request)
+    return ret
+
+
+async def origin_serving_self_check_model(self, request):
+    if request.model == self.served_model:
+        return
+    return self.create_error_response(
+        message=f"The model `{request.model}` does not exist.",
+        err_type="NotFoundError",
+        status_code=HTTPStatus.NOT_FOUND)
+
+
+async def patch_serving_self_check_model(self, request):
+    ret = await self.origin_serving_check_model(request)
     reset_default_request(request=request)
     return ret
 
@@ -158,16 +185,23 @@ async def patch_get_gen_prompt(request) -> str:
 
 
 def patch_api_server():
+    print("load monkey_patch_api_request_v2")
     from vllm.entrypoints.openai import protocol
     protocol.ChatMessage = ChatMessageEx
     protocol.ChatCompletionResponseChoice = ChatCompletionResponseChoiceEx
     protocol.ChatCompletionResponse = ChatCompletionResponseEx
-
-    from vllm.entrypoints.openai.api_server import check_model as origin_check_model
-
+    try:
+        from vllm.entrypoints.openai.api_server import check_model as origin_check_model
+    except ImportError:
+        origin_check_model = None
     from vllm.entrypoints.openai import api_server
 
     api_server.get_gen_prompt = patch_get_gen_prompt
-    api_server.origin_check_model = origin_check_model
+    if origin_check_model:
+        api_server.origin_check_model = origin_check_model
+        api_server.check_model = patch_check_model
 
-    api_server.check_model = patch_check_model
+    if OpenAIServing:
+        OpenAIServing.origin_serving_check_model = origin_serving_self_check_model
+        OpenAIServing._check_model = patch_serving_self_check_model
+
