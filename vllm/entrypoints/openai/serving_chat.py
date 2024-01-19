@@ -11,7 +11,6 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import SamplingParams
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 
 logger = init_logger(__name__)
@@ -60,32 +59,11 @@ class OpenAIServingChat(OpenAIServing):
                 f"Error in applying chat template from request: {str(e)}")
             return self.create_error_response(str(e))
 
-        token_ids, error_check_ret = await self._check_length(request,
-                                                              prompt=prompt)
-        if error_check_ret is not None:
-            return error_check_ret
-
         request_id = f"cmpl-{random_uuid()}"
         try:
-            spaces_between_special_tokens = request.spaces_between_special_tokens
-            sampling_params = SamplingParams(
-                n=request.n,
-                presence_penalty=request.presence_penalty,
-                frequency_penalty=request.frequency_penalty,
-                repetition_penalty=request.repetition_penalty,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                min_p=request.min_p,
-                stop=request.stop,
-                stop_token_ids=request.stop_token_ids,
-                max_tokens=request.max_tokens,
-                best_of=request.best_of,
-                top_k=request.top_k,
-                ignore_eos=request.ignore_eos,
-                use_beam_search=request.use_beam_search,
-                skip_special_tokens=request.skip_special_tokens,
-                spaces_between_special_tokens=spaces_between_special_tokens,
-            )
+            token_ids = self._validate_prompt_and_tokenize(request,
+                                                           prompt=prompt)
+            sampling_params = request.to_sampling_params()
         except ValueError as e:
             return self.create_error_response(str(e))
 

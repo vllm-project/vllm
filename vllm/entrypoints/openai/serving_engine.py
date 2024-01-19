@@ -1,6 +1,6 @@
 import asyncio
 from http import HTTPStatus
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -104,27 +104,30 @@ class OpenAIServing:
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    async def _check_length(
-        self,
-        request: Union[ChatCompletionRequest, CompletionRequest],
-        prompt: Optional[str] = None,
-        prompt_ids: Optional[List[int]] = None
-    ) -> Tuple[List[int], Optional[ErrorResponse]]:
-        assert (not (prompt is None and prompt_ids is None)
-                and not (prompt is not None and prompt_ids is not None)
-                ), "Either prompt or prompt_ids should be provided."
+    def _validate_prompt_and_tokenize(
+            self,
+            request: Union[ChatCompletionRequest, CompletionRequest],
+            prompt: Optional[str] = None,
+            prompt_ids: Optional[List[int]] = None) -> List[int]:
+        if not (prompt or prompt_ids):
+            raise ValueError("Either prompt or prompt_ids should be provided.")
+        if (prompt and prompt_ids):
+            raise ValueError(
+                "Only one of prompt or prompt_ids should be provided.")
+
         input_ids = prompt_ids if prompt_ids is not None else self.tokenizer(
             prompt).input_ids
         token_num = len(input_ids)
 
         if request.max_tokens is None:
             request.max_tokens = self.max_model_len - token_num
+
         if token_num + request.max_tokens > self.max_model_len:
-            return input_ids, self.create_error_response(
+            raise ValueError(
                 f"This model's maximum context length is {self.max_model_len} tokens. "
                 f"However, you requested {request.max_tokens + token_num} tokens "
                 f"({token_num} in the messages, "
                 f"{request.max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.", )
         else:
-            return input_ids, None
+            return input_ids

@@ -88,6 +88,16 @@ async def test_single_completion(server, client: openai.AsyncOpenAI):
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
+    # test using token IDs
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    assert completion.choices[0].text is not None and len(
+        completion.choices[0].text) >= 5
+
 
 async def test_single_chat_session(server, client: openai.AsyncOpenAI):
     messages = [{
