@@ -19,6 +19,7 @@
 #define MARLIN_CUDA_KERNEL_CUH
 
 #include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -182,6 +183,25 @@ __device__ inline void barrier_release(int* lock) {
   }
 }
 
+__global__ void zero_data(int* data, int len, int blocks, int threads) {
+    const int idx = blockIdx.x * threads + threadIdx.x;
+    long total_size = sizeof(int) * len;
+    long chunk_size = total_size / (blocks * threads);
+    
+    long thread_offset = idx * chunk_size;
+    if (thread_offset > total_size) {
+        return;
+    }
+
+    if (thread_offset + chunk_size > total_size) {
+        chunk_size = total_size - thread_offset;
+    } 
+
+    void* start_addr = reinterpret_cast<void *>(reinterpret_cast<char *>(data) + thread_offset);
+    memset((void *) start_addr, 0, chunk_size);
+
+    __syncthreads();
+}
 
 template <
   const int threads, // number of threads in a threadblock
@@ -675,18 +695,22 @@ const int THREADS = 256;
 const int STAGES = 4; // 4 pipeline stages fit into shared memory
 const int SHARED_MEM = 96 * 1024; // max shared memory on compute capability 8.6 (< 8.0)
 
+// Essentially all reasonable GPUs have less than 256 SMs so this should be safe for now
+const int MAX_SMS = 256;
+
 #define CALL_IF(THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, GROUP_BLOCKS) \
   else if ( \
     thread_m_blocks == THREAD_M_BLOCKS && thread_n_blocks == THREAD_N_BLOCKS && thread_k_blocks == THREAD_K_BLOCKS && \
     group_blocks == GROUP_BLOCKS \
   ) { \
-    cudaMemset(locks, 0, 4 * cols); \
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream(); \
+    zero_data<<<1, MAX_SMS, 0, stream>>>(locks, MAX_SMS, 1, MAX_SMS); \
     cudaFuncSetAttribute( \
       Marlin<THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS>, \
       cudaFuncAttributeMaxDynamicSharedMemorySize, \
       SHARED_MEM \
-    ); \
-    Marlin<THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS><<<blocks, THREADS, SHARED_MEM>>>( \
+    ); \ 
+    Marlin<THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS><<<blocks, THREADS, SHARED_MEM, stream>>>( \
       A_ptr, B_ptr, C_ptr, s_ptr, \
       prob_m, prob_n, prob_k, \
       locks \

@@ -1,4 +1,3 @@
-import numpy as np
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -17,6 +16,7 @@ TILE_SIZE = 16
 # 4 Bits Packed Into 32 Bit Dtype
 PACK_FACTOR = 32 // 4
 
+
 class MarlinConfig(QuantizationConfig):
     """Config class for Marlin.
 
@@ -32,7 +32,7 @@ class MarlinConfig(QuantizationConfig):
         self.pack_factor = 32 // 4
         # Tile size of 16 used by Marlin.
         self.tile_size = 16
-        
+
         # todo(rib-2): add channelwise support (-1).
         if self.group_size != 128:
             raise ValueError(
@@ -69,6 +69,7 @@ class MarlinConfig(QuantizationConfig):
 
     def get_scaled_act_names(self) -> List[str]:
         return []
+
 
 class MarlinLinearMethod(LinearMethodBase):
     """Linear method for Marlin.
@@ -107,27 +108,26 @@ class MarlinLinearMethod(LinearMethodBase):
             raise ValueError(
                 "The input_size_per_partition must be divisible by 128, "
                 f"but got {input_size_per_partition}")
-        
+
         if output_size_per_partition % 256 != 0:
             raise ValueError(
                 "The output_size_per_partition must be divisible by 256, "
                 f"but got {output_size_per_partition}")
 
         # check that we have at least 4 tiles horizontally in the shard
-        num_tiles_per_perm = self._perm_len // (self.quant_config.tile_size ** 2)
+        num_tiles_per_perm = self._perm_len // (self.quant_config.tile_size**2)
         if output_size_per_partition % num_tiles_per_perm != 0:
             raise ValueError(
-                "Each permutation group must reside on the same gpu"
-            )
+                "Each permutation group must reside on the same gpu")
 
         # Quantized 4Bit weights packed into Int32.
         qweight = Parameter(
             torch.empty(
-                input_size_per_partition // self.quant_config.tile_size, 
-                output_size_per_partition * self.quant_config.tile_size // self.quant_config.pack_factor, 
+                input_size_per_partition // self.quant_config.tile_size,
+                output_size_per_partition * self.quant_config.tile_size //
+                self.quant_config.pack_factor,
                 device="cuda",
-                dtype=torch.int32
-            ),
+                dtype=torch.int32),
             requires_grad=False,
         )
         set_weight_attrs(
@@ -143,19 +143,21 @@ class MarlinLinearMethod(LinearMethodBase):
         scales = Parameter(
             torch.empty(
                 input_size_per_partition // self.quant_config.group_size,
-                output_size_per_partition, 
+                output_size_per_partition,
                 device="cuda",
                 dtype=params_dtype,
             ),
             requires_grad=False,
         )
-        set_weight_attrs(scales, {
-            "input_dim": None if input_size == input_size_per_partition else 0,
-            "output_dim": 1,
-        })
+        set_weight_attrs(
+            scales, {
+                "input_dim":
+                None if input_size == input_size_per_partition else 0,
+                "output_dim": 1,
+            })
 
         # Workspace for the marlin kernels.
-        self.workspace = torch.empty(MAX_SMS, dtype=torch.int)
+        self.workspace = torch.empty(MAX_SMS, dtype=torch.int, device="cuda")
 
         return {
             "B": qweight,
@@ -169,20 +171,15 @@ class MarlinLinearMethod(LinearMethodBase):
         qweight = weights["B"]
         scales = weights["s"]
 
-        output = torch.empty(
-            x.shape[:-1] + (scales.shape[1],), 
-            dtype=x.dtype, 
-            device=x.device
-        )
-        ops.marlin_gemm(
-            x.view(-1, x.shape[-1]),
-            qweight,
-            output.view(-1, output.shape[-1]),
-            scales,
-            self.workspace
-        )
-    
+        output = torch.empty(x.shape[:-1] + (scales.shape[1], ),
+                             dtype=x.dtype,
+                             device=x.device)
+
+        ops.marlin_gemm(x.view(-1, x.shape[-1]), qweight,
+                        output.view(-1, output.shape[-1]), scales,
+                        self.workspace)
+
         if bias is not None:
-            output = output + bias
+            output.add_(bias)
+
         return output
-    
