@@ -173,34 +173,18 @@ __device__ inline void barrier_acquire(int* lock, int count) {
 }
 
 // Release barrier and increment visitation count.
-__device__ inline void barrier_release(int* lock) {
+__device__ inline void barrier_release(int* lock, bool reset = false) {
   __syncthreads();
   if (threadIdx.x == 0) {
+    if (reset) {
+      lock[0] = 0;
+      return;
+    }
     int val = 1;
     // Make sure that all writes since acquiring this barrier are visible globally, while releasing the barrier. 
     asm volatile ("fence.acq_rel.gpu;\n");
     asm volatile ("red.relaxed.gpu.global.add.s32 [%0], %1;\n" : : "l"(lock), "r"(val)); 
   }
-}
-
-__global__ void zero_data(int* data, int len, int blocks, int threads) {
-    const int idx = blockIdx.x * threads + threadIdx.x;
-    long total_size = sizeof(int) * len;
-    long chunk_size = total_size / (blocks * threads);
-    
-    long thread_offset = idx * chunk_size;
-    if (thread_offset > total_size) {
-        return;
-    }
-
-    if (thread_offset + chunk_size > total_size) {
-        chunk_size = total_size - thread_offset;
-    } 
-
-    void* start_addr = reinterpret_cast<void *>(reinterpret_cast<char *>(data) + thread_offset);
-    memset((void *) start_addr, 0, chunk_size);
-
-    __syncthreads();
 }
 
 template <
@@ -669,7 +653,7 @@ __global__ void Marlin(
       if (slice_count > 1) { // only globally reduce if there is more than one block in a slice
         barrier_acquire(&locks[slice_col], slice_idx);
         global_reduce(slice_idx == 0, last);
-        barrier_release(&locks[slice_col]);
+        barrier_release(&locks[slice_col], last);
       }
       if (last) // only the last block in a slice actually writes the result
         write_result();
@@ -695,16 +679,11 @@ const int THREADS = 256;
 const int STAGES = 4; // 4 pipeline stages fit into shared memory
 const int SHARED_MEM = 96 * 1024; // max shared memory on compute capability 8.6 (< 8.0)
 
-// Essentially all reasonable GPUs have less than 256 SMs so this should be safe for now
-const int MAX_SMS = 256;
-
 #define CALL_IF(THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, GROUP_BLOCKS) \
   else if ( \
     thread_m_blocks == THREAD_M_BLOCKS && thread_n_blocks == THREAD_N_BLOCKS && thread_k_blocks == THREAD_K_BLOCKS && \
     group_blocks == GROUP_BLOCKS \
   ) { \
-    const cudaStream_t stream = at::cuda::getCurrentCUDAStream(); \
-    zero_data<<<1, MAX_SMS, 0, stream>>>(locks, MAX_SMS, 1, MAX_SMS); \
     cudaFuncSetAttribute( \
       Marlin<THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS>, \
       cudaFuncAttributeMaxDynamicSharedMemorySize, \
@@ -731,6 +710,7 @@ int marlin_cuda(
   void* workspace,
   int groupsize = -1,
   int dev = 0,
+  cudaStream_t stream = 0,
   int thread_k = -1,
   int thread_n = -1,
   int sms = -1
@@ -813,7 +793,7 @@ const int ERR_KERN_SHAPE = 2;
 // weights:   `torch.int` weight matrix of original shape `(k, n)` in Marlin format; see `Layer.pack()`
 // output:    `torch.half` out matrix of shape `(m, n)` in standard row-major layout
 // scales:    `torch.half` scales of shape `(m / groupsize, n)`
-// workspace: `torch.int` tensor with at least as many entries as there a GPU SMs (256 is usually safe)
+// workspace: `torch.int` tensor with at least `n / 128` entries that are all zero
 
 void marlin_gemm(
   const torch::Tensor& input,
@@ -835,6 +815,7 @@ void marlin_gemm(
   int groupsize = (scales.size(0) == 1) ? -1 : prob_k / scales.size(0);
   if (groupsize != -1 && groupsize * scales.size(0) != prob_k)
     AT_ERROR("k=", prob_k, " not compatible with ", scales.size(0), " groups.");
+  int dev = input.get_device();
   int err = vllm::marlin::marlin_cuda(
     input.data_ptr(),
     weights.data_ptr(),
@@ -843,7 +824,8 @@ void marlin_gemm(
     prob_m, prob_n, prob_k,
     workspace.data_ptr(),
     groupsize,
-    input.get_device(),
+    dev,
+    at::cuda::getCurrentCUDAStream(dev),
     thread_k,
     thread_n,
     sms
