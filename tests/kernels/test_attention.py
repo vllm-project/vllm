@@ -149,6 +149,11 @@ def test_paged_attention(
     context_lens = torch.tensor(context_lens, dtype=torch.int, device=gpu_id)
 
     # Create the block tables.
+    if use_fp8_kv_cache:
+        # When using fp8 kv cache, we should convert cache data type to fp8
+        # in reference implementation. This may occur OOM in reference impl
+        # due to large NUM_BLOCKS.
+        NUM_BLOCKS //= 3
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables = []
     for _ in range(num_seqs):

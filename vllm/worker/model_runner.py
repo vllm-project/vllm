@@ -30,7 +30,7 @@ class ModelRunner:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        cache_config: CacheConfig,
+        cache_config: Optional[CacheConfig] = None,
         is_driver_worker: bool = False,
     ):
         self.model_config = model_config
@@ -62,7 +62,9 @@ class ModelRunner:
         # cache in_wsl result
         self.in_wsl = in_wsl()
 
-        self.use_fp8_kv_cache = 'fp8' in self.cache_config.quant_method if self.cache_config.quant_method else False
+        self.use_fp8_kv_cache = (self.cache_config
+                                 and self.cache_config.quant_method) and (
+                                     'fp8' in self.cache_config.quant_method)
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)

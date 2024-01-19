@@ -171,15 +171,17 @@ def test_convert_fp8(
     num_blocks: int,
     dtype: torch.dtype,
     seed: int,
+    device: int,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+    gpu_id = f"cuda:{device}"
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
                                                 num_heads, head_size, dtype,
-                                                seed)
+                                                seed, gpu_id)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
