@@ -33,6 +33,9 @@ class MarlinConfig(QuantizationConfig):
         # Tile size of 16 used by Marlin.
         self.tile_size = 16
 
+        # Maximum workspace (>= than the number of GPU SMs => so 512 is safe)
+        self.max_workspace_size = 512
+
         # todo(rib-2): add channelwise support (-1).
         if self.group_size != 128:
             raise ValueError(
@@ -156,8 +159,10 @@ class MarlinLinearMethod(LinearMethodBase):
                 "output_dim": 1,
             })
 
-        # Workspace for the marlin kernels.
-        self.workspace = torch.empty(MAX_SMS, dtype=torch.int, device="cuda")
+        # Alloc workspace (shared across invocations of this layer)
+        self.workspace = torch.zeros(self.quant_config.max_workspace_size,
+                                     dtype=torch.int,
+                                     device="cuda")
 
         return {
             "B": qweight,
