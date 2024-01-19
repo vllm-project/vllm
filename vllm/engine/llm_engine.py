@@ -438,8 +438,8 @@ class LLMEngine:
 
         # Check whether the input specifies prefix
         prefix = self.scheduler.prefix_pool.add_or_get_prefix(
-            prompt_token_ids[:prefix_pos],
-            lora_request.lora_int_id) if prefix_pos is not None else None
+            prompt_token_ids[:prefix_pos], lora_request.lora_int_id
+            if lora_request else 0) if prefix_pos is not None else None
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,

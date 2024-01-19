@@ -35,8 +35,9 @@ def do_sample(llm, lora_path: str, lora_id: int):
     return generated_texts
 
 
-@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("tp_size", [1])
 def test_llama_lora(sql_lora_files, tp_size):
+    # Cannot use as it will initialize torch.cuda too early...
     # if torch.cuda.device_count() < tp_size:
     #     pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
@@ -78,7 +79,9 @@ def test_llama_lora(sql_lora_files, tp_size):
     print("removing lora")
 
 
+@pytest.mark.skip("Requires multiple GPUs")
 def test_llama_tensor_parallel_equality(sql_lora_files):
+    # Cannot use as it will initialize torch.cuda too early...
     # if torch.cuda.device_count() < 4:
     #     pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
 

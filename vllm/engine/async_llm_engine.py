@@ -227,6 +227,7 @@ class _AsyncLLMEngine(LLMEngine):
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        prefix_pos: Optional[int] = None,
     ) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -246,6 +247,7 @@ class _AsyncLLMEngine(LLMEngine):
             sampling_params=sampling_params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            prefix_pos=prefix_pos,
         )
 
     async def _run_workers_async(
