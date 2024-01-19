@@ -139,7 +139,7 @@ class MarlinLinearMethod(LinearMethodBase):
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                "tile_size": TILE_SIZE,
+                "marlin_tile_size": TILE_SIZE,
             })
 
         # Scales in Float16.

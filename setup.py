@@ -305,7 +305,6 @@ vllm_extension_sources = [
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
-    print("\n\n HERE \n\n")
     vllm_extension_sources.append(
         "csrc/quantization/marlin/marlin_cuda_kernel.cu")
 
