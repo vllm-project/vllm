@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Union
+from collections import namedtuple
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 
@@ -111,19 +112,11 @@ def broadcast_object_list(obj_list: List[Any], src: int = 0):
     return obj_list
 
 
-class TensorMetadata:
-    """A simple class to hold tensor metadata."""
-
-    def __init__(self, tensor):
-        self.dtype = tensor.dtype
-        self.size = tensor.size()
-
-    def __repr__(self):
-        return (f"TensorMetadata(dtype={self.dtype}, size={self.size})")
+TensorMetadata = namedtuple("TensorMetadata", ["dtype", "size"])
 
 
-def broadcast_tensor_dict(tensor_dict: Dict[Any, Union[torch.Tensor,
-                                                       Any]] = None,
+def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
+                                                                Any]]] = None,
                           src: int = 0) -> Dict[Any, Union[torch.Tensor, Any]]:
     """Broadcast the input tensor dictionary."""
     rank = torch.distributed.get_rank()
