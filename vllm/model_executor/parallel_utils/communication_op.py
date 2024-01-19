@@ -160,7 +160,8 @@ def broadcast_tensor_dict(tensor_dict: Dict[Any, Union[torch.Tensor,
         async_handles = []
         for key, value in metadata_list:
             if isinstance(value, TensorMetaData):
-                tensor = torch.empty(value.size, dtype=value.dtype,
+                tensor = torch.empty(value.size,
+                                     dtype=value.dtype,
                                      device="cuda")
                 async_handle = torch.distributed.broadcast(tensor,
                                                            src=src,
