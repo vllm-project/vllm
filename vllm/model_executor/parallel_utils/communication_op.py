@@ -111,15 +111,15 @@ def broadcast_object_list(obj_list: List[Any], src: int = 0):
     return obj_list
 
 
-class TensorMetaData:
-    """A simple class to hold tensor meta data."""
+class TensorMetadata:
+    """A simple class to hold tensor metadata."""
 
     def __init__(self, tensor):
         self.dtype = tensor.dtype
         self.size = tensor.size()
 
     def __repr__(self):
-        return (f"TensorMetaData(dtype={self.dtype}, size={self.size})")
+        return (f"TensorMetadata(dtype={self.dtype}, size={self.size})")
 
 
 def broadcast_tensor_dict(tensor_dict: Dict[Any, Union[torch.Tensor,
@@ -144,12 +144,12 @@ def broadcast_tensor_dict(tensor_dict: Dict[Any, Union[torch.Tensor,
                 assert value.is_cuda, (
                     f"Tensor {key}: {value} is not on cuda. Currently we only "
                     f"support broadcasting tensors on cuda.")
-                metadata_list.append((key, TensorMetaData(value)))
+                metadata_list.append((key, TensorMetadata(value)))
             else:
                 metadata_list.append((key, value))
         torch.distributed.broadcast_object_list([metadata_list], src=src)
         for key, value in metadata_list:
-            if isinstance(value, TensorMetaData):
+            if isinstance(value, TensorMetadata):
                 tensor = tensor_dict[key]
                 torch.distributed.broadcast(tensor, src=src)
     else:
@@ -159,7 +159,7 @@ def broadcast_tensor_dict(tensor_dict: Dict[Any, Union[torch.Tensor,
         tensor_dict = {}
         async_handles = []
         for key, value in metadata_list:
-            if isinstance(value, TensorMetaData):
+            if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
                                      device="cuda")
