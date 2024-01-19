@@ -393,8 +393,8 @@ class ModelRunner:
                                                      prompt_lens,
                                                      subquery_lens)
 
-            # Broadcast the input tensors.
-            input_tensors = {
+            # Broadcast the metadata.
+            metadata_dict = {
                 "input_tokens": input_tokens,
                 "input_positions": input_positions,
                 "is_prompt": input_metadata.is_prompt,
@@ -409,27 +409,27 @@ class ModelRunner:
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
             }
-            broadcast_tensor_dict(input_tensors, src=0)
+            broadcast_tensor_dict(metadata_dict, src=0)
         else:
-            input_tensors = broadcast_tensor_dict(src=0)
-            input_tokens = input_tensors["input_tokens"]
-            input_positions = input_tensors["input_positions"]
+            metadata_dict = broadcast_tensor_dict(src=0)
+            input_tokens = metadata_dict["input_tokens"]
+            input_positions = metadata_dict["input_positions"]
             input_metadata = InputMetadata(
-                is_prompt=input_tensors["is_prompt"],
-                slot_mapping=input_tensors["slot_mapping"],
-                prompt_lens=input_tensors["prompt_lens"],
-                max_seq_len=input_tensors["max_seq_len"],
-                start_loc=input_tensors["start_loc"],
-                max_context_len=input_tensors["max_context_len"],
-                context_lens=input_tensors["context_lens"],
-                block_tables=input_tensors["block_tables"],
-                use_cuda_graph=input_tensors["use_cuda_graph"],
+                is_prompt=metadata_dict["is_prompt"],
+                slot_mapping=metadata_dict["slot_mapping"],
+                prompt_lens=metadata_dict["prompt_lens"],
+                max_seq_len=metadata_dict["max_seq_len"],
+                start_loc=metadata_dict["start_loc"],
+                max_context_len=metadata_dict["max_context_len"],
+                context_lens=metadata_dict["context_lens"],
+                block_tables=metadata_dict["block_tables"],
+                use_cuda_graph=metadata_dict["use_cuda_graph"],
             )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
                 prompt_lens=None,
-                selected_token_indices=input_tensors["selected_token_indices"],
+                selected_token_indices=metadata_dict["selected_token_indices"],
                 categorized_sample_indices=None,
                 perform_sampling=False,
             )
