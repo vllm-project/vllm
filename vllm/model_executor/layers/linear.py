@@ -17,6 +17,14 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def adjust_marlin_shard(param, shard_size, shard_offset):
+    marlin_tile_size = getattr(param, "marlin_tile_size", None)
+    if marlin_tile_size is None:
+        return shard_size, shard_offset
+
+    return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
+
+
 class LinearMethodBase(ABC):
     """Base class for different (maybe quantized) linear methods."""
 
@@ -281,12 +289,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
 
-                    # If marlin, we need to adjust the offset and size to account
-                    # for the tiling.
-                    marlin_tile_size = getattr(param, "tile_size", None)
-                    if marlin_tile_size is not None:
-                        shard_size = shard_size * marlin_tile_size
-                        shard_offset = shard_offset * marlin_tile_size
+                    # If marlin, we need to adjust the offset and size to account for the tiling.
+                    shard_size, shard_offset = adjust_marlin_shard(
+                        param, shard_size, shard_offset)
 
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
@@ -306,12 +311,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size = shard_size // param.pack_factor
                 shard_offset = shard_offset // param.pack_factor
 
-                # If marlin, we need to adjust the offset and size to account
-                # for the tiling.
-                marlin_tile_size = getattr(param, "tile_size", None)
-                if marlin_tile_size is not None:
-                    shard_size = shard_size * marlin_tile_size
-                    shard_offset = shard_offset * marlin_tile_size
+                # If marlin, we need to adjust the offset and size to account for the tiling.
+                shard_size, shard_offset = adjust_marlin_shard(
+                    param, shard_size, shard_offset)
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
@@ -417,12 +419,9 @@ class QKVParallelLinear(ColumnParallelLinear):
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
 
-                    # If marlin, we need to adjust the offset and size to account
-                    # for the tiling.
-                    marlin_tile_size = getattr(param, "tile_size", None)
-                    if marlin_tile_size is not None:
-                        shard_size = shard_size * marlin_tile_size
-                        shard_offset = shard_offset * marlin_tile_size
+                    # If marlin, we need to adjust the offset and size to account for the tiling.
+                    shard_size, shard_offset = adjust_marlin_shard(
+                        param, shard_size, shard_offset)
 
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
@@ -449,12 +448,9 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_size = shard_size // param.pack_factor
                 shard_offset = shard_offset // param.pack_factor
 
-                # If marlin, we need to adjust the offset and size to account
-                # for the tiling
-                marlin_tile_size = getattr(param, "tile_size", None)
-                if marlin_tile_size is not None:
-                    shard_size = shard_size * marlin_tile_size
-                    shard_offset = shard_offset * marlin_tile_size
+                # If marlin, we need to adjust the offset and size to account for the tiling.
+                shard_size, shard_offset = adjust_marlin_shard(
+                    param, shard_size, shard_offset)
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
