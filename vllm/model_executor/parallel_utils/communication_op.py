@@ -137,7 +137,8 @@ def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
                 assert value.is_cuda, (
                     f"Tensor {key}: {value} is not on cuda. Currently we only "
                     f"support broadcasting tensors on cuda.")
-                metadata_list.append((key, TensorMetadata(value)))
+                metadata_list.append(
+                    (key, TensorMetadata(value.dtype, value.size())))
             else:
                 metadata_list.append((key, value))
         torch.distributed.broadcast_object_list([metadata_list], src=src)
