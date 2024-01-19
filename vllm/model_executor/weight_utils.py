@@ -159,7 +159,6 @@ def prepare_hf_model_weights(
             matching = fnmatch.filter(file_list, pattern)
             if len(matching) > 0:
                 allow_patterns = [pattern]
-
                 break
 
         logger.info(f"Using model weights format {allow_patterns}")
