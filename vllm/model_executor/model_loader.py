@@ -8,6 +8,8 @@ from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.weight_utils import (get_quant_config,
+                                              initialize_dummy_weights)
 
 
 @contextlib.contextmanager
@@ -31,8 +33,6 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 
 
 def get_model(model_config: ModelConfig) -> nn.Module:
-    from vllm.model_executor.weight_utils import (get_quant_config,
-                                                  initialize_dummy_weights)
     model_class = _get_model_architecture(model_config.hf_config)
 
     # Get the (maybe quantized) linear method.
