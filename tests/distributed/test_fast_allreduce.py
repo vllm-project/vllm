@@ -7,7 +7,7 @@ import ray
 
 from vllm.model_executor.parallel_utils import fast_allreduce as fast_ar
 from vllm.model_executor.parallel_utils.communication_op import tensor_model_parallel_all_reduce
-from tests.distributed.comm_utils import init_test_distributed_environment, multi_process_tensor_parallel
+from vllm.test_utils import init_test_distributed_environment, multi_process_tensor_parallel
 
 random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for i in range(8)]
