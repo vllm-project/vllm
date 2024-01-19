@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast_object_list)
+    broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -175,20 +175,21 @@ class Worker:
             assert blocks_to_swap_in is not None
             assert blocks_to_swap_out is not None
             assert blocks_to_copy is not None
-            block_swapping_info = [
-                blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy
-            ]
-            broadcast_object_list([num_seq_groups] + block_swapping_info,
-                                  src=0)
+            data = {
+                "num_seq_groups": num_seq_groups,
+                "blocks_to_swap_in": blocks_to_swap_in,
+                "blocks_to_swap_out": blocks_to_swap_out,
+                "blocks_to_copy": blocks_to_copy,
+            }
+            broadcast_tensor_dict(data, src=0)
         else:
-            # num_seq_groups, blocks_to_swap_in, blocks_to_swap_out,
-            # blocks_to_copy (4 elements)
-            recv_data = [None] * 4
-            broadcast_object_list(recv_data, src=0)
-            num_seq_groups = recv_data[0]
-            block_swapping_info = recv_data[1:]
+            data = broadcast_tensor_dict(src=0)
+            num_seq_groups = data["num_seq_groups"]
+            blocks_to_swap_in = data["blocks_to_swap_in"]
+            blocks_to_swap_out = data["blocks_to_swap_out"]
+            blocks_to_copy = data["blocks_to_copy"]
 
-        self.cache_swap(*block_swapping_info)
+        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:

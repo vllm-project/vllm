@@ -9,7 +9,7 @@ from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast, broadcast_object_list)
+    broadcast_tensor_dict)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import in_wsl
@@ -393,121 +393,43 @@ class ModelRunner:
                                                      prompt_lens,
                                                      subquery_lens)
 
-            def get_size_or_none(x: Optional[torch.Tensor]):
-                return x.size() if x is not None else None
-
-            # Broadcast the input data. For input tensors, we first broadcast
-            # its shape and then broadcast the tensor to avoid high
-            # serialization cost.
-            py_data = {
-                "input_tokens_size":
-                input_tokens.size(),
-                "input_positions_size":
-                input_positions.size(),
-                "is_prompt":
-                input_metadata.is_prompt,
-                "slot_mapping_size":
-                get_size_or_none(input_metadata.slot_mapping),
-                "prompt_lens_size":
-                get_size_or_none(input_metadata.prompt_lens),
-                "max_seq_len":
-                input_metadata.max_seq_len,
-                "start_loc_size":
-                get_size_or_none(input_metadata.start_loc),
-                "max_context_len":
-                input_metadata.max_context_len,
-                "context_lens_size":
-                get_size_or_none(input_metadata.context_lens),
-                "block_tables_size":
-                get_size_or_none(input_metadata.block_tables),
-                "use_cuda_graph":
-                input_metadata.use_cuda_graph,
-                "selected_token_indices_size":
-                sampling_metadata.selected_token_indices.size(),
+            # Broadcast the metadata.
+            metadata_dict = {
+                "input_tokens": input_tokens,
+                "input_positions": input_positions,
+                "is_prompt": input_metadata.is_prompt,
+                "slot_mapping": input_metadata.slot_mapping,
+                "prompt_lens": input_metadata.prompt_lens,
+                "max_seq_len": input_metadata.max_seq_len,
+                "start_loc": input_metadata.start_loc,
+                "max_context_len": input_metadata.max_context_len,
+                "context_lens": input_metadata.context_lens,
+                "block_tables": input_metadata.block_tables,
+                "use_cuda_graph": input_metadata.use_cuda_graph,
+                "selected_token_indices":
+                sampling_metadata.selected_token_indices,
             }
-            broadcast_object_list([py_data], src=0)
-            # TODO(zhuohan): Combine the broadcasts or set async_op=True.
-            broadcast(input_tokens, src=0)
-            broadcast(input_positions, src=0)
-            if input_metadata.slot_mapping is not None:
-                broadcast(input_metadata.slot_mapping, src=0)
-            if input_metadata.prompt_lens is not None:
-                broadcast(input_metadata.prompt_lens, src=0)
-            if input_metadata.start_loc is not None:
-                broadcast(input_metadata.start_loc, src=0)
-            if input_metadata.context_lens is not None:
-                broadcast(input_metadata.context_lens, src=0)
-            if input_metadata.block_tables is not None:
-                broadcast(input_metadata.block_tables, src=0)
-            broadcast(sampling_metadata.selected_token_indices, src=0)
+            broadcast_tensor_dict(metadata_dict, src=0)
         else:
-            receving_list = [None]
-            broadcast_object_list(receving_list, src=0)
-            py_data = receving_list[0]
-            input_tokens = torch.empty(*py_data["input_tokens_size"],
-                                       dtype=torch.long,
-                                       device="cuda")
-            broadcast(input_tokens, src=0)
-            input_positions = torch.empty(*py_data["input_positions_size"],
-                                          dtype=torch.long,
-                                          device="cuda")
-            broadcast(input_positions, src=0)
-            if py_data["slot_mapping_size"] is not None:
-                slot_mapping = torch.empty(*py_data["slot_mapping_size"],
-                                           dtype=torch.long,
-                                           device="cuda")
-                broadcast(slot_mapping, src=0)
-            else:
-                slot_mapping = None
-            if py_data["prompt_lens_size"] is not None:
-                prompt_lens = torch.empty(*py_data["prompt_lens_size"],
-                                          dtype=torch.long,
-                                          device="cuda")
-                broadcast(prompt_lens, src=0)
-            else:
-                prompt_lens = None
-            if py_data["start_loc_size"] is not None:
-                start_loc = torch.empty(*py_data["start_loc_size"],
-                                        dtype=torch.long,
-                                        device="cuda")
-                broadcast(start_loc, src=0)
-            else:
-                start_loc = None
-            if py_data["context_lens_size"] is not None:
-                context_lens = torch.empty(*py_data["context_lens_size"],
-                                           dtype=torch.int,
-                                           device="cuda")
-                broadcast(context_lens, src=0)
-            else:
-                context_lens = None
-            if py_data["block_tables_size"] is not None:
-                block_tables = torch.empty(*py_data["block_tables_size"],
-                                           dtype=torch.int,
-                                           device="cuda")
-                broadcast(block_tables, src=0)
-            else:
-                block_tables = None
-            selected_token_indices = torch.empty(
-                *py_data["selected_token_indices_size"],
-                dtype=torch.long,
-                device="cuda")
-            broadcast(selected_token_indices, src=0)
+            metadata_dict = broadcast_tensor_dict(src=0)
+            input_tokens = metadata_dict["input_tokens"]
+            input_positions = metadata_dict["input_positions"]
             input_metadata = InputMetadata(
-                is_prompt=py_data["is_prompt"],
-                slot_mapping=slot_mapping,
-                prompt_lens=prompt_lens,
-                max_seq_len=py_data["max_seq_len"],
-                start_loc=start_loc,
-                max_context_len=py_data["max_context_len"],
-                context_lens=context_lens,
-                block_tables=block_tables,
-                use_cuda_graph=py_data["use_cuda_graph"],
+                is_prompt=metadata_dict["is_prompt"],
+                slot_mapping=metadata_dict["slot_mapping"],
+                prompt_lens=metadata_dict["prompt_lens"],
+                max_seq_len=metadata_dict["max_seq_len"],
+                start_loc=metadata_dict["start_loc"],
+                max_context_len=metadata_dict["max_context_len"],
+                context_lens=metadata_dict["context_lens"],
+                block_tables=metadata_dict["block_tables"],
+                use_cuda_graph=metadata_dict["use_cuda_graph"],
             )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
                 prompt_lens=None,
-                selected_token_indices=selected_token_indices,
+                selected_token_indices=metadata_dict["selected_token_indices"],
                 categorized_sample_indices=None,
                 perform_sampling=False,
             )
