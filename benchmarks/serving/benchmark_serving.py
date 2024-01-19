@@ -274,7 +274,7 @@ if __name__ == "__main__":
         "--backend",
         type=str,
         default="vllm",
-        choices=["vllm", "tgi", "openai", "deepspeed-mii", "tensorrt-llm"],
+        choices=list(ASYNC_REQUEST_FUNCS.keys()),
     )
     parser.add_argument("--version", type=str, default="N/A")
     parser.add_argument(
