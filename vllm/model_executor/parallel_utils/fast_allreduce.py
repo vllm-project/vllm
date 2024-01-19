@@ -118,7 +118,7 @@ class FastAllreduce:
         self.fast_cond = self.full_nvlink or world_size <= 2
 
     def _get_ipc_meta(self, inp: torch.Tensor):
-        data = inp.storage()._share_cuda_()
+        data = inp.untyped_storage()._share_cuda_()
         shard_data = (
             data[1],  # ipc handle to base ptr
             data[3],  # offset of base ptr
