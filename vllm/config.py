@@ -201,9 +201,10 @@ class ModelConfig:
                     f"{self.quantization} quantization is currently not supported "
                     f"in ROCm.")
             if self.quantization != "marlin":
-                logger.warning(f"{self.quantization} quantization is not fully "
-                                "optimized yet. The speed can be slower than "
-                                "non-quantized models.")
+                logger.warning(
+                    f"{self.quantization} quantization is not fully "
+                    "optimized yet. The speed can be slower than "
+                    "non-quantized models.")
 
     def _verify_cuda_graph(self) -> None:
         if self.max_context_len_to_capture is None:
