@@ -140,15 +140,15 @@ class BlockSpaceManager:
         num_prefix_blocks = 0
 
         prefix = seq_group.prefix
-        # Update the reference counts to the prefix from all the seqs
-        # in this group.
-        prefix.seq_ref_count += seq_group.num_seqs()
-        if prefix is not None and prefix.allocated:
-            # Prefix has already been allocated. Use the existing block table.
-            num_prompt_blocks -= prefix.get_num_blocks()
-            for block in prefix.block_table:
-                block.ref_count += seq_group.num_seqs()
-                block_table.append(block)
+        if prefix is not None:
+            prefix.seq_ref_count += seq_group.num_seqs()
+
+            if prefix.allocated:
+                # Prefix has already been allocated. Use the existing block table.
+                num_prompt_blocks -= prefix.get_num_blocks()
+                for block in prefix.block_table:
+                    block.ref_count += seq_group.num_seqs()
+                    block_table.append(block)
 
         for logical_idx in range(num_prompt_blocks):
             if (self.block_sliding_window is not None
