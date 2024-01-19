@@ -10,7 +10,7 @@ from vllm.lora.request import LoRARequest
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
-from vllm.prefix import PrefixPool
+from vllm.prefix import PrefixPool, Prefix
 
 logger = init_logger(__name__)
 
@@ -149,7 +149,7 @@ class Scheduler:
                     if seq.is_finished():
                         continue
                     seq.status = SequenceStatus.FINISHED_ABORTED
-                    self.free_seq(seq)
+                    self.free_seq(seq, aborted_group.prefix)
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
@@ -167,6 +167,22 @@ class Scheduler:
         now = time.monotonic()
 
         # Join waiting sequences if possible.
+        # TODO(jadielam): There is an inefficiency here in the way we are scheduling
+        # sequences. We should first process swapped sequences, and then process waiting
+        # sequences (until resources allow of course).
+        # Currently when we process swapped sequences, we do not consider afterwards if
+        # there are enough resources to add some of the waiting sequences.
+        # In some situations (that is, when the number of swapped sequences is small)
+        # we might be leaving some resources unused because of that.
+
+        # TODO(jadielam): Also, there seems to be a bigger problem with the current code:
+        # On this one I am not so sure, but I am making a note of it here to not forget.
+        # If there are no swapped sequences, we never consider if we have enough
+        # resources to add the next token on the currently running sequences.
+        # Question that is not clear to me regarding this: Do we mix and match and run
+        # requests in the prompt stage together with requests in the generation stage
+        # on an engine step? If the answer is NO, then this is not a problem, but
+        # if the answer is YES, then my concerns here might be valid.
         if not self.swapped:
             ignored_seq_groups: List[SequenceGroup] = []
             scheduled: List[SequenceGroup] = []
@@ -388,15 +404,27 @@ class Scheduler:
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
 
-    def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
-        self.block_manager.fork(parent_seq, child_seq)
+    def fork_seq(self,
+                 parent_seq: Sequence,
+                 child_seq: Sequence,
+                 prefix: Optional[Prefix] = None) -> None:
+        self.block_manager.fork(parent_seq, child_seq, prefix)
 
-    def free_seq(self, seq: Sequence) -> None:
-        self.block_manager.free(seq)
+    def free_seq(self, seq: Sequence, prefix: Optional[Prefix] = None) -> None:
+        self.block_manager.free(seq, prefix)
 
     def free_finished_seq_groups(self) -> None:
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
+
+    def free_old_prefixes(self):
+        """
+        Deallocates the GPU memory of prefixes that have been moved to the list of candidates
+        for deallocation in the prefix pool and that are not currently being used by any sequence group.
+        """
+        prefixes_to_free = self.prefix_pool.get_prefixes_to_free()
+        for prefix in prefixes_to_free:
+            self.block_manager.free_prefix(prefix)
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
@@ -423,6 +451,14 @@ class Scheduler:
         blocks_to_swap_out: Dict[int, int],
         preemption_mode: Optional[PreemptionMode] = None,
     ) -> None:
+        """
+        Preempts the given sequence group. PreemptionMode.RECOMPUTE can only
+        be used if the sequence group has a single sequence. 
+        
+        Raises: 
+            AssertionError if PreemptionMode.RECOMPUTE is used for a 
+                sequence group with multiple sequences.
+        """
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
         # swapping. However, when the sequence group has multiple sequences
@@ -454,7 +490,7 @@ class Scheduler:
         assert len(seqs) == 1
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
-            self.block_manager.free(seq)
+            self.block_manager.free(seq, seq_group.prefix)
         # NOTE: For FCFS, we insert the preempted sequence group to the front
         # of the waiting queue.
         self.waiting.appendleft(seq_group)

@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+from vllm.prefix import Prefix
 
 
 class BlockAllocator:
@@ -46,6 +47,12 @@ class BlockAllocator:
         block.ref_count -= 1
         if block.ref_count == 0:
             self.free_blocks.append(block)
+
+    def force_free(self, block: PhysicalTokenBlock) -> None:
+        """Force free a block without checking its ref count. 
+        Currently used to free prefix blocks, whose block.ref_count is going
+        to be 1 at this moment in time. Handle with care!"""
+        self.free_blocks.append(block)
 
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
@@ -133,6 +140,9 @@ class BlockSpaceManager:
         num_prefix_blocks = 0
 
         prefix = seq_group.prefix
+        # Update the reference counts to the prefix from all the seqs
+        # in this group.
+        prefix.seq_ref_count += seq_group.num_seqs()
         if prefix is not None and prefix.allocated:
             # Prefix has already been allocated. Use the existing block table.
             num_prompt_blocks -= prefix.get_num_blocks()
@@ -155,6 +165,9 @@ class BlockSpaceManager:
             # KV cache in this run.
             num_prefix_blocks = prefix.get_num_blocks()
             prefix_block_table = block_table[:num_prefix_blocks]
+            # The extra reference count increment on the prefix blocks
+            # guarantees that the prefix blocks will not be freed even
+            # if all sequences that share the prefix are finished.
             for block in prefix_block_table:
                 block.ref_count += 1
             prefix.set_block_table(prefix_block_table)
@@ -202,11 +215,16 @@ class BlockSpaceManager:
             self.gpu_allocator.free(last_block)
             return last_block.block_number, new_block.block_number
 
-    def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
+    def fork(self,
+             parent_seq: Sequence,
+             child_seq: Sequence,
+             prefix: Optional[Prefix] = None) -> None:
         # NOTE: fork does not allocate a new physical block.
         # Thus, it is always safe from OOM.
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.copy()
+        if prefix is not None:
+            prefix.seq_ref_count += 1
         for block in src_block_table:
             block.ref_count += 1
 
@@ -223,12 +241,19 @@ class BlockSpaceManager:
 
     def can_swap_in(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
+        seq_group_blocks = len(blocks)
         num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
+
+        # If sequence has a prefix and prefix is already allocated,
+        # there is no need to count blocks for the prefix.
+        if seq_group.prefix is not None and seq_group.prefix.allocated:
+            seq_group_blocks -= seq_group.prefix.get_num_blocks()
+
         # NOTE: Conservatively, we assume that every sequence will allocate
         # at least one free block right after the swap-in.
         # NOTE: This should match the logic in can_append_slot().
-        num_required_blocks = len(blocks) + num_swapped_seqs
+        num_required_blocks = seq_group_blocks + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
@@ -276,6 +301,8 @@ class BlockSpaceManager:
             block_table = self.block_tables[seq.seq_id]
 
             for gpu_block in block_table:
+                # TODO(jadielam) The `in` operation on a list (the block_table) might be slow
+                # if the list is long. Think of alternatives to speed this up.
                 if (seq_group.prefix is not None
                         and gpu_block in seq_group.prefix.block_table):
                     # NOTE: We do not swap out the prefix blocks for now.
@@ -306,13 +333,22 @@ class BlockSpaceManager:
             else:
                 self.cpu_allocator.free(block)
 
-    def free(self, seq: Sequence) -> None:
+    def free(self, seq: Sequence, prefix: Optional[Prefix] = None) -> None:
         if seq.seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
             return
+        if prefix is not None:
+            prefix.seq_ref_count -= 1
         block_table = self.block_tables[seq.seq_id]
         self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]
+
+    def free_prefix_blocks(self, prefix: Prefix) -> None:
+        # Safety check here, don't know if necessary.
+        assert prefix.allocated and prefix.seq_ref_count == 0
+        block_table = prefix.block_table
+        for block in set(block_table):
+            self.gpu_allocator.force_free(block)
 
     def reset(self) -> None:
         for block_table in self.block_tables.values():

@@ -565,7 +565,7 @@ class LLMEngine:
                 # not be used in the future iterations.
                 parent.status = SequenceStatus.FINISHED_ABORTED
                 seq_group.remove(parent.seq_id)
-                self.scheduler.free_seq(parent)
+                self.scheduler.free_seq(parent, seq_group.prefix)
                 continue
             # Fork the parent sequence if there are multiple child samples.
             for child_sample in child_samples[:-1]:
@@ -594,7 +594,7 @@ class LLMEngine:
                 if seq is not parent:
                     seq_group.add(seq)
                     if not seq.is_finished():
-                        self.scheduler.fork_seq(parent, seq)
+                        self.scheduler.fork_seq(parent, seq, seq_group.prefix)
 
             # Free the finished and selected parent sequences' memory in block
             # manager. Keep them in the sequence group as candidate output.
@@ -602,7 +602,7 @@ class LLMEngine:
             # old sequences.
             for seq, parent in child_seqs:
                 if seq is parent and seq.is_finished():
-                    self.scheduler.free_seq(seq)
+                    self.scheduler.free_seq(seq, seq_group.prefix)
             return
 
         # Beam search case
@@ -689,13 +689,13 @@ class LLMEngine:
             if seq is not parent:
                 seq_group.add(seq)
                 if not seq.is_finished():
-                    self.scheduler.fork_seq(parent, seq)
+                    self.scheduler.fork_seq(parent, seq, seq_group.prefix)
 
         # Free the finished and selected parent sequences' memory in block
         # manager. Keep them in the sequence group as candidate output.
         for seq, parent in selected_child_seqs:
             if seq is parent and seq.is_finished():
-                self.scheduler.free_seq(seq)
+                self.scheduler.free_seq(seq, seq_group.prefix)
 
         # Remove the unselected parent sequences from the sequence group and
         # free their memory in block manager.
@@ -704,7 +704,7 @@ class LLMEngine:
                 # Remove the parent sequence if it is not selected for next
                 # iteration
                 seq_group.remove(seq.seq_id)
-                self.scheduler.free_seq(seq)
+                self.scheduler.free_seq(seq, seq_group.prefix)
 
     def _process_model_outputs(
             self, output: SamplerOutput,
@@ -731,6 +731,11 @@ class LLMEngine:
             if (seq_group.prefix is not None and seq_group.prefix.allocated
                     and not seq_group.prefix.computed):
                 seq_group.prefix.computed = True
+
+        # Remove prefixes that are due for removal because they are no longer
+        # being used by any sequence group and have been moved to the candidates
+        # to remove list in the PrefixPool
+        self.scheduler.free_old_prefixes()
 
         if self.log_stats:
             # Log the system stats.

@@ -176,6 +176,10 @@ class Sequence:
         self.data.append_token_id(token_id, logprobs[token_id])
 
     def get_len(self) -> int:
+        """
+        Returns the lenght of the sequence in number of tokens. This length
+        includes the prompt and the generated tokens up to that point.
+        """
         return self.data.get_len()
 
     def get_prompt_len(self) -> int:

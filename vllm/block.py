@@ -60,6 +60,12 @@ class PhysicalTokenBlock:
         self.block_number = block_number
         self.block_size = block_size
 
+        # Contains the number of sequences that share this block that
+        # are currently allocated in the same device as this block.
+        # Notice that prefix blocks will have an extra 1 added to this
+        # reference count to guarantee that prefix blocks are not deallocated
+        # by the standard way that the block manager uses to free the memory
+        # for blocks.
         self.ref_count = 0
 
     def __repr__(self) -> str:
