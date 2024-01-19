@@ -163,7 +163,7 @@ def prepare_hf_model_weights(
                     use_safetensors = True
                 break
 
-        logger.info(f"Downloading model weights {allow_patterns}")
+        logger.info(f"Using model weights format {allow_patterns}")
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
         with get_lock(model_name_or_path, cache_dir):
