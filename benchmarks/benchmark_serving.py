@@ -163,14 +163,13 @@ async def benchmark(
     request_rate: float,
 ) -> None:
     tasks: List[asyncio.Task] = []
-    async for request in tqdm(get_request(input_requests, request_rate),
-                              total=len(input_requests)):
+    async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len = request
         task = asyncio.create_task(
             send_request(backend, model, api_url, prompt, prompt_len,
                          output_len, best_of, use_beam_search))
         tasks.append(task)
-    await asyncio.gather(*tasks)
+    await tqdm.gather(*tasks)
 
 
 def main(args: argparse.Namespace):
