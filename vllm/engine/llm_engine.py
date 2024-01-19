@@ -919,6 +919,20 @@ class LLMEngine:
         return [driver_worker_output] + ray_worker_outputs
 
     def _init_single_gpu_config(self) -> None:
+        """Using monkey patching to avoid initializing distributed group for a single GPU
+
+        Details
+            - Step 1: As shown in the following code, use monkey patching to modify 
+             `get_tensor_model_parallel_rank`、`get_tensor_model_parallel_world_size` 
+             and get_tensor_model_parallel_group.
+            - Step 2: Due to Python's import mechanism, we must reload certain 
+             modules (those to be reloaded are stored in `_NEED_RELOAD_MODULES`) so that 
+             the monkey patching in Step 1 can take effect.
+            - Step 3: Use monkey patching to modify the `_init_distributed_environment` of
+            module `vllm.worker.worker`
+
+        
+        """
         _NEED_RELOAD_MODULES = [
             "vllm.model_executor.parallel_utils.communication_op",
             "vllm.model_executor.layers.linear",
@@ -926,28 +940,22 @@ class LLMEngine:
             "vllm.model_executor.layers.sampler",
             "vllm.model_executor.layers.vocab_parallel_embedding",
         ]
-
-        def _parallel_rank_mp(*args, **kargs) -> int:
-            return 0
-
-        def _parallel_world_size_mp(*args, **kargs) -> int:
-            return 1
-
-        def _parallel_group_mp(*args, **kargs) -> int:
-            return 1
-
         import sys
         import importlib
         import vllm.model_executor.parallel_utils.parallel_state as ps_module
-
-        ps_module.get_tensor_model_parallel_world_size = _parallel_world_size_mp
-        ps_module.get_tensor_model_parallel_rank = _parallel_rank_mp
-        ps_module.get_tensor_model_parallel_group = _parallel_group_mp
+        assert self.parallel_config.world_size == 1, (
+            "it is required that the world_size must be 1.")
+        #Step 1
+        ps_module.get_tensor_model_parallel_rank = lambda *args, **kargs: 0
+        ps_module.get_tensor_model_parallel_world_size = lambda *args, **kargs: 1
+        ps_module.get_tensor_model_parallel_group = lambda *args, **kargs: 1
+        #Step 2
         for module_name in _NEED_RELOAD_MODULES:
             if module_name in sys.modules:
                 module_before = sys.modules.get(module_name, None)
                 _ = importlib.reload(module_before)  # retrurn reloaded module
-        module_worker = "vllm.worker.worker"
-        module = sys.modules.get(module_worker, None)
-        assert module
-        module._init_distributed_environment = lambda *args, **kargs: 0
+        #Step 3
+        module_worker_name = "vllm.worker.worker"
+        module_worker = sys.modules.get(module_worker_name, None)
+        assert module_worker
+        module_worker._init_distributed_environment = lambda *args, **kargs: None
