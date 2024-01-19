@@ -19,10 +19,11 @@ class MockLogitsSampler(Sampler):
         self.fake_logits = fake_logits
 
     def forward(self, *args, **kwargs):
-        with patch("vllm.model_executor.layers.sampler._prune_hidden_states",
-                   lambda x, y: x), patch(
-                       "vllm.model_executor.layers.sampler._get_logits",
-                       lambda *args, **kwargs: self.fake_logits):
+        with patch(
+                "vllm.model_executor.layers.sampler._prune_hidden_states",
+                lambda x, y: x), patch(
+                    "vllm.model_executor.layers.sampler.Sampler._get_logits",
+                    lambda *args, **kwargs: self.fake_logits):
             return super().forward(*args, **kwargs)
 
 

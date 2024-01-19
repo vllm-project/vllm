@@ -42,6 +42,10 @@ class MockEngine:
         del kwargs  # Unused
         self.add_request_calls += 1
 
+    async def add_request_async(self, **kwargs):
+        del kwargs  # Unused
+        self.add_request_calls += 1
+
     def abort_request(self, request_id):
         del request_id  # Unused
         self.abort_request_calls += 1
