@@ -246,7 +246,8 @@ class OpenAIServingCompletion(OpenAIServing):
             result_generator = self.engine.generate(None,
                                                     sampling_params,
                                                     request_id,
-                                                    prompt_token_ids=input_ids)
+                                                    prompt_token_ids=input_ids,
+                                                    prefix_pos=request.prefix_pos)
         except ValueError as e:
             return self.create_error_response(str(e))
 

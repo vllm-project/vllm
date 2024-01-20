@@ -78,6 +78,7 @@ class ChatCompletionRequest(BaseModel):
     echo: Optional[bool] = False
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    prefix_pos: Optional[int] = None
 
     def to_sampling_params(self) -> SamplingParams:
         return SamplingParams(
@@ -127,6 +128,7 @@ class CompletionRequest(BaseModel):
     spaces_between_special_tokens: Optional[bool] = True
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    prefix_pos: Optional[int] = None
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
