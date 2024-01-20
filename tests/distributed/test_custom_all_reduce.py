@@ -16,12 +16,13 @@ for i, v in enumerate(test_sizes):
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def graph_registration(world_size, rank, distributed_init_port):
+def graph_allreduce(world_size, rank, distributed_init_port):
     init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
+    custom_ar.init_custom_ar()
     for sz in test_sizes:
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            with custom_ar.capture(enable=True):
+            with custom_ar.capture():
                 # use integers so result matches NCCL exactly
                 inp1 = torch.randint(1,
                                      16, (sz, ),
@@ -35,9 +36,9 @@ def graph_registration(world_size, rank, distributed_init_port):
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
                     out1 = tensor_model_parallel_all_reduce(inp1)
-                    out2 = tensor_model_parallel_all_reduce(inp2)
                     # the input buffer is immediately modified to test synchronization
                     dist.all_reduce(inp1)
+                    out2 = tensor_model_parallel_all_reduce(inp2)
                     dist.all_reduce(inp2)
             graph.replay()
             assert torch.allclose(out1, inp1)
@@ -45,7 +46,7 @@ def graph_registration(world_size, rank, distributed_init_port):
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def manual_registration(world_size, rank, distributed_init_port):
+def eager_allreduce(world_size, rank, distributed_init_port):
     init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
     sz = 1024
@@ -54,8 +55,13 @@ def manual_registration(world_size, rank, distributed_init_port):
     inp = torch.ones(sz,
                      dtype=torch.float32,
                      device=torch.cuda.current_device())
-    fa.register_buffer(inp)
-    out = fa.all_reduce(inp)
+    out = fa.all_reduce_unreg(inp)
+    assert torch.allclose(out, inp * world_size)
+    
+    inp = torch.ones(sz * 4,
+                     dtype=torch.bfloat16,
+                     device=torch.cuda.current_device())
+    out = fa.all_reduce_unreg(inp)
     assert torch.allclose(out, inp * world_size)
 
 
@@ -63,6 +69,6 @@ def manual_registration(world_size, rank, distributed_init_port):
                     reason="Need at least 4 GPUs to run the test.")
 @pytest.mark.parametrize("tensor_parallel_size", [2, 4])
 @pytest.mark.parametrize("test_target",
-                         [manual_registration, graph_registration])
+                         [eager_allreduce, graph_allreduce])
 def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
     multi_process_tensor_parallel(tensor_parallel_size, test_target)

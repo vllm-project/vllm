@@ -10,9 +10,9 @@ using fptr_t = uint64_t;
 static_assert(sizeof(void *) == sizeof(fptr_t));
 
 fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,
-                    const std::vector<std::string> &handles,
-                    const std::vector<int64_t> &offsets, int rank,
-                    bool full_nvlink) {
+                      const std::vector<std::string> &handles,
+                      const std::vector<int64_t> &offsets, int rank,
+                      bool full_nvlink) {
   int world_size = offsets.size();
   if (world_size > 8)
     throw std::invalid_argument("world size > 8 is not supported");
@@ -33,29 +33,39 @@ fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,
       rank_data.numel(), ipc_handles, offsets, rank, full_nvlink);
 }
 
-void allreduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out) {
+// Make sure tensor t's data lies completely within
+// ((char)t.data_ptr()) + t.numel() * t.element_size()
+// This is slightly weaker than t.is_contiguous() because it allows transposes.
+// Currently, we need this information because stride information is not passed
+// into the kernels
+bool _is_weak_contiguous(torch::Tensor &t) {
+  return t.is_contiguous() ||
+         t.storage().nbytes() == t.numel() * t.element_size();
+}
+
+void _all_reduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out,
+                 cudaStream_t stream) {
   auto fa = reinterpret_cast<vllm::FastAllreduce *>(_fa);
-  auto stream = c10::cuda::getCurrentCUDAStream().stream();
-  TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
-  TORCH_CHECK_EQ(inp.numel(), out.numel());
-  switch (inp.scalar_type()) {
+  TORCH_CHECK(_is_weak_contiguous(inp));
+  TORCH_CHECK(_is_weak_contiguous(out));
+  switch (out.scalar_type()) {
     case at::ScalarType::Float: {
       fa->allreduce<float>(stream, reinterpret_cast<float *>(inp.data_ptr()),
                            reinterpret_cast<float *>(out.data_ptr()),
-                           inp.numel());
+                           out.numel());
       break;
     }
     case at::ScalarType::Half: {
       fa->allreduce<half>(stream, reinterpret_cast<half *>(inp.data_ptr()),
                           reinterpret_cast<half *>(out.data_ptr()),
-                          inp.numel());
+                          out.numel());
       break;
     }
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
     case at::ScalarType::BFloat16: {
       fa->allreduce<nv_bfloat16>(
           stream, reinterpret_cast<nv_bfloat16 *>(inp.data_ptr()),
-          reinterpret_cast<nv_bfloat16 *>(out.data_ptr()), inp.numel());
+          reinterpret_cast<nv_bfloat16 *>(out.data_ptr()), out.numel());
       break;
     }
 #endif
@@ -63,6 +73,30 @@ void allreduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out) {
       throw std::runtime_error(
           "custom allreduce only supports float32, float16 and bfloat16");
   }
+}
+
+void all_reduce_reg(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out) {
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
+  TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
+  TORCH_CHECK_EQ(inp.numel(), out.numel());
+  _all_reduce(_fa, inp, out, stream);
+}
+
+void all_reduce_unreg(fptr_t _fa, torch::Tensor &inp, torch::Tensor &reg_buffer,
+                      torch::Tensor &out) {
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
+
+  auto input_size = inp.numel() * inp.element_size();
+  TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
+  TORCH_CHECK_EQ(inp.numel(), out.numel());
+  TORCH_CHECK(input_size <= reg_buffer.numel() * reg_buffer.element_size(),
+              "registered buffer is too small to contain the input");
+  TORCH_CHECK(_is_weak_contiguous(inp));
+  AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer.data_ptr(), inp.data_ptr(),
+                                input_size, cudaMemcpyDeviceToDevice, stream));
+  _all_reduce(_fa, reg_buffer, out, stream);
 }
 
 void dispose(fptr_t _fa) {

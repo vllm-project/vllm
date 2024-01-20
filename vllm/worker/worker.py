@@ -10,6 +10,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_object_list)
+from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -73,7 +74,8 @@ class Worker:
         # Initialize the distributed environment.
         _init_distributed_environment(self.parallel_config, self.rank,
                                       self.distributed_init_method)
-
+        if not self.parallel_config.disable_custom_all_reduce:
+            init_custom_ar()
         # Initialize the model.
         set_random_seed(self.model_config.seed)
 

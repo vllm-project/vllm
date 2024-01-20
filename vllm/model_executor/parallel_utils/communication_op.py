@@ -1,4 +1,5 @@
 import torch
+from typing import Optional
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -8,27 +9,38 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils import custom_all_reduce as custom_ar
 
 
-def tensor_model_parallel_all_reduce(input_: torch.Tensor):
+def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
+    ca_handle = custom_ar.get_handle()
+    # when custom allreduce is disabled, this will be None
+    if ca_handle is None:
+        return
+    if custom_ar.is_capturing():
+        if torch.cuda.is_current_stream_capturing():
+            if ca_handle.should_custom_ar(input):
+                return ca_handle.all_reduce_reg(input)
+        else:
+            if ca_handle.should_custom_ar(input):
+                # if warm up, mimic the allocation pattern
+                # since custom allreduce is out-of-place
+                return torch.empty_like(input)
+    else:
+        # note: outside of cuda graph context,
+        # fast allreduce incurs a cost of cudaMemcpy
+        if ca_handle.should_custom_ar(input):
+            return ca_handle.all_reduce_unreg(input)
+
+
+def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group.
 
-    NOTE: This operation is applied in-place on the input tensor.
+    NOTE: This operation may be applied in-place on the input tensor.
     """
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
         return input_
-    # custom allreduce only works with IPC pre-registered buffer.
-    # This is only handled when captured with cuda graph
-    if custom_ar.is_capturing():
-        ca_handle = custom_ar.get_handle()
-        if torch.cuda.is_current_stream_capturing():
-            if ca_handle.should_custom_ar(input_):
-                return ca_handle.all_reduce(input_)
-        else:
-            if ca_handle.should_custom_ar(input_):
-                # if warm up, mimic the allocation pattern
-                # since custom allreduce is out-of-place
-                return torch.empty_like(input_)
-
+    out = custom_all_reduce(input_)
+    if out is not None:
+        return out
     torch.distributed.all_reduce(input_,
                                  group=get_tensor_model_parallel_group())
     return input_

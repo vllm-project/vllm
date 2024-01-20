@@ -44,16 +44,15 @@ def get_handle() -> Optional["FastAllreduce"]:
 
 
 @contextmanager
-def capture(enable: bool):
-    if enable:
-        init_custom_ar()
+def capture():
     try:
         begin_capture()
         yield
     finally:
         end_capture()
-        if enable and get_handle() is not None:
-            get_handle().register_graph_buffers()
+        handle = get_handle()
+        if handle is not None:
+            handle.register_graph_buffers()
 
 
 # query if the set of gpus are fully connected by nvlink (1 hop)
@@ -106,7 +105,10 @@ class FastAllreduce:
         self.meta = torch.zeros(custom_ar.meta_size() + max_size,
                                 dtype=torch.uint8,
                                 device="cuda")
-        self.rank_data = torch.empty(16 * 1024 * 1024,
+        self.buffer = torch.empty(max_size,
+                                dtype=torch.uint8,
+                                device="cuda")
+        self.rank_data = torch.empty(8 * 1024 * 1024,
                                      dtype=torch.uint8,
                                      device="cuda")
         self.max_size = max_size
@@ -116,6 +118,7 @@ class FastAllreduce:
         self._ptr = custom_ar.init_custom_ar(self.meta, self.rank_data, handles,
                                          offsets, rank, self.full_nvlink)
         self.fast_cond = self.full_nvlink or world_size <= 2
+        self.register_buffer(self.buffer)
 
     def _get_ipc_meta(self, inp: torch.Tensor):
         data = inp.untyped_storage()._share_cuda_()
@@ -147,17 +150,25 @@ class FastAllreduce:
         custom_ar.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
-        inp_size = inp.numel() * torch.finfo(inp.dtype).bits // 8
+        inp_size = inp.numel() * inp.element_size()
         if self.fast_cond:
             return inp_size <= self.max_size
         # 4 pcie gpus use 2 stage AR, and is only faster than NCCL
         # when size <= 512k
         return self.world_size <= 4 and inp_size <= 512 * 1024
 
-    def all_reduce(self, inp: torch.Tensor, out: torch.Tensor = None):
+    # all reduce, assuming inp tensor is IPC registered with register_buffer, or, in the context of cuda graphs, register_graph_buffers
+    def all_reduce_reg(self, inp: torch.Tensor, out: torch.Tensor = None):
         if out is None:
             out = torch.empty_like(inp)
-        custom_ar.allreduce(self._ptr, inp, out)
+        custom_ar.all_reduce_reg(self._ptr, inp, out)
+        return out
+
+    # all reduce, assuming inp tensor is NOT IPC registered
+    def all_reduce_unreg(self, inp: torch.Tensor, out: torch.Tensor = None):
+        if out is None:
+            out = torch.empty_like(inp)
+        custom_ar.all_reduce_unreg(self._ptr, inp, self.buffer, out)
         return out
 
     def close(self):
