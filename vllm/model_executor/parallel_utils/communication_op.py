@@ -1,3 +1,6 @@
+from collections import namedtuple
+from typing import Any, Dict, List, Optional, Union
+
 import torch
 
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -7,7 +10,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 )
 
 
-def tensor_model_parallel_all_reduce(input_):
+def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group.
 
     NOTE: This operation is applied in-place on the input tensor.
@@ -21,7 +24,8 @@ def tensor_model_parallel_all_reduce(input_):
     return input_
 
 
-def tensor_model_parallel_all_gather(input_, dim=-1):
+def tensor_model_parallel_all_gather(input_: torch.Tensor,
+                                     dim: int = -1) -> torch.Tensor:
     """All-gather the input tensor across model parallel group."""
     world_size = get_tensor_model_parallel_world_size()
     # Bypass the function if we are using only 1 GPU.
@@ -48,7 +52,9 @@ def tensor_model_parallel_all_gather(input_, dim=-1):
     return output_tensor
 
 
-def tensor_model_parallel_gather(input_, dst=0, dim=-1):
+def tensor_model_parallel_gather(input_: torch.Tensor,
+                                 dst: int = 0,
+                                 dim: int = -1) -> torch.Tensor:
     """Gather the input tensor across model parallel group.
 
     NOTE: We assume that the input tensor is on the same device across
@@ -80,7 +86,7 @@ def tensor_model_parallel_gather(input_, dst=0, dim=-1):
     return output_tensor
 
 
-def broadcast(input_, src=0):
+def broadcast(input_: torch.Tensor, src: int = 0):
     """Broadcast the input tensor."""
     world_size = torch.distributed.get_world_size()
     assert 0 <= src < world_size, f"Invalid src rank ({src})"
@@ -93,7 +99,7 @@ def broadcast(input_, src=0):
     return input_
 
 
-def broadcast_object_list(obj_list, src=0):
+def broadcast_object_list(obj_list: List[Any], src: int = 0):
     """Broadcast the input object list."""
     world_size = torch.distributed.get_world_size()
     assert 0 <= src < world_size, f"Invalid src rank ({src})"
@@ -104,3 +110,60 @@ def broadcast_object_list(obj_list, src=0):
     # Broadcast.
     torch.distributed.broadcast_object_list(obj_list, src=src)
     return obj_list
+
+
+TensorMetadata = namedtuple("TensorMetadata", ["dtype", "size"])
+
+
+def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
+                                                                Any]]] = None,
+                          src: int = 0) -> Dict[Any, Union[torch.Tensor, Any]]:
+    """Broadcast the input tensor dictionary."""
+    rank = torch.distributed.get_rank()
+    world_size = torch.distributed.get_world_size()
+    assert 0 <= src < world_size, f"Invalid src rank ({src})"
+
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        return tensor_dict
+
+    if rank == src:
+        assert isinstance(
+            tensor_dict,
+            dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
+        metadata_list = []
+        for key, value in tensor_dict.items():
+            if isinstance(value, torch.Tensor):
+                assert value.is_cuda, (
+                    f"Tensor {key}: {value} is not on cuda. Currently we only "
+                    f"support broadcasting tensors on cuda.")
+                metadata_list.append(
+                    (key, TensorMetadata(value.dtype, value.size())))
+            else:
+                metadata_list.append((key, value))
+        torch.distributed.broadcast_object_list([metadata_list], src=src)
+        for key, value in metadata_list:
+            if isinstance(value, TensorMetadata):
+                tensor = tensor_dict[key]
+                torch.distributed.broadcast(tensor, src=src)
+    else:
+        recv_metadata_list = [None]
+        torch.distributed.broadcast_object_list(recv_metadata_list, src=src)
+        metadata_list = recv_metadata_list[0]
+        tensor_dict = {}
+        async_handles = []
+        for key, value in metadata_list:
+            if isinstance(value, TensorMetadata):
+                tensor = torch.empty(value.size,
+                                     dtype=value.dtype,
+                                     device="cuda")
+                async_handle = torch.distributed.broadcast(tensor,
+                                                           src=src,
+                                                           async_op=True)
+                async_handles.append(async_handle)
+                tensor_dict[key] = tensor
+            else:
+                tensor_dict[key] = value
+        for async_handle in async_handles:
+            async_handle.wait()
+    return tensor_dict
