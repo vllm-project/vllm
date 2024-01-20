@@ -1,8 +1,7 @@
 from collections import namedtuple
-from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Union
 
-if TYPE_CHECKING:
-    from torch.distributed import ProcessGroup
+from torch.distributed import ProcessGroup
 
 import torch
 
@@ -91,7 +90,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
 
 def broadcast(input_: torch.Tensor,
               src: int = 0,
-              group: "Optional[ProcessGroup]" = None):
+              group: Optional[ProcessGroup] = None):
     """Broadcast the input tensor."""
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
@@ -108,7 +107,7 @@ def broadcast(input_: torch.Tensor,
 
 def broadcast_object_list(obj_list: List[Any],
                           src: int = 0,
-                          group: "Optional[ProcessGroup]" = None):
+                          group: Optional[ProcessGroup] = None):
     """Broadcast the input object list."""
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
@@ -129,7 +128,7 @@ TensorMetadata = namedtuple("TensorMetadata", ["dtype", "size"])
 def broadcast_tensor_dict(
     tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
     src: int = 0,
-    group: "Optional[ProcessGroup]" = None,
+    group: Optional[ProcessGroup] = None,
 ) -> Dict[Any, Union[torch.Tensor, Any]]:
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
