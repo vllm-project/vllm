@@ -2,7 +2,6 @@ from collections import namedtuple
 from typing import Any, Dict, List, Optional, Union
 
 import torch
-from typing import Optional
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -28,7 +27,9 @@ def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
                 return torch.empty_like(input)
     else:
         # note: outside of cuda graph context,
-        # fast allreduce incurs a cost of cudaMemcpy
+        # custom allreduce incurs a cost of cudaMemcpy, which should
+        # be small(<=1% of overall latency) compared to the performance
+        # gains of using custom kernels
         if ca_handle.should_custom_ar(input):
             return ca_handle.all_reduce_unreg(input)
 
