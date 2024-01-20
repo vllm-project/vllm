@@ -119,11 +119,11 @@ def broadcast_object_list(obj_list: List[Any], src: int = 0, group=None):
 TensorMetadata = namedtuple("TensorMetadata", ["dtype", "size"])
 
 
-def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
-                                                                Any]]] = None,
-                          src: int = 0,
-                          group=None,
-                          ) -> Dict[Any, Union[torch.Tensor, Any]]:
+def broadcast_tensor_dict(
+    tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
+    src: int = 0,
+    group=None,
+) -> Dict[Any, Union[torch.Tensor, Any]]:
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_group(group).ranks()
@@ -149,14 +149,18 @@ def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
                     (key, TensorMetadata(value.dtype, value.size())))
             else:
                 metadata_list.append((key, value))
-        torch.distributed.broadcast_object_list([metadata_list], src=src, group=group)
+        torch.distributed.broadcast_object_list([metadata_list],
+                                                src=src,
+                                                group=group)
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = tensor_dict[key]
                 torch.distributed.broadcast(tensor, src=src)
     else:
         recv_metadata_list = [None]
-        torch.distributed.broadcast_object_list(recv_metadata_list, src=src, group=group)
+        torch.distributed.broadcast_object_list(recv_metadata_list,
+                                                src=src,
+                                                group=group)
         metadata_list = recv_metadata_list[0]
         tensor_dict = {}
         async_handles = []
@@ -168,8 +172,7 @@ def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
                 async_handle = torch.distributed.broadcast(tensor,
                                                            src=src,
                                                            async_op=True,
-                                                           group=group
-                                                           )
+                                                           group=group)
                 async_handles.append(async_handle)
                 tensor_dict[key] = tensor
             else:
