@@ -236,17 +236,22 @@ class OpenAIServingCompletion(OpenAIServing):
                     "Batching in completion API is not supported.")
             prompt = prompts[0]
 
+            prefix_pos = None
             if prompt_is_tokens:
+                prefix_pos = request.prefix_pos
                 input_ids = self._validate_prompt_and_tokenize(
                     request, prompt_ids=prompt)
             else:
+                if request.prefix is not None:
+                    prefix_pos = len(self.tokenizer.encode(request.prefix)) - 1
                 input_ids = self._validate_prompt_and_tokenize(request,
                                                                prompt=prompt)
 
             result_generator = self.engine.generate(None,
                                                     sampling_params,
                                                     request_id,
-                                                    prompt_token_ids=input_ids)
+                                                    prompt_token_ids=input_ids,
+                                                    prefix_pos=prefix_pos)
         except ValueError as e:
             return self.create_error_response(str(e))
 
