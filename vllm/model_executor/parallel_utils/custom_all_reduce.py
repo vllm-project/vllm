@@ -105,9 +105,7 @@ class FastAllreduce:
         self.meta = torch.zeros(custom_ar.meta_size() + max_size,
                                 dtype=torch.uint8,
                                 device="cuda")
-        self.buffer = torch.empty(max_size,
-                                dtype=torch.uint8,
-                                device="cuda")
+        self.buffer = torch.empty(max_size, dtype=torch.uint8, device="cuda")
         self.rank_data = torch.empty(8 * 1024 * 1024,
                                      dtype=torch.uint8,
                                      device="cuda")
@@ -115,8 +113,9 @@ class FastAllreduce:
         self.world_size = world_size
         handles, offsets = self._get_ipc_meta(self.meta)
         self.full_nvlink = _is_full_nvlink(rank, world_size)
-        self._ptr = custom_ar.init_custom_ar(self.meta, self.rank_data, handles,
-                                         offsets, rank, self.full_nvlink)
+        self._ptr = custom_ar.init_custom_ar(self.meta, self.rank_data,
+                                             handles, offsets, rank,
+                                             self.full_nvlink)
         self.fast_cond = self.full_nvlink or world_size <= 2
         self.register_buffer(self.buffer)
 

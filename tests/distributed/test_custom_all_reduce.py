@@ -57,7 +57,7 @@ def eager_allreduce(world_size, rank, distributed_init_port):
                      device=torch.cuda.current_device())
     out = fa.all_reduce_unreg(inp)
     assert torch.allclose(out, inp * world_size)
-    
+
     inp = torch.ones(sz * 4,
                      dtype=torch.bfloat16,
                      device=torch.cuda.current_device())
@@ -68,7 +68,6 @@ def eager_allreduce(world_size, rank, distributed_init_port):
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
 @pytest.mark.parametrize("tensor_parallel_size", [2, 4])
-@pytest.mark.parametrize("test_target",
-                         [eager_allreduce, graph_allreduce])
+@pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
 def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
     multi_process_tensor_parallel(tensor_parallel_size, test_target)
