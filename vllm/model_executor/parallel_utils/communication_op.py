@@ -8,30 +8,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_group,
 )
-from vllm.model_executor.parallel_utils import custom_all_reduce as custom_ar
-
-
-def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
-    ca_handle = custom_ar.get_handle()
-    # when custom allreduce is disabled, this will be None
-    if ca_handle is None:
-        return
-    if custom_ar.is_capturing():
-        if torch.cuda.is_current_stream_capturing():
-            if ca_handle.should_custom_ar(input):
-                return ca_handle.all_reduce_reg(input)
-        else:
-            if ca_handle.should_custom_ar(input):
-                # if warm up, mimic the allocation pattern
-                # since custom allreduce is out-of-place
-                return torch.empty_like(input)
-    else:
-        # note: outside of cuda graph context,
-        # custom allreduce incurs a cost of cudaMemcpy, which should
-        # be small(<=1% of overall latency) compared to the performance
-        # gains of using custom kernels
-        if ca_handle.should_custom_ar(input):
-            return ca_handle.all_reduce_unreg(input)
+from vllm.model_executor.parallel_utils.custom_all_reduce import custom_all_reduce
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:

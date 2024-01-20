@@ -53,6 +53,29 @@ def capture():
         handle = get_handle()
         if handle is not None:
             handle.register_graph_buffers()
+            
+
+def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
+    ca_handle = get_handle()
+    # when custom allreduce is disabled, this will be None
+    if ca_handle is None:
+        return
+    if is_capturing():
+        if torch.cuda.is_current_stream_capturing():
+            if ca_handle.should_custom_ar(input):
+                return ca_handle.all_reduce_reg(input)
+        else:
+            if ca_handle.should_custom_ar(input):
+                # if warm up, mimic the allocation pattern
+                # since custom allreduce is out-of-place
+                return torch.empty_like(input)
+    else:
+        # note: outside of cuda graph context,
+        # custom allreduce incurs a cost of cudaMemcpy, which should
+        # be small(<=1% of overall latency) compared to the performance
+        # gains of using custom kernels
+        if ca_handle.should_custom_ar(input):
+            return ca_handle.all_reduce_unreg(input)
 
 
 # query if the set of gpus are fully connected by nvlink (1 hop)
