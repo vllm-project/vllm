@@ -33,14 +33,26 @@ fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,
       rank_data.numel(), ipc_handles, offsets, rank, full_nvlink);
 }
 
-// Make sure tensor t's data lies completely within
-// ((char)t.data_ptr()) + t.numel() * t.element_size()
-// This is slightly weaker than t.is_contiguous() because it allows transposes.
-// Currently, we need this information because stride information is not passed
-// into the kernels
+/**
+ * Make sure tensor t's data lies completely within ((char)t.data_ptr()) +
+ * t.numel() * t.element_size(). This is slightly weaker than t.is_contiguous()
+ * because it allows transpose of contiguous slice (i.e. slicing the first
+ * dimension). Currently, we require this because stride information is not
+ * passed into the kernels and we treat input tensors as flat.
+ *
+ * Examples
+ * A = torch.zeros(3, 3, 3)
+ * 1. A: OK
+ * 2. A[1:]: OK
+ * 3. A.permute(2, 0, 1): OK
+ * 4. A[1:].permute(2, 0, 1): OK
+ * 5. A[None].expand(2, -1, -1, -1): Not OK
+ * 6. A[:, 1:, 1:]: Not OK
+ */
 bool _is_weak_contiguous(torch::Tensor &t) {
   return t.is_contiguous() ||
-         t.storage().nbytes() == t.numel() * t.element_size();
+         t.storage().nbytes() - t.storage_offset() * t.element_size() ==
+             t.numel() * t.element_size();
 }
 
 void _all_reduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out,
