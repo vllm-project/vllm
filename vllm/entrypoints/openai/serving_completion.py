@@ -244,6 +244,7 @@ class OpenAIServingCompletion(OpenAIServing):
             else:
                 if request.prefix is not None:
                     prefix_pos = len(self.tokenizer.encode(request.prefix)) - 1
+                    prompt = request.prefix + prompt
                 input_ids = self._validate_prompt_and_tokenize(request,
                                                                prompt=prompt)
 
