@@ -82,14 +82,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &get_device_attribute,
     "Gets the specified device attribute.");
 
-  pybind11::module fast_ar = m.def_submodule("fast_ar", "fast allreduce");
-  fast_ar.def("init_fast_ar", &init_fast_ar, "init_fast_ar");
-  fast_ar.def("allreduce", &allreduce, "allreduce");
-  fast_ar.def("dispose", &dispose, "dispose");
-  fast_ar.def("meta_size", &meta_size, "meta_size");
-  fast_ar.def("register_buffer", &register_buffer, "register_buffer");
-  fast_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta,
+  pybind11::module custom_ar = m.def_submodule("custom_ar", "fast allreduce");
+  custom_ar.def("init_custom_ar", &init_custom_ar, "init_custom_ar");
+  custom_ar.def("allreduce", &allreduce, "allreduce");
+  custom_ar.def("dispose", &dispose, "dispose");
+  custom_ar.def("meta_size", &meta_size, "meta_size");
+  custom_ar.def("register_buffer", &register_buffer, "register_buffer");
+  custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta,
               "get_graph_buffer_ipc_meta");
-  fast_ar.def("register_graph_buffers", &register_graph_buffers,
+  custom_ar.def("register_graph_buffers", &register_graph_buffers,
               "register_graph_buffers");
 }

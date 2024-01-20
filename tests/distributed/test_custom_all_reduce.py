@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 import ray
 
-from vllm.model_executor.parallel_utils import fast_allreduce as fast_ar
+from vllm.model_executor.parallel_utils import custom_all_reduce as custom_ar
 from vllm.model_executor.parallel_utils.communication_op import tensor_model_parallel_all_reduce
 from vllm.test_utils import init_test_distributed_environment, multi_process_tensor_parallel
 
@@ -21,7 +21,7 @@ def graph_registration(world_size, rank, distributed_init_port):
                                       distributed_init_port)
     for sz in test_sizes:
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            with fast_ar.capture(enable=True):
+            with custom_ar.capture(enable=True):
                 # use integers so result matches NCCL exactly
                 inp1 = torch.randint(1,
                                      16, (sz, ),
@@ -49,8 +49,8 @@ def manual_registration(world_size, rank, distributed_init_port):
     init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
     sz = 1024
-    fast_ar.init_fast_ar()
-    fa = fast_ar.get_handle()
+    custom_ar.init_custom_ar()
+    fa = custom_ar.get_handle()
     inp = torch.ones(sz,
                      dtype=torch.float32,
                      device=torch.cuda.current_device())

@@ -35,7 +35,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
-    disable_fast_allreduce: bool = False
+    disable_custom_all_reduce: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -205,7 +205,7 @@ class EngineArgs:
                             'larger than this, we fall back to eager mode.')
         parser.add_argument('--disable-fast-allreduce',
                             action='store_true',
-                            default=EngineArgs.disable_fast_allreduce,
+                            default=EngineArgs.disable_custom_all_reduce,
                             help='See ParallelConfig')
         return parser
 
@@ -235,7 +235,7 @@ class EngineArgs:
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
-                                         self.disable_fast_allreduce)
+                                         self.disable_custom_all_reduce)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,

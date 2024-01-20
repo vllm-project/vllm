@@ -1,15 +1,15 @@
 /**
- * This is a standalone test for fast allreduce.
+ * This is a standalone test for custom allreduce.
  * To compile, make sure you have MPI and NCCL installed in your system.
  * export MPI_HOME=XXX
- * nvcc -O2 -arch=native -std=c++17 fast_allreduce_test.cu -o
- * fast_allreduce_test -lnccl -I${MPI_HOME}/include -lmpi
+ * nvcc -O2 -arch=native -std=c++17 custom_all_reduce_test.cu -o
+ * custom_all_reduce_test -lnccl -I${MPI_HOME}/include -lmpi
  *
  * Warning: this C++ test is not designed to be very readable and was used
  * during the rapid prototyping process.
  *
  * To run:
- * mpirun -np 8 ./fast_allreduce_test
+ * mpirun -np 8 ./custom_all_reduce_test
  */
 #include <cuda.h>
 #include <curand_kernel.h>
@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "cuda_profiler_api.h"
-#include "fast_allreduce.cuh"
+#include "custom_all_reduce.cuh"
 #include "mpi.h"
 #include "nccl.h"
 

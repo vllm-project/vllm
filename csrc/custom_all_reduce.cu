@@ -3,13 +3,13 @@
 #include <c10/cuda/CUDAStream.h>
 #include <torch/extension.h>
 
-#include "fast_allreduce.cuh"
+#include "custom_all_reduce.cuh"
 
 // fake pointer type
 using fptr_t = uint64_t;
 static_assert(sizeof(void *) == sizeof(fptr_t));
 
-fptr_t init_fast_ar(torch::Tensor &meta, torch::Tensor &rank_data,
+fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,
                     const std::vector<std::string> &handles,
                     const std::vector<int64_t> &offsets, int rank,
                     bool full_nvlink) {
@@ -61,7 +61,7 @@ void allreduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out) {
 #endif
     default:
       throw std::runtime_error(
-          "Fast allreduce only supports float32, float16 and bfloat16");
+          "custom allreduce only supports float32, float16 and bfloat16");
   }
 }
 

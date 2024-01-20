@@ -473,7 +473,7 @@ class FastAllreduce {
     auto d = packed_t<T>::P::size;
     if (size % d != 0)
       throw std::runtime_error(
-          "fast allreduce currently requires input length to be multiple of " +
+          "custom allreduce currently requires input length to be multiple of " +
           std::to_string(d));
 
     RankData *ptrs;
@@ -522,7 +522,7 @@ class FastAllreduce {
       REDUCE_CASE(8)
       default:
         throw std::runtime_error(
-            "Fast allreduce only supports num gpus in (2,4,6,8). Actual num "
+            "custom allreduce only supports num gpus in (2,4,6,8). Actual num "
             "gpus = " +
             std::to_string(world_size_));
     }

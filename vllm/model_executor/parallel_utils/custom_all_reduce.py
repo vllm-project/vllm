@@ -4,25 +4,25 @@ import torch
 import torch.distributed as dist
 from typing import Optional
 
-from vllm._C import fast_ar
+from vllm._C import custom_ar
 from vllm.logger import init_logger
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank)
 
 logger = init_logger(__name__)
 
-_FA_HANDLE = None
+_ca_handle = None
 _IS_CAPTURING = False
 
 
-def init_fast_ar() -> None:
-    global _FA_HANDLE
-    if _FA_HANDLE is not None:
+def init_custom_ar() -> None:
+    global _ca_handle
+    if _ca_handle is not None:
         return
     rank = get_tensor_model_parallel_rank()
     world_size = get_tensor_model_parallel_world_size()
     if world_size > 1 and _can_p2p(rank, world_size):
-        _FA_HANDLE = FastAllreduce(rank, world_size)
+        _ca_handle = FastAllreduce(rank, world_size)
 
 
 def begin_capture() -> None:
@@ -36,17 +36,17 @@ def end_capture() -> None:
 
 
 def is_capturing() -> bool:
-    return _IS_CAPTURING and _FA_HANDLE is not None
+    return _IS_CAPTURING and _ca_handle is not None
 
 
 def get_handle() -> Optional["FastAllreduce"]:
-    return _FA_HANDLE
+    return _ca_handle
 
 
 @contextmanager
 def capture(enable: bool):
     if enable:
-        init_fast_ar()
+        init_custom_ar()
     try:
         begin_capture()
         yield
@@ -87,12 +87,12 @@ def _can_p2p(rank, world_size):
                 if p2p_status != pynvml.NVML_P2P_STATUS_OK:
                     logger.info(
                         f"P2P is not supported between device {i} and {rank}. "
-                        "Fast allreduce will be disabled")
+                        "custom allreduce will be disabled")
                     return False
             except pynvml.NVMLError as error:
                 logger.info(
                     f"P2P detection failed with message \"{str(error)}\". "
-                    "Fast allreduce will be disabled")
+                    "custom allreduce will be disabled")
                 return False
     pynvml.nvmlShutdown()
     return True
@@ -103,7 +103,7 @@ class FastAllreduce:
     # max_size: max supported allreduce size
     def __init__(self, rank, world_size, max_size=8192 * 1024) -> None:
         # buffers memory are owned by this Python class and passed to C++
-        self.meta = torch.zeros(fast_ar.meta_size() + max_size,
+        self.meta = torch.zeros(custom_ar.meta_size() + max_size,
                                 dtype=torch.uint8,
                                 device="cuda")
         self.rank_data = torch.empty(16 * 1024 * 1024,
@@ -113,7 +113,7 @@ class FastAllreduce:
         self.world_size = world_size
         handles, offsets = self._get_ipc_meta(self.meta)
         self.full_nvlink = _is_full_nvlink(rank, world_size)
-        self._ptr = fast_ar.init_fast_ar(self.meta, self.rank_data, handles,
+        self._ptr = custom_ar.init_custom_ar(self.meta, self.rank_data, handles,
                                          offsets, rank, self.full_nvlink)
         self.fast_cond = self.full_nvlink or world_size <= 2
 
@@ -138,15 +138,15 @@ class FastAllreduce:
 
     def register_buffer(self, inp: torch.Tensor):
         handles, offsets = self._get_ipc_meta(inp)
-        fast_ar.register_buffer(self._ptr, inp, handles, offsets)
+        custom_ar.register_buffer(self._ptr, inp, handles, offsets)
 
     def register_graph_buffers(self):
-        handle, offset = fast_ar.get_graph_buffer_ipc_meta(self._ptr)
+        handle, offset = custom_ar.get_graph_buffer_ipc_meta(self._ptr)
         handles, offsets = self._gather_ipc_meta((bytes(handle), offset))
         logger.info("Registering %d cuda graph addresses", len(offset))
-        fast_ar.register_graph_buffers(self._ptr, handles, offsets)
+        custom_ar.register_graph_buffers(self._ptr, handles, offsets)
 
-    def should_fast_ar(self, inp: torch.Tensor):
+    def should_custom_ar(self, inp: torch.Tensor):
         inp_size = inp.numel() * torch.finfo(inp.dtype).bits // 8
         if self.fast_cond:
             return inp_size <= self.max_size
@@ -157,12 +157,12 @@ class FastAllreduce:
     def all_reduce(self, inp: torch.Tensor, out: torch.Tensor = None):
         if out is None:
             out = torch.empty_like(inp)
-        fast_ar.allreduce(self._ptr, inp, out)
+        custom_ar.allreduce(self._ptr, inp, out)
         return out
 
     def close(self):
         if self._ptr:
-            fast_ar.dispose(self._ptr)
+            custom_ar.dispose(self._ptr)
             self._ptr = 0
 
     def __del__(self):

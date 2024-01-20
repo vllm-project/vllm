@@ -12,7 +12,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
     broadcast, broadcast_object_list)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.model_executor.parallel_utils import fast_allreduce
+from vllm.model_executor.parallel_utils import custom_all_reduce
 from vllm.utils import in_wsl
 
 logger = init_logger(__name__)
@@ -606,8 +606,8 @@ class ModelRunner:
 
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
-        with fast_allreduce.capture(
-                enable=not self.parallel_config.disable_fast_allreduce):
+        with custom_all_reduce.capture(
+                enable=not self.parallel_config.disable_custom_all_reduce):
             for batch_size in reversed(batch_size_capture_list):
                 # Create dummy input_metadata.
                 input_metadata = InputMetadata(
