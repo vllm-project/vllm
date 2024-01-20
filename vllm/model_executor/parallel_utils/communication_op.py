@@ -89,7 +89,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
 def broadcast(input_: torch.Tensor, src: int = 0, group=None):
     """Broadcast the input tensor."""
     group = group or torch.distributed.group.WORLD
-    ranks = torch.distributed.get_group(group).ranks()
+    ranks = torch.distributed.get_process_group_ranks()
     assert src in ranks, f"Invalid src rank ({src})"
 
     # Bypass the function if we are using only 1 GPU.
@@ -104,7 +104,7 @@ def broadcast(input_: torch.Tensor, src: int = 0, group=None):
 def broadcast_object_list(obj_list: List[Any], src: int = 0, group=None):
     """Broadcast the input object list."""
     group = group or torch.distributed.group.WORLD
-    ranks = torch.distributed.get_group(group).ranks()
+    ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src})"
 
     # Bypass the function if we are using only 1 GPU.
@@ -126,7 +126,7 @@ def broadcast_tensor_dict(
 ) -> Dict[Any, Union[torch.Tensor, Any]]:
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
-    ranks = torch.distributed.get_group(group).ranks()
+    ranks = torch.distributed.get_process_group_ranks()
     assert src in ranks, f"Invalid src rank ({src})"
 
     # Bypass the function if we are using only 1 GPU.
