@@ -1,10 +1,10 @@
 # prometheus.yaml
 global:
-  scrape_interval: 5s                       # how often to scrape from endpoint
-  evaluation_interval: 30s                  # time between each evaluation of Prometheus' alerting rules
+  scrape_interval: 5s
+  evaluation_interval: 30s
 
 scrape_configs:
-  - job_name: vllm                          # your project name
+  - job_name: vllm
     static_configs:
       - targets:
-          - 'host.docker.internal:8000'     # should match the port exposed by vLLM
+          - 'host.docker.internal:8000'
