@@ -14,7 +14,7 @@ bench_latency_exit_code=$?
 python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 2>&1 | tee benchmark_throughput.txt
 bench_throughput_exit_code=$?
 
-python3 -m vllm.entrypoints.openai.api-server --model meta-llama/Llama-2-7b-chat-hf &
+python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf &
 server_pid=$!
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
