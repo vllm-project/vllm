@@ -22,7 +22,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.0)
 
 # Create an LLM.
-llm = llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="facebook/opt-125m")
 
 generating_prompts = [prefix + prompt for prompt in prompts]
 
