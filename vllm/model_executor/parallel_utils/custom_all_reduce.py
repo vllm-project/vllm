@@ -53,7 +53,7 @@ def capture():
         handle = get_handle()
         if handle is not None:
             handle.register_graph_buffers()
-            
+
 
 def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
     ca_handle = get_handle()
