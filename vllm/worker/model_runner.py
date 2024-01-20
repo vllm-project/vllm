@@ -66,6 +66,9 @@ class ModelRunner:
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.graph_memory_pool = None  # Set during graph capture.
 
+        # request_id -> Generator for seeded random sampling
+        self.generators: Dict[str, torch.Generator] = {}
+
         self.max_context_len_to_capture = (
             self.model_config.max_context_len_to_capture
             if self.model_config is not None else 0)
@@ -389,6 +392,7 @@ class ModelRunner:
     ) -> SamplingMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
+        generators: List[torch.Generator] = []
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
@@ -397,6 +401,7 @@ class ModelRunner:
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
+            seed = seq_group_metadata.sampling_params.seed
             seq_groups.append((seq_ids, sampling_params))
 
             if seq_group_metadata.is_prompt:
@@ -419,6 +424,12 @@ class ModelRunner:
                 selected_token_indices.append(selected_token_start_idx +
                                               subquery_len - 1)
                 selected_token_start_idx += max_subquery_len
+
+                if seed is not None:
+                    generator = torch.Generator(
+                        device="cuda").manual_seed(seed)
+                    self.generators[seq_group_metadata.request_id] = generator
+                    generators.append(generator)
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -431,6 +442,11 @@ class ModelRunner:
                         range(categorized_sample_indices_start_idx,
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
+
+                if seed is not None:
+                    generator = self.generators.get(
+                        seq_group_metadata.request_id)
+                    generators.append(generator)
 
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,

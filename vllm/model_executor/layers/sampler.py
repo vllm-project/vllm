@@ -342,7 +342,9 @@ def _beam_search_sample(
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
-):
+    seq_groups: Optional[List[Tuple[List[int], SamplingParams]]] = None,
+    generators: Optional[List[torch.Generator]] = None,
+) -> torch.Tensor:
     if num_samples > 1:
         # This is equivalent to torch.repeat_interleaved (which also
         # forces a GPU<->CPU sync).
@@ -352,7 +354,15 @@ def _multinomial(
         probs = probs[:, None, :].expand(probs.shape[0], num_samples,
                                          probs.shape[1]).contiguous().view(
                                              -1, probs.shape[1])
-    q = torch.empty_like(probs).exponential_(1)
+    q = torch.empty_like(probs)
+    if seq_groups is None:
+        q.exponential_()
+    else:
+        sample_idx = 0
+        for (seq_ids, _), generator in zip(seq_groups, generators):
+            next_sample_idx = sample_idx + len(seq_ids)
+            q[sample_idx:next_sample_idx].exponential_(generator=generator)
+            sample_idx = next_sample_idx
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
 
@@ -385,14 +395,18 @@ def _sample(
                                           is_prompts, sample_indices)
         if sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[sample_indices], dim=-1)
-        elif sampling_type == SamplingType.RANDOM:
+        elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             max_best_of = 1
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
                 if is_prompt:
                     _, sampling_params = seq_group
                     max_best_of = max(max_best_of, sampling_params.best_of)
+            seeded_args = {} if sampling_type == SamplingType.RANDOM else {
+                "seq_groups": seq_groups,
+                "generators": sampling_metadata.generators,
+            }
             multinomial_samples = _multinomial(probs[sample_indices],
-                                               max_best_of)
+                                               max_best_of, **seeded_args)
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -407,7 +421,7 @@ def _sample(
             sampling_type]
         if sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(seq_groups, greedy_samples)
-        elif sampling_type == SamplingType.RANDOM:
+        elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups, is_prompts,
                                             multinomial_samples)
         elif sampling_type == SamplingType.BEAM:
