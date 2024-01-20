@@ -80,7 +80,7 @@ class ReorderPolicy(Policy):
             arrival_time_sorted[pos:])
 
     def get_preemption_mode(self, seq_group: SequenceGroup) -> PreemptionMode:
-        """Always use SWAP"""
+        """Always use SWAP, as it is faster than `RECOMPUTE` for heavy models like llama."""
         return PreemptionMode.SWAP
 
 
