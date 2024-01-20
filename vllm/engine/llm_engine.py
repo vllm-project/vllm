@@ -647,6 +647,7 @@ class LLMEngine:
 
     def _get_stats(self, scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
         """Get Stats to be Logged to Prometheus."""
+        now = time.monotonic()
 
         # KV Cache Usage in %.
         num_total_gpu = self.cache_config.num_gpu_blocks
@@ -693,7 +694,7 @@ class LLMEngine:
             time_per_output_tokens = [] if prompt_run else time_last_iters
 
         return Stats(
-            now=time.monotonic(),
+            now=now,
             num_running=num_running,
             num_swapped=num_swapped,
             num_waiting=num_waiting,

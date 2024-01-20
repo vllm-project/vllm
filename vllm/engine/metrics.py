@@ -123,15 +123,15 @@ class StatLogger:
         self._log_prometheus(stats)
 
         # Save tracked stats for token counters.
-        self.prompt_tokens.append(stats.num_prompt_tokens)
-        self.generation_tokens.append(stats.num_generation_tokens)
+        self.num_prompt_tokens.append(stats.num_prompt_tokens)
+        self.num_generation_tokens.append(stats.num_generation_tokens)
 
         # Log locally every local_interval seconds.
         if self._local_interval_elapsed(stats.now):
 
             # Compute summary metrics for tracked stats.
-            prompt_tput = self._get_tput(self.num_prompt_tokens)
-            generation_tput = self._get_tput(self.num_generation_tokens)
+            prompt_tput = self._get_tput(self.num_prompt_tokens, now=stats.now)
+            generation_tput = self._get_tput(self.num_generation_tokens, now=stats.now)
 
             # Log to stdout.
             logger.info(
