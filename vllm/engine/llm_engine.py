@@ -118,7 +118,7 @@ class LLMEngine:
         # Metric Logging.
         if self.log_stats:
             self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC, )
+                local_interval=_LOCAL_LOGGING_INTERVAL_SEC)
 
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
