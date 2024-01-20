@@ -1,6 +1,7 @@
 # This script is run by buildkite to run the benchmarks and upload the results to buildkite
 
 set -ex
+set -o pipefail
 
 # cd into parent directory of this file
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -20,7 +21,7 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 
 # wait for server to start, timeout after 600 seconds
 timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
-python3 benchmark_serving.py \
+python3 benchmarks/benchmark_serving.py \
     --dataset ./ShareGPT_V3_unfiltered_cleaned_split.json \
     --model meta-llama/Llama-2-7b-chat-hf \
     --num-prompts 20 \
