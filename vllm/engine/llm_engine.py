@@ -118,8 +118,7 @@ class LLMEngine:
         # Metric Logging.
         if self.log_stats:
             self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-            )
+                local_interval=_LOCAL_LOGGING_INTERVAL_SEC, )
 
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -759,7 +758,8 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs=None))
 
-    def _get_stats(self, scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
+    def _get_stats(self,
+                   scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
         """Get Stats to be Logged to Prometheus."""
         now = time.monotonic()
 

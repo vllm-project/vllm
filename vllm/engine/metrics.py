@@ -6,13 +6,14 @@ import numpy as np
 from typing import List
 from dataclasses import dataclass
 
-
 logger = init_logger(__name__)
 
 labels = {}
 
+
 def add_global_metrics_labels(**kwargs):
     labels.update(kwargs)
+
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the metrics definitions.
@@ -74,6 +75,7 @@ class Stats:
     time_per_output_tokens: List[float]
     time_e2e_requests: List[float]
 
+
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""
 
@@ -103,7 +105,7 @@ class StatLogger:
 
         # Add to token counters.
         counter_prompt_tokens.add(labels, stats.num_prompt_tokens)
-        counter_generation_tokens.add(labels, stats.num_generation_tokens)  
+        counter_generation_tokens.add(labels, stats.num_generation_tokens)
 
         # Observe request level latencies in histograms.
         for ttft in stats.time_to_first_tokens:
@@ -112,13 +114,12 @@ class StatLogger:
             histogram_time_per_output_tokens.observe(labels, tpot)
         for e2e in stats.time_e2e_requests:
             histogram_e2e_request_latency.observe(labels, e2e)
-    
 
     def log(self, stats: Stats) -> None:
         """Called by LLMEngine.
            Logs to prometheus and tracked stats every iteration. 
            Logs to Stdout every self.local_interval seconds."""
-        
+
         # Log to prometheus.
         self._log_prometheus(stats)
 
@@ -131,7 +132,8 @@ class StatLogger:
 
             # Compute summary metrics for tracked stats.
             prompt_tput = self._get_tput(self.num_prompt_tokens, now=stats.now)
-            generation_tput = self._get_tput(self.num_generation_tokens, now=stats.now)
+            generation_tput = self._get_tput(self.num_generation_tokens,
+                                             now=stats.now)
 
             # Log to stdout.
             logger.info(
@@ -141,9 +143,8 @@ class StatLogger:
                 f"Swapped: {stats.num_swapped} reqs, "
                 f"Pending: {stats.num_waiting} reqs, "
                 f"GPU KV cache usage: {stats.gpu_cache_usage * 100:.1f}%, "
-                f"CPU KV cache usage: {stats.cpu_cache_usage * 100:.1f}%"
-            )
-            
+                f"CPU KV cache usage: {stats.cpu_cache_usage * 100:.1f}%")
+
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
