@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import METRICS_REGISTRY, MetricsLogger, Stats
+from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -117,9 +117,7 @@ class LLMEngine:
 
         # Metric Logging.
         if self.log_stats:
-            self.metrics_logger = MetricsLogger(
-                metrics=METRICS_REGISTRY,
-                local_logger=logger,
+            self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
             )
 
@@ -609,10 +607,7 @@ class LLMEngine:
 
         # Log stats.
         if self.log_stats:
-            now = time.monotonic()
-            self.metrics_logger.log(now=now,
-                                    stats=self._get_stats(
-                                        now, scheduler_outputs))
+            self.stat_logger.log(self._get_stats(scheduler_outputs))
 
         return request_outputs
 
@@ -646,68 +641,59 @@ class LLMEngine:
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
+        """Forced log when no requests active."""
         if self.log_stats:
-            now = time.monotonic()
-            self.metrics_logger.log(now=now,
-                                    stats=self._get_stats(
-                                        now=now, scheduler_outputs=None))
+            self.stat_logger.log(self._get_stats(scheduler_outputs=None))
 
-    def _get_stats(self, now: float,
-                   scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
+    def _get_stats(self, scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
         """Get Stats to be Logged to Prometheus."""
 
-        # Compute System Stats.
         # KV Cache Usage in %.
         num_total_gpu = self.cache_config.num_gpu_blocks
         num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
-        gpu_cache_usage = (1.0 - (num_free_gpu / num_total_gpu)) * 100
+        gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage = 0.
         if num_total_cpu > 0:
             num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
             )
-            cpu_cache_usage = (1.0 - (num_free_cpu / num_total_cpu)) * 100
+            cpu_cache_usage = 1.0 - (num_free_cpu / num_total_cpu)
 
         # Scheduler State
         num_running = len(self.scheduler.running)
         num_swapped = len(self.scheduler.swapped)
         num_waiting = len(self.scheduler.waiting)
 
-        # If no scheduler outputs, empty iteration stats.
-        if scheduler_outputs is None:
-            return Stats(
-                num_running=num_running,
-                num_swapped=num_swapped,
-                num_waiting=num_waiting,
-                gpu_cache_usage=gpu_cache_usage,
-                cpu_cache_usage=cpu_cache_usage,
-                num_prompt_tokens=0,
-                num_generation_tokens=0,
-                time_to_first_tokens=[],
-                time_per_output_tokens=[],
-                time_e2e_requests=[],
-            )
-
-        # Compute IterationStats.
-        prompt_run = scheduler_outputs.prompt_run
-        num_prompt_tokens = scheduler_outputs.num_batched_tokens if prompt_run else 0
-        num_generation_tokens = 0 if prompt_run else scheduler_outputs.num_batched_tokens
-
-        # Get Latency Timings.
-        time_last_iters = []
+        # Iteration stats if we have scheduler output.
+        num_prompt_tokens = 0
+        num_generation_tokens = 0
+        time_to_first_tokens = []
+        time_per_output_tokens = []
         time_e2e_requests = []
-        for seq_group in scheduler_outputs.scheduled_seq_groups:
-            # Time since last token. (n.b. updates seq_group.last_token_time)
-            time_last_iters.append(seq_group.get_last_latency(now))
-            # Time since arrival for all finished requests.
-            if seq_group.is_finished():
-                time_e2e_requests.append(seq_group.get_e2e_latency(now))
+        if scheduler_outputs is not None:
+            prompt_run = scheduler_outputs.prompt_run
 
-        time_to_first_tokens = time_last_iters if prompt_run else []
-        time_per_output_tokens = [] if prompt_run else time_last_iters
+            # Number of Tokens.
+            if prompt_run:
+                num_prompt_tokens = scheduler_outputs.num_batched_tokens
+            else:
+                num_generation_tokens = scheduler_outputs.num_batched_tokens
+
+            # Latency Timings.
+            time_last_iters = []
+            for seq_group in scheduler_outputs.scheduled_seq_groups:
+                # Time since last token. (n.b. updates seq_group.last_token_time)
+                time_last_iters.append(seq_group.get_last_latency(now))
+                # Time since arrival for all finished requests.
+                if seq_group.is_finished():
+                    time_e2e_requests.append(seq_group.get_e2e_latency(now))
+
+            time_to_first_tokens = time_last_iters if prompt_run else []
+            time_per_output_tokens = [] if prompt_run else time_last_iters
 
         return Stats(
+            now=time.monotonic(),
             num_running=num_running,
             num_swapped=num_swapped,
             num_waiting=num_waiting,
