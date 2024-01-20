@@ -193,6 +193,7 @@ class Worker:
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+        finished_requests: Optional[List[str]] = None,
     ) -> Optional[SamplerOutput]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
@@ -207,6 +208,10 @@ class Worker:
                 "blocks_to_copy": blocks_to_copy,
             }
             broadcast_tensor_dict(data, src=0)
+
+            if finished_requests is not None:
+                self.model_runner.free_finished_request_state(
+                    finished_requests)
         else:
             data = broadcast_tensor_dict(src=0)
             num_seq_groups = data["num_seq_groups"]
@@ -218,7 +223,7 @@ class Worker:
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
-            return {}
+            return None
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache)

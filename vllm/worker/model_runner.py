@@ -66,7 +66,8 @@ class ModelRunner:
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.graph_memory_pool = None  # Set during graph capture.
 
-        # request_id -> Generator for seeded random sampling
+        # request_id -> Generator for seeded random sampling,
+        # used only in driver worker
         self.generators: Dict[str, torch.Generator] = {}
 
         self.max_context_len_to_capture = (
@@ -113,6 +114,10 @@ class ModelRunner:
                           1) // block_size
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), max_num_blocks), dtype=np.int32)
+
+    def free_finished_request_state(self, finished_request_ids: List[str]):
+        for request_id in finished_request_ids:
+            self.generators.pop(request_id, None)
 
     def _prepare_prompt(
         self,

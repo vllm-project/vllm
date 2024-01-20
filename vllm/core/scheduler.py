@@ -39,6 +39,7 @@ class SchedulerOutputs:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
         ignored_seq_groups: List[SequenceGroup],
+        finished_requests: List[str],
     ) -> None:
         self.scheduled_seq_groups = scheduled_seq_groups
         self.prompt_run = prompt_run
@@ -49,6 +50,7 @@ class SchedulerOutputs:
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
         self.ignored_seq_groups = ignored_seq_groups
+        self.finished_requests = finished_requests
 
         self.num_loras = len(self.lora_requests)
         if self.num_loras > 0:
@@ -256,6 +258,10 @@ class Scheduler:
             self.waiting.extendleft(leftover_waiting_sequences)
 
             if scheduled or ignored_seq_groups:
+                finished_requests = [
+                    seq_group.request_id for seq_group in self.running
+                    if seq_group.is_finished()
+                ]
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
@@ -265,6 +271,7 @@ class Scheduler:
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
                     ignored_seq_groups=ignored_seq_groups,
+                    finished_requests=finished_requests,
                 )
                 return scheduler_outputs
 
@@ -345,9 +352,13 @@ class Scheduler:
         # Each sequence in the generation phase only takes one token slot.
         # Therefore, the number of batched tokens is equal to the number of
         # sequences in the RUNNING state.
-        num_batched_tokens = sum(
-            seq_group.num_seqs(status=SequenceStatus.RUNNING)
-            for seq_group in self.running)
+        num_batched_tokens = 0
+        finished_requests: List[str] = []
+        for seq_group in self.running:
+            running_count = seq_group.num_seqs(status=SequenceStatus.RUNNING)
+            if not running_count and seq_group.is_finished():
+                finished_requests.append(seq_group.request_id)
+            num_batched_tokens += running_count
 
         scheduler_outputs = SchedulerOutputs(
             scheduled_seq_groups=self.running,
@@ -357,6 +368,7 @@ class Scheduler:
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             ignored_seq_groups=[],
+            finished_requests=finished_requests,
         )
         return scheduler_outputs
 
