@@ -1,4 +1,5 @@
 from vllm.patch.monkey_patch_api_request import patch_api_server;patch_api_server()
+from vllm.entrypoints.openai.cli_args import cliContext
 import argparse
 import asyncio
 import json
@@ -179,6 +180,7 @@ if __name__ == "__main__":
     add_global_metrics_labels(model_name=engine_args.model)
 
     app.root_path = args.root_path
+    cliContext.args = args
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,

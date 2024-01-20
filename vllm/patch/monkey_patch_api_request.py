@@ -71,12 +71,10 @@ def get_conversation_stop_token_ids(conv: Conversation):
 
 @cache
 def get_default_model_template():
-    try:
-        from vllm.entrypoints.openai.api_server import parser
-        args = parser.parse_args()
-    except ImportError:
-        from vllm.entrypoints.openai.api_server_turbo import parse_args as args
-
+    from vllm.entrypoints.openai.cli_args import cliContext
+    args = cliContext.args
+    if not args:
+        return
     default_model_template = getattr(args, 'default_model_template', None)
     print('default_model_template', default_model_template)
     return default_model_template
