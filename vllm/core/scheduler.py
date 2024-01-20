@@ -424,7 +424,7 @@ class Scheduler:
         """
         prefixes_to_free = self.prefix_pool.get_prefixes_to_free()
         for prefix in prefixes_to_free:
-            self.block_manager.free_prefix(prefix)
+            self.block_manager.free_prefix_blocks(prefix)
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)

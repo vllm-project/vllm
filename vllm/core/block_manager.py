@@ -349,6 +349,7 @@ class BlockSpaceManager:
         block_table = prefix.block_table
         for block in set(block_table):
             self.gpu_allocator.force_free(block)
+        prefix.block_table = None
 
     def reset(self) -> None:
         for block_table in self.block_tables.values():
