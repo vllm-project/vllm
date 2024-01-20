@@ -470,6 +470,7 @@ class ModelRunner:
             prompt_lens=prompt_lens,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
+            generators=generators,
         )
         return sampling_metadata
 
@@ -552,6 +553,7 @@ class ModelRunner:
                 prompt_lens=None,
                 selected_token_indices=metadata_dict["selected_token_indices"],
                 categorized_sample_indices=None,
+                generators=None,
                 perform_sampling=False,
             )
 

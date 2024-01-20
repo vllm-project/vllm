@@ -32,7 +32,7 @@ class SamplingMetadata:
         prompt_lens: Optional[List[int]],
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
-        generators: Optional[List[torch.Generator]],
+        generators: Optional[List[torch.Generator]] = None,
         perform_sampling: bool = True,
     ) -> None:
         self.seq_groups = seq_groups
