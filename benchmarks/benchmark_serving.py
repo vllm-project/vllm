@@ -146,9 +146,6 @@ async def send_request(
 
             # Re-send the request if it failed.
             if "error" not in output:
-                print("\n----")
-                print(prompt)
-                print(output["choices"][0]["text"])
                 break
 
     request_end_time = time.perf_counter()
