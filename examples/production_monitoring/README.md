@@ -28,9 +28,9 @@ python3 ../../benchmark/benchmark_serving.py \
     --model mistralai/Mistral-7B-v0.1 \
     --tokenizer mistralai/Mistral-7B-v0.1 \
     --endpoint /v1/completions \
-     --dataset ShareGPT_V3_unfiltered_cleaned_split.json \
-     --num-prompts 200 \
-     --request-rate 3.0
+    --dataset ShareGPT_V3_unfiltered_cleaned_split.json \
+    --num-prompts 200 \
+    --request-rate 3.0
 ```
 
 Navigating to [`http://localhost:8000/metrics`](http://localhost:8000/metrics) will show the raw Prometheus metrics being exposed by vLLM.
