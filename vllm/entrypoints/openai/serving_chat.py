@@ -67,10 +67,8 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator = self.engine.generate(prompt,
-                                                sampling_params,
-                                                request_id,
-                                                token_ids,
+        result_generator = self.engine.generate(prompt, sampling_params,
+                                                request_id, token_ids,
                                                 request.prefix_pos)
         # Streaming response
         if request.stream:
