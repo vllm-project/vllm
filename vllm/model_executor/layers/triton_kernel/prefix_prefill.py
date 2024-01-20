@@ -4,7 +4,6 @@
 import torch
 import triton
 import triton.language as tl
-import time
 
 TESLA = 'Tesla' in torch.cuda.get_device_name(0)
 
@@ -621,7 +620,7 @@ if triton.__version__ >= "2.1.0":
                               b_ctx_len,
                               max_input_len,
                               alibi_slopes=None):
-        
+
         BLOCK = 128 if not TESLA else 64
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]

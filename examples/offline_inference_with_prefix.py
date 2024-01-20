@@ -22,7 +22,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.0)
 
 # Create an LLM.
-llm = llm = LLM(model="baichuan-inc/Baichuan2-13B-Chat", tensor_parallel_size=4, enforce_eager=True, dtype="half", trust_remote_code=True)
+llm = llm = LLM(model="facebook/opt-125m")
 
 generating_prompts = [prefix + prompt for prompt in prompts]
 
