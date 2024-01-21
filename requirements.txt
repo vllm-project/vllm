@@ -8,5 +8,5 @@ transformers >= 4.36.0  # Required for Mixtral.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
-pydantic == 1.10.13  # Required for OpenAI server.
+pydantic >= 2.0  # Required for OpenAI server.
 aioprometheus[starlette]
