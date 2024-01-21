@@ -126,7 +126,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
-    if request.stream and not isinstance(generator, ErrorResponse):
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    if request.stream:
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
     else:
@@ -137,7 +140,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
 async def create_completion(request: CompletionRequest, raw_request: Request):
     generator = await openai_serving_completion.create_completion(
         request, raw_request)
-    if request.stream and not isinstance(generator, ErrorResponse):
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    if request.stream:
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
     else:
