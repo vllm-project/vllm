@@ -61,8 +61,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
 
     Args:
         input_: Input tensor to gather.
-        dst: Destination rank (global rank). If None, gather on the
-            first rank in the tensor parallel group.
+        dst: Tensor parallel rank to gather the input tensor to.
         dim: Dimension to gather.
 
     Returns:
