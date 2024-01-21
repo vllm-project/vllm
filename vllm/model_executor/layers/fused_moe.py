@@ -129,7 +129,6 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-# TODO: rewrite in CPP
 def alig_block_size(
         topk_ids: torch.Tensor, block_size: int,
         num_experts: int) -> (torch.Tensor, torch.Tensor, torch.Tensor):
@@ -154,52 +153,25 @@ def alig_block_size(
     - We initially have 12 tokens (after repeating 'top_k' times) and 4 experts, with each expert needing to process 3 tokens.
     - As block_size is 4, we pad 1 token for each expert.
     - First, flatten topk_ids to [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3].
-    - Then append padding tokens [1, 2, 3, 4] at the end, resulting in [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3 | 1, 2, 3, 4].
-    - After sorting by expert index, we obtain token_ids [3, 6, 9, 12, 0, 4, 10, 13, 1, 7, 11, 14, 2, 5, 8, 15]. 
-        Tokens 12-15 are non-existent (padding) and are ignored in the subsequent matrix multiplication.
+    - Then append padding tokens [12, 12, 12, 12] for each block.
+    - After sorting by expert index, we obtain token_ids [3, 6, 9, 12, 0, 4, 10, 12, 1, 7, 11, 12, 2, 5, 8, 12]. 
+        Tokens 12 are non-existent (padding) and are ignored in the subsequent matrix multiplication.
     - The padding ensures that the total number of tokens is now divisible by block_size for proper block matrix operations.
     """
-    cnts = torch.zeros(topk_ids.shape[0],
-                       num_experts,
-                       dtype=topk_ids.dtype,
-                       device=topk_ids.device)
-    cnts.scatter_(1, topk_ids, 1)
-    tokens_per_expert = cnts.sum(dim=0)
-    tokens_per_expert_post_alig = torch.floor_divide(
-        tokens_per_expert + block_size - 1, block_size) * block_size
-
-    cumsum = tokens_per_expert_post_alig.cumsum(0)
-    num_tokens_post_padded = cumsum[-1].clone()
-    max_tokens_post_padded = (
-        topk_ids.numel() + num_experts *
-        (block_size - 1)) if topk_ids.numel() > num_experts else (
-            topk_ids.numel() + 1) * block_size
-
-    # we just store the expert id of each single block but each token,
-    # as each token in the same block will be process by the same expert.
-    expert_ids = torch.zeros(max(
-        (max_tokens_post_padded + block_size - 1) // block_size + 1,
-        num_experts),
-                             dtype=topk_ids.dtype,
+    sorted_ids = torch.empty(
+        (topk_ids.numel() + num_experts * (block_size - 1), ),
+        dtype=torch.int32,
+        device=topk_ids.device)
+    expert_ids = torch.empty((topk_ids.numel() + num_experts, ),
+                             dtype=torch.int32,
                              device=topk_ids.device)
-
-    cumsum.div_(block_size, rounding_mode="floor")
-    ones = torch.ones_like(expert_ids)
-    expert_ids.scatter_add_(0, cumsum, ones)
-    expert_ids = expert_ids.cumsum(0)
-
-    cumsum = (tokens_per_expert_post_alig - tokens_per_expert).cumsum(0)
-
-    padded_tokens = torch.zeros(max_tokens_post_padded - topk_ids.numel(),
-                                dtype=topk_ids.dtype,
-                                device=topk_ids.device)
-    ones = torch.ones_like(padded_tokens)
-    padded_tokens.scatter_add_(0, cumsum[:-1], ones)
-    padded_tokens = padded_tokens.cumsum(0)
-
-    sorted_token_ids = torch.cat([topk_ids.view(-1), padded_tokens]).argsort()
-
-    return sorted_token_ids, expert_ids, num_tokens_post_padded
+    sorted_ids.fill_(topk_ids.numel())
+    num_tokens_post_pad = torch.empty((1),
+                                      dtype=torch.int32,
+                                      device=topk_ids.device)
+    ops.moe_alig_block_size(topk_ids, num_experts, block_size, sorted_ids,
+                            expert_ids, num_tokens_post_pad)
+    return sorted_ids, expert_ids, num_tokens_post_pad
 
 
 def fused_moe(hidden_states: torch.Tensor,
