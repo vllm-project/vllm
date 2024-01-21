@@ -24,7 +24,6 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
-
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
@@ -43,9 +42,9 @@ class InternLM2MLP(nn.Module):
             bias=False,
             linear_method=linear_method)
         self.w2 = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           linear_method=linear_method)
+                                    hidden_size,
+                                    bias=False,
+                                    linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -165,9 +164,8 @@ class InternLMDecoderLayer(nn.Module):
             linear_method=linear_method,
         )
         self.attention_norm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.ffn_norm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+                                      eps=config.rms_norm_eps)
+        self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -192,8 +190,7 @@ class InternLMDecoderLayer(nn.Module):
         )
 
         # Fully Connected
-        hidden_states, residual = self.ffn_norm(
-            hidden_states, residual)
+        hidden_states, residual = self.ffn_norm(hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
