@@ -41,7 +41,7 @@ def tensor_model_parallel_all_gather(input_: torch.Tensor,
         dim += input_.dim()
     input_size = input_.size()
     # Allocate output tensor.
-    output_tensor = torch.empty((world_size, ) + input_size,
+    output_tensor = torch.empty((world_size,) + input_size,
                                 dtype=input_.dtype,
                                 device=input_.device)
     # All-gather.
@@ -50,7 +50,7 @@ def tensor_model_parallel_all_gather(input_: torch.Tensor,
     # Reshape
     output_tensor = output_tensor.movedim(0, dim)
     output_tensor = output_tensor.reshape(input_size[:dim] +
-                                          (world_size * input_size[dim], ) +
+                                          (world_size * input_size[dim],) +
                                           input_size[dim + 1:])
     return output_tensor
 
@@ -59,6 +59,12 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
                                  dst: int = 0,
                                  dim: int = -1) -> torch.Tensor:
     """Gather the input tensor across model parallel group.
+
+    Args:
+        input_: Input tensor to gather.
+        dst: Destination rank in the tensor parallel group.
+            Defaults to 0 (the group-rank of the leader proc).
+        dim: Dimension to gather. Defaults to -1.
 
     NOTE: We assume that the input tensor is on the same device across
     all the ranks.
@@ -94,7 +100,14 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
 def broadcast(input_: torch.Tensor,
               src: int = 0,
               group: Optional[ProcessGroup] = None):
-    """Broadcast the input tensor."""
+    """Broadcast the input tensor.
+
+    Args:
+        input_: Input tensor to broadcast.
+        src: Source rank with respect to `group`. Defaults to 0.
+        group: Process group. Defaults to the world group.
+
+    """
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src})"
@@ -111,7 +124,13 @@ def broadcast(input_: torch.Tensor,
 def broadcast_object_list(obj_list: List[Any],
                           src: int = 0,
                           group: Optional[ProcessGroup] = None):
-    """Broadcast the input object list."""
+    """Broadcast the input object list.
+
+    Args:
+        obj_list: Input object list to broadcast.
+        src: Source rank with respect to `group`. Defaults to 0.
+        group: Process group. Defaults to the world group.
+    """
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src})"
@@ -133,7 +152,14 @@ def broadcast_tensor_dict(
     src: int = 0,
     group: Optional[ProcessGroup] = None,
 ) -> Dict[Any, Union[torch.Tensor, Any]]:
-    """Broadcast the input tensor dictionary."""
+    """Broadcast the input tensor dictionary.
+
+    Args:
+        tensor_dict: Input tensor dictionary to broadcast.
+        src: Source rank with respect to `group`. Defaults to 0.
+        group: Process group. Defaults to the world group.
+
+    """
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src})"
