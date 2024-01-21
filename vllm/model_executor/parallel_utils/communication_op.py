@@ -55,12 +55,15 @@ def tensor_model_parallel_all_gather(input_: torch.Tensor,
 
 
 def tensor_model_parallel_gather(input_: torch.Tensor,
-                                 dst: int = None, # FIXME: Gather should specify the target!
+                                 dst: int = None,
                                  dim: int = -1) -> torch.Tensor:
     """Gather the input tensor across model parallel group.
 
     NOTE: We assume that the input tensor is on the same device across
     all the ranks.
+    # TODO: Semantic of the `get_tensor_model_parallel_rank` function becomes unclear.
+    NOTE: `dst` is the global rank of the destination process. Do not
+    use the output from `get_tensor_model_parallel_rank()` as `dst`.
     """
     dst = dst if dst is not None else get_tensor_model_parallel_src_rank()
     world_size = get_tensor_model_parallel_world_size()
