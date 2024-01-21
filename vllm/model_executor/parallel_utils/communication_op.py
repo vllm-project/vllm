@@ -71,7 +71,8 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     NOTE: We assume that the input tensor is on the same device across
     all the ranks.
     """
-    dst = dst if dst is not None else get_tensor_model_parallel_src_rank()
+    if dst is None:
+        dst = get_tensor_model_parallel_src_rank()
     world_size = get_tensor_model_parallel_world_size()
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
@@ -93,10 +94,9 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
                              gather_list,
                              dst=dst,
                              group=get_tensor_model_parallel_group())
+    output_tensor = None
     if rank == dst:
         output_tensor = torch.cat(gather_list, dim=dim)
-    else:
-        output_tensor = None
     return output_tensor
 
 
