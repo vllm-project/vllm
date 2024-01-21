@@ -62,6 +62,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     NOTE: We assume that the input tensor is on the same device across
     all the ranks.
     """
+    group = get_tensor_model_parallel_group()
     world_size = get_tensor_model_parallel_world_size()
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
@@ -72,19 +73,16 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
         # Convert negative dim to positive.
         dim += input_.dim()
     # Allocate output tensor.
-    if get_tensor_model_parallel_rank() == dst:
+    rank = get_tensor_model_parallel_rank()
+    if rank == dst:
         gather_list = [torch.empty_like(input_) for _ in range(world_size)]
     else:
         gather_list = None
     # Gather.
-    torch.distributed.gather(input_,
-                             gather_list,
-                             dst=dst,
-                             group=get_tensor_model_parallel_group())
-    if get_tensor_model_parallel_rank() == dst:
+    torch.distributed.gather(input_, gather_list, dst=dst, group=group)
+    output_tensor = None
+    if rank == dst:
         output_tensor = torch.cat(gather_list, dim=dim)
-    else:
-        output_tensor = None
     return output_tensor
 
 
@@ -140,7 +138,7 @@ def broadcast_tensor_dict(
     if world_size == 1:
         return tensor_dict
 
-    rank = torch.distributed.get_rank()
+    rank = torch.distributed.get_rank(group=group)
     if rank == src:
         assert isinstance(
             tensor_dict,
@@ -161,7 +159,7 @@ def broadcast_tensor_dict(
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = tensor_dict[key]
-                torch.distributed.broadcast(tensor, src=src)
+                torch.distributed.broadcast(tensor, src=src, group=group)
     else:
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,

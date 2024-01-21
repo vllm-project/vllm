@@ -14,6 +14,9 @@ _PIPELINE_MODEL_PARALLEL_GROUP = None
 # A list of global ranks for each pipeline group to ease calculation of the
 # source rank when broadcasting from the first or last pipeline stage.
 _PIPELINE_GLOBAL_RANKS = None
+# A list of global ranks for each pipeline group to ease calculation of the
+# source rank when broadcasting within the tensor parallel group.
+_TENSOR_GLOBAL_RANKS = None
 
 
 def initialize_model_parallel(
@@ -61,6 +64,7 @@ def initialize_model_parallel(
 
     # Build the tensor model-parallel groups.
     global _TENSOR_MODEL_PARALLEL_GROUP
+    global _TENSOR_GLOBAL_RANKS
     assert _TENSOR_MODEL_PARALLEL_GROUP is None, (
         "tensor model parallel group is already initialized")
     for i in range(num_tensor_model_parallel_groups):
@@ -69,6 +73,7 @@ def initialize_model_parallel(
         group = torch.distributed.new_group(ranks)
         if rank in ranks:
             _TENSOR_MODEL_PARALLEL_GROUP = group
+            _TENSOR_GLOBAL_RANKS = ranks
 
     # Build the pipeline model-parallel groups.
     global _PIPELINE_MODEL_PARALLEL_GROUP
