@@ -243,6 +243,7 @@ class LLMEngine:
             model_config,
             parallel_config,
             scheduler_config,
+            cache_config,
             driver_local_rank,
             driver_rank,
             distributed_init_method,
