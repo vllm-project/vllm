@@ -9,6 +9,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_group,
+    get_tensor_model_parallel_global_rank,
 )
 
 
@@ -79,7 +80,11 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     else:
         gather_list = None
     # Gather.
-    torch.distributed.gather(input_, gather_list, dst=dst, group=group)
+    dst_global_rank = get_tensor_model_parallel_global_rank(dst)
+    torch.distributed.gather(input_,
+                             gather_list,
+                             dst=dst_global_rank,
+                             group=group)
     output_tensor = None
     if rank == dst:
         output_tensor = torch.cat(gather_list, dim=dim)
@@ -139,6 +144,7 @@ def broadcast_tensor_dict(
         return tensor_dict
 
     rank = torch.distributed.get_rank(group=group)
+    src_global_rank = ranks[src]
     if rank == src:
         assert isinstance(
             tensor_dict,
@@ -154,7 +160,7 @@ def broadcast_tensor_dict(
             else:
                 metadata_list.append((key, value))
         torch.distributed.broadcast_object_list([metadata_list],
-                                                src=src,
+                                                src=src_global_rank,
                                                 group=group)
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
@@ -163,7 +169,7 @@ def broadcast_tensor_dict(
     else:
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
-                                                src=src,
+                                                src=src_global_rank,
                                                 group=group)
         metadata_list = recv_metadata_list[0]
         tensor_dict = {}
@@ -174,7 +180,7 @@ def broadcast_tensor_dict(
                                      dtype=value.dtype,
                                      device="cuda")
                 async_handle = torch.distributed.broadcast(tensor,
-                                                           src=src,
+                                                           src=src_global_rank,
                                                            async_op=True,
                                                            group=group)
                 async_handles.append(async_handle)

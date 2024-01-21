@@ -131,12 +131,30 @@ def get_pipeline_model_parallel_rank():
         group=get_pipeline_model_parallel_group())
 
 
+def get_tensor_model_parallel_global_rank(rank):
+    """Return global rank given the tensor model parallel group rank."""
+    assert _TENSOR_GLOBAL_RANKS is not None, (
+        "Tensor model parallel group is not initialized")
+    assert rank >= 0 and rank < len(_TENSOR_GLOBAL_RANKS), (
+        f"Invalid local rank ({rank}) for tensor model parallel group")
+    return _TENSOR_GLOBAL_RANKS[rank]
+
+
+def get_pipeline_model_parallel_global_rank(rank):
+    """Return global rank given the pipeline model parallel group rank."""
+    assert _PIPELINE_GLOBAL_RANKS is not None, (
+        "Pipeline model parallel group is not initialized")
+    assert rank >= 0 and rank < len(_PIPELINE_GLOBAL_RANKS), (
+        f"Invalid local rank ({rank}) for pipeline model parallel group")
+    return _PIPELINE_GLOBAL_RANKS[rank]
+
+
 def get_tensor_model_parallel_src_rank():
     """Calculate the global rank corresponding to the first local rank
     in the tensor model parallel group."""
-    global_rank = torch.distributed.get_rank()
-    local_world_size = get_tensor_model_parallel_world_size()
-    return (global_rank // local_world_size) * local_world_size
+    assert _TENSOR_GLOBAL_RANKS is not None, (
+        "Tensor model parallel group is not initialized")
+    return _TENSOR_GLOBAL_RANKS[0]
 
 
 def get_pipeline_model_parallel_first_rank():
