@@ -79,13 +79,6 @@ class PrefixPool:
         self.block_size = block_size
 
         if max_capacity is not None:
-            # NOTE(to remove after consultation): I have also been thinking if we need to
-            # assert that max_capacity must be greater than or equal to the max allowed
-            # batch size. My own analysis has led me to believe that this is not necessary
-            # because even if a prefix is removed from the pool before it even gets computed,
-            # this will not stop the prefix from being computed. It only means that the prefix
-            # will not stay allocated for next cycles of computation and future requests
-            # with the prefix will have to recompute it.
             assert max_capacity > 0, "max_capacity must be positive."
 
         self.max_capacity = max_capacity
