@@ -67,9 +67,16 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
+        prefix_pos = request.prefix_pos
+        if request.prefix_stop is not None:
+            prefix_index = prompt.index(request.prefix_stop)
+            prefix_pos = len(self.tokenizer.encode(prompt[:prefix_index])) - 1
+            prompt = prompt.replace(request.prefix_stop, '')
+
         result_generator = self.engine.generate(prompt, sampling_params,
                                                 request_id, token_ids,
-                                                request.prefix_pos)
+                                                prefix_pos)
+
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
