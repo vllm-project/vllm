@@ -93,8 +93,8 @@ class ModelConfig:
             from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
             if not os.path.exists(model):
                 model_path = snapshot_download(model_id=model,
-                                            cache_dir=download_dir,
-                                            revision=revision)
+                                               cache_dir=download_dir,
+                                               revision=revision)
             else:
                 model_path = model
             self.model = model_path
