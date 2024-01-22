@@ -1,9 +1,9 @@
+import json
 import os
 import time
 from typing import Dict, Union
 
 import aiohttp
-from openai import AsyncOpenAI
 
 
 async def async_request_tgi(
@@ -16,6 +16,8 @@ async def async_request_tgi(
     **kwargs,
 ) -> Dict[str, Union[str, bool, float]]:
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
+
+    assert api_url.endswith("generate_stream")
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         assert not use_beam_search
@@ -33,12 +35,19 @@ async def async_request_tgi(
         output = {}
         output["prompt_len"] = prompt_len
 
+        ttft = 0
         st = time.perf_counter()
-        async with session.post(url=api_url, json=payload) as resp:
-            if resp.status == 200:
-                parsed_resp = await resp.json()
+        async with session.post(url=api_url, json=payload) as response:
+            if response.status == 200:
+                async for data in response.content.iter_any():
+                    if ttft == 0:
+                        ttft = time.perf_counter() - st
+                        output["ttft"] = ttft
                 latency = time.perf_counter() - st
-                output["generated_text"] = parsed_resp["generated_text"]
+
+                body = data.decode("utf-8").lstrip("data:")
+                generated_text = json.loads(body)["generated_text"]
+                output["generated_text"] = generated_text
                 output["success"] = True
                 output["latency"] = latency
             else:
@@ -59,6 +68,8 @@ async def async_request_vllm(
 ) -> Dict[str, Union[str, bool, float]]:
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
+    assert api_url.endswith("generate")
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
         payload = {
             "prompt": prompt,
@@ -69,17 +80,25 @@ async def async_request_vllm(
             "top_p": 1.0,
             "max_tokens": output_len,
             "ignore_eos": True,
-            "stream": False,
+            "stream": True,
         }
         output = {}
         output["prompt_len"] = prompt_len
 
+        ttft = 0
         st = time.perf_counter()
-        async with session.post(url=api_url, json=payload) as resp:
-            if resp.status == 200:
-                parsed_resp = await resp.json()
+        async with session.post(url=api_url, json=payload) as response:
+            if response.status == 200:
+                async for data in response.content.iter_any():
+                    if ttft == 0:
+                        ttft = time.perf_counter() - st
+                        output["ttft"] = ttft
                 latency = time.perf_counter() - st
-                output["generated_text"] = parsed_resp["text"]
+
+                # When streaming, '\0' is appended to the end of the response.
+                body = data.decode("utf-8").strip("\0")
+                generated_text = json.loads(body)["text"][0][len(prompt) :]
+                output["generated_text"] = generated_text
                 output["success"] = True
                 output["latency"] = latency
             else:
@@ -100,15 +119,18 @@ async def async_request_trt_llm(
 ) -> Dict[str, Union[str, bool, float]]:
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
+    assert api_url.endswith("generate_stream")
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
         assert not use_beam_search
         assert best_of == 1
         payload = {
+            "accumulate_tokens": True,
             "text_input": prompt,
             "temperature": 0.0,
             "top_p": 1.0,
             "max_tokens": output_len,
-            "stream": False,
+            "stream": True,
         }
         output = {}
         output["prompt_len"] = prompt_len
@@ -116,9 +138,15 @@ async def async_request_trt_llm(
         st = time.perf_counter()
         async with session.post(url=api_url, json=payload) as resp:
             if resp.status == 200:
-                parsed_resp = await resp.json()
+                async for data in resp.content.iter_any():
+                    if ttft == 0:
+                        ttft = time.perf_counter() - st
+                        output["ttft"] = ttft
                 latency = time.perf_counter() - st
-                output["generated_text"] = parsed_resp["text_output"]
+
+                body = data.decode("utf-8").lstrip("data:")
+                generated_text = json.loads(body)["text_output"]
+                output["generated_text"] = generated_text
                 output["success"] = True
                 output["latency"] = latency
             else:
@@ -154,6 +182,7 @@ async def async_request_deepspeed_mii(
         output = {}
         output["prompt_len"] = prompt_len
 
+        # TODO - Check how to enable steaming on deepspeed-mii
         st = time.perf_counter()
         async with session.post(url=api_url, json=payload) as resp:
             if resp.status == 200:
@@ -178,31 +207,57 @@ async def async_request_openai_completions(
     best_of: int,
     use_beam_search: bool,
     **kwargs,
-):
-    output = {}
-    output["prompt_len"] = prompt_len
-    oai_client = AsyncOpenAI(
-        base_url=api_url, api_key=os.environ.get("OPENAI_API_KEY")
-    )
+):  
+    
+    assert api_url.endswith("v1/completions")
+    timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
-    assert not use_beam_search
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        assert not use_beam_search
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "temperature": 0.0,
+            "best_of": best_of,
+            "max_tokens": output_len,
+            "stream": True,
+        }
+        headers = {
+            f"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+        }
 
-    try:
+        output = {}
+        output["prompt_len"] = prompt_len
+
+        generated_text = ""
+        ttft = 0
         st = time.perf_counter()
-        resp = await oai_client.completions.create(
-            model=model,
-            prompt=prompt,
-            temperature=0,
-            max_tokens=output_len,
-            best_of=best_of,
-        )
-        latency = time.perf_counter() - st
-        output["generated_text"] = resp.choices[0].text
-        output["success"] = True
-        output["latency"] = latency
-    except:
-        output["generated_text"] = ""
-        output["success"] = False
+        async with session.post(
+            url=api_url, json=payload, headers=headers
+        ) as response:
+            if response.status == 200:
+                async for chunk in response.content:
+                    if ttft == 0:
+                        ttft = time.perf_counter() - st
+                        output["ttft"] = ttft
+
+                    chunk = chunk.strip()
+                    if not chunk:
+                        continue
+
+                    chunk = chunk.decode("utf-8").lstrip("data: ")
+                    if chunk == "[DONE]":
+                        latency = time.perf_counter() - st
+                    else:
+                        body = json.loads(chunk)
+                        generated_text += body["choices"][0]["text"]
+
+                output["generated_text"] = generated_text
+                output["success"] = True
+                output["latency"] = latency
+            else:
+                output["generated_text"] = ""
+                output["success"] = False
 
     return output
 
