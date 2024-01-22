@@ -69,7 +69,7 @@ def test_prefix_caching_with_multiple_prefixes(
     reload(parallel_state)
     llm = LLM(model="facebook/opt-125m",
               prefix_pool_max_capacity=prefix_pool_max_capacity)
-    
+
     # Use 10 different prefixes:
     for i in range(prefix_pool_max_capacity + 1):
         new_prefix = str(i) + ' ' + prefix

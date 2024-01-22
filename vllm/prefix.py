@@ -149,4 +149,6 @@ class PrefixPool:
         ]
         # Popping needs to happen with the indexes_to_remove list in reverse order
         # so that we don't get Index out of range errors
-        return [self._candidates_to_free.pop(i) for i in indexes_to_remove[::-1]]
+        return [
+            self._candidates_to_free.pop(i) for i in indexes_to_remove[::-1]
+        ]
