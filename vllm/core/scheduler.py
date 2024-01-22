@@ -108,7 +108,7 @@ class Scheduler:
             request_id = (request_id, )
         request_ids = set(request_id)
         for state_queue in [self.waiting, self.running, self.swapped]:
-            aborted_groups = []
+            aborted_groups: List[SequenceGroup] = []
             for seq_group in state_queue:
                 if not request_ids:
                     # Using 'break' here may add two extra iterations,
@@ -121,7 +121,7 @@ class Scheduler:
             for aborted_group in aborted_groups:
                 # Remove the sequence group from the state queue.
                 state_queue.remove(aborted_group)
-                for seq in seq_group.get_seqs():
+                for seq in aborted_group.get_seqs():
                     if seq.is_finished():
                         continue
                     seq.status = SequenceStatus.FINISHED_ABORTED
@@ -332,10 +332,8 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        self.running = [
-            seq_group for seq_group in self.running
-            if not seq_group.is_finished()
-        ]
+        self.running = deque(seq_group for seq_group in self.running
+                             if not seq_group.is_finished())
 
     def _allocate(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
