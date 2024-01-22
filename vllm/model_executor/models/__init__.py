@@ -35,6 +35,7 @@ _MODELS = {
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
+    "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "YiForCausalLM": ("yi", "YiForCausalLM")
@@ -46,6 +47,8 @@ _ROCM_UNSUPPORTED_MODELS = []
 # Models partially supported by ROCm.
 # Architecture -> Reason.
 _ROCM_PARTIALLY_SUPPORTED_MODELS = {
+    "Qwen2ForCausalLM":
+    "Sliding window attention is not yet supported in ROCm's flash attention",
     "MistralForCausalLM":
     "Sliding window attention is not yet supported in ROCm's flash attention",
     "MixtralForCausalLM":
