@@ -74,7 +74,7 @@ async def completion_stream_generator(
                         logprobs=logprobs,
                         finish_reason=finish_reason,
                     )
-                ]).json(exclude_unset=True, ensure_ascii=False)
+                ]).model_dump_json(exclude_unset=True)
             yield f"data: {response_json}\n\n"
 
             if output.finish_reason is not None:
@@ -99,7 +99,7 @@ async def completion_stream_generator(
                         )
                     ],
                     usage=final_usage,
-                ).json(exclude_unset=True, ensure_ascii=False)
+                ).model_dump_json(exclude_unset=True)
                 yield f"data: {response_json}\n\n"
 
     yield "data: [DONE]\n\n"
@@ -279,7 +279,7 @@ class OpenAIServingCompletion(OpenAIServing):
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
         if request.stream:
-            response_json = response.json(ensure_ascii=False)
+            response_json = response.model_dump_json()
 
             async def fake_stream_generator() -> AsyncGenerator[str, None]:
                 yield f"data: {response_json}\n\n"
