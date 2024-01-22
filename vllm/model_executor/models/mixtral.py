@@ -272,8 +272,9 @@ class MixtralForCausalLM(nn.Module):
 
         expert_params_mapping = [
             # (param_name, weight_name, expert_id)
-            (f"{weight_name}s", f"experts.{expert_id}.{weight_name}.weight",
-             expert_id) for expert_id in range(self.config.num_local_experts)
+            (f"ws" if weight_name in ["w1", "w3"] else "w2s",
+             f"experts.{expert_id}.{weight_name}.weight", expert_id)
+            for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
         ]
 
@@ -305,7 +306,7 @@ class MixtralForCausalLM(nn.Module):
                     name = name.replace(weight_name, param_name)
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, expert_id=expert_id)
+                    weight_loader(param, loaded_weight, weight_name, expert_id=expert_id)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
