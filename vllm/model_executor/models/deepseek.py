@@ -63,7 +63,7 @@ class DeepseekMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         linear_method: Optional[LinearMethodBase] = None,
-        reduce_results=True,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(

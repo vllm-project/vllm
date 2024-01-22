@@ -182,8 +182,7 @@ def fused_moe(hidden_states: torch.Tensor,
               inplace=False):
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
-    We used three shared cache variables across all layers to save gpu memory, which is more effective in a static graph context.
-
+    
     Parameters:
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
     - w1 (torch.Tensor): The first set of expert weights.
