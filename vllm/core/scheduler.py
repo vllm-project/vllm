@@ -99,9 +99,8 @@ class Scheduler:
 
         # Create the prefix pool to cache the prefixes.
         self.prefix_pool = PrefixPool(
-            self.cache_config.block_size, 
-            max_capacity=self.cache_config.prefix_pool_max_capacity
-        )
+            self.cache_config.block_size,
+            max_capacity=self.cache_config.prefix_pool_max_capacity)
 
         # Sequence groups in the WAITING state.
         self.waiting: Deque[SequenceGroup] = deque()

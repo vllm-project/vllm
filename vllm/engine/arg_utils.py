@@ -184,7 +184,8 @@ class EngineArgs:
             '--prefix-pool-max-capacity',
             type=int,
             default=EngineArgs.prefix_pool_max_capacity,
-            help='the maximum number of prefixes allowed in the prefix pool. If None, '
+            help=
+            'the maximum number of prefixes allowed in the prefix pool. If None, '
             'there is no limit. It can only take positive values.')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,

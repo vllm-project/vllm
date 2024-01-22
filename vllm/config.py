@@ -306,11 +306,31 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
-        if self.prefix_pool_max_capacity is not None:
-            if self.prefix_pool_max_capacity <= 0:
+        if self.prefix_pool_max_capacity is not None and self.prefix_pool_max_capacity <= 0:
+            raise ValueError("prefix_pool_max_capacity must be positive. Got "
+                             f"{self.prefix_pool_max_capacity}.")
+
+    def _verify_cache_dtype(self) -> None:
+        if self.cache_dtype == "auto":
+            pass
+        elif self.cache_dtype == "fp8_e5m2":
+            nvcc_cuda_version = get_nvcc_cuda_version()
+            if nvcc_cuda_version < Version("11.8"):
                 raise ValueError(
-                    "prefix_pool_max_capacity must be positive. Got "
-                    f"{self.prefix_pool_max_capacity}.")
+                    "FP8 is not supported when cuda version is lower than 11.8."
+                )
+            device_name = torch.cuda.get_device_name()
+            if "AMD" in device_name:
+                raise NotImplementedError(
+                    "FP8_E5M2 KV Cache on AMD GPU has not been supported yet.")
+            logger.info(
+                "Using fp8_e5m2 data type to store kv cache. It reduces "
+                "the GPU memory footprint and boosts the performance. "
+                "But it may cause slight accuracy drop. "
+                "Currently we only support fp8 without scaling factors and "
+                "make e5m2 as a default format.")
+        else:
+            raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
