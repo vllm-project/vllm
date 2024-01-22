@@ -65,26 +65,25 @@ class MoE(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
         shard_size = self.intermediate_size
-        shard = slice(tp_rank * shard_size, (tp_rank+1) * shard_size)
+        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1.weight"):
-            param_data[expert_id,0:shard_size,:] = loaded_weight[shard,:]
+            param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w3.weight"):
-            param_data[expert_id,shard_size:2*shard_size,:] = loaded_weight[shard,:]
+            param_data[expert_id,
+                       shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
-            param_data[expert_id,:,:] = loaded_weight[:,shard]
-
+            param_data[expert_id, :, :] = loaded_weight[:, shard]
 
     def fused_moe_infer(self, hidden_states: torch.Tensor,
                         selected_experts: torch.Tensor,
                         routing_weights: torch.Tensor) -> torch.Tensor:
-        return fused_moe(hidden_states,
-                         # self.w1s,
-                         self.ws,
-                         self.w2s,
-                         # self.w3s,
-                         routing_weights,
-                         selected_experts,
-                         inplace=True)
+        return fused_moe(
+            hidden_states,
+            self.ws,
+            self.w2s,
+            routing_weights,
+            selected_experts,
+            inplace=True)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_size = hidden_states.shape
@@ -101,13 +100,12 @@ class MoE(nn.Module):
         final_hidden_states = self.fused_moe_infer(hidden_states,
                                                    selected_experts,
                                                    routing_weights)
-        
+
         final_hidden_states = tensor_model_parallel_all_reduce(
             final_hidden_states)
 
         return final_hidden_states.view(batch_size, sequence_length,
                                         hidden_size)
-
 
 
 @triton.jit
