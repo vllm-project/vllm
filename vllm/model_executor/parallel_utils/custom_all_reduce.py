@@ -1,13 +1,20 @@
 from contextlib import contextmanager
-import pynvml
-import torch
-import torch.distributed as dist
 from typing import Optional
 
-from vllm._C import custom_ar
+import torch
+import torch.distributed as dist
+
 from vllm.logger import init_logger
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank)
+
+try:
+    from vllm._C import custom_ar
+    import pynvml
+except ImportError:
+    # For AMD GPUs
+    custom_ar = None
+    pynvml = None
 
 logger = init_logger(__name__)
 
