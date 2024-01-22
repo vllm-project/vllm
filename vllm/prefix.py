@@ -147,4 +147,6 @@ class PrefixPool:
             i for i, prefix in enumerate(self._candidates_to_free)
             if prefix.seq_ref_count == 0 and prefix.allocated
         ]
-        return [self._candidates_to_free.pop(i) for i in indexes_to_remove]
+        # Popping needs to happen with the indexes_to_remove list in reverse order
+        # so that we don't get Index out of range errors
+        return [self._candidates_to_free.pop(i) for i in indexes_to_remove[::-1]]
