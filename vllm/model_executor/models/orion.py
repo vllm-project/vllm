@@ -3,7 +3,6 @@
 # https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/modeling_orion.py
 # Copyright (c) OrionStar Inc.
 # LICENSE: https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/LICENSE
-
 """Inference-only Orion-14B model compatible with HuggingFace weights."""
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -168,12 +167,11 @@ class OrionDecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             linear_method=linear_method,
         )
-        
-        self.input_layernorm = LayerNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LayerNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
 
+        self.input_layernorm = LayerNorm(config.hidden_size,
+                                         eps=config.rms_norm_eps)
+        self.post_attention_layernorm = LayerNorm(config.hidden_size,
+                                                  eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -201,6 +199,7 @@ class OrionDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states, None
+
 
 class OrionModel(nn.Module):
 
