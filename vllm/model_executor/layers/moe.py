@@ -77,13 +77,12 @@ class MoE(nn.Module):
     def fused_moe_infer(self, hidden_states: torch.Tensor,
                         selected_experts: torch.Tensor,
                         routing_weights: torch.Tensor) -> torch.Tensor:
-        return fused_moe(
-            hidden_states,
-            self.ws,
-            self.w2s,
-            routing_weights,
-            selected_experts,
-            inplace=True)
+        return fused_moe(hidden_states,
+                         self.ws,
+                         self.w2s,
+                         routing_weights,
+                         selected_experts,
+                         inplace=True)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_size = hidden_states.shape
