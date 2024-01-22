@@ -209,7 +209,7 @@ class LLMEngine:
             worker.set_cuda_visible_devices.remote(node_gpus[node_id])
 
         distributed_init_method = get_distributed_init_method(
-            driver_ip, get_open_port)
+            driver_ip, get_open_port())
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
