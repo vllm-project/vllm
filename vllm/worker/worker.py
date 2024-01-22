@@ -39,6 +39,7 @@ class Worker:
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
+        mscclpp_init_method: str = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -49,6 +50,7 @@ class Worker:
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
+        self.mscclpp_init_method = mscclpp_init_method
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -89,13 +91,28 @@ class Worker:
         # Initialize the distributed environment.
         init_distributed_environment(self.parallel_config, self.rank,
                                      self.distributed_init_method)
+        self.init_mscclpp_comm(self.mscclpp_init_method)
         if not self.parallel_config.disable_custom_all_reduce:
             init_custom_ar()
+
+
         # Initialize the model.
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
         self.model_runner.load_model()
+
+    def init_mscclpp_comm(self, mscclpp_init_method: Optional[str] = None) -> None:
+        if mscclpp_init_method is not None:
+            import mscclpp.comm as mscclpp_comm
+            self.mscclpp_group = mscclpp_comm.CommGroup(
+                rank=self.rank,
+                size=self.parallel_config.world_size,
+                interfaceIpPortTrio=mscclpp_init_method
+            )
+
+    def setup_mscclpp_comm(self):
+        pass
 
     @torch.inference_mode()
     def profile_num_available_blocks(
