@@ -9,6 +9,7 @@ from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 from vllm._C import ops
 from vllm.utils import get_max_shared_memory_bytes
 from vllm.utils import is_hip
+from allclose_default import get_default_atol, get_default_rtol
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -237,7 +238,10 @@ def test_paged_attention(
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
     # outputs. Thus, we use a relaxed tolerance for the test.
-    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+    assert torch.allclose(output,
+                          ref_output,
+                          atol=get_default_atol(output),
+                          rtol=get_default_rtol(output))
 
 
 def ref_multi_query_kv_attention(
@@ -338,4 +342,7 @@ def test_multi_query_kv_attention(
         scale,
         dtype,
     )
-    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+    assert torch.allclose(output,
+                          ref_output,
+                          atol=get_default_atol(output),
+                          rtol=get_default_rtol(output))

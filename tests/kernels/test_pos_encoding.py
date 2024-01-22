@@ -2,8 +2,7 @@ from typing import Optional
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import skipIfRocm
-
+from allclose_default import get_default_atol, get_default_rtol
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
 IS_NEOX_STYLE = [True, False]
@@ -27,7 +26,6 @@ DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-@skipIfRocm
 def test_rotary_embedding(
     is_neox_style: bool,
     batch_size: int,
@@ -66,5 +64,11 @@ def test_rotary_embedding(
     ref_query, ref_key = rope._forward(positions, query, key)
     out_query, out_key = rope.forward(positions, query, key)
     # Compare the results.
-    assert torch.allclose(out_query, ref_query, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(out_key, ref_key, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(out_query,
+                          ref_query,
+                          atol=get_default_atol(out_query),
+                          rtol=get_default_rtol(out_query))
+    assert torch.allclose(out_key,
+                          ref_key,
+                          atol=get_default_atol(out_key),
+                          rtol=get_default_rtol(out_key))

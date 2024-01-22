@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.activation import FastGELU, NewGELU, SiluAndMul
-from vllm.utils import is_hip
+from allclose_default import get_default_atol, get_default_rtol
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
@@ -31,7 +31,10 @@ def test_silu_and_mul(
     layer = SiluAndMul()
     out = layer(x)
     ref_out = layer._forward(x)
-    assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(out,
+                          ref_out,
+                          atol=get_default_atol(out),
+                          rtol=get_default_rtol(out))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -54,17 +57,10 @@ def test_gelu_new(
     layer = NewGELU()
     out = layer(x)
     ref_out = layer._forward(x)
-    assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
-
-
-# Reference default values of atol and rtol are from
-# https://github.com/pytorch/pytorch/blob/6d96beb6bec24d73ee3f080bac54d2104068f675/test/test_transformers.py#L67
-default_atol = {torch.float16: 1e-3, torch.bfloat16: 1e-3, torch.float: 1e-5}
-default_rtol = {
-    torch.float16: 1e-3,
-    torch.bfloat16: 1.6e-2,
-    torch.float: 1.3e-6
-}
+    assert torch.allclose(out,
+                          ref_out,
+                          atol=get_default_atol(out),
+                          rtol=get_default_rtol(out))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -86,6 +82,7 @@ def test_gelu_fast(
     layer = FastGELU()
     out = layer(x)
     ref_out = layer._forward(x)
-    atol = 1e-5 if not is_hip() else default_atol[out.dtype]
-    rtol = 1e-5 if not is_hip() else default_rtol[out.dtype]
-    assert torch.allclose(out, ref_out, atol=atol, rtol=rtol)
+    assert torch.allclose(out,
+                          ref_out,
+                          atol=get_default_atol(out),
+                          rtol=get_default_rtol(out))
