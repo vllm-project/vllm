@@ -14,13 +14,12 @@ from vllm.model_executor.utils import set_weight_attrs
 
 
 class MoE(nn.Module):
-    """a tensor-parallel MOE implementation that shards each expert across
+    """A tensor-parallel MOE implementation that shards each expert across
     all ranks.
 
-    Each expert's weights are sharded across all ranks. The forward pass
-    will first expand and group the hidden states by experts, then compute
-    the per-rank MLP output of each expert using grouped gemm, and finally
-    reduce the output across ranks.
+    Each expert's weights are sharded across all ranks and a fused MOE
+    kernel is used for the forward pass, and finally we reduce the outputs
+    across ranks.
     """
 
     def __init__(
