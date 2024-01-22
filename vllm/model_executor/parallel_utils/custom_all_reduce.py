@@ -193,7 +193,8 @@ class FastAllreduce:
         # when size <= 512k
         return self.world_size <= 4 and inp_size <= 512 * 1024
 
-    # all reduce, assuming inp tensor is IPC registered with register_buffer, or, in the context of cuda graphs, register_graph_buffers
+    # all reduce, assuming inp tensor is IPC registered with register_buffer,
+    # or, in the context of cuda graphs, register_graph_buffers
     def all_reduce_reg(self, inp: torch.Tensor, out: torch.Tensor = None):
         if out is None:
             out = torch.empty_like(inp)
