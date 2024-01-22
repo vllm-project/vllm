@@ -85,9 +85,18 @@ def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
             return ca_handle.all_reduce_unreg(input)
 
 
+@contextmanager
+def _nvml():
+    try:
+        pynvml.nvmlInit()
+        yield
+    finally:
+        pynvml.nvmlShutdown()
+
+
 # query if the set of gpus are fully connected by nvlink (1 hop)
+@_nvml()
 def _is_full_nvlink(rank, world_size):
-    pynvml.nvmlInit()
     handle = pynvml.nvmlDeviceGetHandleByIndex(rank)
     for i in range(world_size):
         if i != rank:
@@ -100,12 +109,11 @@ def _is_full_nvlink(rank, world_size):
                     f"NVLink detection failed with message \"{str(error)}\". "
                     "This is normal if your machine has no NVLink equipped")
                 return False
-    pynvml.nvmlShutdown()
     return True
 
 
+@_nvml()
 def _can_p2p(rank, world_size):
-    pynvml.nvmlInit()
     handle1 = pynvml.nvmlDeviceGetHandleByIndex(rank)
     for i in range(world_size):
         if i != rank:
@@ -123,7 +131,6 @@ def _can_p2p(rank, world_size):
                     f"P2P detection failed with message \"{str(error)}\". "
                     "custom allreduce will be disabled")
                 return False
-    pynvml.nvmlShutdown()
     return True
 
 
