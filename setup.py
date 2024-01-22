@@ -252,12 +252,12 @@ vllm_extension_sources = [
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     "csrc/quantization/gptq/q_gemm.cu",
     "csrc/cuda_utils_kernels.cu",
-    "csrc/custom_all_reduce.cu",
     "csrc/pybind.cpp",
 ]
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
 if not _is_neuron():
     vllm_extension = CUDAExtension(
@@ -267,7 +267,6 @@ if not _is_neuron():
             "cxx": CXX_FLAGS,
             "nvcc": NVCC_FLAGS,
         },
-        libraries=["cuda"],
     )
     ext_modules.append(vllm_extension)
 
