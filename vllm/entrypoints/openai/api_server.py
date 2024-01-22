@@ -106,7 +106,7 @@ app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_, exc):
     err = openai_serving_chat.create_error_response(message=str(exc))
-    return JSONResponse(err.dict(), status_code=HTTPStatus.BAD_REQUEST)
+    return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
 
 
 @app.get("/health")
@@ -118,7 +118,7 @@ async def health() -> Response:
 @app.get("/v1/models")
 async def show_available_models():
     models = await openai_serving_chat.show_available_models()
-    return JSONResponse(content=models.dict())
+    return JSONResponse(content=models.model_dump())
 
 
 @app.post("/v1/chat/completions")
@@ -126,22 +126,28 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
-    if request.stream and not isinstance(generator, ErrorResponse):
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    if request.stream:
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
     else:
-        return JSONResponse(content=generator.dict())
+        return JSONResponse(content=generator.model_dump())
 
 
 @app.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
     generator = await openai_serving_completion.create_completion(
         request, raw_request)
-    if request.stream and not isinstance(generator, ErrorResponse):
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    if request.stream:
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
     else:
-        return JSONResponse(content=generator.dict())
+        return JSONResponse(content=generator.model_dump())
 
 
 if __name__ == "__main__":
