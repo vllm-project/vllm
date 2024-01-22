@@ -1,4 +1,3 @@
-
 # coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -272,7 +271,7 @@ class MixtralForCausalLM(nn.Module):
 
         expert_params_mapping = [
             # (param_name, weight_name, expert_id)
-            (f"ws" if weight_name in ["w1", "w3"] else "w2s",
+            ("ws" if weight_name in ["w1", "w3"] else "w2s",
              f"experts.{expert_id}.{weight_name}.weight", expert_id)
             for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
