@@ -10,9 +10,9 @@ default_rtol = {
 }
 
 
-def get_default_atol(output):
+def get_default_atol(output) -> float:
     return default_atol[output.dtype]
 
 
-def get_default_rtol(output):
+def get_default_rtol(output) -> float:
     return default_rtol[output.dtype]
