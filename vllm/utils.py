@@ -65,6 +65,10 @@ def get_ip() -> str:
     return s.getsockname()[0]
 
 
+def get_distributed_init_method(ip: str, port: int) -> str:
+    return f"tcp://{ip}:{port}"
+
+
 def get_open_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
