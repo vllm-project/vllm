@@ -286,12 +286,14 @@ class CacheConfig:
         swap_space: int,
         cache_dtype: str,
         sliding_window: Optional[int] = None,
+        prefix_pool_max_capacity: Optional[int] = None
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
+        self.prefix_pool_max_capacity = prefix_pool_max_capacity
         self._verify_args()
         self._verify_cache_dtype()
 
@@ -304,6 +306,11 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+        if self.prefix_pool_max_capacity is not None:
+            if self.prefix_pool_max_capacity <= 0:
+                raise ValueError(
+                    "prefix_pool_max_capacity must be positive. Got "
+                    f"{self.prefix_pool_max_capacity}.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
