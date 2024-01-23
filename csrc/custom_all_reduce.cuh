@@ -141,7 +141,7 @@ __host__ __device__ constexpr uint64_t compute_flag(int ngpus) {
 }
 
 template <int ngpus>
-__device__ __forceinline__ void start_sync(const RankSignals &sg,
+DINLINE void start_sync(const RankSignals &sg,
                                            volatile Metadata *meta, int rank) {
   constexpr auto FLAG = compute_flag(ngpus);
   if (blockIdx.x == 0) {
@@ -161,7 +161,7 @@ __device__ __forceinline__ void start_sync(const RankSignals &sg,
 }
 
 template <int ngpus, bool final_sync = false>
-__device__ __forceinline__ void end_sync(const RankSignals &sg,
+DINLINE void end_sync(const RankSignals &sg,
                                          volatile Metadata *meta, int rank) {
   constexpr auto FLAG = compute_flag(ngpus);
   __syncthreads();
