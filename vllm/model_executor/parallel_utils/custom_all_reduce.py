@@ -139,7 +139,7 @@ class FastAllreduce:
         # IPC buffers from all ranks. Each registered tuple has size of
         # 8*world_size bytes where world_size is at most 8. Allocating 8MB
         # is enough for 131072 such tuples. The largest model I've seen only
-        # needs less than 10000 of registered tuples. 
+        # needs less than 10000 of registered tuples.
         self.rank_data = torch.empty(8 * 1024 * 1024,
                                      dtype=torch.uint8,
                                      device="cuda")
@@ -183,15 +183,8 @@ class FastAllreduce:
         custom_ar.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
-        inp_size = inp.numel() * inp.element_size()
-        # custom allreduce requires input byte size to be multiples of 16
-        if inp_size % 16 != 0:
-            return False
-        if self.fast_cond:
-            return inp_size <= self.max_size
-        # 4 pcie gpus use 2 stage AR, and is only faster than NCCL
-        # when size <= 512k
-        return self.world_size <= 4 and inp_size <= 512 * 1024
+        return custom_ar.should_custom_ar(inp, self.max_size, self.world_size,
+                                          self.full_nvlink)
 
     # all reduce, assuming inp tensor is IPC registered with register_buffer,
     # or, in the context of cuda graphs, register_graph_buffers

@@ -55,10 +55,21 @@ bool _is_weak_contiguous(torch::Tensor &t) {
           t.numel() * t.element_size());
 }
 
+bool should_custom_ar(torch::Tensor &inp, int max_size, int world_size,
+                      bool full_nvlink) {
+  auto inp_size = inp.numel() * inp.element_size();
+  // custom allreduce requires input byte size to be multiples of 16
+  if (inp_size % 16 != 0) return false;
+  if (!_is_weak_contiguous(inp)) return false;
+  if (world_size == 2 || full_nvlink) return inp_size <= max_size;
+  // 4 PCIE GPUs use 2 stage allreduce, and is only faster than NCCL when size
+  // <= 512k
+  return world_size <= 4 && inp_size <= 512 * 1024;
+}
+
 void _all_reduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out,
                  cudaStream_t stream) {
   auto fa = reinterpret_cast<vllm::FastAllreduce *>(_fa);
-  TORCH_CHECK(_is_weak_contiguous(inp));
   TORCH_CHECK(_is_weak_contiguous(out));
   switch (out.scalar_type()) {
     case at::ScalarType::Float: {
@@ -105,7 +116,6 @@ void all_reduce_unreg(fptr_t _fa, torch::Tensor &inp, torch::Tensor &reg_buffer,
   TORCH_CHECK_EQ(inp.numel(), out.numel());
   TORCH_CHECK(input_size <= reg_buffer.numel() * reg_buffer.element_size(),
               "registered buffer is too small to contain the input");
-  TORCH_CHECK(_is_weak_contiguous(inp));
   AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer.data_ptr(), inp.data_ptr(),
                                 input_size, cudaMemcpyDeviceToDevice, stream));
   _all_reduce(_fa, reg_buffer, out, stream);
