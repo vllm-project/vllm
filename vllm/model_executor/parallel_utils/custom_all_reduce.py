@@ -184,6 +184,9 @@ class FastAllreduce:
 
     def should_custom_ar(self, inp: torch.Tensor):
         inp_size = inp.numel() * inp.element_size()
+        # custom allreduce currently input byte size to be multiples of 16
+        if inp_size % 16 != 0:
+            return False
         if self.fast_cond:
             return inp_size <= self.max_size
         # 4 pcie gpus use 2 stage AR, and is only faster than NCCL
