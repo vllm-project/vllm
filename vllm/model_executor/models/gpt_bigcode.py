@@ -27,18 +27,23 @@ from transformers import GPTBigCodeConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearMethodBase,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    VocabParallelEmbedding, )
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.utils import replace_prompt_embeds
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -85,10 +90,12 @@ class GPTBigCodeAttention(nn.Module):
             bias=True,
             linear_method=linear_method,
         )
-        self.attn = PagedAttention(self.num_heads,
-                                   self.head_dim,
-                                   scale=self.scale,
-                                   num_kv_heads=self.num_kv_heads)
+        self.attn = PagedAttention(
+            self.num_heads,
+            self.head_dim,
+            scale=self.scale,
+            num_kv_heads=self.num_kv_heads,
+        )
 
     def forward(
         self,
@@ -100,7 +107,8 @@ class GPTBigCodeAttention(nn.Module):
         q, k, v = qkv.split(
             [
                 self.hidden_size // self.tensor_model_parallel_world_size,
-                self.kv_dim, self.kv_dim
+                self.kv_dim,
+                self.kv_dim,
             ],
             dim=-1,
         )
@@ -212,8 +220,15 @@ class GPTBigCodeModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         inputs_embeds = self.wte(input_ids)
+        if prompt_embeds is not None:
+            inputs_embeds = replace_prompt_embeds(
+                inputs_embeds,
+                prompt_embeds,
+                input_metadata.prompt_embeds_indices,
+            )
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds
 
@@ -245,9 +260,10 @@ class GPTBigCodeForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
+                                         input_metadata, prompt_embeds)
         return hidden_states
 
     def sample(
@@ -259,11 +275,13 @@ class GPTBigCodeForCausalLM(nn.Module):
                                    sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
@@ -277,3 +295,6 @@ class GPTBigCodeForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+
+    def get_input_embeddings(self):
+        return self.transformer.wte

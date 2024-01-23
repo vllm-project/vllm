@@ -37,6 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.utils import replace_prompt_embeds
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -242,8 +243,16 @@ class OPTDecoder(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
+        if prompt_embeds is not None:
+            inputs_embeds = replace_prompt_embeds(
+                inputs_embeds,
+                prompt_embeds,
+                input_metadata.prompt_embeds_indices,
+            )
+
         pos_embeds = self.embed_positions(positions)
         if self.project_in is not None:
             inputs_embeds, _ = self.project_in(inputs_embeds)
@@ -276,8 +285,10 @@ class OPTModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        return self.decoder(input_ids, positions, kv_caches, input_metadata)
+        return self.decoder(input_ids, positions, kv_caches, input_metadata,
+                            prompt_embeds)
 
 
 class OPTForCausalLM(nn.Module):
@@ -300,9 +311,10 @@ class OPTForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata)
+                                   input_metadata, prompt_embeds)
         return hidden_states
 
     def sample(
@@ -352,3 +364,6 @@ class OPTForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+    def get_input_embeddings(self):
+        return self.model.decoder.embed_tokens

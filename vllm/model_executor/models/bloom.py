@@ -36,6 +36,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.utils import replace_prompt_embeds
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -246,9 +247,16 @@ class BloomModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        hidden_states = self.word_embeddings(input_ids)
-        hidden_states = self.word_embeddings_layernorm(hidden_states)
+        inputs_embeds = self.word_embeddings(input_ids)
+        if prompt_embeds is not None:
+            inputs_embeds = replace_prompt_embeds(
+                inputs_embeds,
+                prompt_embeds,
+                input_metadata.prompt_embeds_indices,
+            )
+        hidden_states = self.word_embeddings_layernorm(inputs_embeds)
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(
@@ -281,9 +289,10 @@ class BloomForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
+                                         input_metadata, prompt_embeds)
         return hidden_states
 
     def sample(
@@ -328,3 +337,6 @@ class BloomForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+
+    def get_input_embeddings(self):
+        return self.transformer.word_embeddings

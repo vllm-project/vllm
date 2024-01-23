@@ -79,6 +79,7 @@ class Worker:
 
     def load_model(self):
         self.model_runner.load_model()
+        self.model_runner.set_zero_token_embeds()
 
     @torch.inference_mode()
     def profile_num_available_blocks(

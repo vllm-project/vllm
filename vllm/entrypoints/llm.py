@@ -3,6 +3,8 @@ from typing import List, Optional, Union
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+import torch
+
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
@@ -106,7 +108,7 @@ class LLM:
         self.request_counter = Counter()
 
     def get_tokenizer(
-            self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+        self, ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer
 
     def set_tokenizer(
@@ -122,6 +124,7 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         prefix_pos: Optional[Union[int, List[int]]] = None,
         use_tqdm: bool = True,
+        prompt_embeds: Optional[List[torch.FloatTensor]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -141,14 +144,19 @@ class LLM:
                 This is an experimental feature, and may be replaced with
                 automatic prefix caching in the future.
             use_tqdm: Whether to use tqdm to display the progress bar.
+            prompt_embeds: A list of embeddings for the prompts. If set, we
+                directly pass the embeddings instead of passing
+                `prompt_token_ids`.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
             completions in the same order as the input prompts.
         """
-        if prompts is None and prompt_token_ids is None:
-            raise ValueError("Either prompts or prompt_token_ids must be "
-                             "provided.")
+        if (prompts is None and prompt_token_ids is None
+                and prompt_embeds is None):
+            raise ValueError(
+                "Either prompts, prompt_token_ids or prompt_token_embeds "
+                "must be provided.")
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
@@ -161,14 +169,24 @@ class LLM:
             sampling_params = SamplingParams()
 
         # Add requests to the engine.
-        num_requests = len(prompts) if prompts is not None else len(
-            prompt_token_ids)
+        if prompts is not None:
+            num_requests = len(prompts)
+        elif prompt_token_ids is not None:
+            num_requests = len(prompt_token_ids)
+        elif prompt_embeds is not None:
+            num_requests = len(prompt_embeds)
+
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             prefix_pos_i = prefix_pos[i] if prefix_pos is not None else None
-            token_ids = None if prompt_token_ids is None else prompt_token_ids[
-                i]
-            self._add_request(prompt, sampling_params, token_ids, prefix_pos_i)
+            token_ids = (None
+                         if prompt_token_ids is None else prompt_token_ids[i])
+            embeds = None if prompt_embeds is None else prompt_embeds[i]
+            self._add_request(prompt,
+                              sampling_params,
+                              token_ids,
+                              prefix_pos_i,
+                              prompt_embeds=embeds)
         return self._run_engine(use_tqdm)
 
     def _add_request(
@@ -177,13 +195,15 @@ class LLM:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]],
         prefix_pos: Optional[int] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
                                     prompt,
                                     sampling_params,
-                                    prompt_token_ids,
-                                    prefix_pos=prefix_pos)
+                                    prompt_token_ids=prompt_token_ids,
+                                    prefix_pos=prefix_pos
+                                    prompt_embeds=prompt_embeds)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.

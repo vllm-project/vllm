@@ -60,6 +60,22 @@ class ModelRunner:
         # cache in_wsl result
         self.in_wsl = in_wsl()
 
+        self.graph_runners: Dict[int, CUDAGraphRunner] = {}
+        self.graph_memory_pool = None  # Set during graph capture.
+
+        self.max_context_len_to_capture = (
+            self.model_config.max_context_len_to_capture
+            if self.model_config is not None else 0)
+        # When using CUDA graph, the input block tables must be padded to
+        # max_context_len_to_capture. However, creating the block table in
+        # Python can be expensive. To optimize this, we cache the block table
+        # in numpy and only copy the actual input content at every iteration.
+        # The shape of the cached block table will be
+        # (max batch size to capture, max context len to capture / block size).
+        self.graph_block_tables = None  # Set after initial profiling.
+        # cache in_wsl result
+        self.in_wsl = in_wsl()
+
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
 
@@ -80,12 +96,14 @@ class ModelRunner:
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
+        prompt_embeds: List[torch.Tensor] = []
+        prompt_embeds_indices: List[int] = []
 
         prompt_lens: List[int] = []
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        for seq_group_metadata in seq_group_metadata_list:
+        for seq_group_idx, seq_group_metadata in enumerate(seq_group_metadata_list):
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
@@ -112,6 +130,16 @@ class ModelRunner:
             # is always the first token in the sequence.
             input_positions.append(
                 list(range(prefix_len, prefix_len + len(prompt_tokens))))
+
+            if seq_data.has_prompt_embeds_forwarding():
+                # If prompt_embeds are set,
+                # the token_ids of the prompt are treated as 0,
+                # so zero_token_embeds is excluded from prompt_embeds.
+                prompt_embeds.append(seq_data.prompt_embeds.to("cuda"))
+                prompt_embeds_indices.append(seq_group_idx)
+            else:
+                prompt_embeds.append(
+                    self.zero_token_embeds.repeat(prompt_len, 1))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -176,6 +204,21 @@ class ModelRunner:
                                           dtype=torch.long,
                                           device='cuda')
 
+        if prompt_embeds:
+            padded_prompt_embeds = [
+                _pad_embeddings_to_max(embeds, max_prompt_len,
+                                       self.zero_token_embeds)
+                for embeds in prompt_embeds
+            ]
+            prompt_embeds = torch.stack(padded_prompt_embeds).to(
+                dtype=self.model_config.dtype, device="cuda")
+        else:
+            prompt_embeds = None
+
+        prompt_embeds_indices = torch.tensor(prompt_embeds_indices,
+                                             device="cuda",
+                                             dtype=torch.int)
+
         input_metadata = InputMetadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
@@ -186,8 +229,9 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
+            prompt_embeds_indices=prompt_embeds_indices,
         )
-        return (input_tokens, input_positions, input_metadata, prompt_lens,
+        return (input_tokens, input_positions, prompt_embeds, input_metadata, prompt_lens,
                 subquery_lens)
 
     def _prepare_decode(
@@ -297,8 +341,9 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            prompt_embeds_indices=None,
         )
-        return input_tokens, input_positions, input_metadata
+        return input_tokens, input_positions, None, input_metadata
 
     def _prepare_sample(
         self,
@@ -455,6 +500,7 @@ class ModelRunner:
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
+            prompt_embeds=prompt_embeds,
         )
 
         # Sample the next token.
@@ -642,6 +688,14 @@ class CUDAGraphRunner:
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     assert len(x) <= max_len
     return x + [pad] * (max_len - len(x))
+
+
+def _pad_embeddings_to_max(x: torch.Tensor, max_len: int,
+                           pad: torch.Tensor) -> torch.Tensor:
+    return torch.cat(
+        [x, pad.repeat(max_len - x.shape[0], 1)],
+        dim=0,
+    )
 
 
 def _make_tensor_with_pad(

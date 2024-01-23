@@ -3,6 +3,7 @@ import time
 from functools import partial
 from typing import (Any, Dict, Iterable, List, Optional, Set, Tuple, Type,
                     Union, AsyncIterator)
+import torch
 
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -372,6 +373,7 @@ class AsyncLLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         prefix_pos: Optional[int] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
     ) -> AsyncStream:
         if self.log_requests:
             shortened_prompt = prompt
@@ -404,7 +406,9 @@ class AsyncLLMEngine:
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
             arrival_time=arrival_time,
-            prefix_pos=prefix_pos)
+            prefix_pos=prefix_pos,
+            prompt_embeds=prompt_embeds,
+        )
 
         return stream
 
@@ -414,7 +418,8 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         request_id: str,
         prompt_token_ids: Optional[List[int]] = None,
-        prefix_pos: Optional[int] = None,
+        prefix_pos: Optional[int] = None,,
+        prompt_embeds: Optional[torch.Tensor] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -492,7 +497,8 @@ class AsyncLLMEngine:
                                             sampling_params,
                                             prompt_token_ids=prompt_token_ids,
                                             arrival_time=arrival_time,
-                                            prefix_pos=prefix_pos)
+                                            prefix_pos=prefix_pos
+                                            prompt_embeds=prompt_embeds)
 
             async for request_output in stream:
                 yield request_output

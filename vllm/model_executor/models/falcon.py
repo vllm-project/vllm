@@ -29,21 +29,30 @@ from transformers import FalconConfig as HF_FalconConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearMethodBase,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    VocabParallelEmbedding,
+    ParallelLMHead,
+)
 from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce)
+    tensor_model_parallel_all_reduce, )
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.utils import replace_prompt_embeds
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
 
@@ -61,7 +70,8 @@ def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
     if closest_power_of_2 != total_num_heads:
         extra_base = torch.tensor(
             2**(-(2**-(math.log2(2 * closest_power_of_2) - 3))),
-            dtype=torch.float32)
+            dtype=torch.float32,
+        )
         num_remaining_heads = min(closest_power_of_2,
                                   total_num_heads - closest_power_of_2)
         extra_powers = torch.arange(1,
@@ -133,12 +143,13 @@ class FalconAttention(nn.Module):
             bias=config.bias,
             skip_bias_add=True,
             linear_method=linear_method,
-            reduce_results=self.reduce_row_parallel_results)
+            reduce_results=self.reduce_row_parallel_results,
+        )
 
         self.use_rotary = config.rotary
         self.use_alibi = config.alibi
-        assert not (self.use_rotary and self.use_alibi), (
-            "Rotary and alibi are mutually exclusive.")
+        assert not (self.use_rotary and
+                    self.use_alibi), "Rotary and alibi are mutually exclusive."
 
         if self.use_rotary:
             rope_theta = getattr(config, "rope_theta", 10000)
@@ -150,10 +161,12 @@ class FalconAttention(nn.Module):
                 max_position=max_position_embeddings,
                 base=rope_theta,
             )
-            self.attn = PagedAttention(self.num_heads,
-                                       self.head_dim,
-                                       self.inv_norm_factor,
-                                       num_kv_heads=self.num_kv_heads)
+            self.attn = PagedAttention(
+                self.num_heads,
+                self.head_dim,
+                self.inv_norm_factor,
+                num_kv_heads=self.num_kv_heads,
+            )
         elif self.use_alibi:
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
@@ -161,16 +174,20 @@ class FalconAttention(nn.Module):
             alibi_slopes = (_get_alibi_slopes(self.total_num_heads) *
                             self.inv_norm_factor)
             alibi_slopes = alibi_slopes[head_start:head_end].tolist()
-            self.attn = PagedAttention(self.num_heads,
-                                       self.head_dim,
-                                       self.inv_norm_factor,
-                                       num_kv_heads=self.num_kv_heads,
-                                       alibi_slopes=alibi_slopes)
+            self.attn = PagedAttention(
+                self.num_heads,
+                self.head_dim,
+                self.inv_norm_factor,
+                num_kv_heads=self.num_kv_heads,
+                alibi_slopes=alibi_slopes,
+            )
         else:
-            self.attn = PagedAttention(self.num_heads,
-                                       self.head_dim,
-                                       scale=self.inv_norm_factor,
-                                       num_kv_heads=self.num_kv_heads)
+            self.attn = PagedAttention(
+                self.num_heads,
+                self.head_dim,
+                scale=self.inv_norm_factor,
+                num_kv_heads=self.num_kv_heads,
+            )
 
     def forward(
         self,
@@ -201,11 +218,13 @@ class FalconMLP(nn.Module):
         super().__init__()
         hidden_size = config.hidden_size
 
-        self.dense_h_to_4h = ColumnParallelLinear(hidden_size,
-                                                  4 * hidden_size,
-                                                  bias=config.bias,
-                                                  skip_bias_add=True,
-                                                  linear_method=linear_method)
+        self.dense_h_to_4h = ColumnParallelLinear(
+            hidden_size,
+            4 * hidden_size,
+            bias=config.bias,
+            skip_bias_add=True,
+            linear_method=linear_method,
+        )
         quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
@@ -216,7 +235,8 @@ class FalconMLP(nn.Module):
             bias=config.bias,
             skip_bias_add=True,
             reduce_results=self.reduce_row_parallel_results,
-            linear_method=linear_method)
+            linear_method=linear_method,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # NOTE(zhuohan): Following huggingface, we do not fuse bias add here.
@@ -344,8 +364,16 @@ class FalconModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        hidden_states = self.word_embeddings(input_ids)
+        inputs_embeds = self.word_embeddings(input_ids)
+        if prompt_embeds is not None:
+            inputs_embeds = replace_prompt_embeds(
+                inputs_embeds,
+                prompt_embeds,
+                input_metadata.prompt_embeds_indices,
+            )
+        hidden_states = inputs_embeds
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(
@@ -381,12 +409,14 @@ class FalconForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(
             input_ids,
             positions,
             kv_caches,
             input_metadata,
+            prompt_embeds,
         )
         return hidden_states
 
@@ -399,11 +429,13 @@ class FalconForCausalLM(nn.Module):
                                    sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
@@ -445,3 +477,6 @@ class FalconForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+
+    def get_input_embeddings(self):
+        return self.transformer.word_embeddings

@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
+from vllm.model_executor.utils import replace_prompt_embeds
 from vllm.transformers_utils.configs.yi import YiConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -241,8 +242,16 @@ class YiModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids)
+        if prompt_embeds is not None:
+            inputs_embeds = replace_prompt_embeds(
+                inputs_embeds,
+                prompt_embeds,
+                input_metadata.prompt_embeds_indices,
+            )
+        hidden_states = inputs_embeds
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -277,9 +286,10 @@ class YiForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        prompt_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata)
+                                   input_metadata, prompt_embeds)
         return hidden_states
 
     def sample(
@@ -328,3 +338,6 @@ class YiForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens

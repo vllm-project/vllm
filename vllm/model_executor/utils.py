@@ -33,3 +33,13 @@ def set_weight_attrs(
         assert not hasattr(
             weight, key), (f"Overwriting existing tensor attribute: {key}")
         setattr(weight, key, value)
+
+
+def replace_prompt_embeds(
+    inputs_embeds: torch.Tensor,
+    prompt_embeds: torch.Tensor,
+    prompt_embeds_indices: torch.Tensor,
+):
+    inputs_embeds[prompt_embeds_indices] = torch.index_select(
+        prompt_embeds, 0, prompt_embeds_indices)
+    return inputs_embeds

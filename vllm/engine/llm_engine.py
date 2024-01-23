@@ -340,6 +340,7 @@ class LLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         prefix_pos: Optional[int] = None,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -349,8 +350,8 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            prompt: The prompt string. Can be None if prompt_token_ids is
-                provided.
+            prompt: The prompt string. Can be None if prompt_token_ids
+                or prompt_embeds are provided.
             sampling_params: The sampling parameters for text generation.
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
@@ -385,21 +386,23 @@ class LLMEngine:
             >>>    SamplingParams(temperature=0.0))
             >>> # continue the request processing
             >>> ...
+            prompt_embeds: The prompt embeddings. If set,
+                input prompt and prompt_token_ids are ignored
         """
         if arrival_time is None:
             arrival_time = time.monotonic()
-        if prompt_token_ids is None:
+
+        # If prompt_embeds is set, prompt_token_ids is filled with 0
+        if prompt_embeds is not None:
+            prompt_token_ids = [0] * prompt_embeds.size(0)
+        elif prompt_token_ids is None:
             assert prompt is not None
             prompt_token_ids = self.tokenizer.encode(prompt)
 
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
-        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
-
-        # Check whether the input specifies prefix
-        prefix = self.scheduler.prefix_pool.add_or_get_prefix(
-            prompt_token_ids[:prefix_pos]) if prefix_pos is not None else None
+        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size, prompt_embeds=prompt_embeds)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
@@ -835,10 +838,17 @@ class LLMEngine:
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
+
+        # if data has prompt embeds, all_input_ids are only output token ids
+        if seq.data.has_prompt_embeds_forwarding():
+            all_input_ids = seq.get_output_token_ids()
+        else:
+            all_input_ids = seq.get_token_ids()
+
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
              self.tokenizer,
-             all_input_ids=seq.get_token_ids(),
+             all_input_ids=all_input_ids,
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,

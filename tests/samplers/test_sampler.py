@@ -19,24 +19,29 @@ class MockLogitsSampler(Sampler):
         self.fake_logits = fake_logits
 
     def forward(self, *args, **kwargs):
-        with patch("vllm.model_executor.layers.sampler._prune_hidden_states",
-                   lambda x, y: x), patch(
-                       "vllm.model_executor.layers.sampler._get_logits",
-                       lambda *args, **kwargs: self.fake_logits):
+        with patch(
+                "vllm.model_executor.layers.sampler._prune_hidden_states",
+                lambda x, y: x,
+        ), patch(
+                "vllm.model_executor.layers.sampler._get_logits",
+                lambda *args, **kwargs: self.fake_logits,
+        ):
             return super().forward(*args, **kwargs)
 
 
 def _prepare_test(
-    batch_size: int
+    batch_size: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, ModelRunner]:
     vocab_size = 32000
     input_tensor = torch.rand((batch_size, 1024),
                               device="cuda",
                               dtype=torch.float16)
-    fake_logits = torch.full((batch_size, vocab_size),
-                             1e-2,
-                             device=input_tensor.device,
-                             dtype=input_tensor.dtype)
+    fake_logits = torch.full(
+        (batch_size, vocab_size),
+        1e-2,
+        device=input_tensor.device,
+        dtype=input_tensor.dtype,
+    )
     sampler = MockLogitsSampler(32000, fake_logits)
     model_runner = ModelRunner(None, None, None)
     return input_tensor, fake_logits, sampler, model_runner
