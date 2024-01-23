@@ -84,7 +84,7 @@ def run_vllm(
         dtype=dtype,
         max_model_len=max_model_len,
         enforce_eager=enforce_eager,
-        use_flash_attn_zte=use_flash_attn,
+        use_flash_attn=use_flash_attn,
     )
 
     # Add the requests to the engine.

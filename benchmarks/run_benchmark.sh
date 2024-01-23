@@ -111,11 +111,41 @@ function bench_latency() {
     done
 }
 
+function bench_throughput_offline() {
+    echo "###################### vllm-benchmark_throughput_offline ######################"
+    local backends=("vllm")
+    local in_out_lens=(512)
+    log_file=${log_path}/throughput_offline.log
+
+    for backend in "${backends[@]}"; do
+        for num_prompts in 1000; do
+            for lens in "${in_out_lens[@]}"; do
+                python3 benchmarks/benchmark_throughput.py \
+                    --backend ${backend} \
+                    --model ${model} \
+                    --tensor-parallel-size ${tp} \
+                    --input-len ${lens} \
+                    --output-len ${lens} \
+                    --num-prompts ${num_prompts} >> ${log_file}
+
+                python3 benchmarks/benchmark_throughput.py \
+                    --backend ${backend} \
+                    --model ${model} \
+                    --tensor-parallel-size ${tp} \
+                    --input-len ${lens} \
+                    --output-len ${lens} \
+                    --use-flash-attn \
+                    --num-prompts ${num_prompts} >> ${log_file}
+            done
+        done
+    done
+}
 
 function main() {
-    bench_kernel_latency_deepseek
-    bench_kernel_latency_qwen
-    bench_latency
+    # bench_kernel_latency_deepseek
+    # bench_kernel_latency_qwen
+    # bench_latency
+    bench_throughput_offline
 
     end=`date`
     echo 'Start:' ${start}
