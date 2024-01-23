@@ -51,8 +51,8 @@ fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,
  */
 bool _is_weak_contiguous(torch::Tensor &t) {
   return t.is_contiguous() ||
-         t.storage().nbytes() - t.storage_offset() * t.element_size() ==
-             t.numel() * t.element_size();
+         (t.storage().nbytes() - t.storage_offset() * t.element_size() ==
+          t.numel() * t.element_size());
 }
 
 void _all_reduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out,
