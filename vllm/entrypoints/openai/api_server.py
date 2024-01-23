@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import json
 from contextlib import asynccontextmanager
+import os
+
 from aioprometheus import MetricsMiddleware
 from aioprometheus.asgi.starlette import metrics
 import fastapi
@@ -64,6 +66,13 @@ def parse_args():
                         type=json.loads,
                         default=["*"],
                         help="allowed headers")
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help=
+        "If provided, the server will require this key to be presented in the header."
+    )
     parser.add_argument("--served-model-name",
                         type=str,
                         default=None,
@@ -160,6 +169,17 @@ if __name__ == "__main__":
         allow_methods=args.allowed_methods,
         allow_headers=args.allowed_headers,
     )
+
+    if token := os.environ.get("VLLM_API_KEY") or args.api_key:
+
+        @app.middleware("http")
+        async def authentication(request: Request, call_next):
+            if not request.url.path.startswith("/v1"):
+                return await call_next(request)
+            if request.headers.get("Authorization") != "Bearer " + token:
+                return JSONResponse(content={"error": "Unauthorized"},
+                                    status_code=401)
+            return await call_next(request)
 
     logger.info(f"args: {args}")
 
