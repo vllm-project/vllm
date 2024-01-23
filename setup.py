@@ -267,6 +267,7 @@ if not _is_neuron():
             "cxx": CXX_FLAGS,
             "nvcc": NVCC_FLAGS,
         },
+        libraries=["cuda"] if _is_cuda() else [],
     )
     ext_modules.append(vllm_extension)
 
