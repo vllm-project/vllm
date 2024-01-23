@@ -25,6 +25,13 @@ class MockEngine:
         return [RequestOutput(
             request_id=self.request_id)] if self.request_id else []
 
+    async def encode_request_async(
+        self,
+        *args,
+        **kwargs,
+    ):
+        return [1]
+
     def generate(self, request_id):
         self.request_id = request_id
 
@@ -32,6 +39,10 @@ class MockEngine:
         self.request_id = None
 
     def add_request(self, **kwargs):
+        del kwargs  # Unused
+        self.add_request_calls += 1
+
+    async def add_request_async(self, **kwargs):
         del kwargs  # Unused
         self.add_request_calls += 1
 

@@ -83,8 +83,8 @@ def create_worker(cls: type,
         enforce_eager=enforce_eager,
     )
 
-    (model_config, cache_config, parallel_config,
-     scheduler_config) = engine_args.create_engine_configs()
+    (model_config, cache_config, parallel_config, scheduler_config,
+     _) = engine_args.create_engine_configs()
 
     distributed_init_method = get_distributed_init_method(
         get_ip(), get_open_port())

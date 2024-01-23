@@ -1,12 +1,13 @@
 """A GPU worker class."""
+import gc
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple, Set, Optional
 
 import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, LoRAConfig)
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
@@ -15,6 +16,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
+from vllm.lora.request import LoRARequest
 
 
 class Worker:
@@ -33,6 +35,7 @@ class Worker:
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        lora_config: Optional[LoRAConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -41,12 +44,16 @@ class Worker:
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.lora_config = lora_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
-        self.model_runner = ModelRunner(model_config, parallel_config,
-                                        scheduler_config, is_driver_worker)
+        self.model_runner = ModelRunner(model_config,
+                                        parallel_config,
+                                        scheduler_config,
+                                        lora_config=self.lora_config,
+                                        is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None
@@ -117,6 +124,9 @@ class Worker:
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
+        if self.model_runner.lora_manager:
+            self.model_runner.remove_all_loras()
+        gc.collect()
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
@@ -198,6 +208,15 @@ class Worker:
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache)
         return output
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.model_runner.list_loras()
 
 
 def _init_distributed_environment(

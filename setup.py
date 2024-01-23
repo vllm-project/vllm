@@ -1,13 +1,16 @@
+import contextlib
 import io
 import os
 import re
 import subprocess
-from typing import List, Set
 import warnings
+from pathlib import Path
+from typing import List, Set
 
 from packaging.version import parse, Version
 import setuptools
 import torch
+import torch.utils.cpp_extension as torch_cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
@@ -28,7 +31,7 @@ def _is_neuron() -> bool:
     torch_neuronx_installed = True
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         torch_neuronx_installed = False
     return torch_neuronx_installed
 
@@ -96,10 +99,16 @@ def get_hipcc_rocm_version():
         return None
 
 
+def glob(pattern: str):
+    root = Path(__name__).parent
+    return [str(p) for p in root.glob(pattern)]
+
+
 def get_neuronxcc_version():
     import sysconfig
     site_dir = sysconfig.get_paths()["purelib"]
-    version_file = os.path.join(site_dir, "neuronxcc", "version", "__init__.py")
+    version_file = os.path.join(site_dir, "neuronxcc", "version",
+                                "__init__.py")
 
     # Check if the command was executed successfully
     with open(version_file, "rt") as fp:
@@ -178,6 +187,8 @@ if _is_cuda() and not compute_capabilities:
                 "GPUs with compute capability below 7.0 are not supported.")
         compute_capabilities.add(f"{major}.{minor}")
 
+ext_modules = []
+
 if _is_cuda():
     nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
     if not compute_capabilities:
@@ -215,6 +226,8 @@ if _is_cuda():
             raise RuntimeError(
                 "CUDA 11.8 or higher is required for compute capability 9.0.")
 
+    NVCC_FLAGS_PUNICA = NVCC_FLAGS.copy()
+
     # Add target compute capabilities to NVCC flags.
     for capability in compute_capabilities:
         num = capability[0] + capability[2]
@@ -223,6 +236,14 @@ if _is_cuda():
             NVCC_FLAGS += [
                 "-gencode", f"arch=compute_{num},code=compute_{num}"
             ]
+        if int(capability[0]) >= 8:
+            NVCC_FLAGS_PUNICA += [
+                "-gencode", f"arch=compute_{num},code=sm_{num}"
+            ]
+            if capability.endswith("+PTX"):
+                NVCC_FLAGS_PUNICA += [
+                    "-gencode", f"arch=compute_{num},code=compute_{num}"
+                ]
 
     # Use NVCC threads to parallelize the build.
     if nvcc_cuda_version >= Version("11.2"):
@@ -230,6 +251,36 @@ if _is_cuda():
         num_threads = min(os.cpu_count(), nvcc_threads)
         NVCC_FLAGS += ["--threads", str(num_threads)]
 
+    # changes for punica kernels
+    NVCC_FLAGS += torch_cpp_ext.COMMON_NVCC_FLAGS
+    REMOVE_NVCC_FLAGS = [
+        '-D__CUDA_NO_HALF_OPERATORS__',
+        '-D__CUDA_NO_HALF_CONVERSIONS__',
+        '-D__CUDA_NO_BFLOAT16_CONVERSIONS__',
+        '-D__CUDA_NO_HALF2_OPERATORS__',
+    ]
+    for flag in REMOVE_NVCC_FLAGS:
+        with contextlib.suppress(ValueError):
+            torch_cpp_ext.COMMON_NVCC_FLAGS.remove(flag)
+
+    install_punica = bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "1")))
+    device_count = torch.cuda.device_count()
+    for i in range(device_count):
+        major, minor = torch.cuda.get_device_capability(i)
+        if major < 8:
+            install_punica = False
+            break
+    if install_punica:
+        ext_modules.append(
+            CUDAExtension(
+                name="vllm._punica_C",
+                sources=["csrc/punica/punica_ops.cc"] +
+                glob("csrc/punica/bgmv/*.cu"),
+                extra_compile_args={
+                    "cxx": CXX_FLAGS,
+                    "nvcc": NVCC_FLAGS_PUNICA,
+                },
+            ))
 elif _is_hip():
     amd_arch = get_amdgpu_offload_arch()
     if amd_arch not in ROCM_SUPPORTED_ARCHS:
@@ -239,8 +290,6 @@ elif _is_hip():
 
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
-
-ext_modules = []
 
 vllm_extension_sources = [
     "csrc/cache_kernels.cu",

@@ -41,6 +41,9 @@ steps:
 - label: Worker Test
   command: pytest -v -s worker
 
+- label: LoRA Test
+  command: pytest -v -s lora
+
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
   commands:

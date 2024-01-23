@@ -65,7 +65,9 @@ def main(args: argparse.Namespace):
     if args.profile:
         profile_dir = args.profile_result_dir
         if not profile_dir:
-            profile_dir = Path(".") / "vllm_benchmark_result" / f"latency_result_{time.time()}"
+            profile_dir = Path(
+                "."
+            ) / "vllm_benchmark_result" / f"latency_result_{time.time()}"
         print(f"Profiling (results will be saved to '{profile_dir}')...")
         run_to_completion(profile_dir=args.profile_result_dir)
         return
@@ -123,9 +125,7 @@ if __name__ == '__main__':
         '--profile-result-dir',
         type=str,
         default=None,
-        help=(
-            'path to save the pytorch profiler output. Can be visualized '
-            'with ui.perfetto.dev or Tensorboard.'
-        ))
+        help=('path to save the pytorch profiler output. Can be visualized '
+              'with ui.perfetto.dev or Tensorboard.'))
     args = parser.parse_args()
     main(args)

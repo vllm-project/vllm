@@ -6,7 +6,7 @@ from vllm.worker.model_runner import ModelRunner
 
 
 def test_prepare_prompt():
-    model_runner = ModelRunner(None, None, None)
+    model_runner = ModelRunner(None, None, None, None)
     model_runner.set_block_size(16)
 
     batch_size = random.randint(1, 256)
@@ -33,7 +33,7 @@ def test_prepare_prompt():
         expected_selected_token_indices.append(selected_token_start_idx +
                                                prompt_len - 1)
         selected_token_start_idx += max_seq_len
-    input_tokens, input_positions, _, return_prompt_lens, _ = (
+    input_tokens, input_positions, _, return_prompt_lens, _, _, _, _ = (
         model_runner._prepare_prompt(seq_group_metadata_list))
     assert return_prompt_lens == prompt_lens
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
