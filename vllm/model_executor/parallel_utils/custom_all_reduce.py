@@ -28,7 +28,7 @@ def init_custom_ar() -> None:
         return
     rank = get_tensor_model_parallel_rank()
     world_size = get_tensor_model_parallel_world_size()
-    if world_size > 1 and _can_p2p(rank, world_size):
+    if world_size in [2, 4, 6, 8] and _can_p2p(rank, world_size):
         _ca_handle = FastAllreduce(rank, world_size)
 
 
