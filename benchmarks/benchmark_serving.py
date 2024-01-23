@@ -92,17 +92,9 @@ async def get_request(
         await asyncio.sleep(interval)
 
 
-async def send_request(
-    backend: str,
-    model: str,
-    api_url: str,
-    prompt: str,
-    prompt_len: int,
-    output_len: int,
-    best_of: int,
-    use_beam_search: bool,
-    pbar: tqdm
-) -> None:
+async def send_request(backend: str, model: str, api_url: str, prompt: str,
+                       prompt_len: int, output_len: int, best_of: int,
+                       use_beam_search: bool, pbar: tqdm) -> None:
     request_start_time = time.perf_counter()
 
     headers = {"User-Agent": "Benchmark Client"}
@@ -153,7 +145,6 @@ async def send_request(
     request_latency = request_end_time - request_start_time
     REQUEST_LATENCY.append((prompt_len, output_len, request_latency))
     pbar.update(1)
-
 
 
 async def benchmark(
@@ -217,7 +208,10 @@ if __name__ == "__main__":
                         type=str,
                         default="vllm",
                         choices=["vllm", "tgi"])
-    parser.add_argument("--protocol", type=str, default="http", choices=["http", "https"])
+    parser.add_argument("--protocol",
+                        type=str,
+                        default="http",
+                        choices=["http", "https"])
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--endpoint", type=str, default="/generate")

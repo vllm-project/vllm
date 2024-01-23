@@ -71,7 +71,7 @@ format_changed() {
 
 # Format all files
 format_all() {
-    yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" vllm tests
+    yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" .
 }
 
 ## This flag formats individual files. --files *must* be the first command line
