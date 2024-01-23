@@ -202,7 +202,7 @@ class LLM:
                                     prompt,
                                     sampling_params,
                                     prompt_token_ids=prompt_token_ids,
-                                    prefix_pos=prefix_pos
+                                    prefix_pos=prefix_pos,
                                     prompt_embeds=prompt_embeds)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:

@@ -28,7 +28,7 @@ def _is_neuron() -> bool:
     torch_neuronx_installed = True
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         torch_neuronx_installed = False
     return torch_neuronx_installed
 
@@ -99,7 +99,8 @@ def get_hipcc_rocm_version():
 def get_neuronxcc_version():
     import sysconfig
     site_dir = sysconfig.get_paths()["purelib"]
-    version_file = os.path.join(site_dir, "neuronxcc", "version", "__init__.py")
+    version_file = os.path.join(site_dir, "neuronxcc", "version",
+                                "__init__.py")
 
     # Check if the command was executed successfully
     with open(version_file, "rt") as fp:

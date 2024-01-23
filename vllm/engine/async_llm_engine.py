@@ -418,7 +418,7 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         request_id: str,
         prompt_token_ids: Optional[List[int]] = None,
-        prefix_pos: Optional[int] = None,,
+        prefix_pos: Optional[int] = None,
         prompt_embeds: Optional[torch.Tensor] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
@@ -497,7 +497,7 @@ class AsyncLLMEngine:
                                             sampling_params,
                                             prompt_token_ids=prompt_token_ids,
                                             arrival_time=arrival_time,
-                                            prefix_pos=prefix_pos
+                                            prefix_pos=prefix_pos,
                                             prompt_embeds=prompt_embeds)
 
             async for request_output in stream:

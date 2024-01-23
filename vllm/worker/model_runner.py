@@ -103,7 +103,8 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        for seq_group_idx, seq_group_metadata in enumerate(seq_group_metadata_list):
+        for seq_group_idx, seq_group_metadata in enumerate(
+                seq_group_metadata_list):
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
@@ -231,8 +232,8 @@ class ModelRunner:
             use_cuda_graph=False,
             prompt_embeds_indices=prompt_embeds_indices,
         )
-        return (input_tokens, input_positions, prompt_embeds, input_metadata, prompt_lens,
-                subquery_lens)
+        return (input_tokens, input_positions, prompt_embeds, input_metadata,
+                prompt_lens, subquery_lens)
 
     def _prepare_decode(
         self,
@@ -427,10 +428,11 @@ class ModelRunner:
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
-                (input_tokens, input_positions, input_metadata, prompt_lens,
+                (input_tokens, input_positions, prompt_embeds, input_metadata,
+                 prompt_lens,
                  subquery_lens) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                (input_tokens, input_positions, input_metadata
+                (input_tokens, input_positions, prompt_embeds, input_metadata
                  ) = self._prepare_decode(seq_group_metadata_list)
                 subquery_lens = None
                 prompt_lens = []
@@ -479,7 +481,7 @@ class ModelRunner:
                 perform_sampling=False,
             )
 
-        return input_tokens, input_positions, input_metadata, sampling_metadata
+        return input_tokens, input_positions, prompt_embeds, input_metadata, sampling_metadata
 
     @torch.inference_mode()
     def execute_model(
@@ -487,7 +489,7 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> Optional[SamplerOutput]:
-        input_tokens, input_positions, input_metadata, sampling_metadata = (
+        input_tokens, input_positions, prompt_embeds, input_metadata, sampling_metadata = (
             self.prepare_input_tensors(seq_group_metadata_list))
         # Execute the model.
         if input_metadata.use_cuda_graph:
