@@ -112,25 +112,12 @@ def _is_full_nvlink(rank, world_size):
     return True
 
 
-@_nvml()
-def _can_p2p(rank, world_size):
-    handle1 = pynvml.nvmlDeviceGetHandleByIndex(rank)
+def _can_p2p(rank: int, world_size: int) -> bool:
     for i in range(world_size):
-        if i != rank:
-            handle2 = pynvml.nvmlDeviceGetHandleByIndex(rank)
-            try:
-                p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                    handle1, handle2, pynvml.NVML_P2P_CAPS_INDEX_READ)
-                if p2p_status != pynvml.NVML_P2P_STATUS_OK:
-                    logger.info(
-                        f"P2P is not supported between device {i} and {rank}. "
-                        "custom allreduce will be disabled")
-                    return False
-            except pynvml.NVMLError as error:
-                logger.info(
-                    f"P2P detection failed with message \"{str(error)}\". "
-                    "custom allreduce will be disabled")
-                return False
+        if i == rank:
+            continue
+        if not torch.cuda.can_device_access_peer(rank, i):
+            return False
     return True
 
 
