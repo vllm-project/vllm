@@ -324,6 +324,7 @@ __global__ void __launch_bounds__(512, 1)
     ((P *)result)[idx] = tmp;
   }
 }
+
 class FastAllreduce {
  public:
   int rank_;
