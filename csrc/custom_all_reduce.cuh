@@ -467,14 +467,21 @@ class FastAllreduce {
     graph_unreg_buffers_.clear();
   }
 
-  // note: 512, 36 is good for most cases
+  /**
+   * This is the result after careful grid search. Using 36 blocks give the best
+   * or close to the best runtime on the devices I tried: A100, A10, A30, T4,
+   * V100. You'll notice that NCCL kernels also only take a small amount of SMs.
+   * Not quite sure the underlying reason, but my guess is that too many SMs
+   * will cause contention on NVLink bus.
+   */
   template <typename T>
   void allreduce(cudaStream_t stream, T *input, T *output, int size,
                  int threads = 512, int block_limit = 36) {
     auto d = packed_t<T>::P::size;
     if (size % d != 0)
       throw std::runtime_error(
-          "custom allreduce currently requires input length to be multiple of " +
+          "custom allreduce currently requires input length to be multiple "
+          "of " +
           std::to_string(d));
 
     RankData *ptrs;

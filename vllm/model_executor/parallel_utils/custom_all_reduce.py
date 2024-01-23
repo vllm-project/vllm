@@ -126,10 +126,20 @@ class FastAllreduce:
     # max_size: max supported allreduce size
     def __init__(self, rank, world_size, max_size=8192 * 1024) -> None:
         # buffers memory are owned by this Python class and passed to C++
+        # meta data composes of two parts: meta data for synchronization
+        # (256 bytes) and a temporary buffer for storing intermediate
+        # allreduce results.
         self.meta = torch.zeros(custom_ar.meta_size() + max_size,
                                 dtype=torch.uint8,
                                 device="cuda")
+        # This is a pre-registered IPC buffer. In eager mode, input tensors
+        # are first copied into this buffer before allreduce is performed
         self.buffer = torch.empty(max_size, dtype=torch.uint8, device="cuda")
+        # This is a buffer for storing the tuples of pointers pointing to
+        # IPC buffers from all ranks. Each registered tuple has size of
+        # 8*world_size bytes where world_size is at most 8. Allocating 8MB
+        # is enough for 131072 such tuples. The largest model I've seen only
+        # needs less than 10000 of registered tuples. 
         self.rank_data = torch.empty(8 * 1024 * 1024,
                                      dtype=torch.uint8,
                                      device="cuda")

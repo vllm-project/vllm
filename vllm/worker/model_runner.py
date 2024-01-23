@@ -10,9 +10,9 @@ from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
+from vllm.model_executor.parallel_utils import custom_all_reduce
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.model_executor.parallel_utils import custom_all_reduce
 from vllm.utils import in_wsl
 
 logger = init_logger(__name__)
