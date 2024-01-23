@@ -3,6 +3,8 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 import os
+import importlib
+import inspect
 
 from aioprometheus import MetricsMiddleware
 from aioprometheus.asgi.starlette import metrics
@@ -103,6 +105,17 @@ def parse_args():
         type=str,
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy")
+    parser.add_argument(
+        "--middleware",
+        type=str,
+        action="append",
+        default=[],
+        help="Additional ASGI middleware to apply to the app. "
+        "We accept multiple --middleware arguments. "
+        "The value should be an import path. "
+        "If a function is provided, vLLM will add it to the server using @app.middleware('http'). "
+        "If a class is provided, vLLM will add it to the server using app.add_middleware(). "
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
@@ -180,6 +193,18 @@ if __name__ == "__main__":
                 return JSONResponse(content={"error": "Unauthorized"},
                                     status_code=401)
             return await call_next(request)
+
+    for middleware in args.middleware:
+        module_path, object_name = middleware.rsplit(".", 1)
+        imported = getattr(importlib.import_module(module_path), object_name)
+        if inspect.isclass(imported):
+            app.add_middleware(imported)
+        elif inspect.iscoroutinefunction(imported):
+            app.middleware("http")(imported)
+        else:
+            raise ValueError(
+                f"Invalid middleware {middleware}. Must be a function or a class."
+            )
 
     logger.info(f"args: {args}")
 
