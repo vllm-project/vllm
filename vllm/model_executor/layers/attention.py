@@ -93,7 +93,7 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            if not input_metadata.use_flash_attn_zte:
+            if not input_metadata.use_flash_attn:
                 cache_ops.reshape_and_cache(
                     key,
                     value,
@@ -168,7 +168,7 @@ class PagedAttention(nn.Module):
             output = out.view_as(query)
         else:
             # Decoding run.
-            if not input_metadata.use_flash_attn_zte:
+            if not input_metadata.use_flash_attn:
                 output = _paged_attention(
                     query,
                     key_cache,

@@ -35,7 +35,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
-    use_flash_attn_zte: bool = False
+    use_flash_attn: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -204,10 +204,9 @@ class EngineArgs:
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode.')
         parser.add_argument(
-            '--use-flash-attn-zte',
+            '--use-flash-attn',
             action='store_true',
-            help='Use original flash attention for prefill stage and '
-            'use blocked kv cache flash attention for decode stage. '
+            help='Use blocked kv cache flash attention for decode stage. '
             'Note this will rewrite block_size of kv cache.')
         return parser
 
@@ -227,8 +226,8 @@ class EngineArgs:
             self.trust_remote_code, self.download_dir, self.load_format,
             self.dtype, self.seed, self.revision, self.tokenizer_revision,
             self.max_model_len, self.quantization, self.enforce_eager,
-            self.max_context_len_to_capture, self.use_flash_attn_zte)
-        if self.use_flash_attn_zte:
+            self.max_context_len_to_capture, self.use_flash_attn)
+        if self.use_flash_attn:
             from flash_attn.flash_attn_interface import get_kvcache_block_size
             self.block_size = get_kvcache_block_size(
                 model_config.get_head_size())
