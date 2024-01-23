@@ -91,6 +91,7 @@ void gptq_shuffle(
   torch::Tensor q_perm);
 
 
+#ifndef USE_ROCM
 using fptr_t = uint64_t;
 fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,
                     const std::vector<std::string> &handles,
@@ -107,3 +108,4 @@ void register_buffer(fptr_t _fa, torch::Tensor &t,
 std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(fptr_t _fa);
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string> &handles,
                             const std::vector<std::vector<int64_t>> &offsets);
+#endif
