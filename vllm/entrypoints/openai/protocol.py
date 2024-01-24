@@ -14,7 +14,7 @@ class ErrorResponse(BaseModel):
     message: str
     type: str
     param: Optional[str] = None
-    code: Optional[str] = None
+    code: int
 
 
 class ModelPermission(BaseModel):
@@ -189,7 +189,7 @@ class CompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[CompletionResponseStreamChoice]
-    usage: Optional[UsageInfo]
+    usage: Optional[UsageInfo] = Field(default=None)
 
 
 class ChatMessage(BaseModel):
@@ -229,5 +229,4 @@ class ChatCompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
-    usage: Optional[UsageInfo] = Field(
-        default=None, description="data about request and response")
+    usage: Optional[UsageInfo] = Field(default=None)
