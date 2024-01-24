@@ -71,7 +71,7 @@ class LLM:
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = False,
-        tensor_parallel_size: int = 4,
+        tensor_parallel_size: int = 1,
         dtype: str = "auto",
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
