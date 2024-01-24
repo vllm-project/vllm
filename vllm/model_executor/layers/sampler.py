@@ -185,10 +185,8 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     logits -= presence_penalties.unsqueeze_(dim=1) * output_mask
     return logits
 
-def _cal_probs_sum(
-    probs_sort: torch.Tensor,
-    matmul_size: int = 1024
-):
+
+def _cal_probs_sum(probs_sort: torch.Tensor, matmul_size: int = 1024):
     """ Use matmul to speed up cumsum.
 
     1. Pad probs_sort to make sure its last dim can be divisible by matmul_size.
@@ -200,18 +198,27 @@ def _cal_probs_sum(
     probs_size = probs_sort.size()
     vocab_size = probs_size[-1]
     # Pad probs_sort
-    padded_len = (vocab_size + matmul_size - 1) // matmul_size * matmul_size - vocab_size
+    padded_len = (vocab_size + matmul_size -
+                  1) // matmul_size * matmul_size - vocab_size
     probs_sort = F.pad(probs_sort, (0, padded_len))
     cumsum_partition_size = probs_sort.size(-1) // matmul_size
     # Use matmul to accelerate cumsum
-    triu_matrix = torch.triu(torch.ones(matmul_size, matmul_size, dtype=probs_sort.dtype, device=probs_sort.device))
-    probs_sum = torch.matmul(probs_sort.view(*probs_size[:-1], cumsum_partition_size, matmul_size), triu_matrix)
+    triu_matrix = torch.triu(
+        torch.ones(matmul_size,
+                   matmul_size,
+                   dtype=probs_sort.dtype,
+                   device=probs_sort.device))
+    probs_sum = torch.matmul(
+        probs_sort.view(*probs_size[:-1], cumsum_partition_size, matmul_size),
+        triu_matrix)
     tmp = probs_sum[..., :-1, -1].cumsum(-1)
     probs_sum[..., 1:, :].add_(tmp.unsqueeze(-1))
     # Restore probs_sort and probs_sum
     probs_sort = probs_sort[..., :vocab_size]
-    probs_sum = probs_sum.view(*probs_size[:-1], cumsum_partition_size * matmul_size)[..., :vocab_size]
+    probs_sum = probs_sum.view(*probs_size[:-1], cumsum_partition_size *
+                               matmul_size)[..., :vocab_size]
     return probs_sum
+
 
 def _apply_top_p_top_k(
     logits: torch.Tensor,
