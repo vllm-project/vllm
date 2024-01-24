@@ -198,9 +198,9 @@ def fused_moe(hidden_states: torch.Tensor,
     E, N, K = w1.shape
 
     config = {
-        'BLOCK_SIZE_M': 64,
-        'BLOCK_SIZE_N': 64,
-        'BLOCK_SIZE_K': 32,
+        'BLOCK_SIZE_M': 128,
+        'BLOCK_SIZE_N': 128,
+        'BLOCK_SIZE_K': 64,
         'GROUP_SIZE_M': 8
     }
 
