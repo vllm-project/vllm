@@ -336,7 +336,7 @@ class EngineArgs:
                                            model_config.max_model_len,
                                            self.max_paddings,
                                            self.scheduler_policy,
-                                           self.scheduler_max_delay)
+                                           self.scheduler_reorder_window)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
