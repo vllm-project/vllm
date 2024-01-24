@@ -78,6 +78,8 @@ class ChatCompletionRequest(BaseModel):
     echo: Optional[bool] = False
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    include_stop_str_in_output: Optional[bool] = False
+    length_penalty: Optional[float] = 1.0
 
     def to_sampling_params(self) -> SamplingParams:
         return SamplingParams(
@@ -97,6 +99,8 @@ class ChatCompletionRequest(BaseModel):
             use_beam_search=self.use_beam_search,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
+            include_stop_str_in_output=self.include_stop_str_in_output,
+            length_penalty=self.length_penalty,
         )
 
 
@@ -127,6 +131,8 @@ class CompletionRequest(BaseModel):
     spaces_between_special_tokens: Optional[bool] = True
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    include_stop_str_in_output: Optional[bool] = False
+    length_penalty: Optional[float] = 1.0
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
@@ -150,6 +156,8 @@ class CompletionRequest(BaseModel):
             prompt_logprobs=self.logprobs if self.echo else None,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=(self.spaces_between_special_tokens),
+            include_stop_str_in_output=self.include_stop_str_in_output,
+            length_penalty=self.length_penalty,
         )
 
 
