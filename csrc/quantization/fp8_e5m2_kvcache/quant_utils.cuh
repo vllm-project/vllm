@@ -175,8 +175,12 @@ __inline__ __device__ uint8_t vec_conversion<uint8_t, uint16_t>(const uint16_t& 
 template<>
 __inline__ __device__ uint8_t vec_conversion<uint8_t, __nv_bfloat16>(const __nv_bfloat16& a)
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    assert(false);
+#else
     __nv_fp8_storage_t res = __nv_cvt_bfloat16raw_to_fp8(__nv_bfloat16_raw(a), __NV_SATFINITE, __NV_E5M2);
     return (uint8_t)res;
+#endif
 }
 
 // float -> fp8

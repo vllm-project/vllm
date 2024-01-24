@@ -15,7 +15,7 @@ NUM_BLOCKS = [1024, 3600]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
-USE_FP8_KV_CACHE = [False, True]
+KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -27,7 +27,7 @@ USE_FP8_KV_CACHE = [False, True]
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("use_fp8_kv_cache", USE_FP8_KV_CACHE)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_copy_blocks(
     kv_cache_factory,
@@ -40,7 +40,7 @@ def test_copy_blocks(
     dtype: torch.dtype,
     seed: int,
     device: int,
-    use_fp8_kv_cache: bool,
+    kv_cache_dtype: str,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -60,11 +60,10 @@ def test_copy_blocks(
         block_mapping[src] = [dst1, dst2]
 
     # Create the KV caches.
-    cache_dtype = dtype if not use_fp8_kv_cache else torch.uint8
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size,
                                                 num_layers, num_heads,
-                                                head_size, cache_dtype, seed,
-                                                gpu_id)
+                                                head_size, kv_cache_dtype,
+                                                dtype, seed, gpu_id)
 
     # Clone the KV caches.
     cloned_key_caches = [key_cache.clone() for key_cache in key_caches]
@@ -163,7 +162,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def test_convert_fp8(
+def test_convert_fp8_e5m2(
     kv_cache_factory,
     num_heads: int,
     head_size: int,
@@ -191,11 +190,11 @@ def test_convert_fp8(
     quanted_key_cache = torch.empty_like(key_cache, dtype=torch.uint8)
     quanted_value_cache = torch.empty_like(value_cache, dtype=torch.uint8)
     # Quantize to fp8.
-    cache_ops.convert_fp8(key_cache, quanted_key_cache)
-    cache_ops.convert_fp8(value_cache, quanted_value_cache)
+    cache_ops.convert_fp8_e5m2(key_cache, quanted_key_cache)
+    cache_ops.convert_fp8_e5m2(value_cache, quanted_value_cache)
     # Dequantize back to dtype.
-    cache_ops.convert_fp8(quanted_key_cache, key_cache)
-    cache_ops.convert_fp8(quanted_value_cache, value_cache)
+    cache_ops.convert_fp8_e5m2(quanted_key_cache, key_cache)
+    cache_ops.convert_fp8_e5m2(quanted_value_cache, value_cache)
 
     # NOTE(zhaoyang): FP8 will introduce quantization error,
     # specifically fp8e5m2 data format. Thus, we use a relaxed tolerance for the test.

@@ -1,11 +1,10 @@
-.. _fp8_kv_cache:
+.. _fp8_e5m2_kv_cache:
 
-FP8 KV Cache
+FP8 E5M2 KV Cache
 ==================
 
 The int8/int4 quantization scheme requires additional scale GPU memory storage, which reduces the expected GPU memory benefits.
-The FP8 data format retains 2~3 mantissa bits and can directly convert float/fp16/bflaot16 and fp8 to each other,
-which not only simplifies the quantization and dequantization operations, but also does not require additional scale GPU memory storage.
+The FP8 data format retains 2~3 mantissa bits and can convert float/fp16/bflaot16 and fp8 to each other.
 
 Here is an example of how to enable this feature:
 
@@ -21,7 +20,7 @@ Here is an example of how to enable this feature:
     # Create a sampling params object.
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m", kv_cache_dtype="fp8")
+    llm = LLM(model="facebook/opt-125m", kv_cache_dtype="fp8_e5m2")
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)

@@ -62,9 +62,9 @@ class ModelRunner:
         # cache in_wsl result
         self.in_wsl = in_wsl()
 
-        self.use_fp8_kv_cache = (self.cache_config
-                                 and self.cache_config.quant_method) and (
-                                     'fp8' in self.cache_config.quant_method)
+        self.kv_cache_dtype = "auto"
+        if self.cache_config and self.cache_config.quant_method:
+            self.kv_cache_dtype = self.cache_config.quant_method
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config)
@@ -192,7 +192,7 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            use_fp8_kv_cache=False,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens)
@@ -304,7 +304,7 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
-            use_fp8_kv_cache=self.use_fp8_kv_cache,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
         return input_tokens, input_positions, input_metadata
 
@@ -414,7 +414,7 @@ class ModelRunner:
                 "context_lens": input_metadata.context_lens,
                 "block_tables": input_metadata.block_tables,
                 "use_cuda_graph": input_metadata.use_cuda_graph,
-                "use_fp8_kv_cache": input_metadata.use_fp8_kv_cache,
+                "kv_cache_dtype": input_metadata.kv_cache_dtype,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
             }
@@ -433,7 +433,7 @@ class ModelRunner:
                 context_lens=metadata_dict["context_lens"],
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
-                use_fp8_kv_cache=metadata_dict["use_fp8_kv_cache"],
+                kv_cache_dtype=metadata_dict["kv_cache_dtype"],
             )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -549,7 +549,7 @@ class ModelRunner:
                 context_lens=context_lens[:batch_size],
                 block_tables=block_tables[:batch_size],
                 use_cuda_graph=True,
-                use_fp8_kv_cache=self.use_fp8_kv_cache,
+                kv_cache_dtype=self.kv_cache_dtype,
             )
 
             graph_runner = CUDAGraphRunner(self.model)

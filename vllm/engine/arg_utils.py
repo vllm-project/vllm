@@ -35,7 +35,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
-    kv_cache_dtype: Optional[str] = None
+    kv_cache_dtype: str = 'auto'
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -206,10 +206,10 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['fp8', None],
-            default=None,
+            choices=['auto', 'fp8_e5m2'],
+            default='auto',
             help=
-            'Data type for kv cache storage. If None, will use model data type.'
+            'Data type for kv cache storage. If "auto", will use model data type.'
         )
         return parser
 

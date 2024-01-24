@@ -98,6 +98,7 @@ class PagedAttention(nn.Module):
                 key_cache,
                 value_cache,
                 input_metadata.slot_mapping.flatten(),
+                input_metadata.kv_cache_dtype,
             )
 
         if input_metadata.is_prompt:
@@ -237,8 +238,6 @@ def _paged_attention(
 ) -> torch.Tensor:
     output = torch.empty_like(query)
 
-    use_fp8_kv_cache = input_metadata.use_fp8_kv_cache
-
     block_size = value_cache.shape[3]
     num_seqs, num_heads, head_size = query.shape
     max_num_partitions = (
@@ -267,7 +266,7 @@ def _paged_attention(
             block_size,
             input_metadata.max_context_len,
             alibi_slopes,
-            use_fp8_kv_cache,
+            input_metadata.kv_cache_dtype,
         )
     else:
         # Run PagedAttention V2.
@@ -298,6 +297,6 @@ def _paged_attention(
             block_size,
             input_metadata.max_context_len,
             alibi_slopes,
-            use_fp8_kv_cache,
+            input_metadata.kv_cache_dtype,
         )
     return output

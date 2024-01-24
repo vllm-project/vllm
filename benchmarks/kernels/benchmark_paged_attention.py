@@ -1,10 +1,12 @@
+from typing import Optional
 import argparse
 import random
 import time
 
 import torch
 
-from vllm._C import ops, cache_ops
+from vllm.utils import create_kv_caches
+from vllm._C import ops
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
@@ -21,9 +23,9 @@ def main(
     use_alibi: bool,
     block_size: int,
     dtype: torch.dtype,
-    use_fp8_kv_cache: bool,
     seed: int,
     do_profile: bool,
+    kv_cache_dtype: Optional[str] = None,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -60,36 +62,10 @@ def main(
     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
 
     # Create the KV cache.
-    cache_dtype = dtype if not use_fp8_kv_cache else torch.uint8
-    x = 16 // torch.tensor([], dtype=cache_dtype).element_size()
-    key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x, block_size, x)
-    key_cache = torch.empty(size=key_cache_shape,
-                            dtype=cache_dtype,
-                            device="cuda")
-    if not use_fp8_kv_cache:
-        key_cache.uniform_(-scale, scale)
-    else:
-        # NOTE(zhaoyang): Due to NaN and Inf representation for fp8 data type,
-        # it may occur Inf or NaN if we directly use torch.randint
-        # to generate random data for fp8 cache.
-        # For example, s.11111.00 in fp8e5m2 format repesents Inf.
-        #     | E4M3        | E5M2
-        #-----|-------------|-------------------
-        # Inf | N/A         | s.11111.00
-        # NaN | s.1111.111  | s.11111.{01,10,11}
-        key_cache_tmp = torch.empty_like(key_cache, dtype=dtype)
-        key_cache_tmp.uniform_(-scale, scale)
-        cache_ops.convert_fp8(key_cache_tmp, key_cache)
-    value_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size, block_size)
-    value_cache = torch.empty(size=value_cache_shape,
-                              dtype=cache_dtype,
-                              device="cuda")
-    if not use_fp8_kv_cache:
-        value_cache.uniform_(-scale, scale)
-    else:
-        value_cache_tmp = torch.empty_like(value_cache, dtype=dtype)
-        value_cache_tmp.uniform_(-scale, scale)
-        cache_ops.convert_fp8(value_cache_tmp, value_cache)
+    key_caches, value_caches = create_kv_caches(NUM_BLOCKS, block_size, 1,
+                                                num_kv_heads, head_size,
+                                                kv_cache_dtype, dtype)
+    key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
@@ -128,7 +104,7 @@ def main(
                     block_size,
                     max_context_len,
                     alibi_slopes,
-                    use_fp8_kv_cache,
+                    kv_cache_dtype,
                 )
             elif version == "v2":
                 ops.paged_attention_v2(
@@ -146,7 +122,7 @@ def main(
                     block_size,
                     max_context_len,
                     alibi_slopes,
-                    use_fp8_kv_cache,
+                    kv_cache_dtype,
                 )
             else:
                 raise ValueError(f"Invalid version: {version}")
@@ -190,9 +166,15 @@ if __name__ == '__main__':
                         type=str,
                         choices=["half", "bfloat16", "float"],
                         default="half")
-    parser.add_argument("--use-fp8-kv-cache", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        choices=["auto", "fp8_e5m2"],
+        default="auto",
+        help=
+        'Data type for kv cache storage. If "auto", will use model data type.')
     args = parser.parse_args()
     print(args)
 
@@ -213,7 +195,7 @@ if __name__ == '__main__':
         block_size=args.block_size,
         use_alibi=args.use_alibi,
         dtype=dtype_to_torch_dtype[args.dtype],
-        use_fp8_kv_cache=args.use_fp8_kv_cache,
         seed=args.seed,
         do_profile=args.profile,
+        kv_cache_dtype=args.kv_cache_dtype,
     )

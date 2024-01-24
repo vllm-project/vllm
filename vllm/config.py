@@ -287,14 +287,14 @@ class CacheConfig:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
 
-        self.cache_dtype = cache_dtype
+        self.cache_dtype = None
         self.quant_method = None
-        if cache_dtype and 'fp8' in cache_dtype.lower():
-            # As fp8 is not a formal data type, we use torch.uint8 instead.
+        if "fp8_e5m2" in cache_dtype.lower():
+            # As fp8_e5m2 is not a formal data type, we use torch.uint8 instead.
             self.cache_dtype = torch.uint8
-            self.quant_method = "fp8"
+            self.quant_method = "fp8_e5m2"
             logger.info(
-                "Using fp8 data type to store kv cache. It reduces "
+                "Using fp8_e5m2 data type to store kv cache. It reduces "
                 "the GPU memory footprint and boosts the performance. "
                 "But it may make slight accuracy drop. "
                 "Currently we only support fp8 without scaling factors and "
@@ -311,11 +311,11 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
-        if self.quant_method == "fp8":
+        if self.quant_method == "fp8_e5m2":
             device_name = torch.cuda.get_device_name()
             if "AMD" in device_name:
                 raise NotImplementedError(
-                    "FP8 KV Cache on AMD GPU has not been supported yet.")
+                    "FP8_E5M2 KV Cache on AMD GPU has not been supported yet.")
 
     def verify_with_parallel_config(
         self,
