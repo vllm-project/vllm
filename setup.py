@@ -282,7 +282,10 @@ if _is_cuda():
                 },
             ))
 elif _is_hip():
-    amd_arch = get_amdgpu_offload_arch()
+    if os.getenv("GPU_ARCHS") is not None:
+        amd_arch = os.getenv("GPU_ARCHS")
+    else:
+        amd_arch = get_amdgpu_offload_arch()
     if amd_arch not in ROCM_SUPPORTED_ARCHS:
         raise RuntimeError(
             f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
