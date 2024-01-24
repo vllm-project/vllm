@@ -22,6 +22,19 @@ def test_duplicated_ignored_sequence_group():
     assert len(prompts) == len(outputs)
 
 
+def test_max_tokens_none():
+    sampling_params = SamplingParams(temperature=0.01,
+                                     top_p=0.1,
+                                     max_tokens=None)
+    llm = LLM(model="facebook/opt-125m",
+              max_num_batched_tokens=4096,
+              tensor_parallel_size=1)
+    prompts = ["Just say hello!"]
+    outputs = llm.generate(prompts, sampling_params=sampling_params)
+
+    assert len(prompts) == len(outputs)
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__])

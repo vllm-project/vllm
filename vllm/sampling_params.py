@@ -108,7 +108,7 @@ class SamplingParams:
         stop_token_ids: Optional[List[int]] = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = 16,
         logprobs: Optional[int] = None,
         prompt_logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
@@ -183,7 +183,7 @@ class SamplingParams:
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")
-        if self.max_tokens < 1:
+        if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
         if self.logprobs is not None and self.logprobs < 0:
