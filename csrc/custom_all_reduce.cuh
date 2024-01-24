@@ -141,8 +141,8 @@ __host__ __device__ constexpr uint64_t compute_flag(int ngpus) {
 }
 
 template <int ngpus>
-DINLINE void start_sync(const RankSignals &sg,
-                                           volatile Metadata *meta, int rank) {
+DINLINE void start_sync(const RankSignals &sg, volatile Metadata *meta,
+                        int rank) {
   constexpr auto FLAG = compute_flag(ngpus);
   if (blockIdx.x == 0) {
     if (threadIdx.x < ngpus)
@@ -161,8 +161,8 @@ DINLINE void start_sync(const RankSignals &sg,
 }
 
 template <int ngpus, bool final_sync = false>
-DINLINE void end_sync(const RankSignals &sg,
-                                         volatile Metadata *meta, int rank) {
+DINLINE void end_sync(const RankSignals &sg, volatile Metadata *meta,
+                      int rank) {
   constexpr auto FLAG = compute_flag(ngpus);
   __syncthreads();
   __shared__ int num;
@@ -327,7 +327,7 @@ __global__ void __launch_bounds__(512, 1)
   }
 }
 
-class FastAllreduce {
+class CustomAllreduce {
  public:
   int rank_;
   int world_size_;
@@ -352,10 +352,10 @@ class FastAllreduce {
    * note: this class does not own any device memory. Any required buffers
    * are passed in from the constructor
    */
-  FastAllreduce(Metadata *meta, void *rank_data, size_t rank_data_sz,
-                const cudaIpcMemHandle_t *handles,
-                const std::vector<int64_t> &offsets, int rank,
-                bool full_nvlink = true)
+  CustomAllreduce(Metadata *meta, void *rank_data, size_t rank_data_sz,
+                  const cudaIpcMemHandle_t *handles,
+                  const std::vector<int64_t> &offsets, int rank,
+                  bool full_nvlink = true)
       : rank_(rank),
         world_size_(offsets.size()),
         full_nvlink_(full_nvlink),
@@ -540,12 +540,16 @@ class FastAllreduce {
 #undef KL
   }
 
-  ~FastAllreduce() {
+  ~CustomAllreduce() {
     for (auto ptr : ipc_handles_) {
       CUDACHECK(cudaIpcCloseMemHandle(ptr));
     }
   }
 };
-template void FastAllreduce::allreduce<half>(cudaStream_t, half *, half *, int,
-                                             int, int);
+/**
+ * To inspect PTX/SASS, copy paste this header file to compiler explorer and add
+ a template instantiation:
+ * template void CustomAllreduce::allreduce<half>(cudaStream_t, half *, half *,
+ int, int, int);
+*/
 }  // namespace vllm

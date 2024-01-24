@@ -18,18 +18,31 @@ except ImportError:
 
 logger = init_logger(__name__)
 
-_ca_handle = None
+_CA_HANDLE = None
 _IS_CAPTURING = False
+_SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
 
 def init_custom_ar() -> None:
-    global _ca_handle
-    if _ca_handle is not None:
+    global _CA_HANDLE
+    if _CA_HANDLE is not None:
         return
     rank = get_tensor_model_parallel_rank()
     world_size = get_tensor_model_parallel_world_size()
-    if world_size in [2, 4, 6, 8] and _can_p2p(rank, world_size):
-        _ca_handle = FastAllreduce(rank, world_size)
+    if world_size not in _SUPPORTED_WORLD_SIZES:
+        logger.warn(
+            "Custom allreduce is disabled due to an unsupported world size: "
+            "%d. Supported world sizes: %s. To slience this warning, specify"
+            "disable_custom_all_reduce=True explicitly.", world_size,
+            str(_SUPPORTED_WORLD_SIZES))
+        return
+    if not _can_p2p(rank, world_size):
+        logger.warn(
+            "Custom allreduce is disabled because your platform lacks GPU P2P"
+            " capability. To slience this warning, specify"
+            "disable_custom_all_reduce=True explicitly.")
+        return
+    _CA_HANDLE = CustomAllreduce(rank, world_size)
 
 
 def begin_capture() -> None:
@@ -43,11 +56,11 @@ def end_capture() -> None:
 
 
 def is_capturing() -> bool:
-    return _IS_CAPTURING and _ca_handle is not None
+    return _IS_CAPTURING and _CA_HANDLE is not None
 
 
-def get_handle() -> Optional["FastAllreduce"]:
-    return _ca_handle
+def get_handle() -> Optional["CustomAllreduce"]:
+    return _CA_HANDLE
 
 
 @contextmanager
@@ -121,7 +134,7 @@ def _can_p2p(rank: int, world_size: int) -> bool:
     return True
 
 
-class FastAllreduce:
+class CustomAllreduce:
 
     # max_size: max supported allreduce size
     def __init__(self, rank, world_size, max_size=8192 * 1024) -> None:

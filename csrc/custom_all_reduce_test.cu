@@ -129,8 +129,8 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   size_t rank_data_sz = 16 * 1024 * 1024;
   CUDACHECK(cudaMalloc(&rank_data, rank_data_sz));
   std::vector<int64_t> offsets(nRanks, 0);
-  vllm::FastAllreduce fa(buffer, rank_data, rank_data_sz, data_handles, offsets,
-                         myRank);
+  vllm::CustomAllreduce fa(buffer, rank_data, rank_data_sz, data_handles,
+                           offsets, myRank);
   auto *self_data =
       reinterpret_cast<T *>(reinterpret_cast<char *>(buffer) +
                             sizeof(vllm::Metadata) + data_size * sizeof(T));
@@ -153,8 +153,8 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   curandState_t *states;
   CUDACHECK(cudaMalloc(&states, sizeof(curandState_t) * nRanks * data_size));
   init_rand<<<108, 1024, 0, stream>>>(states, data_size, nRanks);
-  gen_data<T><<<108, 1024, 0, stream>>>(states, self_data, ground_truth,
-                                        myRank, nRanks, data_size);
+  gen_data<T><<<108, 1024, 0, stream>>>(states, self_data, ground_truth, myRank,
+                                        nRanks, data_size);
   CUDACHECK(cudaMemcpyAsync(self_data_copy, self_data, data_size * sizeof(T),
                             cudaMemcpyDeviceToDevice, stream));
   cudaEvent_t start, stop;
@@ -229,8 +229,8 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   for (unsigned long j = 0; j < data_size; j++) {
     auto diff = abs(nccl_result[j] - my_result[j]);
     if (diff >= 1e-2) {
-      printf("Rank %d: Verification mismatch at %lld: %f != (my) %f, gt=%f\n", myRank,
-             j, nccl_result[j], my_result[j], ground_truth[j]);
+      printf("Rank %d: Verification mismatch at %lld: %f != (my) %f, gt=%f\n",
+             myRank, j, nccl_result[j], my_result[j], ground_truth[j]);
       break;
     }
   }

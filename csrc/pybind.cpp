@@ -86,6 +86,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Custom all-reduce kernels
   pybind11::module custom_ar = m.def_submodule("custom_ar", "custom allreduce");
   custom_ar.def("init_custom_ar", &init_custom_ar, "init_custom_ar");
+  custom_ar.def("should_custom_ar", &should_custom_ar, "should_custom_ar");
   custom_ar.def("all_reduce_reg", &all_reduce_reg, "all_reduce_reg");
   custom_ar.def("all_reduce_unreg", &all_reduce_unreg, "all_reduce_unreg");
   custom_ar.def("dispose", &dispose, "dispose");

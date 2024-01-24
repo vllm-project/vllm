@@ -28,7 +28,7 @@ fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,
   for (int i = 0; i < world_size; i++) {
     std::memcpy(&ipc_handles[i], handles[i].data(), sizeof(cudaIpcMemHandle_t));
   }
-  return (fptr_t) new vllm::FastAllreduce(
+  return (fptr_t) new vllm::CustomAllreduce(
       reinterpret_cast<vllm::Metadata *>(meta.data_ptr()), rank_data.data_ptr(),
       rank_data.numel(), ipc_handles, offsets, rank, full_nvlink);
 }
@@ -69,7 +69,7 @@ bool should_custom_ar(torch::Tensor &inp, int max_size, int world_size,
 
 void _all_reduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out,
                  cudaStream_t stream) {
-  auto fa = reinterpret_cast<vllm::FastAllreduce *>(_fa);
+  auto fa = reinterpret_cast<vllm::CustomAllreduce *>(_fa);
   TORCH_CHECK(_is_weak_contiguous(out));
   switch (out.scalar_type()) {
     case at::ScalarType::Float: {
@@ -122,7 +122,7 @@ void all_reduce_unreg(fptr_t _fa, torch::Tensor &inp, torch::Tensor &reg_buffer,
 }
 
 void dispose(fptr_t _fa) {
-  auto fa = reinterpret_cast<vllm::FastAllreduce *>(_fa);
+  auto fa = reinterpret_cast<vllm::CustomAllreduce *>(_fa);
   delete fa;
 }
 
@@ -131,18 +131,18 @@ int meta_size() { return sizeof(vllm::Metadata); }
 void register_buffer(fptr_t _fa, torch::Tensor &t,
                      const std::vector<std::string> &handles,
                      const std::vector<int64_t> &offsets) {
-  auto fa = reinterpret_cast<vllm::FastAllreduce *>(_fa);
+  auto fa = reinterpret_cast<vllm::CustomAllreduce *>(_fa);
   fa->register_buffer(handles, offsets, t.data_ptr());
 }
 
 std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
     fptr_t _fa) {
-  auto fa = reinterpret_cast<vllm::FastAllreduce *>(_fa);
+  auto fa = reinterpret_cast<vllm::CustomAllreduce *>(_fa);
   return fa->get_graph_buffer_ipc_meta();
 }
 
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string> &handles,
                             const std::vector<std::vector<int64_t>> &offsets) {
-  auto fa = reinterpret_cast<vllm::FastAllreduce *>(_fa);
+  auto fa = reinterpret_cast<vllm::CustomAllreduce *>(_fa);
   fa->register_graph_buffers(handles, offsets);
 }
