@@ -10,7 +10,7 @@ For this example, we launch Prometheus and Grafana via Docker. Install:
 
 Prometheus metric logging is enabled by default in the OpenAI-compatible server. Launch via the entrypoint:
 ```bash
-python3 ../../vllm/entrypoints/openai/api_server.py \
+python3 -m vllm.entrypoints.openai.api_server.py \
     --model mistralai/Mistral-7B-v0.1 \
     --max-model-len 2048 \
     --disable-log-requests
