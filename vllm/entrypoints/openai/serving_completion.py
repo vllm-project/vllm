@@ -1,7 +1,7 @@
 import asyncio
 import time
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator
+from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -19,12 +19,23 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 
 logger = init_logger(__name__)
 
+TypeTokenIDs = list[int]
+TypeTopLogProbs = List[Optional[dict[int, float]]]
+TypeCreateLogProbsFn = Callable[
+    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
+
 
 async def completion_stream_generator(
-        request: CompletionRequest, raw_request: Request, on_abort,
-        result_generator: AsyncIterator[tuple[int, RequestOutput]],
-        create_logprobs_fn, request_id, created_time, model_name,
-        num_prompts) -> AsyncGenerator[str, None]:
+    request: CompletionRequest,
+    raw_request: Request,
+    on_abort,
+    result_generator: AsyncIterator[tuple[int, RequestOutput]],
+    create_logprobs_fn: TypeCreateLogProbsFn,
+    request_id: str,
+    created_time: int,
+    model_name: str,
+    num_prompts: int,
+) -> AsyncGenerator[str, None]:
     previous_texts = [""] * request.n * num_prompts
     previous_num_tokens = [0] * request.n * num_prompts
     has_echoed = [False] * request.n * num_prompts
@@ -139,10 +150,14 @@ def parse_prompt_format(prompt) -> tuple[bool, list]:
     return prompt_is_tokens, prompts
 
 
-def request_output_to_completion_response(final_res_batch: list[RequestOutput],
-                                          request, create_logprobs_fn,
-                                          request_id, created_time,
-                                          model_name) -> CompletionResponse:
+def request_output_to_completion_response(
+    final_res_batch: list[RequestOutput],
+    request: CompletionRequest,
+    create_logprobs_fn: TypeCreateLogProbsFn,
+    request_id: str,
+    created_time: int,
+    model_name: str,
+) -> CompletionResponse:
     choices = []
     num_prompt_tokens = 0
     num_generated_tokens = 0
