@@ -189,8 +189,10 @@ __global__ void reshape_and_cache_kernel(
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
     if constexpr (is_fp8_e5m2_kv_cache) {
+#ifdef ENABLE_FP8
       key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
       value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
+#endif
     } else {
       key_cache[tgt_key_idx] = tgt_key;
       value_cache[tgt_value_idx] = tgt_value;
@@ -415,6 +417,7 @@ void gather_cached_kv(
     });
 }
 
+#ifdef ENABLE_FP8
 namespace vllm {
 
 template<typename Tout, typename Tin>
@@ -462,3 +465,4 @@ void convert_fp8_e5m2(
     CALL_CONVERT_FP8_E5M2(__nv_bfloat16, uint8_t);
   }
 }
+#endif // ENABLE_FP8

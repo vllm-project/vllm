@@ -1,9 +1,11 @@
 import enum
 import os
 import socket
+import subprocess
 import uuid
 from platform import uname
-from typing import List, Optional, Tuple, Union
+from typing import List, Tuple, Union
+from packaging.version import parse, Version
 
 import psutil
 import torch
@@ -167,6 +169,19 @@ def get_open_port() -> int:
 
 def set_cuda_visible_devices(device_ids: List[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
+
+
+def get_nvcc_cuda_version(cuda_dir: str) -> Version:
+    """Get the CUDA version from nvcc.
+
+    Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
+    """
+    nvcc_output = subprocess.check_output([cuda_dir + "/bin/nvcc", "-V"],
+                                          universal_newlines=True)
+    output = nvcc_output.split()
+    release_idx = output.index("release") + 1
+    nvcc_cuda_version = parse(output[release_idx].split(",")[0])
+    return nvcc_cuda_version
 
 
 def _generate_random_fp8_e5m2(

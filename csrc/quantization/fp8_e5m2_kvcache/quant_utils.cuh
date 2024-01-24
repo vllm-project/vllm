@@ -12,6 +12,7 @@
 #pragma once
 
 namespace vllm {
+#ifdef ENABLE_FP8
 namespace fp8_e5m2_unscaled {
 
 template<typename Tout, typename Tin>
@@ -273,4 +274,5 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, Float8_>(const Float8_ &
 }
 
 } // namespace fp8_e5m2_unscaled
+#endif // ENABLE_FP8
 } // namespace vllm

@@ -215,7 +215,7 @@ class EngineArgs:
             choices=['auto', 'fp8_e5m2'],
             default='auto',
             help=
-            'Data type for kv cache storage. If "auto", will use model data type.'
+            'Data type for kv cache storage. If "auto", will use model data type. Not FP8 is not supported when cuda version is lower than 11.8.'
         )
         # LoRA related configs
         parser.add_argument('--enable-lora',

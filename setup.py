@@ -251,6 +251,9 @@ if _is_cuda():
         num_threads = min(os.cpu_count(), nvcc_threads)
         NVCC_FLAGS += ["--threads", str(num_threads)]
 
+    if nvcc_cuda_version >= Version("11.8"):
+        NVCC_FLAGS += ["-DENABLE_FP8"]
+
     # changes for punica kernels
     NVCC_FLAGS += torch_cpp_ext.COMMON_NVCC_FLAGS
     REMOVE_NVCC_FLAGS = [
