@@ -265,10 +265,6 @@ class SequenceGroup:
         self.last_token_time = now
         return latency
 
-    def get_e2e_latency(self, now: float) -> float:
-        """Gets end-to-end latency for Request level timings."""
-        return now - self.arrival_time
-
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
