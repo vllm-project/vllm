@@ -307,13 +307,13 @@ class CacheConfig:
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
         if self.prefix_pool_memory_utilization < 0:
-            raise ValueError("prefix_pool_memory_utilization must be non negative. "
-                             f"{self.prefix_pool_memory_utilization}.")
+            raise ValueError(
+                "prefix_pool_memory_utilization must be non negative. "
+                f"{self.prefix_pool_memory_utilization}.")
         if self.prefix_pool_memory_utilization > self.gpu_memory_utilization:
             raise ValueError(
                 "prefix_pool_memory_utilization must be less than or equal to "
-                "gpu_memory_utilization."
-            )
+                "gpu_memory_utilization.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":

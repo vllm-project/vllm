@@ -78,14 +78,14 @@ class PrefixPool:
         self.prefixes: OrderedDict[int, Prefix] = OrderedDict()
         self.block_size = block_size
         self._current_block_usage = 0
-        
+
         self.max_allowed_prefix_length = float('inf')
         if max_capacity_in_blocks < float('inf'):
             assert max_capacity_in_blocks >= 0, "max_capacity must be non-negative."
             self.max_allowed_prefix_length = self.block_size * max_capacity_in_blocks
 
         self.max_capacity_in_blocks = max_capacity_in_blocks
-        
+
         self._candidates_to_deallocate: List[Prefix] = []
 
     def __len__(self) -> int:
@@ -93,7 +93,7 @@ class PrefixPool:
         Returns the number of prefixes in the pool.
         """
         return len(self.prefixes)
-    
+
     @property
     def current_block_usage(self) -> int:
         """
@@ -127,12 +127,12 @@ class PrefixPool:
         if self.max_capacity_in_blocks == 0:
             # Prefix cache is disabled.
             return None
-        
+
         token_ids = self._truncate_token_ids(token_ids)
         if len(token_ids) == 0:
             # Prefix is empty.
             return None
-        
+
         # Check first if prefix exists, moving it to the end of the OrderedDict.
         # so that the LRU policy is maintained. Return the existing prefix.
         prefix = Prefix(token_ids, self.block_size)
@@ -151,7 +151,7 @@ class PrefixPool:
             _, candidate_prefix = self.prefixes.popitem(last=False)
             self._candidates_to_deallocate.append(candidate_prefix)
             self._current_block_usage -= candidate_prefix.get_num_blocks()
-    
+
         self.prefixes[prefix_hash] = prefix
         self._current_block_usage += prefix_num_blocks
         return prefix
@@ -183,5 +183,6 @@ class PrefixPool:
         # Popping needs to happen with the indexes_to_remove list in reverse order
         # so that we don't get Index out of range errors
         return [
-            self._candidates_to_deallocate.pop(i) for i in indexes_to_remove[::-1]
+            self._candidates_to_deallocate.pop(i)
+            for i in indexes_to_remove[::-1]
         ]

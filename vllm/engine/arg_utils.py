@@ -184,9 +184,11 @@ class EngineArgs:
             '--prefix-pool-max-capacity',
             type=int,
             default=EngineArgs.prefix_pool_memory_utilization,
-            help='the fraction of GPU memory to be used by prefixes allocated and '
+            help=
+            'the fraction of GPU memory to be used by prefixes allocated and '
             'present in the prefix pool. If 0, no prefix cache is used. It cannot be '
-            'larger than gpu_memory_utilization. If unspecified, will use the default of 0.')
+            'larger than gpu_memory_utilization. If unspecified, will use the default of 0.'
+        )
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
                             default=EngineArgs.max_num_batched_tokens,

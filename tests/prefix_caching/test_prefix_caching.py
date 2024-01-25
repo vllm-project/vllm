@@ -2,7 +2,6 @@
 
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
-from typing import Optional
 from importlib import reload
 
 import pytest
@@ -36,7 +35,8 @@ def test_prefix_caching(
     # to fail with the message: "AssertionError: tensor model parallel group is
     # already initialized."
     reload(parallel_state)
-    llm = LLM(model=model, prefix_pool_memory_utilization=prefix_pool_memory_utilization)
+    llm = LLM(model=model,
+              prefix_pool_memory_utilization=prefix_pool_memory_utilization)
     # -1 since the last token can change when concatenating prompts.
     prefix_pos = len(llm.llm_engine.tokenizer.encode(prefix)) - 1
     prompts = [prefix + prompt for prompt in example_prompts]
@@ -51,6 +51,7 @@ def test_prefix_caching(
                 output_with_prefix.outputs[0].token_ids)
     if prefix_pool_memory_utilization == 0:
         assert len(llm.llm_engine.scheduler.prefix_pool.prefixes) == 0
+
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 @pytest.mark.parametrize("max_tokens", [16])
@@ -79,12 +80,11 @@ def test_prefix_caching_with_multiple_prefixes(
         sampling_params = SamplingParams(temperature=0.0,
                                          max_tokens=max_tokens)
         outputs_with_prefix = llm.generate(prompts,
-                         sampling_params,
-                         prefix_pos=[prefix_pos] * len(prompts))
-        outputs_without_prefix = llm.generate(prompts,
-                         sampling_params)
+                                           sampling_params,
+                                           prefix_pos=[prefix_pos] *
+                                           len(prompts))
+        outputs_without_prefix = llm.generate(prompts, sampling_params)
         for output_without_prefix, output_with_prefix in zip(
-            outputs_without_prefix, outputs_with_prefix):
+                outputs_without_prefix, outputs_with_prefix):
             assert (output_without_prefix.outputs[0].token_ids ==
-                output_with_prefix.outputs[0].token_ids)
-
+                    output_with_prefix.outputs[0].token_ids)
