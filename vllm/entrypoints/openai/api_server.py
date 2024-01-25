@@ -28,6 +28,8 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 openai_serving_chat: OpenAIServingChat = None
 openai_serving_completion: OpenAIServingCompletion = None
+engine_args: AsyncEngineArgs = None
+engine: AsyncLLMEngine = None
 logger = init_logger(__name__)
 
 
@@ -217,11 +219,13 @@ def configure_app(args: argparse.Namespace):
     else:
         served_model = args.model
 
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
     # Need to alter those global variables to make sure they are picked up
+    global engine_args
+    global engine
     global openai_serving_chat
     global openai_serving_completion
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
                                             args.chat_template)
