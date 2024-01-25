@@ -68,6 +68,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
+  * - :code:`Qwen2ForCausalLM`
+    - Qwen2
+    - :code:`Qwen/Qwen2-7B-beta`, :code:`Qwen/Qwen-7B-Chat-beta`, etc.
   * - :code:`StableLMEpochForCausalLM`
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
