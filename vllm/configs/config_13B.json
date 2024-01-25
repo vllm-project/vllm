@@ -1,0 +1,40 @@
+{
+    "_name_or_path": "inception-mbzuai/jais-13b-chat",
+    "activation_function": "swiglu",
+    "architectures": [
+      "JAISLMHeadModel"
+    ],
+    "attn_pdrop": 0.0,
+    "auto_map": {
+      "AutoConfig": "configuration_jais.JAISConfig",
+      "AutoModel": "modeling_jais.JAISModel",
+      "AutoModelForCausalLM": "modeling_jais.JAISLMHeadModel",
+      "AutoModelForQuestionAnswering": "modeling_jais.JAISForQuestionAnswering",
+      "AutoModelForSequenceClassification": "modeling_jais.JAISForSequenceClassification",
+      "AutoModelForTokenClassification": "modeling_jais.JAISForTokenClassification"
+    },
+    "bos_token_id": 0,
+    "embd_pdrop": 0.0,
+    "embeddings_scale": 14.6,
+    "eos_token_id": 0,
+    "initializer_range": 0.02,
+    "layer_norm_epsilon": 1e-05,
+    "model_type": "jais",
+    "n_embd": 5120,
+    "n_head": 40,
+    "n_inner": 13653,
+    "n_layer": 40,
+    "n_positions": 2048,
+    "pad_token_id": 0,
+    "position_embedding_type": "alibi",
+    "reorder_and_upcast_attn": false,
+    "resid_pdrop": 0.0,
+    "scale_attn_by_inverse_layer_idx": false,
+    "scale_attn_weights": true,
+    "scale_qk_dot_by_d": true,
+    "torch_dtype": "float32",
+    "transformers_version": "4.35.0.dev0",
+    "use_cache": true,
+    "vocab_size": 84992,
+    "width_scale": 0.11100000000000002
+  }

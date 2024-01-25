@@ -16,6 +16,33 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
+<h3 align="center">
+This is a fork of the vLLM repo to add support for Jais.
+</h3>
+
+## ** Limitations: **
+1. Tested only with `13b` and `30b` models
+2. Works only with vLLM "0.2.1-post1" tag
+3. `13b` can only be used on a single GPU due to non-divisibility of FF layer dim
+4. `30b` can only be used either on a single GPU or two GPUs due to non-divisibility of FF layer dim
+5. Need to modify the config.json file to add extra attributes
+
+
+**NOTE:** You might need to modify the `config.json` file after downloading from [HuggingFace](https://huggingface.co/core42/jais-30b-chat-v1). The file will be located whereever the model weights are located.
+I have added the config files for `Jais-13B` and `Jais-30B` at location: `configs/config_13B.json` and `configs/config_30B.json` respectively.
+Replace the contents of the `config.json` with the corresponding copy.
+
+For example, the following config might not be present in the `config.json` file:
+```json
+  "architectures": [
+    "GPT2LMHeadModel"
+  ],
+```
+
+"""
+
+---
+
 *Latest News* 🔥
 - [2023/10] We hosted [the first vLLM meetup](https://lu.ma/first-vllm-meetup) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit?usp=sharing).
 - [2023/09] We created our [Discord server](https://discord.gg/jz7wjKhh6g)! Join us to discuss vLLM and LLM serving! We will also post the latest announcements and updates there.
