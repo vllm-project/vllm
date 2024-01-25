@@ -181,8 +181,8 @@ class EngineArgs:
             'the model executor, which can range from 0 to 1.'
             'If unspecified, will use the default value of 0.9.')
         parser.add_argument(
-            '--prefix-pool-max-capacity',
-            type=int,
+            '--prefix-pool-memory-utilization',
+            type=float,
             default=EngineArgs.prefix_pool_memory_utilization,
             help=
             'the fraction of GPU memory to be used by prefixes allocated and '
