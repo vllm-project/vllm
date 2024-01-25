@@ -15,6 +15,12 @@ logger = init_logger(__name__)
 _GB = 1 << 30
 
 
+class DeviceConfig:
+
+    def __init__(self, device: str = "cuda") -> None:
+        self.device = torch.device(device)
+
+
 class ModelConfig:
     """Configuration for the model.
 

@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, LoRAConfig, ParallelConfig, SchedulerConfig
+from vllm.config import DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -35,6 +35,7 @@ class ModelRunner:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
@@ -56,6 +57,9 @@ class ModelRunner:
 
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.graph_memory_pool = None  # Set during graph capture.
+        self.device_config = device_config if device_config is not None else DeviceConfig(
+        )
+        torch.set_default_device(self.device_config.device)
 
         self.max_context_len_to_capture = (
             self.model_config.max_context_len_to_capture
@@ -72,7 +76,8 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config, self.lora_config)
+        self.model = get_model(self.model_config, self.device_config,
+                               self.lora_config)
 
         vocab_size = self.model.config.vocab_size
 
@@ -179,28 +184,27 @@ class ModelRunner:
                 slot_mapping[-1].append(slot)
 
         max_prompt_len = max(subquery_lens)
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_prompt_len,
-                                             pad=0,
-                                             dtype=torch.long)
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_prompt_len,
-                                                pad=0,
-                                                dtype=torch.long)
-        slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_prompt_len,
-                                             pad=_PAD_SLOT_ID,
-                                             dtype=torch.long)
+        input_tokens = self._make_tensor_with_pad(input_tokens,
+                                                  max_prompt_len,
+                                                  pad=0,
+                                                  dtype=torch.long)
+
+        input_positions = self._make_tensor_with_pad(input_positions,
+                                                     max_prompt_len,
+                                                     pad=0,
+                                                     dtype=torch.long)
+        slot_mapping = self._make_tensor_with_pad(slot_mapping,
+                                                  max_prompt_len,
+                                                  pad=_PAD_SLOT_ID,
+                                                  dtype=torch.long)
         lora_index_mapping = [
             _pad_to_max(mapping, max_prompt_len, pad=0)
             for mapping in lora_index_mapping
         ]
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device='cuda')
+        context_lens_tensor = torch.tensor(context_lens, dtype=torch.int)
         # Prepare prefix block tables
         max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
-        block_tables = _make_tensor_with_pad(
+        block_tables = self._make_tensor_with_pad(
             prefix_block_tables,
             max_len=max_prompt_block_table_len,
             pad=0,
@@ -209,11 +213,8 @@ class ModelRunner:
         start_loc_tensor = torch.arange(0,
                                         len(prompt_lens) * max_prompt_len,
                                         max_prompt_len,
-                                        dtype=torch.long,
-                                        device='cuda')
-        prompt_lens_tensor = torch.tensor(prompt_lens,
-                                          dtype=torch.long,
-                                          device='cuda')
+                                        dtype=torch.long)
+        prompt_lens_tensor = torch.tensor(prompt_lens, dtype=torch.long)
 
         input_metadata = InputMetadata(
             is_prompt=True,
@@ -301,24 +302,19 @@ class ModelRunner:
                 block_tables.append([])
             batch_size = graph_batch_size
 
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_len=1,
-                                             pad=0,
-                                             dtype=torch.long,
-                                             device="cuda")
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_len=1,
-                                                pad=0,
-                                                dtype=torch.long,
-                                                device="cuda")
-        slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_len=1,
-                                             pad=_PAD_SLOT_ID,
-                                             dtype=torch.long,
-                                             device="cuda")
-        context_lens = torch.tensor(context_lens,
-                                    dtype=torch.int,
-                                    device="cuda")
+        input_tokens = self._make_tensor_with_pad(input_tokens,
+                                                  max_len=1,
+                                                  pad=0,
+                                                  dtype=torch.long)
+        input_positions = self._make_tensor_with_pad(input_positions,
+                                                     max_len=1,
+                                                     pad=0,
+                                                     dtype=torch.long)
+        slot_mapping = self._make_tensor_with_pad(slot_mapping,
+                                                  max_len=1,
+                                                  pad=_PAD_SLOT_ID,
+                                                  dtype=torch.long)
+        context_lens = torch.tensor(context_lens, dtype=torch.int)
 
         if use_captured_graph:
             # The shape of graph_block_tables is
@@ -327,16 +323,15 @@ class ModelRunner:
             for i, block_table in enumerate(block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables, device="cuda")
+            block_tables = torch.tensor(input_block_tables)
         else:
             max_block_table_len = max(
                 len(block_table) for block_table in block_tables)
-            block_tables = _make_tensor_with_pad(
+            block_tables = self._make_tensor_with_pad(
                 block_tables,
                 max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
-                device="cuda",
             )
 
         lora_index_mapping = [
@@ -410,9 +405,13 @@ class ModelRunner:
 
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,
+                                            device=self.device_config.device,
                                             pin_memory=not self.in_wsl)
         categorized_sample_indices = {
-            t: _async_h2d(seq_ids, dtype=torch.int, pin_memory=not self.in_wsl)
+            t: _async_h2d(seq_ids,
+                          dtype=torch.int,
+                          device=self.device_config.device,
+                          pin_memory=not self.in_wsl)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -697,6 +696,18 @@ class ModelRunner:
         # This usually takes < 10 seconds.
         logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
 
+    def _make_tensor_with_pad(
+        self,
+        x: List[List[int]],
+        max_len: int,
+        pad: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
+        return torch.tensor(padded_x,
+                            dtype=dtype,
+                            device=self.device_config.device)
+
 
 class CUDAGraphRunner:
 
@@ -784,7 +795,8 @@ def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     return x + [pad] * (max_len - len(x))
 
 
-def _make_tensor_with_pad(
+# device have to be 'cpu' so it can pin memory.
+def _make_pin_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
     pad: int,
@@ -808,6 +820,11 @@ def _get_graph_batch_size(batch_size: int) -> int:
         return (batch_size + 7) // 8 * 8
 
 
-def _async_h2d(data: list, dtype, pin_memory):
-    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory)
-    return t.to(device="cuda", non_blocking=True)
+def _async_h2d(
+    data: list,
+    dtype: torch.dtype,
+    device: Union[str, torch.device] = "cuda",
+    pin_memory: bool = False,
+):
+    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
+    return t.to(device=device, non_blocking=True)

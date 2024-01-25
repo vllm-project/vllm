@@ -3,8 +3,8 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, LoRAConfig)
 
 
 @dataclass
@@ -43,6 +43,7 @@ class EngineArgs:
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
+    device: str = 'cuda'
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -255,6 +256,13 @@ class EngineArgs:
             help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
+        parser.add_argument(
+            "--device",
+            type=str,
+            default="cuda",
+            choices=["cuda"],
+            help=
+            'device type for vLLM execution, supporting CUDA only currently.')
         return parser
 
     @classmethod
@@ -268,7 +276,8 @@ class EngineArgs:
     def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
-               Optional[LoRAConfig]]:
+               DeviceConfig, Optional[LoRAConfig]]:
+        device_config = DeviceConfig(self.device)
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
                                    self.download_dir, self.load_format,
@@ -296,7 +305,7 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
-        return model_config, cache_config, parallel_config, scheduler_config, lora_config
+        return model_config, cache_config, parallel_config, scheduler_config, device_config, lora_config
 
 
 @dataclass
