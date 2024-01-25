@@ -20,12 +20,20 @@ Easy, fast, and cheap LLM serving for everyone
 This is a fork of the vLLM repo to add support for Jais.
 </h3>
 
+## ** How to use **
+1. Clone this repo:
+2. Copy the file [jais.py](vllm/model_executor/models/jais.py) into directory `vllm/model_executor/models/` in you vLLM installation.
+3. Update [__init__.py](vllm/model_executor/models/__init__.py)
+4. Download the [Jais model](https://huggingface.co/core42/jais-30b-chat-v1) from HuggingFace
+5. Update the `config.json` file if required
+6. Run `main_jais.py` file
+
 ## ** Limitations: **
-1. Tested only with `13b` and `30b` models
-2. Works only with vLLM "0.2.1-post1" tag
-3. `13b` can only be used on a single GPU due to non-divisibility of FF layer dim
-4. `30b` can only be used either on a single GPU or two GPUs due to non-divisibility of FF layer dim
-5. Need to modify the config.json file to add extra attributes
+- Tested only with `13b` and `30b` models
+- Works only with vLLM "0.2.1-post1" tag
+- `13b` can only be used on a single GPU due to non-divisibility of FF layer dim
+- `30b` can only be used either on a single GPU or two GPUs due to non-divisibility of FF layer dim
+- Need to modify the config.json file to add extra attributes
 
 
 **NOTE:** You might need to modify the `config.json` file after downloading from [HuggingFace](https://huggingface.co/core42/jais-30b-chat-v1). The file will be located whereever the model weights are located.
