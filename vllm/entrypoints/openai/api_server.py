@@ -48,7 +48,7 @@ async def lifespan(app: fastapi.FastAPI):
 app = fastapi.FastAPI(lifespan=lifespan)
 
 
-def parse_args():
+def get_openai_argparser():
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser.add_argument("--host", type=str, default=None, help="host name")
@@ -118,7 +118,12 @@ def parse_args():
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
-    return parser.parse_args()
+    return parser
+
+
+def parse_args():
+    """Provided for backward compatibility with other scripts"""
+    return get_openai_argparser().parse_args()
 
 
 app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
@@ -172,9 +177,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-if __name__ == "__main__":
-    args = parse_args()
-
+def configure_app(args: argparse.Namespace):
+    """ Customises the app based on the command line arguments"""
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,
@@ -215,6 +219,9 @@ if __name__ == "__main__":
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
+    # Need to alter those global variables to make sure they are picked up
+    global openai_serving_chat
+    global openai_serving_completion
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
                                             args.chat_template)
@@ -224,6 +231,11 @@ if __name__ == "__main__":
     add_global_metrics_labels(model_name=engine_args.model)
 
     app.root_path = args.root_path
+
+
+if __name__ == "__main__":
+    args = get_openai_argparser().parse_args()
+    configure_app(args)
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,
