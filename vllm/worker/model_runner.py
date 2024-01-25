@@ -34,8 +34,8 @@ class ModelRunner:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        cache_config: Optional[CacheConfig],
         lora_config: Optional[LoRAConfig],
+        cache_config: Optional[CacheConfig] = None,
         is_driver_worker: bool = False,
     ):
         self.model_config = model_config
@@ -70,7 +70,8 @@ class ModelRunner:
         # cache in_wsl result
         self.in_wsl = in_wsl()
 
-        self.kv_cache_dtype = self.cache_config.quant_method if self.cache_config.quant_method else "auto"
+        self.kv_cache_dtype = self.cache_config.quant_method if (
+            self.cache_config and self.cache_config.quant_method) else "auto"
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config, self.lora_config)

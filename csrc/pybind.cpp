@@ -74,12 +74,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "gather_cached_kv",
     &gather_cached_kv,
     "Gather key and value from the cache into contiguous QKV tensors");
-#ifdef ENABLE_FP8
   cache_ops.def(
     "convert_fp8_e5m2",
     &convert_fp8_e5m2,
     "Convert the key and value cache to fp8_e5m2 data type");
-#endif
 
   // Cuda utils
   pybind11::module cuda_utils = m.def_submodule("cuda_utils", "vLLM cuda utils");

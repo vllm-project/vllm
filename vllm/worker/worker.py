@@ -32,11 +32,11 @@ class Worker:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        cache_config: CacheConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -53,8 +53,8 @@ class Worker:
         self.model_runner = ModelRunner(model_config,
                                         parallel_config,
                                         scheduler_config,
-                                        cache_config,
                                         lora_config=self.lora_config,
+                                        cache_config=cache_config,
                                         is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().

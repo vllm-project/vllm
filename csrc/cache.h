@@ -30,9 +30,7 @@ void gather_cached_kv(
   torch::Tensor& value_cache,
   torch::Tensor& slot_mapping);
 
-#ifdef ENABLE_FP8
 // Just for unittest
 void convert_fp8_e5m2(
   torch::Tensor& src_cache,
   torch::Tensor& dst_cache);
-#endif

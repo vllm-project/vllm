@@ -39,7 +39,7 @@ def _prepare_test(
                              device=input_tensor.device,
                              dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(32000, fake_logits)
-    model_runner = ModelRunner(None, None, None, None, None)
+    model_runner = ModelRunner(None, None, None, None)
     return input_tensor, fake_logits, sampler, model_runner
 
 
@@ -267,7 +267,7 @@ def test_sampler_top_k_top_p(seed: int):
                                device=input_tensor.device,
                                dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(32000, fake_logits)
-    model_runner = ModelRunner(None, None, None, None, None)
+    model_runner = ModelRunner(None, None, None, None)
 
     generation_model = GenerationMixin()
     generation_config = GenerationConfig(top_k=top_k,

@@ -219,6 +219,8 @@ __device__ void paged_attention_kernel(
           Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
           // Vector conversion from Quant_vec to K_vec.
           k_vecs[j] = fp8_e5m2_unscaled::vec_conversion<K_vec, Quant_vec>(k_vec_quant);
+#else
+          assert(false);
 #endif
         } else {
           k_vecs[j] = *reinterpret_cast<const K_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
@@ -337,6 +339,8 @@ __device__ void paged_attention_kernel(
           V_quant_vec v_quant_vec = *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
           // Vector conversion from V_quant_vec to V_vec.
           v_vec = fp8_e5m2_unscaled::vec_conversion<V_vec, V_quant_vec>(v_quant_vec);
+#else
+          assert(false);
 #endif
         } else {
           v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
