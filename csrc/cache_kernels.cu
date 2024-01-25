@@ -255,6 +255,8 @@ void reshape_and_cache(
     } else if (key.dtype() == at::ScalarType::BFloat16) {
       CALL_RESHAPE_AND_CACHE(__nv_bfloat16, uint8_t, true);
     }
+  } else {
+    TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
   }
 }
 

@@ -14,7 +14,7 @@ BLOCK_SIZES = [8, 16, 32]
 NUM_BLOCKS = [1024, 3600]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
-DEVICES = [0]  # [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
 
 

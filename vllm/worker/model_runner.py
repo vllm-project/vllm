@@ -41,8 +41,8 @@ class ModelRunner:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
-        self.cache_config = cache_config
         self.lora_config = lora_config
+        self.cache_config = cache_config
         self.is_driver_worker = is_driver_worker
 
         # model_config can be None in tests/samplers/test_sampler.py.
