@@ -100,7 +100,8 @@ class Scheduler:
         # Create the prefix pool to cache the prefixes.
         self.prefix_pool = PrefixPool(
             self.cache_config.block_size,
-            max_capacity=self.cache_config.prefix_pool_max_capacity)
+            max_capacity_in_blocks= \
+                int(self.cache_config.prefix_pool_memory_utilization * self.cache_config.num_gpu_blocks))
 
         # Sequence groups in the WAITING state.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -424,7 +425,7 @@ class Scheduler:
         Deallocates the GPU memory of prefixes that have been moved to the list of candidates
         for deallocation in the prefix pool and that are not currently being used by any sequence group.
         """
-        prefixes_to_free = self.prefix_pool.get_prefixes_to_free()
+        prefixes_to_free = self.prefix_pool.get_prefixes_to_deallocate()
         for prefix in prefixes_to_free:
             self.block_manager.free_prefix_blocks(prefix)
 

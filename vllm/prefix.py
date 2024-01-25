@@ -67,28 +67,43 @@ class PrefixPool:
     Attributes:
         prefixes: A list of all the prefixes.
         block_size: The block size of the executed model.
-        max_capacity: The maximum number of prefixes allowed in the pool at any given time. 
-            The default value is None, which means there is no limit. It can only take positive
-            values.
+        max_capacity_in_blocks: The maximum number of blocks that can be used for prefixes in the pool
+            at any given time. The default value is 0, which effectively means there is no prefix cache.
+            If the value is float('inf'), is means that the capacity of the pool is unbounded (not recommended).
     """
 
     def __init__(self,
                  block_size: int,
-                 max_capacity: Optional[int] = None) -> None:
+                 max_capacity_in_blocks: int | float = 0) -> None:
         self.prefixes: OrderedDict[int, Prefix] = OrderedDict()
         self.block_size = block_size
+        self._current_block_usage = 0
+        
+        self.max_allowed_prefix_length = float('inf')
+        if max_capacity_in_blocks < float('inf'):
+            assert max_capacity_in_blocks >= 0, "max_capacity must be non-negative."
+            self.max_allowed_prefix_length = self.block_size * max_capacity_in_blocks
 
-        if max_capacity is not None:
-            assert max_capacity > 0, "max_capacity must be positive."
-
-        self.max_capacity = max_capacity
-        self._candidates_to_free: List[Prefix] = []
+        self.max_capacity_in_blocks = max_capacity_in_blocks
+        
+        self._candidates_to_deallocate: List[Prefix] = []
 
     def __len__(self) -> int:
+        """
+        Returns the number of prefixes in the pool.
+        """
         return len(self.prefixes)
+    
+    @property
+    def current_block_usage(self) -> int:
+        """
+        Returns the number of blocks currently used by the pool.
+        """
+        return self._current_block_usage
 
     def _truncate_token_ids(self, token_ids: Sequence[int]) -> Tuple[int]:
         new_length = len(token_ids) // self.block_size * self.block_size
+        new_length = min(new_length, self.max_allowed_prefix_length)
         return tuple(token_ids[:new_length])
 
     def add_or_get_prefix(self, token_ids: Sequence[int]) -> Optional[Prefix]:
@@ -97,14 +112,27 @@ class PrefixPool:
         it returns the existing prefix. If the pool is at max capacity, it removes
         the least recently used prefix before adding the new prefix.
 
-        Notice that if the length of token_ids is less than the block_size, no 
+        There are two situations when None is returned:
+        1. If the length of the token_ids of the prefix is less than the block_size, no 
         prefix is created and None is returned.
+        2. If the max_capacity of the pool is 0, then no prefix is created and None is returned.
+
+        There is also two situations where the prefix is shortened to fit block boundaries:
+        1. If the length of the token_ids of the prefix is not a multiple of the block_size.
+        2. If the number of blocks needed to allocate the prefix exceeds the max_capacity of the pool,
+        the prefix is shortened to fit the max_capacity. Notice that this second occurence happens once
+        we have already attempted all other recourses to be able to allocate the prefix on its entirity, such
+        as evicting older prefixes from the pool. 
         """
+        if self.max_capacity_in_blocks == 0:
+            # Prefix cache is disabled.
+            return None
+        
         token_ids = self._truncate_token_ids(token_ids)
         if len(token_ids) == 0:
             # Prefix is empty.
             return None
-
+        
         # Check first if prefix exists, moving it to the end of the OrderedDict.
         # so that the LRU policy is maintained. Return the existing prefix.
         prefix = Prefix(token_ids, self.block_size)
@@ -117,13 +145,18 @@ class PrefixPool:
         # Prefix does not exist. Add created prefix to the pool and return it.
         # Always, before adding anything to the pool, check the capacity constraints and
         # remove the least recently used prefix if capacity constraints are violated.
-        if len(self.prefixes) == self.max_capacity:
+        prefix_num_blocks = prefix.get_num_blocks()
+
+        while self._current_block_usage > 0 and prefix_num_blocks > self.max_capacity_in_blocks - self._current_block_usage:
             _, candidate_prefix = self.prefixes.popitem(last=False)
-            self._candidates_to_free.append(candidate_prefix)
+            self._candidates_to_deallocate.append(candidate_prefix)
+            self._current_block_usage -= candidate_prefix.get_num_blocks()
+    
         self.prefixes[prefix_hash] = prefix
+        self._current_block_usage += prefix_num_blocks
         return prefix
 
-    def get_prefixes_to_free(self) -> List[Prefix]:
+    def get_prefixes_to_deallocate(self) -> List[Prefix]:
         """
         Returns a list of prefixes that are ready to be deallocated.
         For a prefix to be deallocated, it must fulfill the following two conditions:
@@ -144,11 +177,11 @@ class PrefixPool:
                 means that the .get_prefixes_to_free() function will not return it.
         """
         indexes_to_remove = [
-            i for i, prefix in enumerate(self._candidates_to_free)
+            i for i, prefix in enumerate(self._candidates_to_deallocate)
             if prefix.seq_ref_count == 0 and prefix.allocated
         ]
         # Popping needs to happen with the indexes_to_remove list in reverse order
         # so that we don't get Index out of range errors
         return [
-            self._candidates_to_free.pop(i) for i in indexes_to_remove[::-1]
+            self._candidates_to_deallocate.pop(i) for i in indexes_to_remove[::-1]
         ]
