@@ -149,6 +149,12 @@ def test_paged_attention(
     context_lens = torch.tensor(context_lens, dtype=torch.int, device=gpu_id)
 
     # Create the block tables.
+    if kv_cache_dtype == "fp8_e5m2":
+        # There may not be enough gpu memory due to large NUM_BLOCKS
+        # as dequantized kv cache in reference impl will need extra gpu memory.
+        # Reduce NUM_BLOCKS when it happens.
+        global NUM_BLOCKS
+        NUM_BLOCKS = 4321 # Arbitrary values for testing
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables = []
     for _ in range(num_seqs):
@@ -222,14 +228,12 @@ def test_paged_attention(
     # Run the reference implementation.
     if kv_cache_dtype == "fp8_e5m2":
         # Convert cache data back to dtype.
-        # There may not be enough gpu memory due to large NUM_BLOCKS.
-        # You' better reduce NUM_BLOCKS when it happens.
         x = 16 // torch.tensor([], dtype=dtype).element_size()
         key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x,
                            block_size, x)
         dequantized_key_cache = torch.empty(size=key_cache_shape,
                                             dtype=dtype,
-                                            device="cuda")
+                                            device=gpu_id)
         cache_ops.convert_fp8_e5m2(key_cache, dequantized_key_cache)
         key_cache = dequantized_key_cache
         del dequantized_key_cache
@@ -237,7 +241,7 @@ def test_paged_attention(
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(size=value_cache_shape,
                                               dtype=dtype,
-                                              device="cuda")
+                                              device=gpu_id)
         cache_ops.convert_fp8_e5m2(value_cache, dequantized_value_cache)
         value_cache = dequantized_value_cache
         del dequantized_value_cache
