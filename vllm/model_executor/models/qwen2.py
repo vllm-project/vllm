@@ -1,7 +1,8 @@
 # coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/qwen2/modeling_qwen2.py
-# Copyright 2024 The Qwen team and the HuggingFace Inc. team.
+# Copyright 2024 The Qwen team.
+# Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -20,7 +21,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only Mistral model compatible with HuggingFace weights."""
+"""Inference-only Qwen2 model compatible with HuggingFace weights."""
 from typing import List, Optional, Tuple
 
 import torch
