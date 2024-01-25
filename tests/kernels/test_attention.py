@@ -154,7 +154,7 @@ def test_paged_attention(
         # as dequantized kv cache in reference impl will need extra gpu memory.
         # Reduce NUM_BLOCKS when it happens.
         global NUM_BLOCKS
-        NUM_BLOCKS = 4321 # Arbitrary values for testing
+        NUM_BLOCKS = 4321  # Arbitrary values for testing
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables = []
     for _ in range(num_seqs):
