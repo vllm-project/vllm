@@ -163,7 +163,7 @@ class Scheduler:
                 for seq_group in self.running) if self.lora_enabled else None
             seq_lens: List[int] = []
 
-            # Optimization: We do not sort the waiting queue when use FCFS policy since the preempted
+            # Optimization: We do not sort the waiting queue when using FCFS policy since the preempted
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
             leftover_waiting_sequences = deque()
