@@ -1,6 +1,4 @@
 from collections import deque
-import enum
-import time
 from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union, Set
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
@@ -10,6 +8,7 @@ from vllm.core.policy import PolicyFactory, PreemptionMode, FCFS
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
+import time
 
 logger = init_logger(__name__)
 

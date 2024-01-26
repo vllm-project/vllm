@@ -219,7 +219,7 @@ def main(args: argparse.Namespace):
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
                                 args.kv_cache_dtype, args.device,
-                                args.enable_prefix_caching,
+                                args.enable_prefix_caching, args.vllm_scheduler_policy,
                                 args.vllm_scheduler_reorder_window, args.swap_space,
                                 args.swap_space, args.gpu_memory_utilization)
     elif args.backend == "hf":

@@ -226,7 +226,7 @@ class EngineArgs:
                             default=EngineArgs.scheduler_policy,
                             choices=['fcfs', 'reorder'],
                             help='scheduler policy')
-        parser.add_argument('--scheduler_reorder_window',
+        parser.add_argument('--scheduler-reorder-window',
                             type=float,
                             default=EngineArgs.scheduler_reorder_window,
                             help='allowed sequences reorder window(in sec)')

@@ -66,10 +66,11 @@ class ReorderPolicy(Policy):
         self,
         seq_groups: Deque[SequenceGroup],
     ) -> Deque[SequenceGroup]:
-        """Sort head withing `reorder_window` of the `seq_groups` by length. It reduces padding computation overhead."""
+        """Sort head within `reorder_window` of the `seq_groups` by length. It reduces padding computation overhead."""
         if len(seq_groups) == 0:
             return seq_groups
-        arrival_time_sorted = sorted(seq_groups, key=lambda x: x.metrics.arrival_time)
+        arrival_time_sorted = sorted(seq_groups,
+                                     key=lambda x: x.metrics.arrival_time)
         pos = bisect.bisect_left(arrival_time_sorted,
                                  arrival_time_sorted[0].metrics.arrival_time +
                                  self.reorder_window,
