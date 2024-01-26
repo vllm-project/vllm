@@ -13,6 +13,8 @@ $python_executable -m pip install -r requirements.txt
 
 # Limit the number of parallel jobs to avoid OOM
 export MAX_JOBS=1
+# Make sure punica is built for the release (for LoRA)
+export VLLM_INSTALL_PUNICA_KERNELS=1
 
 # Build
 $python_executable setup.py bdist_wheel --dist-dir=dist
