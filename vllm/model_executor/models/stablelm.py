@@ -98,11 +98,7 @@ class StablelmAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_key_value_heads * self.head_dim
-        try:
-            self.qkv_bias = config.use_qkv_bias
-        except AttributeError:
-            # To support stablelm-3b-4e1t, which has a different config.
-            self.qkv_bias = False
+        self.qkv_bias = getattr(config, "use_qkv_bias", False)
         if (self.head_dim * self.num_heads * tp_size) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
