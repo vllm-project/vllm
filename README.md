@@ -16,17 +16,18 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
-<h3 align="center">
+<h2 align="left">
 This is a fork of the vLLM repo to add support for Jais.
-</h3>
+</h2>
 
 ## ** How to use **
-1. Clone this repo:
-2. Copy the file [jais.py](vllm/model_executor/models/jais.py) into directory `vllm/model_executor/models/` in you vLLM installation.
+1. Clone this repo: [vllm-jais](https://github.com/SamujjwalSam/vllm-jais)
+2. Copy the file [jais.py](vllm/model_executor/models/jais.py) into [models](vllm/model_executor/models/) directory in you vLLM installation.
 3. Update [__init__.py](vllm/model_executor/models/__init__.py)
 4. Download the [Jais model](https://huggingface.co/core42/jais-30b-chat-v1) from HuggingFace
-5. Update the `config.json` file if required
-6. Run `main_jais.py` file
+5. Update the `config.json` in the model directory, if required.
+6. Run [main_jais.py](main_jais.py) file
+
 
 ## ** Limitations: **
 - Tested only with `13b` and `30b` models
