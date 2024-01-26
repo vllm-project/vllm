@@ -3,6 +3,7 @@ import time
 from fastapi import Request
 from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from .protocol import (
@@ -285,6 +286,7 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             sampling_params = request.to_sampling_params()
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
+            lora_request = LoRARequest(**request.lora_request) if request.lora_request else None
 
             for i, prompt in enumerate(prompts):
                 if prompt_is_tokens:
@@ -298,7 +300,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     self.engine.generate(None,
                                          sampling_params,
                                          f"{request_id}-{i}",
-                                         prompt_token_ids=input_ids))
+                                         prompt_token_ids=input_ids, lora_request=lora_request))
         except ValueError as e:
             return self.create_error_response(str(e))
 

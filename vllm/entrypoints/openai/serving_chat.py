@@ -3,6 +3,7 @@ import codecs
 from fastapi import Request
 from typing import AsyncGenerator, AsyncIterator, Union
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
@@ -67,8 +68,9 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
+        lora_request = LoRARequest(**request.lora_request) if request.lora_request else None
         result_generator = self.engine.generate(prompt, sampling_params,
-                                                request_id, token_ids)
+                                                request_id, token_ids, lora_request)
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(

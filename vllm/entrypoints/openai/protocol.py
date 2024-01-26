@@ -80,6 +80,7 @@ class ChatCompletionRequest(BaseModel):
     min_p: Optional[float] = 0.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
+    lora_request: Optional[dict] = None
 
     def to_sampling_params(self) -> SamplingParams:
         return SamplingParams(
@@ -133,6 +134,7 @@ class CompletionRequest(BaseModel):
     min_p: Optional[float] = 0.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
+    lora_request: Optional[dict] = None
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
