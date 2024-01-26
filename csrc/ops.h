@@ -122,7 +122,7 @@ void register_graph_buffers(fptr_t _fa, const std::vector<std::string> &handles,
                             const std::vector<std::vector<int64_t>> &offsets);
 #endif
 
-void moe_alig_block_size(
+void moe_align_block_size(
   torch::Tensor topk_ids,
   int num_experts,
   int block_size,

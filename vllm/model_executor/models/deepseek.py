@@ -149,16 +149,6 @@ class DeepseekMoE(nn.Module):
 
         self.w2 = self.w2.view(len(w2), *w2s[0].shape)
 
-    def fused_moe_infer(self, hidden_states: torch.Tensor,
-                        selected_experts: torch.Tensor,
-                        routing_weights: torch.Tensor) -> torch.Tensor:
-        return fused_moe(hidden_states,
-                         self.w1,
-                         self.w2,
-                         routing_weights,
-                         selected_experts,
-                         inplace=True)
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -175,9 +165,12 @@ class DeepseekMoE(nn.Module):
         if self.config.norm_topk_prob:
             routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        final_hidden_states = self.fused_moe_infer(hidden_states,
-                                                   selected_experts,
-                                                   routing_weights)
+        final_hidden_states = fused_moe(hidden_states,
+                                        self.w1,
+                                        self.w2,
+                                        routing_weights,
+                                        selected_experts,
+                                        inplace=True)
 
         if self.config.n_shared_experts is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -290,15 +283,16 @@ class DeepseekDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             linear_method=linear_method,
         )
-        self.mlp = DeepseekMoE(config=config,
-                                           linear_method=linear_method) if (config.n_routed_experts is not None and  \
-                                           layer_idx >= config.first_k_dense_replace and layer_idx % config.moe_layer_freq == 0) \
-                                        else DeepseekMLP(
-                                                hidden_size=config.hidden_size,
-                                                intermediate_size=config.intermediate_size,
-                                                hidden_act=config.hidden_act,
-                                                linear_method=linear_method,
-                                            )
+        if (config.n_routed_experts is not None and  \
+            layer_idx >= config.first_k_dense_replace and layer_idx % config.moe_layer_freq == 0):
+            self.mlp = DeepseekMoE(config=config, linear_method=linear_method)
+        else:
+            self.mlp = DeepseekMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                linear_method=linear_method,
+            )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,

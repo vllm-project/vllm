@@ -11,7 +11,7 @@ const static size_t NUM_MAX_EXPERTS = 64;
 
 namespace vllm {
 template <typename scalar_t>
-__global__ void moe_alig_block_size_kernel(scalar_t *__restrict__ topk_ids, 
+__global__ void moe_align_block_size_kernel(scalar_t *__restrict__ topk_ids, 
                                 int32_t *sorted_token_ids, 
                                 int32_t *expert_ids, 
                                 int32_t *total_tokens_post_pad,
@@ -22,7 +22,7 @@ __global__ void moe_alig_block_size_kernel(scalar_t *__restrict__ topk_ids,
     const size_t start_idx = threadIdx.x * tokens_per_thread;
     __shared__ int32_t tokens_cnts[NUM_MAX_EXPERTS + 1][NUM_MAX_EXPERTS];
     __shared__ int32_t cumsum[NUM_MAX_EXPERTS + 1];
-    for(int i = 0;i < num_experts;i++){
+    for(int i = 0; i < num_experts; ++i){
         tokens_cnts[threadIdx.x + 1][i] = 0;
     }
 
@@ -33,15 +33,15 @@ __global__ void moe_alig_block_size_kernel(scalar_t *__restrict__ topk_ids,
     __syncthreads();
 
     tokens_cnts[0][threadIdx.x] = 0;
-    for(int i=1;i<=blockDim.x;++i){
+    for(int i = 1; i <= blockDim.x; ++i){
         tokens_cnts[i][threadIdx.x] += tokens_cnts[i-1][threadIdx.x];
     }
 
     __syncthreads();
     
-    if(threadIdx.x ==0){
+    if(threadIdx.x == 0){
         cumsum[0] = 0;
-        for(int i=1;i<=num_experts;++i){
+        for(int i = 1; i <= num_experts; ++i){
             cumsum[i] = cumsum[i-1] + (tokens_cnts[blockDim.x][i - 1] + block_size - 1) / block_size * block_size;
         }
         *total_tokens_post_pad = cumsum[num_experts];
@@ -49,7 +49,7 @@ __global__ void moe_alig_block_size_kernel(scalar_t *__restrict__ topk_ids,
 
     __syncthreads();
 
-    for(int i= cumsum[threadIdx.x];i<cumsum[threadIdx.x + 1];i += block_size){
+    for(int i = cumsum[threadIdx.x];i < cumsum[threadIdx.x + 1];i += block_size){
         expert_ids[i / block_size] = threadIdx.x;
     }
     
@@ -62,7 +62,7 @@ __global__ void moe_alig_block_size_kernel(scalar_t *__restrict__ topk_ids,
 }
 }
 
-void moe_alig_block_size(
+void moe_align_block_size(
     torch::Tensor topk_ids,
     int num_experts,
     int block_size,
@@ -73,7 +73,7 @@ void moe_alig_block_size(
     assert(num_experts <= NUM_MAX_EXPERTS);
     VLLM_DISPATCH_INTEGRAL_TYPES(
         topk_ids.scalar_type(), "moe_alig_block_size_kernel", [&] {
-        vllm::moe_alig_block_size_kernel<scalar_t><<<1, num_experts, 0, stream>>>(
+        vllm::moe_align_block_size_kernel<scalar_t><<<1, num_experts, 0, stream>>>(
             topk_ids.data_ptr<scalar_t>(), 
             sorted_token_ids.data_ptr<int32_t>(), 
             experts_ids.data_ptr<int32_t>(), 

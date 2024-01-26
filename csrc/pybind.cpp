@@ -57,8 +57,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
   ops.def(
-      "moe_alig_block_size",
-      &moe_alig_block_size,
+      "moe_align_block_size",
+      &moe_align_block_size,
       "Aligning the number of tokens to be processed by each expert such that it is divisible by the block size.");
 
   // Cache ops
