@@ -112,10 +112,10 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     # the Neuron-X backend does not have the `cuda_utils` module.
     from vllm._C import cuda_utils
 
-    # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
-    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97 if not is_hip() else 74
-    max_shared_mem = cuda_utils.get_device_attribute(
-        cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
+    max_shared_mem = cuda_utils.get_max_shared_memory_per_block_device_attribute(
+        gpu)
+    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py will fail
+    assert max_shared_mem > 0, "max_shared_mem can not be zero"
     return int(max_shared_mem)
 
 

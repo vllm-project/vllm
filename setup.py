@@ -51,6 +51,8 @@ if _is_hip():
             "Cannot find ROCM_HOME. ROCm must be available to build the package."
         )
     NVCC_FLAGS += ["-DUSE_ROCM"]
+    NVCC_FLAGS += [f"-U__HIP_NO_HALF_CONVERSIONS__"]
+    NVCC_FLAGS += [f"-U__HIP_NO_HALF_OPERATORS__"]
 
 if _is_cuda() and CUDA_HOME is None:
     raise RuntimeError(
