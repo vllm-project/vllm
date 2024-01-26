@@ -107,7 +107,9 @@ class PrefixPool:
         new_length = min(new_length, self.max_allowed_prefix_length)
         return tuple(token_ids[:new_length])
 
-    def add_or_get_prefix(self, token_ids: Sequence[int], lora_int_id: int = 0) -> Optional[Prefix]:
+    def add_or_get_prefix(self,
+                          token_ids: Sequence[int],
+                          lora_int_id: int = 0) -> Optional[Prefix]:
         """
         Arguments:
         - token_ids: The token ids of the prefix to add to the pool.
@@ -186,14 +188,14 @@ class PrefixPool:
             i for i, prefix in enumerate(self._candidates_to_deallocate)
             if prefix.seq_ref_count == 0 and prefix.allocated
         ]
-        
+
         # Mark the prefix as expired, so that if a sequence group still in the
         # waiting list that shares this prefix tries to allocate it as a prefix,
         # it will fail.
         for i in indexes_to_remove:
             prefix = self._candidates_to_deallocate[i]
             prefix.expired = True
-        
+
         # Popping needs to happen with the indexes_to_remove list in reverse order
         # so that we don't get Index out of range errors
         return [

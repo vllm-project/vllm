@@ -281,7 +281,7 @@ class SequenceGroup:
         if self._prefix is not None and self._prefix.expired:
             self._prefix = None
         return self._prefix
-    
+
     @property
     def prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
