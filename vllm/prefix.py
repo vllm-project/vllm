@@ -107,8 +107,13 @@ class PrefixPool:
         new_length = min(new_length, self.max_allowed_prefix_length)
         return tuple(token_ids[:new_length])
 
-    def add_or_get_prefix(self, token_ids: Sequence[int]) -> Optional[Prefix]:
+    def add_or_get_prefix(self, token_ids: Sequence[int], lora_int_id: int = 0) -> Optional[Prefix]:
         """
+        Arguments:
+        - token_ids: The token ids of the prefix to add to the pool.
+        - lora_int_id: The lora_int_id of the request, which will be used to hash the prefix too.
+            If the lora_int_id is not given, defaults to 0.
+        
         Adds a prefix to the pool if it does not already exist. If it does exist,
         it returns the existing prefix. If the pool is at max capacity, it removes
         the least recently used prefix before adding the new prefix.
@@ -137,7 +142,7 @@ class PrefixPool:
         # Check first if prefix exists, moving it to the end of the OrderedDict.
         # so that the LRU policy is maintained. Return the existing prefix.
         prefix = Prefix(token_ids, self.block_size)
-        prefix_hash = hash(prefix)
+        prefix_hash = hash((prefix, lora_int_id))
         if prefix_hash in self.prefixes:
             prefix = self.prefixes[prefix_hash]
             self.prefixes.move_to_end(prefix_hash)
