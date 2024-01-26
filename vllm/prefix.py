@@ -30,6 +30,7 @@ class Prefix:
         # Must not be initialized to 1 at creation time because a prefix might be created
         # and thrown away, or sequences sharing this prefix might never be allocated.
         self.seq_ref_count = 0
+        self.expired = False
 
     @property
     def allocated(self) -> bool:
@@ -180,6 +181,14 @@ class PrefixPool:
             i for i, prefix in enumerate(self._candidates_to_deallocate)
             if prefix.seq_ref_count == 0 and prefix.allocated
         ]
+        
+        # Mark the prefix as expired, so that if a sequence group still in the
+        # waiting list that shares this prefix tries to allocate it as a prefix,
+        # it will fail.
+        for i in indexes_to_remove:
+            prefix = self._candidates_to_deallocate[i]
+            prefix.expired = True
+        
         # Popping needs to happen with the indexes_to_remove list in reverse order
         # so that we don't get Index out of range errors
         return [

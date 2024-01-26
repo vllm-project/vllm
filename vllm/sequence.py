@@ -259,7 +259,7 @@ class SequenceGroup:
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
         self.lora_request = lora_request
-        self.prefix: Optional[Prefix] = prefix
+        self._prefix: Optional[Prefix] = prefix
         self.prompt_logprobs: Optional[PromptLogprobs] = None
 
     @property
@@ -268,6 +268,20 @@ class SequenceGroup:
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).prompt
 
+    @property
+    def prefix(self) -> Optional[Prefix]:
+        """
+        If the prefix has been marked as expired, set the prefix to None.
+        The reason for this is that when a prefix has expired it means that it has
+        been moved out of the prefix pool, so is no longer valid, and it should
+        no longer be allocated as a prefix.
+        
+        Return the prefix.
+        """
+        if self._prefix is not None and self._prefix.expired:
+            self._prefix = None
+        return self._prefix
+    
     @property
     def prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
