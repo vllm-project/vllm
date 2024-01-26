@@ -908,7 +908,8 @@ class LLMEngine:
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
         if seq.get_last_token_id() in sampling_params.stop_token_ids:
-            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(seq.get_last_token_id())
+            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
+                seq.get_last_token_id())
             self._finalize_sequence(seq, sampling_params, stop_str)
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
@@ -930,7 +931,8 @@ class LLMEngine:
             return
 
     def _finalize_sequence(self, seq: Sequence,
-                           sampling_params: SamplingParams, stop_string: str) -> None:
+                           sampling_params: SamplingParams, 
+                           stop_string: str) -> None:
         if not sampling_params.include_stop_str_in_output and stop_string:
             # Truncate the output text so that the stop string is
             # not included in the output.
