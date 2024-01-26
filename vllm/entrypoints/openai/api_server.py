@@ -72,6 +72,11 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
+@app.get("/get_tokenizer")
+async def get_tokenizer():
+    return JSONResponse(content=openai_serving_chat.tokenizer_jsons)
+
+
 @app.get("/v1/models")
 async def show_available_models():
     models = await openai_serving_chat.show_available_models()
