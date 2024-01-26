@@ -95,6 +95,14 @@ Below, you can find an explanation of every engine argument for vLLM:
     For example, a value of 0.5 would imply 50% GPU memory utilization.
     If unspecified, will use the default value of 0.9.
 
+.. option:: --prefix-caching-memory-utilization <fraction>
+
+    The fraction of GPU memory to be used for the prefix caching, which can range from 0 to --gpu-memory-utilization. 
+    For example, a value of 0.5 would imply 50% GPU memory utilization.
+    If unspecified, will use the default value of 0. A value of 0 means no prefix caching at all.
+    The size of the prefixes relative to the length of the rest of the prompts and the generated
+    sequences should dictate the relative value of this parameter with respect to gpu-memory-utilization.
+
 .. option:: --max-num-batched-tokens <tokens>
 
     Maximum number of batched tokens per iteration.
