@@ -19,7 +19,10 @@ from typing import (
 from collections import OrderedDict
 from typing import Any, Hashable, Optional
 
+from vllm.logger import init_logger
+
 T = TypeVar("T")
+logger = init_logger(__name__)
 
 
 class Device(enum.Enum):
@@ -171,12 +174,14 @@ def set_cuda_visible_devices(device_ids: List[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
 
 
-def get_nvcc_cuda_version(cuda_dir: str) -> Version:
-    """Get the CUDA version from nvcc.
-
-    Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
-    """
-    nvcc_output = subprocess.check_output([cuda_dir + "/bin/nvcc", "-V"],
+def get_nvcc_cuda_version() -> Version:
+    cuda_home = os.environ.get('CUDA_HOME')
+    if not cuda_home:
+        cuda_home = '/usr/local/cuda'
+        logger.info(
+            f'CUDA_HOME is not found in the environment. Using {cuda_home} as CUDA_HOME.'
+        )
+    nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
     output = nvcc_output.split()
     release_idx = output.index("release") + 1

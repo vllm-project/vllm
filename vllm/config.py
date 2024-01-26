@@ -4,7 +4,6 @@ import os
 from packaging.version import Version
 
 import torch
-from torch.utils.cpp_extension import CUDA_HOME
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
@@ -315,7 +314,7 @@ class CacheConfig:
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
         if self.quant_method == "fp8_e5m2":
-            nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
+            nvcc_cuda_version = get_nvcc_cuda_version()
             if nvcc_cuda_version < Version("11.8"):
                 raise ValueError(
                     "FP8 is not supported when cuda version is lower than 11.8."
