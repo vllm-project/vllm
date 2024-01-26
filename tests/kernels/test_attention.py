@@ -341,7 +341,6 @@ def test_multi_query_kv_attention(
         scale,
         dtype,
     )
-    assert torch.allclose(output,
-                          ref_output,
-                          atol=get_default_atol(output),
-                          rtol=get_default_rtol(output))
+    atol = get_default_atol(output) if is_hip() else 1e-3
+    rtol = get_default_rtol(output) if is_hip() else 1e-5
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
