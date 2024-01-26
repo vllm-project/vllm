@@ -47,7 +47,10 @@ gauge_cpu_cache_usage = Gauge(
 histogram_time_to_first_token = Histogram(
     "vllm:time_to_first_token_seconds",
     "Histogram of time to first token in seconds.",
-    buckets=[0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0])
+    buckets=[
+        0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0,
+        2.5, 5.0, 7.5, 10.0
+    ])
 histogram_time_per_output_tokens = Histogram(
     "vllm:time_per_output_tokens_seconds",
     "Histogram of time per output token in seconds.",
@@ -120,7 +123,8 @@ class StatLogger:
         for e2e in stats.time_e2e_requests:
             histogram_e2e_request_latency.observe(labels, e2e)
 
-    def _log_prometheus_interval(self, prompt_throughput: float, generation_throughput: float) -> None:
+    def _log_prometheus_interval(self, prompt_throughput: float,
+                                 generation_throughput: float) -> None:
         # Logs metrics to prometheus that are computed every logging_interval.
         # Support legacy gauge metrics that make throughput calculations on the vLLM side.
         # Moving forward, we should use counters like counter_prompt_tokens, counter_generation_tokens
@@ -145,10 +149,13 @@ class StatLogger:
         if self._local_interval_elapsed(stats.now):
 
             # Compute summary metrics for tracked stats (and log them to promethus if applicable).
-            prompt_throughput = self._get_throughput(self.num_prompt_tokens, now=stats.now)
-            generation_throughput = self._get_throughput(self.num_generation_tokens,
-                                             now=stats.now)
-            self._log_prometheus_interval(prompt_throughput=prompt_throughput, generation_throughput=generation_throughput)
+            prompt_throughput = self._get_throughput(self.num_prompt_tokens,
+                                                     now=stats.now)
+            generation_throughput = self._get_throughput(
+                self.num_generation_tokens, now=stats.now)
+            self._log_prometheus_interval(
+                prompt_throughput=prompt_throughput,
+                generation_throughput=generation_throughput)
 
             # Log to stdout.
             logger.info(
