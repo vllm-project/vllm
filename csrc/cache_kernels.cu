@@ -34,7 +34,7 @@ void swap_blocks(
   char *dst_ptr = static_cast<char*>(dst.data_ptr());
 
   const int64_t block_size_in_bytes = src.element_size() * src[0].numel();
-  const at::cuda::OptionalCUDAGuard device_guard(src_device);
+  const at::cuda::OptionalCUDAGuard device_guard(src_device.is_cuda() ? src_device : dst_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // NOTE(woosuk): This can be slow if the number of blocks is large.
   for (const auto& pair : block_mapping) {
