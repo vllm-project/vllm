@@ -500,7 +500,7 @@ class SchedulerConfig:
         if self.reorder_window < 0:
             raise ValueError(f"reorder_window ({self.reorder_window}) must "
                              "be not be negative.")
-        if self.reorder_window != 0 and self.policy == 'fcfs':
+        if self.reorder_window != 0 and self.policy != 'reorder':
             raise ValueError(
                 f"fcfs policy doesn't support reorder_window ({self.reorder_window})."
             )
