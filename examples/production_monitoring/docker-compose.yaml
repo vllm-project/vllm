@@ -17,3 +17,4 @@ services:
       - prometheus
     ports:
       - "3000:3000" # the default port used by Grafana
+      
