@@ -10,3 +10,4 @@ fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
 aioprometheus[starlette]
+pynvml == 11.5.0

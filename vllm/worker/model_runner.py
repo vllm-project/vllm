@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
+from vllm.model_executor.parallel_utils import custom_all_reduce
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -651,37 +652,38 @@ class ModelRunner:
 
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
-        for batch_size in reversed(batch_size_capture_list):
-            # Create dummy input_metadata.
-            input_metadata = InputMetadata(
-                is_prompt=False,
-                slot_mapping=slot_mapping[:batch_size],
-                prompt_lens=None,
-                max_seq_len=None,
-                start_loc=None,
-                max_context_len=self.max_context_len_to_capture,
-                context_lens=context_lens[:batch_size],
-                block_tables=block_tables[:batch_size],
-                use_cuda_graph=True,
-            )
-
-            if self.lora_config:
-                lora_mapping = LoRAMapping(
-                    [0] * batch_size,
-                    [0] * batch_size,
+        with custom_all_reduce.capture():
+            for batch_size in reversed(batch_size_capture_list):
+                # Create dummy input_metadata.
+                input_metadata = InputMetadata(
+                    is_prompt=False,
+                    slot_mapping=slot_mapping[:batch_size],
+                    prompt_lens=None,
+                    max_seq_len=None,
+                    start_loc=None,
+                    max_context_len=self.max_context_len_to_capture,
+                    context_lens=context_lens[:batch_size],
+                    block_tables=block_tables[:batch_size],
+                    use_cuda_graph=True,
                 )
-                self.set_active_loras(set(), lora_mapping)
 
-            graph_runner = CUDAGraphRunner(self.model)
-            graph_runner.capture(
-                input_tokens[:batch_size],
-                input_positions[:batch_size],
-                kv_caches,
-                input_metadata,
-                memory_pool=self.graph_memory_pool,
-            )
-            self.graph_memory_pool = graph_runner.graph.pool()
-            self.graph_runners[batch_size] = graph_runner
+                if self.lora_config:
+                    lora_mapping = LoRAMapping(
+                        [0] * batch_size,
+                        [0] * batch_size,
+                    )
+                    self.set_active_loras(set(), lora_mapping)
+
+                graph_runner = CUDAGraphRunner(self.model)
+                graph_runner.capture(
+                    input_tokens[:batch_size],
+                    input_positions[:batch_size],
+                    kv_caches,
+                    input_metadata,
+                    memory_pool=self.graph_memory_pool,
+                )
+                self.graph_memory_pool = graph_runner.graph.pool()
+                self.graph_runners[batch_size] = graph_runner
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time

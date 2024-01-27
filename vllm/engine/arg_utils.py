@@ -35,6 +35,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
+    disable_custom_all_reduce: bool = False
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
@@ -208,6 +209,10 @@ class EngineArgs:
                             help='maximum context length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode.')
+        parser.add_argument('--disable-custom-all-reduce',
+                            action='store_true',
+                            default=EngineArgs.disable_custom_all_reduce,
+                            help='See ParallelConfig')
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
@@ -269,7 +274,8 @@ class EngineArgs:
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
-                                         self.max_parallel_loading_workers)
+                                         self.max_parallel_loading_workers,
+                                         self.disable_custom_all_reduce)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
