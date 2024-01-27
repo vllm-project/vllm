@@ -51,8 +51,8 @@ if _is_hip():
             "Cannot find ROCM_HOME. ROCm must be available to build the package."
         )
     NVCC_FLAGS += ["-DUSE_ROCM"]
-    NVCC_FLAGS += [f"-U__HIP_NO_HALF_CONVERSIONS__"]
-    NVCC_FLAGS += [f"-U__HIP_NO_HALF_OPERATORS__"]
+    NVCC_FLAGS += ["-U__HIP_NO_HALF_CONVERSIONS__"]
+    NVCC_FLAGS += ["-U__HIP_NO_HALF_OPERATORS__"]
 
 if _is_cuda() and CUDA_HOME is None:
     raise RuntimeError(
@@ -307,6 +307,7 @@ vllm_extension_sources = [
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
 if not _is_neuron():
     vllm_extension = CUDAExtension(
@@ -316,6 +317,7 @@ if not _is_neuron():
             "cxx": CXX_FLAGS,
             "nvcc": NVCC_FLAGS,
         },
+        libraries=["cuda"] if _is_cuda() else [],
     )
     ext_modules.append(vllm_extension)
 
