@@ -1,4 +1,3 @@
-
 #include "bgmv_config.h"
 #include "bgmv_impl.cuh"
 
