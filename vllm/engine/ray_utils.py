@@ -43,7 +43,7 @@ try:
 except ImportError as e:
     logger.warning(f"Failed to import Ray with {e!r}. "
                    "For distributed inference, please install Ray with "
-                   "`pip install ray pandas pyarrow`.")
+                   "`pip install ray`.")
     ray = None
     RayWorkerVllm = None
 
