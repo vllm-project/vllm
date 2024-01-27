@@ -79,8 +79,8 @@ class Worker:
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 
         # Initialize the distributed environment.
-        _init_distributed_environment(self.parallel_config, self.rank,
-                                      self.distributed_init_method)
+        init_distributed_environment(self.parallel_config, self.rank,
+                                     self.distributed_init_method)
         if not self.parallel_config.disable_custom_all_reduce:
             init_custom_ar()
         # Initialize the model.
@@ -221,7 +221,7 @@ class Worker:
         return self.model_runner.list_loras()
 
 
-def _init_distributed_environment(
+def init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
