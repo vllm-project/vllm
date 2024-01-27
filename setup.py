@@ -19,7 +19,9 @@ MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
-ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx942", "gfx1030", "gfx1100"}
+ROCM_SUPPORTED_ARCHS = {
+    "gfx90a", "gfx908", "gfx906", "gfx942", "gfx1030", "gfx1100"
+}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
@@ -61,7 +63,6 @@ if _is_cuda() and CUDA_HOME is None:
 ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
-
 
 
 def get_hipcc_rocm_version():
@@ -165,6 +166,7 @@ def get_pytorch_rocm_arch() -> Set[str]:
             f"{ROCM_SUPPORTED_ARCHS}.",
             stacklevel=2)
     return arch_list
+
 
 def get_torch_arch_list() -> Set[str]:
     # TORCH_CUDA_ARCH_LIST can have one or more architectures,
