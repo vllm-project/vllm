@@ -69,9 +69,7 @@ class ModelRunner:
         self.graph_block_tables = None  # Set after initial profiling.
         # cache in_wsl result
         self.in_wsl = in_wsl()
-
-        self.kv_cache_dtype = self.cache_config.quant_method if (
-            self.cache_config and self.cache_config.quant_method) else "auto"
+        self.kv_cache_dtype = self.cache_config.cache_dtype_str if self.cache_config else "auto"
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config, self.lora_config)

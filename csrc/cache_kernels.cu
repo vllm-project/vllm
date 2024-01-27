@@ -189,7 +189,7 @@ __global__ void reshape_and_cache_kernel(
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
     if constexpr (is_fp8_e5m2_kv_cache) {
-#ifdef ENABLE_FP8
+#ifdef ENABLE_FP8_E5M2
       key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
       value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
 #else
@@ -431,7 +431,7 @@ __global__ void convert_fp8_e5m2_kernel(
   const int64_t block_idx = blockIdx.x;
   for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
     int64_t idx = block_idx * block_stride + i;
-#ifdef ENABLE_FP8
+#ifdef ENABLE_FP8_E5M2
     dst_cache[idx] = fp8_e5m2_unscaled::vec_conversion<Tout, Tin>(src_cache[idx]);
 #else
     assert(false);

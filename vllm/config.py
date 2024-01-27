@@ -282,27 +282,16 @@ class CacheConfig:
         block_size: int,
         gpu_memory_utilization: float,
         swap_space: int,
-        cache_dtype: str,
+        cache_dtype_str: str,
         sliding_window: Optional[int] = None,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
-
-        self.cache_dtype = None
-        self.quant_method = None
-        if "fp8_e5m2" in cache_dtype.lower():
-            # As fp8_e5m2 is not a formal data type, we use torch.uint8 instead.
-            self.cache_dtype = torch.uint8
-            self.quant_method = "fp8_e5m2"
-            logger.info(
-                "Using fp8_e5m2 data type to store kv cache. It reduces "
-                "the GPU memory footprint and boosts the performance. "
-                "But it may make slight accuracy drop. "
-                "Currently we only support fp8 without scaling factors and "
-                "make e5m2 as a default format.")
+        self.cache_dtype_str = cache_dtype_str
         self.sliding_window = sliding_window
         self._verify_args()
+        self._verify_cache_dtype()
 
         # Will be set after profiling.
         self.num_gpu_blocks = None
@@ -313,7 +302,11 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
-        if self.quant_method == "fp8_e5m2":
+
+    def _verify_cache_dtype(self) -> None:
+        if self.cache_dtype_str == "auto":
+            self.cache_dtype = None
+        elif self.cache_dtype_str == "fp8_e5m2":
             nvcc_cuda_version = get_nvcc_cuda_version()
             if nvcc_cuda_version < Version("11.8"):
                 raise ValueError(
@@ -323,6 +316,17 @@ class CacheConfig:
             if "AMD" in device_name:
                 raise NotImplementedError(
                     "FP8_E5M2 KV Cache on AMD GPU has not been supported yet.")
+
+            # As fp8_e5m2 is not a formal data type, we use torch.uint8 instead.
+            self.cache_dtype = torch.uint8
+            logger.info(
+                "Using fp8_e5m2 data type to store kv cache. It reduces "
+                "the GPU memory footprint and boosts the performance. "
+                "But it may cause slight accuracy drop. "
+                "Currently we only support fp8 without scaling factors and "
+                "make e5m2 as a default format.")
+        else:
+            raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype_str}")
 
     def verify_with_parallel_config(
         self,
