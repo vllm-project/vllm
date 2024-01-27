@@ -209,7 +209,7 @@ def _generate_random_fp8_e5m2(
     del tensor_tmp
 
 
-def create_kv_caches(
+def create_kv_caches_with_random(
     num_blocks: int,
     block_size: int,
     num_layers: int,

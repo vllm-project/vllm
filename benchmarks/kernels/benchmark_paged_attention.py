@@ -5,7 +5,7 @@ import time
 
 import torch
 
-from vllm.utils import create_kv_caches
+from vllm.utils import create_kv_caches_with_random
 from vllm._C import ops
 
 NUM_BLOCKS = 1024
@@ -62,9 +62,9 @@ def main(
     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
 
     # Create the KV cache.
-    key_caches, value_caches = create_kv_caches(NUM_BLOCKS, block_size, 1,
-                                                num_kv_heads, head_size,
-                                                kv_cache_dtype, dtype)
+    key_caches, value_caches = create_kv_caches_with_random(
+        NUM_BLOCKS, block_size, 1, num_kv_heads, head_size, kv_cache_dtype,
+        dtype)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
