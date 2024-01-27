@@ -37,7 +37,7 @@ _MODELS = {
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
-    "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
+    "StableLMEpochForCausalLM": ("stablelm", "StableLMEpochForCausalLM"),
     "YiForCausalLM": ("yi", "YiForCausalLM")
 }
 
