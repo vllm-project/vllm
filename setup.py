@@ -51,6 +51,8 @@ if _is_hip():
             "Cannot find ROCM_HOME. ROCm must be available to build the package."
         )
     NVCC_FLAGS += ["-DUSE_ROCM"]
+    NVCC_FLAGS += [f"-U__HIP_NO_HALF_CONVERSIONS__"]
+    NVCC_FLAGS += [f"-U__HIP_NO_HALF_OPERATORS__"]
 
 if _is_cuda() and CUDA_HOME is None:
     raise RuntimeError(
@@ -263,7 +265,7 @@ if _is_cuda():
         with contextlib.suppress(ValueError):
             torch_cpp_ext.COMMON_NVCC_FLAGS.remove(flag)
 
-    install_punica = bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "1")))
+    install_punica = bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
     device_count = torch.cuda.device_count()
     for i in range(device_count):
         major, minor = torch.cuda.get_device_capability(i)
