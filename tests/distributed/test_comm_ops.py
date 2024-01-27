@@ -11,8 +11,8 @@ from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather,
     broadcast_tensor_dict,
 )
-from tests.distributed.utils import (init_test_distributed_environment,
-                                     multi_process_tensor_parallel)
+from vllm.test_utils import (init_test_distributed_environment,
+                             multi_process_tensor_parallel)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
