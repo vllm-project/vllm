@@ -11,6 +11,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
+from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
     ensure_model_parallel_initialized)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -78,9 +79,10 @@ class Worker:
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 
         # Initialize the distributed environment.
-        _init_distributed_environment(self.parallel_config, self.rank,
-                                      self.distributed_init_method)
-
+        init_distributed_environment(self.parallel_config, self.rank,
+                                     self.distributed_init_method)
+        if not self.parallel_config.disable_custom_all_reduce:
+            init_custom_ar()
         # Initialize the model.
         set_random_seed(self.model_config.seed)
 
@@ -219,7 +221,7 @@ class Worker:
         return self.model_runner.list_loras()
 
 
-def _init_distributed_environment(
+def init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
