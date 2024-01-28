@@ -2,6 +2,10 @@ import argparse
 import asyncio
 import json
 from contextlib import asynccontextmanager
+import os
+import importlib
+import inspect
+
 from aioprometheus import MetricsMiddleware
 from aioprometheus.asgi.starlette import metrics
 import fastapi
@@ -64,6 +68,13 @@ def parse_args():
                         type=json.loads,
                         default=["*"],
                         help="allowed headers")
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help=
+        "If provided, the server will require this key to be presented in the header."
+    )
     parser.add_argument("--served-model-name",
                         type=str,
                         default=None,
@@ -94,6 +105,17 @@ def parse_args():
         type=str,
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy")
+    parser.add_argument(
+        "--middleware",
+        type=str,
+        action="append",
+        default=[],
+        help="Additional ASGI middleware to apply to the app. "
+        "We accept multiple --middleware arguments. "
+        "The value should be an import path. "
+        "If a function is provided, vLLM will add it to the server using @app.middleware('http'). "
+        "If a class is provided, vLLM will add it to the server using app.add_middleware(). "
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
@@ -106,7 +128,7 @@ app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_, exc):
     err = openai_serving_chat.create_error_response(message=str(exc))
-    return JSONResponse(err.dict(), status_code=HTTPStatus.BAD_REQUEST)
+    return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
 
 
 @app.get("/health")
@@ -118,7 +140,7 @@ async def health() -> Response:
 @app.get("/v1/models")
 async def show_available_models():
     models = await openai_serving_chat.show_available_models()
-    return JSONResponse(content=models.dict())
+    return JSONResponse(content=models.model_dump())
 
 
 @app.post("/v1/chat/completions")
@@ -126,22 +148,28 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
-    if request.stream and not isinstance(generator, ErrorResponse):
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    if request.stream:
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
     else:
-        return JSONResponse(content=generator.dict())
+        return JSONResponse(content=generator.model_dump())
 
 
 @app.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
     generator = await openai_serving_completion.create_completion(
         request, raw_request)
-    if request.stream and not isinstance(generator, ErrorResponse):
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    if request.stream:
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
     else:
-        return JSONResponse(content=generator.dict())
+        return JSONResponse(content=generator.model_dump())
 
 
 if __name__ == "__main__":
@@ -154,6 +182,29 @@ if __name__ == "__main__":
         allow_methods=args.allowed_methods,
         allow_headers=args.allowed_headers,
     )
+
+    if token := os.environ.get("VLLM_API_KEY") or args.api_key:
+
+        @app.middleware("http")
+        async def authentication(request: Request, call_next):
+            if not request.url.path.startswith("/v1"):
+                return await call_next(request)
+            if request.headers.get("Authorization") != "Bearer " + token:
+                return JSONResponse(content={"error": "Unauthorized"},
+                                    status_code=401)
+            return await call_next(request)
+
+    for middleware in args.middleware:
+        module_path, object_name = middleware.rsplit(".", 1)
+        imported = getattr(importlib.import_module(module_path), object_name)
+        if inspect.isclass(imported):
+            app.add_middleware(imported)
+        elif inspect.iscoroutinefunction(imported):
+            app.middleware("http")(imported)
+        else:
+            raise ValueError(
+                f"Invalid middleware {middleware}. Must be a function or a class."
+            )
 
     logger.info(f"args: {args}")
 
