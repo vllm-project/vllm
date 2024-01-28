@@ -5,8 +5,8 @@ import importlib
 import torch
 import torch.nn as nn
 from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalFromBottomRightMask,
-                                         LowerTriangularMaskWithTensorBias)
+from xformers.ops.fmha.attn_bias import (
+    BlockDiagonalCausalFromBottomRightMask, LowerTriangularMaskWithTensorBias)
 
 from vllm._C import ops
 from vllm._C import cache_ops
@@ -156,9 +156,9 @@ class PagedAttention(nn.Module):
             # FIXME(woosuk): This is a hack.
             if not input_metadata.attn_bias:
                 for seq_id, current_prompt_chunk_len, processed_prompt_len in zip(
-                    input_metadata.prompt_seq_ids,
-                    input_metadata.current_prompt_chunk_lens,
-                    input_metadata.processed_prompt_lens,
+                        input_metadata.prompt_seq_ids,
+                        input_metadata.current_prompt_chunk_lens,
+                        input_metadata.processed_prompt_lens,
                 ):
                     if self.alibi_slopes is not None:
                         # TODO(ravianupindi): get ALiBi working
@@ -168,7 +168,8 @@ class PagedAttention(nn.Module):
                             seq_len, query.dtype)
 
                     if self.sliding_window is not None:
-                        processed_prompt_len = min(processed_prompt_len, self.sliding_window)
+                        processed_prompt_len = min(processed_prompt_len,
+                                                   self.sliding_window)
                     kv_cache_len = current_prompt_chunk_len + processed_prompt_len
                     attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
                         [current_prompt_chunk_len], [kv_cache_len])
@@ -181,9 +182,9 @@ class PagedAttention(nn.Module):
             # we need to work with query[:num_current_prompt_tokens]
             offset = 0
             for seq_id, current_prompt_chunk_len, kv_tensor in zip(
-                input_metadata.prompt_seq_ids,
-                input_metadata.current_prompt_chunk_lens,
-                kv_tensors,
+                    input_metadata.prompt_seq_ids,
+                    input_metadata.current_prompt_chunk_lens,
+                    kv_tensors,
             ):
                 seq_query = query[offset:offset + current_prompt_chunk_len]
                 seq_output = output[offset:offset + current_prompt_chunk_len]
@@ -196,16 +197,18 @@ class PagedAttention(nn.Module):
                     # project the key and value tensors to the desired number of
                     # heads.
                     # TODO(woosuk): Use MQA/GQA kernels for higher performance.
-                    seq_query = seq_query.view(seq_query.shape[0], self.num_kv_heads,
-                                    self.num_queries_per_kv, seq_query.shape[-1])
+                    seq_query = seq_query.view(seq_query.shape[0],
+                                               self.num_kv_heads,
+                                               self.num_queries_per_kv,
+                                               seq_query.shape[-1])
                     seq_key = seq_key[:, :,
-                            None, :].expand(seq_key.shape[0], self.num_kv_heads,
-                                            self.num_queries_per_kv,
-                                            seq_key.shape[-1])
-                    seq_value = seq_value[:, :, None, :].expand(seq_value.shape[0],
-                                                        self.num_kv_heads,
-                                                        self.num_queries_per_kv,
-                                                        seq_value.shape[-1])
+                                      None, :].expand(seq_key.shape[0],
+                                                      self.num_kv_heads,
+                                                      self.num_queries_per_kv,
+                                                      seq_key.shape[-1])
+                    seq_value = seq_value[:, :, None, :].expand(
+                        seq_value.shape[0], self.num_kv_heads,
+                        self.num_queries_per_kv, seq_value.shape[-1])
 
                 # TODO(woosuk): Too many view operations. Let's try to reduce them
                 # in the future for code readability.
@@ -244,12 +247,11 @@ class PagedAttention(nn.Module):
         # When key_cache and value_cache are not provided, the new key
         # and value vectors will not be cached
         if (num_decode_tokens > 0 and key_cache is not None
-            and value_cache is not None):
+                and value_cache is not None):
             key_to_cache = key[num_current_prompt_tokens:num_valid_tokens]
             value_to_cache = value[num_current_prompt_tokens:num_valid_tokens]
             slot_mapping = input_metadata.current_tokens_slot_mapping[
-                num_current_prompt_tokens:num_valid_tokens
-            ]
+                num_current_prompt_tokens:num_valid_tokens]
 
             cache_ops.reshape_and_cache(
                 key_to_cache,
@@ -259,7 +261,7 @@ class PagedAttention(nn.Module):
                 slot_mapping,
             )
 
-        if input_metadata.num_generation_tokens> 0:
+        if input_metadata.num_generation_tokens > 0:
             # Decoding run.
             if key_cache is not None and value_cache is not None:
                 _paged_attention(
@@ -301,10 +303,10 @@ class PagedAttention(nn.Module):
 
         offset = 0
         for seq_id, current_prompt_chunk_len, processed_prompt_len, total_prompt_len in zip(
-            input_metadata.prompt_seq_ids,
-            input_metadata.current_prompt_chunk_lens,
-            input_metadata.processed_prompt_lens,
-            input_metadata.total_prompt_lens,
+                input_metadata.prompt_seq_ids,
+                input_metadata.current_prompt_chunk_lens,
+                input_metadata.processed_prompt_lens,
+                input_metadata.total_prompt_lens,
         ):
             seq_k = key[offset:offset + current_prompt_chunk_len]
             seq_v = value[offset:offset + current_prompt_chunk_len]
@@ -317,14 +319,15 @@ class PagedAttention(nn.Module):
                     kv_buffer.add_request(seq_id, total_prompt_len)
 
                 # Skip check during profiling phase
-                assert input_metadata.is_profiling_iteration or processed_prompt_len == kv_buffer.get_offset(seq_id), (
-                    f"processed_prompt_len={processed_prompt_len}"
+                assert input_metadata.is_profiling_iteration or processed_prompt_len == kv_buffer.get_offset(
+                    seq_id
+                ), (f"processed_prompt_len={processed_prompt_len}"
                     f"kv_buffer.get_offset(seq_id)={kv_buffer.get_offset(seq_id)}"
-                )
+                    )
                 kv_buffer.extend(seq_id, seq_k, seq_v)
 
             kv_tensors.append(kv_buffer.get_kv_tensors(seq_id))
-        
+
         return kv_tensors
 
     def update_kv_cache_buffer(
@@ -336,10 +339,10 @@ class PagedAttention(nn.Module):
     ) -> None:
         offset = 0
         for seq_id, current_prompt_chunk_len, processed_prompt_len, total_prompt_len in zip(
-            input_metadata.prompt_seq_ids,
-            input_metadata.current_prompt_chunk_lens,
-            input_metadata.processed_prompt_lens,
-            input_metadata.total_prompt_lens,
+                input_metadata.prompt_seq_ids,
+                input_metadata.current_prompt_chunk_lens,
+                input_metadata.processed_prompt_lens,
+                input_metadata.total_prompt_lens,
         ):
             if processed_prompt_len + current_prompt_chunk_len != total_prompt_len:
                 continue
@@ -353,7 +356,7 @@ class PagedAttention(nn.Module):
                 start_index = max(0, total_prompt_len - self.sliding_window)
                 key = key[start_index:]
                 value = value[start_index:]
-            
+
             slot_mapping = input_metadata.prefix_plus_current_prompt_tokens_slot_mapping[
                 offset:offset + len(key)]
             offset += len(key)
@@ -363,11 +366,12 @@ class PagedAttention(nn.Module):
                 key_cache,
                 value_cache,
                 slot_mapping,
-            ) 
+            )
 
             # TODO: need to handle restarted and aborted sequences
             # in the current state, we can have memory leaks
             kv_buffer.free_request(seq_id)
+
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,

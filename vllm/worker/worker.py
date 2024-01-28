@@ -4,7 +4,6 @@ import os
 import torch
 import torch.distributed
 from typing import Dict, List, Tuple, Set, Optional
-from typing import Dict, List, Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, BaseSchedulerConfig, LoRAConfig)

@@ -110,12 +110,13 @@ class ModelRunner:
         # Otherwise (say vllm, orca), this buffer is not actually used in the codepath
         self.kv_buffers = [
             KVBuffer(
-                num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config),
+                num_kv_heads=self.model_config.get_num_kv_heads(
+                    self.parallel_config),
                 head_size=self.model_config.get_head_size(),
                 dtype=self.model_config.dtype,
                 device=device,
-            )
-            for _ in range(self.model_config.get_num_layers(self.parallel_config))
+            ) for _ in range(
+                self.model_config.get_num_layers(self.parallel_config))
         ]
 
     def reset_kv_buffers(self) -> None:
@@ -154,7 +155,7 @@ class ModelRunner:
         current_prompt_chunk_lens: List[int] = []
         total_prompt_lens: List[int] = []
         prompt_seq_ids: List[int] = []
-        is_profiling_iteration=False
+        is_profiling_iteration = False
 
         for seq_group_metadata in seq_group_metadata_list:
             if not seq_group_metadata.is_prompt:
@@ -179,7 +180,7 @@ class ModelRunner:
             context_lens.append(prefix_len)
             subquery_lens.append(prompt_len - prefix_len)
             prompt_chunk_size = seq_group_metadata.prompt_chunk_size
-            current_prompt_chunk_tokens=seq_data.get_next_prompt_chunk_token_ids(
+            current_prompt_chunk_tokens = seq_data.get_next_prompt_chunk_token_ids(
                 prompt_chunk_size)
             current_prompt_chunk_len = len(current_prompt_chunk_tokens)
             current_prompt_chunk_lens.append(current_prompt_chunk_len)
@@ -207,7 +208,7 @@ class ModelRunner:
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
             input_positions.extend(
                 range(processed_prompt_len,
-                           processed_prompt_len + current_prompt_chunk_len))
+                      processed_prompt_len + current_prompt_chunk_len))
 
             # ONLY used for profiling
             if seq_group_metadata.block_tables is None:
@@ -216,10 +217,10 @@ class ModelRunner:
                 # yet. In this case, we just use a dummy slot mapping.
                 prefix_plus_current_prompt_tokens_slot_mapping.extend(
                     [0] * (processed_prompt_len + current_prompt_chunk_len))
-                
-                current_tokens_slot_mapping.extend(
-                    [0] * current_prompt_chunk_len)
-                
+
+                current_tokens_slot_mapping.extend([0] *
+                                                   current_prompt_chunk_len)
+
                 continue
 
             # Compute the slot mapping.
@@ -250,7 +251,7 @@ class ModelRunner:
                 slot = block_number * self.block_size + block_offset
                 if i >= context_start:
                     prefix_plus_current_prompt_tokens_slot_mapping.append(slot)
-                if i>= processed_prompt_len:
+                if i >= processed_prompt_len:
                     current_tokens_slot_mapping.append(slot)
 
         max_prompt_len = max(subquery_lens)
@@ -353,7 +354,8 @@ class ModelRunner:
                 context_lens.append(context_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
-                max_num_blocks_per_seq = max(max_num_blocks_per_seq, len(block_table))
+                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
+                                             len(block_table))
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
@@ -382,13 +384,12 @@ class ModelRunner:
                                        device="cuda")
 
         prefix_plus_current_prompt_tokens_slot_mapping = torch.tensor(
-                                             prefix_plus_current_prompt_tokens_slot_mapping,
-                                             dtype=torch.long,
-                                             device="cuda")
-        current_tokens_slot_mapping = torch.tensor(
-                                             current_tokens_slot_mapping,
-                                             dtype=torch.long,
-                                             device="cuda")
+            prefix_plus_current_prompt_tokens_slot_mapping,
+            dtype=torch.long,
+            device="cuda")
+        current_tokens_slot_mapping = torch.tensor(current_tokens_slot_mapping,
+                                                   dtype=torch.long,
+                                                   device="cuda")
 
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
@@ -408,7 +409,8 @@ class ModelRunner:
             for _ in range(graph_batch_size - batch_size):
                 input_tokens.append([])
                 input_positions.append([])
-                slot_mapping.append([]) # TODO(ravianupindi): enable cuda graphs
+                slot_mapping.append(
+                    [])  # TODO(ravianupindi): enable cuda graphs
                 context_lens.append(1)
                 block_tables.append([])
             batch_size = graph_batch_size
@@ -466,7 +468,8 @@ class ModelRunner:
             processed_prompt_lens=processed_prompt_lens,
             current_prompt_chunk_lens=current_prompt_chunk_lens,
             total_prompt_lens=total_prompt_lens,
-            prefix_plus_current_prompt_tokens_slot_mapping=prefix_plus_current_prompt_tokens_slot_mapping,
+            prefix_plus_current_prompt_tokens_slot_mapping=
+            prefix_plus_current_prompt_tokens_slot_mapping,
             current_tokens_slot_mapping=current_tokens_slot_mapping,
             max_context_len=max_context_len,
             context_lens=context_lens,
@@ -660,7 +663,7 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
-        
+
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
@@ -740,7 +743,7 @@ class ModelRunner:
         else:
             for group_id in range(max_num_seqs):
                 seq_len = (max_num_batched_tokens // max_num_seqs +
-                        (group_id < max_num_batched_tokens % max_num_seqs))
+                           (group_id < max_num_batched_tokens % max_num_seqs))
                 seq_data = SequenceData([0] * seq_len)
                 seq = SequenceGroupMetadata(
                     request_id=str(group_id),
@@ -984,8 +987,10 @@ def _pad_to_max(x: List[int], max_len: int, pad: int, skip_sanity_check: bool) -
     assert len(x) <= max_len
     return x + [pad] * (max_len - len(x))
 
+
 def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
     return x + [0] * ((-len(x)) % multiple_of)
+
 
 def _make_tensor_with_pad(
     x: List[List[int]],

@@ -222,15 +222,18 @@ class EngineArgs:
                             action="store_true",
                             default=EngineArgs.enable_rolling_prefills,
                             help='Enable rolling prefills in Sarathi')
-        parser.add_argument('--prefill-fitting-tolerance',
-                            type=float,
-                            default=EngineArgs.prefill_fitting_tolerance,
-                            help=
-                            'Maximum fraction of prefill chunk that can be left empty in Sarathi')
-        parser.add_argument('--max-pre-queue-batches',
-                            type=int,
-                            default=EngineArgs.max_pre_queue_batches,
-                            help='Maximum number of batches that can be pre-queued in Sarathi')
+        parser.add_argument(
+            '--prefill-fitting-tolerance',
+            type=float,
+            default=EngineArgs.prefill_fitting_tolerance,
+            help=
+            'Maximum fraction of prefill chunk that can be left empty in Sarathi'
+        )
+        parser.add_argument(
+            '--max-pre-queue-batches',
+            type=int,
+            default=EngineArgs.max_pre_queue_batches,
+            help='Maximum number of batches that can be pre-queued in Sarathi')
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',

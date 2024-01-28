@@ -24,16 +24,16 @@ class SarathiScheduler(BaseScheduler):
         self.chunk_size = self.scheduler_config.chunk_size
         self.enable_rolling_prefills = self.scheduler_config.enable_rolling_prefills
         self.prefill_fitting_tolerance = self.scheduler_config.prefill_fitting_tolerance
-    
+
     # TODO(ravianupindi): override _update_num_running_batches_on_step_completed
     # and add other pipeline parallel related methods
 
     def _get_max_num_running_seqs(self) -> int:
         return 1 + self.scheduler_config.max_pre_queue_batches
-    
+
     def _get_block_space_manager_class(self) -> Type[BaseBlockSpaceManager]:
         return SarathiBlockSpaceManager
-    
+
     def _get_seq_next_num_prefill_tokens(self, seq: Sequence,
                                          batch_contains_prefill: bool,
                                          num_batched_tokens: int) -> int:
@@ -45,12 +45,12 @@ class SarathiScheduler(BaseScheduler):
         next_num_tokens = min(
             seq.get_prompt_len() - seq.get_num_prompt_tokens_processed(),
             self.chunk_size - num_batched_tokens)
-        
+
         if not batch_contains_prefill:
             return next_num_tokens
-    
+
         if self.enable_rolling_prefills and num_batched_tokens < self.chunk_size * (
-            1 - self.prefill_fitting_tolerance):
+                1 - self.prefill_fitting_tolerance):
             # We can have multiple prefills per batch
             # but the total number of tokens should not exceed
             # the max batch size, which is the chunk size
@@ -64,7 +64,7 @@ class SarathiScheduler(BaseScheduler):
         prefill_seq_groups: List[SequenceGroup] = []
         decode_seq_groups: List[SequenceGroup] = []
         prefill_prompt_chunk_lens: List[int] = []
-        decode_prompt_chunk_lens: List[int] = [] # Just a list of zeros
+        decode_prompt_chunk_lens: List[int] = []  # Just a list of zeros
         num_curr_seqs: int = 0
         num_batched_tokens: int = 0
         batch_contains_prefill: bool = False
@@ -80,7 +80,7 @@ class SarathiScheduler(BaseScheduler):
 
             if not seq.is_prompt_processing_finished():
                 continue
-            
+
             num_seqs = seq_group.num_seqs(status=SequenceStatus.PAUSED)
             num_curr_seqs += num_seqs
             num_batched_tokens += num_seqs
@@ -88,13 +88,12 @@ class SarathiScheduler(BaseScheduler):
             decode_seq_groups.append(seq_group)
             decode_prompt_chunk_lens.append(0)
 
-
         # Now add requests with prefill incomplete
         for seq_group in self.running:
             seq = seq_group.get_seqs()[0]
             if seq.get_status() != SequenceStatus.PAUSED:
                 continue
-        
+
             if seq.is_prompt_processing_finished():
                 continue
 
@@ -105,7 +104,7 @@ class SarathiScheduler(BaseScheduler):
 
             next_num_prefill_tokens = self._get_seq_next_num_prefill_tokens(
                 seq, batch_contains_prefill, num_batched_tokens)
-            
+
             # As long as the request could fit in the batch previously
             # it should be able to fit in the batch now
             if next_num_prefill_tokens == 0:
@@ -116,15 +115,14 @@ class SarathiScheduler(BaseScheduler):
             num_batched_tokens += next_num_prefill_tokens
             prefill_seq_groups.append(seq_group)
             prefill_prompt_chunk_lens.append(next_num_prefill_tokens)
-        
+
         # Optimization: We do not sort the waiting queue since the preempted
         # sequence groups are added to the front and the new sequence groups
         # are added to the back.
         while self.waiting:
             seq_group = self.waiting[0]
 
-            waiting_seqs = seq_group.get_seqs(
-                status=SequenceStatus.WAITING)
+            waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
             assert len(waiting_seqs) == 1, (
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
@@ -133,7 +131,7 @@ class SarathiScheduler(BaseScheduler):
                 logger.warning(
                     f"Input prompt ({num_prompt_tokens} tokens) is too long"
                     f" and exceeds the limit of {self.prompt_limit}")
-                
+
                 for seq in waiting_seqs:
                     seq.set_status(SequenceStatus.FINISHED_IGNORED)
                 ignored_seq_groups.append(seq_group)
@@ -153,18 +151,18 @@ class SarathiScheduler(BaseScheduler):
                 ignored_seq_groups.append(seq_group)
                 self.waiting.pop(0)
                 continue
-            
+
             # The total number of sequences in the RUNNING state should not
             # exceed the maximum number of sequences
             num_new_seqs = seq_group.get_max_num_running_seqs()
-            if(num_curr_seqs + num_new_seqs
-               > self.scheduler_config.max_num_seqs):
+            if (num_curr_seqs + num_new_seqs >
+                    self.scheduler_config.max_num_seqs):
                 break
-            
+
             # Check if we can fit the prefill in this batch
             next_num_prefill_tokens = self._get_seq_next_num_prefill_tokens(
                 waiting_seqs[0], batch_contains_prefill, num_batched_tokens)
-            
+
             if next_num_prefill_tokens == 0:
                 break
 
@@ -176,7 +174,7 @@ class SarathiScheduler(BaseScheduler):
             prefill_prompt_chunk_lens.append(next_num_prefill_tokens)
             prefill_seq_groups.append(seq_group)
             self.running.append(seq_group)
-        
+
         # Make sure that prefills are at the start of a batch, so that we don't
         # violate assumptions made in the original vLLM codebase
         scheduled = prefill_seq_groups + decode_seq_groups
@@ -195,4 +193,3 @@ class SarathiScheduler(BaseScheduler):
             ignored_seq_groups=ignored_seq_groups,
         )
         return scheduler_outputs
-    

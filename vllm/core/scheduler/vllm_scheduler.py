@@ -24,7 +24,7 @@ class VLLMScheduler(BaseScheduler):
 
         self.prompt_limit = min(self.scheduler_config.max_model_len,
                                 self.scheduler_config.max_num_batched_tokens)
-    
+
     def _get_block_space_manager_class(self) -> Type[BaseBlockSpaceManager]:
         return VLLMBlockSpaceManager
     

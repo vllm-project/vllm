@@ -1,4 +1,5 @@
 import os
+
 import torch
 
 from abc import ABC
@@ -543,9 +544,8 @@ class VLLMSchedulerConfig(BaseSchedulerConfig):
 
 
 class SarathiSchedulerConfig(BaseSchedulerConfig):
-    
-    def __init__(self, max_num_seqs: int, max_model_len: int,
-                 chunk_size: int,
+
+    def __init__(self, max_num_seqs: int, max_model_len: int, chunk_size: int,
                  enable_rolling_prefills: bool,
                  prefill_fitting_tolerance: float,
                  max_pre_queue_batches: float) -> None:
@@ -559,7 +559,7 @@ class SarathiSchedulerConfig(BaseSchedulerConfig):
     def max_num_batched_tokens(self) -> int:
         # Sarathi never schedules more than chunk_size tokens in one iteration.
         return self.chunk_size
-    
+
     @property
     def type_name(self) -> str:
         return "sarathi"

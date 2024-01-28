@@ -16,7 +16,7 @@ class DSarathiScheduler(SarathiScheduler):
 
     def _get_block_space_manager_class(self) -> Type[BaseBlockSpaceManager]:
         return DSarathiBlockSpaceManager
-    
+
     def _schedule(self) -> SchedulerOutputs:
         # Blocks that need to be swapped or copied before model execution
         blocks_to_swap_in: Dict[int, int] = {}
@@ -91,7 +91,7 @@ class DSarathiScheduler(SarathiScheduler):
                 decode_seq_groups.append(seq_group)
                 decode_prompt_chunk_lens.append(0)
                 running.append(seq_group)
-        
+
         # now add the requests with prefill incomplete
         # the memory for all these prefills has already been allocated
         # so we should be able to run all of them
@@ -107,7 +107,7 @@ class DSarathiScheduler(SarathiScheduler):
             # it should be able to fit in the batch now
             # so in non-pipeline case this condition should always be false
             # however, in pipeline case, the grouping of requests can change
-            # between different microbatches, so this is not guaranteed to be always true 
+            # between different microbatches, so this is not guaranteed to be always true
             if next_num_prefill_tokens == 0:
                 running.append(seq_group)
                 continue
@@ -117,7 +117,7 @@ class DSarathiScheduler(SarathiScheduler):
             prefill_prompt_chunk_lens.append(next_num_prefill_tokens)
             prefill_seq_groups.append(seq_group)
             running.append(seq_group)
-        
+
         if preempted:
             # make sure that prefills are at the start of the batch, so that we don't violate assumptions
             # made in the original vllm codebase
@@ -138,7 +138,7 @@ class DSarathiScheduler(SarathiScheduler):
                 ignored_seq_groups=ignored_seq_groups,
             )
             return scheduler_outputs
-        
+
         ######################################################################
         # Phase 2: Add swapped out sequence groups to the batch.
         ######################################################################
