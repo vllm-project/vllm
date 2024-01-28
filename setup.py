@@ -18,7 +18,7 @@ ROOT_DIR = os.path.dirname(__file__)
 MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
-NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
+NVIDIA_SUPPORTED_ARCHS = {"6.0", "6.1", "6.2", "7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
 ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030", "gfx1100"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
@@ -184,9 +184,14 @@ if _is_cuda() and not compute_capabilities:
     device_count = torch.cuda.device_count()
     for i in range(device_count):
         major, minor = torch.cuda.get_device_capability(i)
-        if major < 7:
+        if major < 6:
             raise RuntimeError(
-                "GPUs with compute capability below 7.0 are not supported.")
+                "GPUs with compute capability below 6.0 are not supported.")
+        if major == 6:
+            warnings.warn(
+                "GPUs with compute capability below 7.0 may work but are not part of vLLM supported testing.",
+                "Proceeding but performance and stability issues may occur.",
+                stacklevel=2)
         compute_capabilities.add(f"{major}.{minor}")
 
 ext_modules = []
