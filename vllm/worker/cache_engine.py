@@ -6,7 +6,7 @@ import torch
 from vllm._C import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import in_wsl
+from vllm.utils import in_wsl, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
@@ -34,8 +34,6 @@ class CacheEngine:
         self.head_size = model_config.get_head_size()
         self.num_layers = model_config.get_num_layers(parallel_config)
         self.num_heads = model_config.get_num_kv_heads(parallel_config)
-        self.dtype = (cache_config.cache_dtype
-                      if cache_config.cache_dtype else model_config.dtype)
 
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
@@ -50,6 +48,10 @@ class CacheEngine:
         assert self.cache_stream != torch.cuda.current_stream()
         # Initialize the events for stream synchronization.
         self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
+        if cache_config.cache_dtype == "auto":
+            self.dtype = model_config.dtype
+        else:
+            self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
     def get_key_block_shape(self) -> Tuple[int, int, int, int]:
         element_size = torch.tensor([], dtype=self.dtype).element_size()
@@ -143,7 +145,7 @@ class CacheEngine:
     @staticmethod
     def get_cache_block_size(
         block_size: int,
-        cache_dtype: torch.dtype,
+        cache_dtype: str,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
@@ -154,9 +156,11 @@ class CacheEngine:
         key_cache_block = block_size * num_heads * head_size
         value_cache_block = key_cache_block
         total = num_layers * (key_cache_block + value_cache_block)
-        if cache_dtype is None:
-            cache_dtype = model_config.dtype
-        dtype_size = _get_dtype_size(cache_dtype)
+        if cache_dtype == "auto":
+            dtype = model_config.dtype
+        else:
+            dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+        dtype_size = _get_dtype_size(dtype)
         return dtype_size * total
 
 

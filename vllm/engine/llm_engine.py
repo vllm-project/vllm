@@ -144,7 +144,7 @@ class LLMEngine:
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            cache_config=self.cache_config,
+            kv_cache_dtype=self.cache_config.cache_dtype_str,
             is_driver_worker=True,
         )
         self._run_workers("init_model")

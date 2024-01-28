@@ -24,6 +24,13 @@ from vllm.logger import init_logger
 T = TypeVar("T")
 logger = init_logger(__name__)
 
+STR_DTYPE_TO_TORCH_DTYPE = {
+    "half": torch.half,
+    "bfloat16": torch.bfloat16,
+    "float": torch.float,
+    "fp8_e5m2": torch.uint8,
+}
+
 
 class Device(enum.Enum):
     GPU = enum.auto()
@@ -223,23 +230,16 @@ def create_kv_caches_with_random(
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    dtype_to_torch_dtype = {
-        "half": torch.half,
-        "bfloat16": torch.bfloat16,
-        "float": torch.float,
-        "fp8_e5m2": torch.uint8,
-    }
-
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
             if isinstance(model_dtype, str):
-                torch_dtype = dtype_to_torch_dtype[model_dtype]
+                torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
             elif isinstance(model_dtype, torch.dtype):
                 torch_dtype = model_dtype
             else:
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
         elif cache_dtype in ["half", "bfloat16", "float"]:
-            torch_dtype = dtype_to_torch_dtype[cache_dtype]
+            torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
         elif cache_dtype == "fp8_e5m2":
             torch_dtype = torch.uint8
         else:

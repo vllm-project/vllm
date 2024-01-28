@@ -36,7 +36,7 @@ class Worker:
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
+        kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -54,7 +54,7 @@ class Worker:
                                         parallel_config,
                                         scheduler_config,
                                         lora_config=self.lora_config,
-                                        cache_config=cache_config,
+                                        kv_cache_dtype=kv_cache_dtype,
                                         is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
@@ -95,7 +95,7 @@ class Worker:
         block_size: int,
         gpu_memory_utilization: float,
         cpu_swap_space: int,
-        cache_dtype: torch.dtype,
+        cache_dtype: str,
     ) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model and returns the maximum
         number of GPU and CPU cache blocks that can be allocated.

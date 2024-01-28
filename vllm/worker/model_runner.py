@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, LoRAConfig, ParallelConfig, SchedulerConfig, CacheConfig
+from vllm.config import ModelConfig, LoRAConfig, ParallelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -35,14 +35,13 @@ class ModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         lora_config: Optional[LoRAConfig],
-        cache_config: Optional[CacheConfig] = None,
+        kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
-        self.cache_config = cache_config
         self.is_driver_worker = is_driver_worker
 
         # model_config can be None in tests/samplers/test_sampler.py.
@@ -69,7 +68,7 @@ class ModelRunner:
         self.graph_block_tables = None  # Set after initial profiling.
         # cache in_wsl result
         self.in_wsl = in_wsl()
-        self.kv_cache_dtype = self.cache_config.cache_dtype_str if self.cache_config else "auto"
+        self.kv_cache_dtype = kv_cache_dtype
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config, self.lora_config)
