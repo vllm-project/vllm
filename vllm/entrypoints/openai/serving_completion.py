@@ -292,9 +292,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     input_ids = self._validate_prompt_and_tokenize(
                         request, prompt_ids=prompt)
                 else:
+                    # Parse prefix position by prompt and prefix_stop indicator
                     if request.prefix_stop is not None and request.prefix_stop in prompt:
                         prefix_index = prompt.index(request.prefix_stop)
-                        prefix_pos = len(self.tokenizer.encode(prompt[:prefix_index])) - 1
+                        prefix_pos = len(
+                            self.tokenizer.encode(prompt[:prefix_index])) - 1
                         prompt = prompt.replace(request.prefix_stop, '')
 
                     input_ids = self._validate_prompt_and_tokenize(
