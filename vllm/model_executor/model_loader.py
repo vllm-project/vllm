@@ -79,7 +79,16 @@ def get_model(model_config: ModelConfig,
             # random values to the weights.
             initialize_dummy_weights(model)
         else:
-            # Load the weights from the cached or downloaded files.
-            model.load_weights(model_config.model, model_config.download_dir,
-                               model_config.load_format, model_config.revision)
+            if getattr(model_config.hf_config, "param_weight_map",
+                       None) is not None:
+                # Load the weights from the cached or downloaded files.
+                model.load_weights(
+                    model_config.model, model_config.download_dir,
+                    model_config.load_format, model_config.revision,
+                    getattr(model_config.hf_config, "param_weight_map", None))
+            else:
+                model.load_weights(model_config.model,
+                                   model_config.download_dir,
+                                   model_config.load_format,
+                                   model_config.revision)
     return model.eval()

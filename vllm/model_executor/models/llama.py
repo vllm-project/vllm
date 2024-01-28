@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -162,7 +162,7 @@ class LlamaDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -224,7 +224,7 @@ class LlamaModel(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
@@ -273,7 +273,7 @@ class LlamaForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:

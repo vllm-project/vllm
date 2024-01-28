@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -124,7 +124,7 @@ class InternLMDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -185,7 +185,7 @@ class InternLMModel(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()

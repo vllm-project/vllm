@@ -21,7 +21,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import OPTConfig
+from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
@@ -112,7 +112,7 @@ class OPTDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: OPTConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -186,7 +186,7 @@ class OPTDecoder(nn.Module):
 
     def __init__(
         self,
-        config: OPTConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -264,7 +264,7 @@ class OPTModel(nn.Module):
 
     def __init__(
         self,
-        config: OPTConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()

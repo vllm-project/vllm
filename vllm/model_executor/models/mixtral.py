@@ -27,9 +27,9 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from transformers import PretrainedConfig
 
 from torch import nn
-from transformers import MixtralConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttention
@@ -97,7 +97,7 @@ class MixtralMoE(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -242,7 +242,7 @@ class MixtralDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -297,7 +297,7 @@ class MixtralModel(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -336,7 +336,7 @@ class MixtralForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()

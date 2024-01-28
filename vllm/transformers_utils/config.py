@@ -5,14 +5,14 @@ from transformers import AutoConfig, PretrainedConfig
 from vllm.transformers_utils.configs import *
 
 _CONFIG_REGISTRY = {
-    "aquila": AquilaConfig,
-    "baichuan": BaiChuanConfig,
     "chatglm": ChatGLMConfig,
     "mpt": MPTConfig,
-    "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-    "yi": YiConfig,
+}
+
+_CONFIG_PARAM_WEIGHT_MAP = {
+    "Yi": [("input_layernorm", "ln1"), ("post_attention_layernorm", "ln2")]
 }
 
 
@@ -36,4 +36,7 @@ def get_config(model: str,
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model, revision=revision)
+
+    if config.model_type in _CONFIG_PARAM_WEIGHT_MAP:
+        config.param_weight_map = _CONFIG_PARAM_WEIGHT_MAP[config.model_type]
     return config
