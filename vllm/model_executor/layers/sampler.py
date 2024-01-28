@@ -117,7 +117,6 @@ def _prune_hidden_states(
     hidden_states: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
     return hidden_states.index_select(0,
                                       sampling_metadata.selected_token_indices)
 
@@ -460,7 +459,7 @@ def _get_logprobs(
                                        sampling_params.prompt_logprobs)
             prompt_len = sampling_metadata.prompt_lens[i]
             prompt_tokens = sampling_metadata.seq_data[
-                seq_ids[0]].prompt_token_ids
+                seq_ids[0]].get_next_prompt_chunk_token_ids(prompt_len)
             batched_logprobs_query_seq_indices.extend(
                 sample_idx + j for j in range(prompt_len - 1))
             batched_logprobs_query_token_indices.extend(
@@ -509,7 +508,7 @@ def _get_logprobs(
             num_logprobs = sampling_params.prompt_logprobs
             prompt_len = sampling_metadata.prompt_lens[i]
             prompt_tokens = sampling_metadata.seq_data[
-                seq_ids[0]].prompt_token_ids
+                seq_ids[0]].get_next_prompt_chunk_token_ids(prompt_len)
             group_prompt_logprobs: PromptLogprobs = [None]
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {

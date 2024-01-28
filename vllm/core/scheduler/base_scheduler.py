@@ -12,6 +12,7 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata)
 from vllm.prefix import PrefixPool
 from vllm.sequence_status import SequenceStatus
+from vllm.core.block_space_manager.base_block_space_manager import BaseBlockSpaceManager
 
 logger = init_logger(__name__)
 
@@ -29,6 +30,14 @@ class PreemptionMode(enum.Enum):
     RECOMPUTE = enum.auto()
 
 
+# Note: On sequence statuses in a sequence group
+# If a sequence group is in the Waiting queue, all sequences in that group
+# must be in the WAITING status
+# If a sequence group is in the running queue, some sequences in the group may be
+# in RUNNING, some may be in FINISHED*
+# WAITING and RUNNING are not allowed together
+# SWAPPED AND RUNNING are not allowed together 
+# PAUSED and RUNNING are not allowed together, but PAUSED and FINISHED* are however
 class SchedulerOutputs:
 
     def __init__(
@@ -130,7 +139,7 @@ class BaseScheduler(ABC):
         self._iteration_id = -1
 
     @abstractmethod
-    def _get_block_space_manager_class(self):
+    def _get_block_space_manager_class(self) -> Type[BaseBlockSpaceManager]:
         pass
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
@@ -231,7 +240,7 @@ class BaseScheduler(ABC):
         self._update_num_running_batches_on_step_completed()
 
     def _update_num_running_batches_on_step_completed(self) -> None:
-        self.num_running_batches += 1
+        self.num_running_batches -= 1
     
     # TODO: ravianupindi, add pipeline parallel related methods
 

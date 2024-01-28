@@ -111,12 +111,10 @@ class SequenceData:
         end = min(start + chunk_size, self.get_prompt_len())
         return self.prompt_token_ids[start:end]
 
-    @property
-    def next_prompt_chunk_token_ids(self, chunk_size: int) -> List[int]:
+    def get_next_prompt_chunk_token_ids(self, chunk_size: int) -> List[int]:
         return self._get_next_prompt_chunk(chunk_size)
 
-    @property
-    def next_prompt_chunk_len(self, chunk_size: int) -> int:
+    def get_next_prompt_chunk_len(self, chunk_size: int) -> int:
         return len(self._get_next_prompt_chunk(chunk_size))
 
     def get_last_token_id(self) -> int:
@@ -130,7 +128,7 @@ class SequenceData:
         self.prompt_tokens_processed = 0
         self.prompt_processing_finished = False
         self.prompt_token_ids = self.prompt_token_ids + self.output_token_ids
-        self.output_token_ids.clear()
+        self.output_token_ids = []
 
     def __repr__(self) -> str:
         return (f"SequenceData("

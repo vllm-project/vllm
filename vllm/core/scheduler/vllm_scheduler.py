@@ -1,13 +1,13 @@
 from collections import deque
 import time
-from typing import Deque, Dict, List
+from typing import Deque, Dict, List, Type
 
 from vllm.config import CacheConfig, VLLMSchedulerConfig
 from vllm.logger import init_logger
 from vllm.sequence import SequenceGroup
 from vllm.sequence_status import SequenceStatus
 from vllm.core.scheduler.base_scheduler import BaseScheduler, SchedulerOutputs
-from vllm.core.block_space_manager.vllm_block_space_manager import VLLMBlockSpaceManager
+from vllm.core.block_space_manager.vllm_block_space_manager import BaseBlockSpaceManager, VLLMBlockSpaceManager
 from vllm.core.block_space_manager.base_block_space_manager import AllocStatus
 
 logger = init_logger(__name__)
@@ -25,7 +25,7 @@ class VLLMScheduler(BaseScheduler):
         self.prompt_limit = min(self.scheduler_config.max_model_len,
                                 self.scheduler_config.max_num_batched_tokens)
     
-    def _get_block_space_manager_class(self):
+    def _get_block_space_manager_class(self) -> Type[BaseBlockSpaceManager]:
         return VLLMBlockSpaceManager
     
     def _schedule(self) -> SchedulerOutputs:
@@ -102,7 +102,7 @@ class VLLMScheduler(BaseScheduler):
 
                 # If the number of batched tokens exceeds the limit, stop.
                 new_seq_lens = seq_lens + [num_prompt_tokens]
-                num_batched_tokens = len(new_seq_lens) * max(new_seq_lens)
+                num_batched_tokens = sum(new_seq_lens)
                 if (num_batched_tokens >
                         self.scheduler_config.max_num_batched_tokens):
                     break
@@ -114,9 +114,6 @@ class VLLMScheduler(BaseScheduler):
                         self.scheduler_config.max_num_seqs):
                     break
 
-                num_paddings = num_batched_tokens - sum(new_seq_lens)
-                if num_paddings > self.scheduler_config.max_paddings:
-                    break
                 seq_lens = new_seq_lens
 
                 if lora_int_id > 0:
@@ -134,8 +131,7 @@ class VLLMScheduler(BaseScheduler):
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
                     prompt_chunk_lens=prompt_chunk_lens,
-                    num_batched_tokens=len(seq_lens) *
-                    max(seq_lens) if seq_lens else 0,
+                    num_batched_tokens=sum(seq_lens) if seq_lens else 0,
                     num_batched_prompt_tokens=sum(prompt_chunk_lens),
                     num_batched_output_tokens=0,
                     blocks_to_swap_in=blocks_to_swap_in,

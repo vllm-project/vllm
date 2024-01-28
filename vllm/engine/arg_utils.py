@@ -1,10 +1,13 @@
 import argparse
 import dataclasses
+import yaml
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                        ParallelConfig, BaseSchedulerConfig, VLLMSchedulerConfig, LoRAConfig)
+                         ParallelConfig, BaseSchedulerConfig,
+                         VLLMSchedulerConfig, SarathiSchedulerConfig,
+                         DSarathiSchedulerConfig, LoRAConfig)
 
 
 @dataclass
@@ -27,7 +30,6 @@ class EngineArgs:
     block_size: int = 16
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
-    max_paddings: int = 256
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -48,6 +50,11 @@ class EngineArgs:
     max_num_seqs: int = 256
     # vllm scheduler parameters
     max_num_batched_tokens: Optional[int] = None
+    # sarathi scheduler parameters
+    chunk_size: Optional[int] = None
+    enable_rolling_prefills: bool = True
+    prefill_fitting_tolerance: float = 0.2
+    max_pre_queue_batches: int = 2
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -204,13 +211,26 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='maximum number of sequences per iteration')
-        parser.add_argument('--max-paddings',
-                            type=int,
-                            default=EngineArgs.max_paddings,
-                            help='maximum number of paddings in a batch')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+        parser.add_argument('--chunk-size',
+                            type=int,
+                            default=EngineArgs.chunk_size,
+                            help='Size of each prefill chunk used in Sarathi')
+        parser.add_argument('--enable-rolling-prefills',
+                            action="store_true",
+                            default=EngineArgs.enable_rolling_prefills,
+                            help='Enable rolling prefills in Sarathi')
+        parser.add_argument('--prefill-fitting-tolerance',
+                            type=float,
+                            default=EngineArgs.prefill_fitting_tolerance,
+                            help=
+                            'Maximum fraction of prefill chunk that can be left empty in Sarathi')
+        parser.add_argument('--max-pre-queue-batches',
+                            type=int,
+                            default=EngineArgs.max_pre_queue_batches,
+                            help='Maximum number of batches that can be pre-queued in Sarathi')
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
@@ -293,8 +313,25 @@ class EngineArgs:
             scheduler_config = VLLMSchedulerConfig(
                 self.max_num_seqs,
                 model_config.max_model_len,
-                self.max_paddings,
                 self.max_num_batched_tokens,
+            )
+        elif self.scheduler_type == "sarathi":
+            scheduler_config = SarathiSchedulerConfig(
+                self.max_num_seqs,
+                model_config.max_model_len,
+                self.chunk_size,
+                self.enable_rolling_prefills,
+                self.prefill_fitting_tolerance,
+                self.max_pre_queue_batches,
+            )
+        elif self.scheduler_type == "dsarathi":
+            scheduler_config = DSarathiSchedulerConfig(
+                self.max_num_seqs,
+                model_config.max_model_len,
+                self.chunk_size,
+                self.enable_rolling_prefills,
+                self.prefill_fitting_tolerance,
+                self.max_pre_queue_batches,
             )
         else:
             raise ValueError(

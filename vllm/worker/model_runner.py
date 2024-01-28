@@ -22,6 +22,7 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.utils import in_wsl
+from vllm.model_executor.kv_buffer import KVBuffer
 
 logger = init_logger(__name__)
 
@@ -103,6 +104,24 @@ class ModelRunner:
                 self.model.embedding_padding_modules)
             self.model = self.lora_manager.create_lora_manager(self.model)
 
+        # Initialize the KV buffer
+        # When chunking is involved, the buffer size is max_modeL_len + max_num_batched_tokens
+        # i.e. [almost_finished_big_request] + [last_piece_big_request, small prefills, very_first_piece_big_request]
+        # Otherwise (say vllm, orca), this buffer is not actually used in the codepath
+        self.kv_buffers = [
+            KVBuffer(
+                num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config),
+                head_size=self.model_config.get_head_size(),
+                dtype=self.model_config.dtype,
+                device=device,
+            )
+            for _ in range(self.model_config.get_num_layers(self.parallel_config))
+        ]
+
+    def reset_kv_buffers(self) -> None:
+        for buffer in self.kv_buffers:
+            buffer.reset()
+
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
 
@@ -111,7 +130,7 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), max_num_blocks), dtype=np.int32)
 
-    def _prepare_prompt(
+    def _prepare_mixed_batch(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
@@ -128,8 +147,18 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
+        prefix_plus_current_prompt_tokens_slot_mapping: List[int] = []
+        current_tokens_slot_mapping: List[int] = []
+
+        processed_prompt_lens: List[int] = []
+        current_prompt_chunk_lens: List[int] = []
+        total_prompt_lens: List[int] = []
+        prompt_seq_ids: List[int] = []
+        is_profiling_iteration=False
+
         for seq_group_metadata in seq_group_metadata_list:
-            assert seq_group_metadata.is_prompt
+            if not seq_group_metadata.is_prompt:
+                continue
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
@@ -149,8 +178,18 @@ class ModelRunner:
             # actual prompt lens
             context_lens.append(prefix_len)
             subquery_lens.append(prompt_len - prefix_len)
+            prompt_chunk_size = seq_group_metadata.prompt_chunk_size
+            current_prompt_chunk_tokens=seq_data.get_next_prompt_chunk_token_ids(
+                prompt_chunk_size)
+            current_prompt_chunk_len = len(current_prompt_chunk_tokens)
+            current_prompt_chunk_lens.append(current_prompt_chunk_len)
+            processed_prompt_len = seq_data.prompt_tokens_processed
+            processed_prompt_lens.append(processed_prompt_len)
+            total_prompt_len = seq_data.get_prompt_len()
+            total_prompt_lens.append(total_prompt_len)
+            prompt_seq_ids.append(seq_id)
 
-            input_tokens.append(prompt_tokens)
+            input_tokens.extend(current_prompt_chunk_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.append(
@@ -166,15 +205,24 @@ class ModelRunner:
                 [lora_id] *
                 (prompt_len - prefix_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
+            input_positions.extend(
+                range(processed_prompt_len,
+                           processed_prompt_len + current_prompt_chunk_len))
 
+            # ONLY used for profiling
             if seq_group_metadata.block_tables is None:
+                is_profiling_iteration = True
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
-                slot_mapping.append([_PAD_SLOT_ID] * prompt_len)
+                prefix_plus_current_prompt_tokens_slot_mapping.extend(
+                    [0] * (processed_prompt_len + current_prompt_chunk_len))
+                
+                current_tokens_slot_mapping.extend(
+                    [0] * current_prompt_chunk_len)
+                
                 continue
 
             # Compute the slot mapping.
-            slot_mapping.append([])
             block_table = seq_group_metadata.block_tables[seq_id]
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
             # where start_idx is max(0, prompt_len - sliding_window).
@@ -192,10 +240,18 @@ class ModelRunner:
                     slot_mapping[-1].append(_PAD_SLOT_ID)
                     continue
 
+            context_end = processed_prompt_len + current_prompt_chunk_len
+            context_start = 0
+            if self.sliding_window is not None:
+                context_start = max(0, context_end - self.sliding_window)
+            for i in range(context_end):
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping[-1].append(slot)
+                if i >= context_start:
+                    prefix_plus_current_prompt_tokens_slot_mapping.append(slot)
+                if i>= processed_prompt_len:
+                    current_tokens_slot_mapping.append(slot)
 
         max_prompt_len = max(subquery_lens)
         input_tokens = _make_tensor_with_pad(input_tokens,
@@ -263,6 +319,9 @@ class ModelRunner:
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
+        # Add generation tokens
+        max_context_len = 0
+        max_num_blocks_per_seq = 0
         context_lens: List[int] = []
         block_tables: List[List[int]] = []
         lora_index_mapping: List[int] = []
@@ -270,7 +329,8 @@ class ModelRunner:
         lora_requests: Set[LoRARequest] = set()
 
         for seq_group_metadata in seq_group_metadata_list:
-            assert not seq_group_metadata.is_prompt
+            if seq_group_metadata.is_prompt:
+                continue
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
             lora_id = seq_group_metadata.lora_int_id
@@ -281,23 +341,26 @@ class ModelRunner:
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
-                input_tokens.append([generation_token])
+                input_tokens.append(generation_token)
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
-                input_positions.append([position])
+                input_positions.append(position)
 
                 context_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
+                max_context_len = max(max_context_len, context_len)
                 context_lens.append(context_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
+                max_num_blocks_per_seq = max(max_num_blocks_per_seq, len(block_table))
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append([slot])
                 lora_index_mapping.append([lora_id])
                 lora_prompt_mapping.append(lora_id)
+                current_tokens_slot_mapping.append(slot)
 
                 if self.sliding_window is not None:
                     sliding_window_blocks = (self.sliding_window //
@@ -305,8 +368,33 @@ class ModelRunner:
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
+        # Optimization: Pad the input length to be a multiple of 8.
+        # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
+        input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
+        input_positions = _pad_to_alignment(input_positions, multiple_of=8)
+
+        # Convert to tensors
+        input_tokens = torch.tensor(input_tokens,
+                                    dtype=torch.long,
+                                    device="cuda")
+        input_positions = torch.tensor(input_positions,
+                                       dtype=torch.long,
+                                       device="cuda")
+
+        prefix_plus_current_prompt_tokens_slot_mapping = torch.tensor(
+                                             prefix_plus_current_prompt_tokens_slot_mapping,
+                                             dtype=torch.long,
+                                             device="cuda")
+        current_tokens_slot_mapping = torch.tensor(
+                                             current_tokens_slot_mapping,
+                                             dtype=torch.long,
+                                             device="cuda")
+
+        context_lens = torch.tensor(context_lens,
+                                    dtype=torch.int,
+                                    device="cuda")
+
         batch_size = len(input_tokens)
-        max_context_len = max(context_lens)
         use_captured_graph = (
             not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
@@ -314,12 +402,13 @@ class ModelRunner:
         if use_captured_graph:
             # Pad the input tokens, positions, and slot mapping to match the
             # batch size of the captured graph.
+            raise RuntimeError("Cuda graphs are currently not supported")
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
             for _ in range(graph_batch_size - batch_size):
                 input_tokens.append([])
                 input_positions.append([])
-                slot_mapping.append([])
+                slot_mapping.append([]) # TODO(ravianupindi): enable cuda graphs
                 context_lens.append(1)
                 block_tables.append([])
             batch_size = graph_batch_size
@@ -357,6 +446,7 @@ class ModelRunner:
             block_tables = _make_tensor_with_pad(
                 block_tables,
                 max_len=max_block_table_len,
+                max_len=max_num_blocks_per_seq,
                 pad=0,
                 dtype=torch.int,
                 device=self.device,
@@ -372,6 +462,12 @@ class ModelRunner:
             prompt_lens=None,
             max_seq_len=None,
             start_loc=None,
+            prompt_seq_ids=prompt_seq_ids,
+            processed_prompt_lens=processed_prompt_lens,
+            current_prompt_chunk_lens=current_prompt_chunk_lens,
+            total_prompt_lens=total_prompt_lens,
+            prefix_plus_current_prompt_tokens_slot_mapping=prefix_plus_current_prompt_tokens_slot_mapping,
+            current_tokens_slot_mapping=current_tokens_slot_mapping,
             max_context_len=max_context_len,
             context_lens=context_lens,
             block_tables=block_tables,
@@ -380,6 +476,9 @@ class ModelRunner:
         )
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
+            is_profiling_iteration=is_profiling_iteration,
+        )
+        return input_tokens, input_positions, input_metadata, current_prompt_chunk_lens
 
     def _prepare_sample(
         self,
@@ -472,20 +571,10 @@ class ModelRunner:
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
                Set[int], LoRAMapping]:
         if self.is_driver_worker:
-            # NOTE: We assume that all sequences in the group are all prompts or
-            # all decodes.
-            is_prompt = seq_group_metadata_list[0].is_prompt
-            # Prepare input tensors.
-            if is_prompt:
-                (input_tokens, input_positions, input_metadata, prompt_lens,
-                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
-                 lora_requests) = self._prepare_prompt(seq_group_metadata_list)
-            else:
-                (input_tokens, input_positions, input_metadata,
-                 lora_index_mapping, lora_prompt_mapping,
-                 lora_requests) = self._prepare_decode(seq_group_metadata_list)
-                prompt_lens = []
-                subquery_lens = None
+            (input_tokens, input_positions, input_metadata,
+             prompt_lens) = self._prepare_mixed_batch(seq_group_metadata_list)
+            # Prompt lens that are passed to prepare_sample should be consistent with
+            # prompt chunk sizes in this iteration
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens)
@@ -571,10 +660,12 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+        
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
+            kv_buffers=self.kv_buffers,
             input_metadata=input_metadata,
         )
 
@@ -618,21 +709,48 @@ class ModelRunner:
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []
-        for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data = SequenceData([0] * seq_len)
+        if self.scheduler_config.type_name in ["sarathi", "dsarathi"]:
+            # Profile memory usage with a single `chunk_size` chunk
+            # which is the last chunk in the longest supported sequence
+            chunk_size = self.scheduler_config.chunk_size
+            seq_len = self.model_config.max_model_len
+            seq_data = SequenceData(prompt_token_ids=[0] * seq_len,
+                                    prompt_tokens_processed=max(
+                                        seq_len - chunk_size, 0))
             seq = SequenceGroupMetadata(
-                request_id=str(group_id),
+                request_id="0",
                 is_prompt=True,
-                seq_data={group_id: seq_data},
+                seq_data={0: seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
-                prompt_chunk_size=seq_len,
+                prompt_chunk_size=chunk_size,
             )
             seqs.append(seq)
+            # We need to consider only dangling prefills (prefills which dont complete in one iteration)
+            # as they use KV buffers
+            # max_running_prefills = 1 + self.parallel_config.pipeline_parallel_size + self.scheduler_config.max_pre_queue_batches
+            max_running_prefills = 1 + self.scheduler_config.max_pre_queue_batches
+
+            for i in range(1, max_running_prefills + 1):
+                for kv_buffer in self.kv_buffers:
+                    kv_buffer.add_request(-i, seq_len)
+
+        else:
+            for group_id in range(max_num_seqs):
+                seq_len = (max_num_batched_tokens // max_num_seqs +
+                        (group_id < max_num_batched_tokens % max_num_seqs))
+                seq_data = SequenceData([0] * seq_len)
+                seq = SequenceGroupMetadata(
+                    request_id=str(group_id),
+                    is_prompt=True,
+                    seq_data={group_id: seq_data},
+                    sampling_params=sampling_params,
+                    block_tables=None,
+                    prompt_chunk_size=seq_len,
+                )
+                seqs.append(seq)
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
@@ -700,6 +818,17 @@ class ModelRunner:
         batch_size_capture_list = [
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
+        # NOTE: Capturing the largest batch size first may help reduce the
+        # memory usage of CUDA graph.
+        for batch_size in reversed(_BATCH_SIZES_TO_CAPTURE):
+            # Create dummy input_metadata.
+            input_metadata = InputMetadata(
+                slot_mapping=slot_mapping[:batch_size],
+                max_context_len=self.max_context_len_to_capture,
+                context_lens=context_lens[:batch_size],
+                block_tables=block_tables[:batch_size],
+                use_cuda_graph=True,
+            )
 
         # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
         # kernel, CuPy NCCL, and PyTorch NCCL. When using CUDA graph, we use
@@ -851,20 +980,27 @@ def _maybe_cupy_nccl():
         yield
 
 
-def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
+def _pad_to_max(x: List[int], max_len: int, pad: int, skip_sanity_check: bool) -> List[int]:
     assert len(x) <= max_len
     return x + [pad] * (max_len - len(x))
 
+def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
+    return x + [0] * ((-len(x)) % multiple_of)
 
 def _make_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
     pad: int,
     dtype: torch.dtype,
-    device: Optional[Union[str, torch.device]],
+    device: Union[str, torch.device] = "cuda",
+    pin_memory: bool = False,
+    skip_sanity_check: bool = False,
 ) -> torch.Tensor:
-    padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
-    return torch.tensor(padded_x, dtype=dtype, device=device)
+    padded_x = [_pad_to_max(x_i, max_len, pad, skip_sanity_check) for x_i in x]
+    return torch.tensor(padded_x,
+                        dtype=dtype,
+                        device=device,
+                        pin_memory=pin_memory and str(device) == "cpu")
 
 
 def _get_graph_batch_size(batch_size: int) -> int:

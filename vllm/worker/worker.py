@@ -97,7 +97,7 @@ class Worker:
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self.model_runner.load_model()
+        self.model_runner.load_model(self.device)
 
     @torch.inference_mode()
     def profile_num_available_blocks(
@@ -121,7 +121,6 @@ class Worker:
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        # TODO: ravianupindi - add sarathi/dsarathi code path here
         self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
@@ -156,11 +155,15 @@ class Worker:
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
     def warm_up_model(self) -> None:
+        # TODO(ravianupindi): investigate cuda graphs
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+        # Also reset the KV buffers for the worker
+        self.model_runner.reset_kv_buffers()
 
     def cache_swap(
         self,

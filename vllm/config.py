@@ -426,7 +426,6 @@ class BaseSchedulerConfig:
             iteration. a.k.a the batch size
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_paddings: Maximum number of paddings to be added to a batch.
     """
 
     def __init__(
@@ -437,7 +436,6 @@ class BaseSchedulerConfig:
     ) -> None:
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.max_paddings = max_paddings
 
     @property
     def max_num_batched_tokens(self) -> int:
@@ -542,6 +540,36 @@ class VLLMSchedulerConfig(BaseSchedulerConfig):
     @property
     def type_name(self) -> str:
         return "vllm"
+
+
+class SarathiSchedulerConfig(BaseSchedulerConfig):
+    
+    def __init__(self, max_num_seqs: int, max_model_len: int,
+                 chunk_size: int,
+                 enable_rolling_prefills: bool,
+                 prefill_fitting_tolerance: float,
+                 max_pre_queue_batches: float) -> None:
+        super().__init__(max_num_seqs, max_model_len)
+        self.chunk_size = chunk_size
+        self.enable_rolling_prefills = enable_rolling_prefills
+        self.prefill_fitting_tolerance = prefill_fitting_tolerance
+        self.max_pre_queue_batches = max_pre_queue_batches
+
+    @property
+    def max_num_batched_tokens(self) -> int:
+        # Sarathi never schedules more than chunk_size tokens in one iteration.
+        return self.chunk_size
+    
+    @property
+    def type_name(self) -> str:
+        return "sarathi"
+
+
+class DSarathiSchedulerConfig(SarathiSchedulerConfig):
+
+    @property
+    def type_name(self) -> str:
+        return "dsarathi"
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
