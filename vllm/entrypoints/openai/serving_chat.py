@@ -68,7 +68,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         prefix_pos = request.prefix_pos
-        if request.prefix_stop is not None:
+        if request.prefix_stop is not None and request.prefix_stop in prompt:
             prefix_index = prompt.index(request.prefix_stop)
             prefix_pos = len(self.tokenizer.encode(prompt[:prefix_index])) - 1
             prompt = prompt.replace(request.prefix_stop, '')

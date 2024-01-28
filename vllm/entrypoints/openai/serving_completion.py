@@ -244,7 +244,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 input_ids = self._validate_prompt_and_tokenize(request,
                                                                prompt=prompt)
 
-            if request.prefix_stop is not None:
+            if request.prefix_stop is not None and request.prefix_stop in prompt:
                 prefix_index = prompt.index(request.prefix_stop)
                 prefix_pos = len(self.tokenizer.encode(
                     prompt[:prefix_index])) - 1
