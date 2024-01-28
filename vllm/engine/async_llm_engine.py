@@ -53,7 +53,7 @@ class AsyncStream:
         self._queue.put_nowait(item)
 
     def finish(self) -> None:
-        self._queue.put_nowait(StopIteration)
+        self._queue.put_nowait(StopAsyncIteration())
         self._finished = True
 
     @property
@@ -65,9 +65,7 @@ class AsyncStream:
 
     async def __anext__(self) -> RequestOutput:
         result = await self._queue.get()
-        if result is StopIteration:
-            raise StopAsyncIteration
-        elif isinstance(result, Exception):
+        if isinstance(result, Exception):
             raise result
         return result
 
