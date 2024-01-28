@@ -82,6 +82,7 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
+            f"disable_custom_all_reduce={parallel_config.disable_custom_all_reduce}, "
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
@@ -144,7 +145,7 @@ class LLMEngine:
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype_str,
+            kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
         self._run_workers("init_model")

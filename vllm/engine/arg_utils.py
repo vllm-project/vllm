@@ -17,6 +17,7 @@ class EngineArgs:
     download_dir: Optional[str] = None
     load_format: str = 'auto'
     dtype: str = 'auto'
+    kv_cache_dtype: str = 'auto'
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
@@ -35,7 +36,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
-    kv_cache_dtype: str = 'auto'
+    disable_custom_all_reduce: bool = False
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
@@ -122,6 +123,14 @@ class EngineArgs:
             'The "auto" option will use FP16 precision '
             'for FP32 and FP16 models, and BF16 precision '
             'for BF16 models.')
+        parser.add_argument(
+            '--kv-cache-dtype',
+            type=str,
+            choices=['auto', 'fp8_e5m2'],
+            default='auto',
+            help='Data type for kv cache storage. If "auto", will use model '
+            'data type. Note FP8 is not supported when cuda version is '
+            'lower than 11.8.')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=None,
@@ -209,14 +218,10 @@ class EngineArgs:
                             help='maximum context length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode.')
-        parser.add_argument(
-            '--kv-cache-dtype',
-            type=str,
-            choices=['auto', 'fp8_e5m2'],
-            default='auto',
-            help='Data type for kv cache storage. If "auto", will use model '
-            'data type. Note FP8 is not supported when cuda version is '
-            'lower than 11.8.')
+        parser.add_argument('--disable-custom-all-reduce',
+                            action='store_true',
+                            default=EngineArgs.disable_custom_all_reduce,
+                            help='See ParallelConfig')
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
@@ -278,7 +283,8 @@ class EngineArgs:
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
-                                         self.max_parallel_loading_workers)
+                                         self.max_parallel_loading_workers,
+                                         self.disable_custom_all_reduce)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
