@@ -1,3 +1,4 @@
+"""Fused MoE kernel."""
 import torch
 import triton
 import triton.language as tl
@@ -24,10 +25,10 @@ def fused_moe_kernel(
     # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
     # by to get the element one row down (A has M rows).
     stride_am,
-    stride_ak,  #
+    stride_ak,
     stride_be,
     stride_bk,
-    stride_bn,  #
+    stride_bn,
     stride_cm,
     stride_cn,
     stride_weight,
@@ -35,22 +36,24 @@ def fused_moe_kernel(
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,  #
-    GROUP_SIZE_M: tl.constexpr,  #
-    MUL_ROUTED_WEIGHT: tl.constexpr,  #
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
 ):
     """
-    A store the input tokens, which has shape (M, K), B is stacked MOE weight with shape (E, K, N) and C is ouput cache with shape (M, topk, N).
-    This Kernel implements the fused computation of MOE (Mixture of Experts). Each entry in expert_ids stores the identifier of 
-    an expert, and each token is multiplied by the corresponding expert matrix. sorted_token_ids contains the indices of tokens 
-    (note that each token is repeated topk times). Indices are sorted by the expert assigned to ensure careful handling of boundary 
-    issues (to guarantee that each block in the block matrix multiplication is processed by the same expert), we have padded the 
-    number of tokens that each expert needs to process so it can be divided evenly by BLOCK_SIZE_M. For example, sorted_token_ids =
-    [1,4,5,-1,2,3,-1,-1] means that tokens 1, 4, and 5 are processed by expert 0, and tokens 2 and 3 are processed by expert 1. Since 
-    the matrix multiplication is handled by blocks, we pad with a -1 to make sure the total count is divisible by BLOCK_SIZE_M, which 
-    in this case is 4.
+    Implements the fused computation for a Mixture of Experts (MOE) using token and expert matrices.
+
+    Key Parameters:
+    - A: The input tensor representing tokens with shape (*, K), where '*' can be any shape representing batches and K is the feature dimension of each token.
+    - B: The stacked MOE weight tensor with shape (E, N, K), where E is the number of experts, K is the input feature dimension, and N is the output feature dimension.
+    - C: The output cache tensor with shape (M, topk, N), where M is the total number of tokens post padding, topk is the number of times each token is repeated,
+        and N is the output feature dimension.
+    - sorted_token_ids: A tensor containing the sorted indices of tokens, repeated topk times and arranged by the expert index they are assigned to.
+    - expert_ids: A tensor containing the indices of the expert for each token. It determines which expert matrix from B should be used for each token in A.
+    This kernel performs the multiplication of a token by its corresponding expert matrix as determined by `expert_ids`. The sorting of `sorted_token_ids`
+    by expert index and padding ensures divisibility by BLOCK_SIZE_M, which is necessary to maintain consistency in block matrix multiplication across different blocks processed by the same expert.
     """
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
@@ -130,7 +133,32 @@ def fused_moe_kernel(
 def alig_block_size(
         topk_ids: torch.Tensor, block_size: int,
         num_experts: int) -> (torch.Tensor, torch.Tensor, torch.Tensor):
+    """
+    Aligns the token distribution across experts to be compatible with block size for matrix multiplication.
 
+    Parameters:
+    - topk_ids: A tensor of shape [total_tokens, top_k] representing the top-k expert indices for each token.
+    - block_size: The block size used in block matrix multiplication.
+    - num_experts: The total number of experts.
+
+    Returns:
+    - sorted_token_ids: A tensor containing the sorted token indices according to their allocated expert.
+    - expert_ids: A tensor indicating the assigned expert index for each token.
+    - num_tokens_post_padded: The total number of tokens after padding, ensuring divisibility by block_size.
+
+    This function pads the number of tokens that each expert needs to process so that it is divisible by block_size. 
+    Padding ensures that during block matrix multiplication, the dimensions align correctly.
+
+    Example:
+    Given topk_ids = [[2, 3, 4], [1, 2, 4], [1, 3, 4], [1, 2, 3]], block_size = 4, and num_experts = 4:
+    - We initially have 12 tokens (after repeating 'top_k' times) and 4 experts, with each expert needing to process 3 tokens.
+    - As block_size is 4, we pad 1 token for each expert.
+    - First, flatten topk_ids to [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3].
+    - Then append padding tokens [1, 2, 3, 4] at the end, resulting in [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3 | 1, 2, 3, 4].
+    - After sorting by expert index, we obtain token_ids [3, 6, 9, 12, 0, 4, 10, 13, 1, 7, 11, 14, 2, 5, 8, 15]. 
+        Tokens 12-14 are non-existent (padding) and are ignored in the subsequent matrix multiplication.
+    - The padding ensures that the total number of tokens is now divisible by block_size for proper block matrix operations.
+    """
     cnts = torch.zeros(topk_ids.shape[0],
                        num_experts,
                        dtype=topk_ids.dtype,
@@ -174,21 +202,23 @@ def fused_moe(hidden_states: torch.Tensor,
               w2: torch.Tensor,
               topk_weights: torch.Tensor,
               topk_ids: torch.Tensor,
-              inplace=False):
+              inplace=False,
+              use_static_cache=True):
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
     We used three shared cache variables across all layers to save gpu memory, which is more effective in a static graph context.
 
     Parameters:
-    hidden_states (torch.Tensor): The input tensor to the MoE layer.
-    w1 (torch.Tensor): The first set of expert weights.
-    w2 (torch.Tensor): The second set of expert weights.
-    topk_weights (torch.Tensor): The weights for the top-k selected experts.
-    topk_ids (torch.Tensor): The indices of the top-k selected experts.
-    inplace (bool): If True, perform the operation in-place. Defaults to False.
+    - hidden_states (torch.Tensor): The input tensor to the MoE layer.
+    - w1 (torch.Tensor): The first set of expert weights.
+    - w2 (torch.Tensor): The second set of expert weights.
+    - topk_weights (torch.Tensor): The weights for the top-k selected experts.
+    - topk_ids (torch.Tensor): The indices of the top-k selected experts.
+    - inplace (bool): If True, perform the operation in-place. Defaults to False.
+    - use_static_cache (bool): If True, perform the operation using pre-allocated cache. Defaults to True.
 
     Returns:
-    torch.Tensor: The output tensor after applying the MoE layer.
+    - torch.Tensor: The output tensor after applying the MoE layer.
     """
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Incompatible dimensions"
@@ -208,7 +238,8 @@ def fused_moe(hidden_states: torch.Tensor,
     global cache1
     global cache2
     global cache3
-    if cache1 is None or cache1.numel() < M * topk_ids.shape[1] * N:
+    if not use_static_cache or cache1 is None or \
+        cache1.numel() < M * topk_ids.shape[1] * N:
         cache1 = torch.empty((M * topk_ids.shape[1] * N),
                              device=hidden_states.device,
                              dtype=hidden_states.dtype)
@@ -242,23 +273,23 @@ def fused_moe(hidden_states: torch.Tensor,
         topk_weights,
         sorted_token_ids,
         expert_ids,
-        num_tokens_post_padded,  #
+        num_tokens_post_padded,
         M,
         N,
         K,
         sorted_token_ids.shape[0],
-        topk_ids.numel(),  #
+        topk_ids.numel(),
         hidden_states.stride(0),
-        hidden_states.stride(1),  #
+        hidden_states.stride(1),
         w1.stride(0),
         w1.stride(2),
-        w1.stride(1),  #
+        w1.stride(1),
         intermediate_cache1.stride(1),
-        intermediate_cache1.stride(2),  #
-        topk_weights.stride(1),  #
-        sorted_token_ids.stride(0),  #
+        intermediate_cache1.stride(2),
+        topk_weights.stride(1),
+        sorted_token_ids.stride(0),
         MUL_ROUTED_WEIGHT=False,
-        top_k=topk_ids.shape[1],  #
+        top_k=topk_ids.shape[1],
         compute_type=tl.bfloat16,
         **config,
     )
@@ -274,21 +305,21 @@ def fused_moe(hidden_states: torch.Tensor,
         topk_weights,
         sorted_token_ids,
         expert_ids,
-        num_tokens_post_padded,  #
+        num_tokens_post_padded,
         M,
         w2.shape[1],
         w2.shape[2],
         sorted_token_ids.shape[0],
-        topk_ids.numel(),  #
+        topk_ids.numel(),
         intermediate_cache2.stride(0),
-        intermediate_cache2.stride(1),  #
+        intermediate_cache2.stride(1),
         w2.stride(0),
         w2.stride(2),
-        w2.stride(1),  #
+        w2.stride(1),
         final_out.stride(1),
-        final_out.stride(2),  #
-        topk_weights.stride(1),  #
-        sorted_token_ids.stride(0),  #
+        final_out.stride(2),
+        topk_weights.stride(1),
+        sorted_token_ids.stride(0),
         MUL_ROUTED_WEIGHT=True,
         top_k=1,  #
         compute_type=tl.bfloat16,
