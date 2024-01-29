@@ -31,7 +31,6 @@ for cache_dtype in "${kv_cache_dtypes[@]}"; do
         --model meta-llama/Llama-2-7b-chat-hf \
         --num-prompts 20 \
         --endpoint /v1/completions \
-        --kv-cache-dtype ${cache_dtype} \
         --tokenizer meta-llama/Llama-2-7b-chat-hf 2>&1 | tee -a benchmark_serving.txt
     bench_serving_exit_code=$?
     kill $server_pid
