@@ -334,10 +334,11 @@ class LLMEngine:
         max_seq_len = self.cache_config.block_size * num_gpu_blocks
         if self.model_config.max_model_len > max_seq_len:
             self.model_config.max_model_len = max_seq_len
-            logger.warning(f"The model's max seq len ({self.model_config.max_model_len}) "
-                           "is larger than the maximum number of tokens that can be "
-                           f"stored in KV cache ({max_seq_len}). "
-                           f"Setting max seq len to {max_seq_len}.")
+            logger.warning(
+                f"The model's max seq len ({self.model_config.max_model_len}) "
+                "is larger than the maximum number of tokens that can be "
+                f"stored in KV cache ({max_seq_len}). "
+                f"Setting max seq len to {max_seq_len}.")
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
