@@ -51,7 +51,7 @@ def fused_moe_kernel(
     - C: The output cache tensor with shape (M, topk, N), where M is the total number of tokens post padding, topk is the number of times each token is repeated,
         and N is the output feature dimension.
     - sorted_token_ids: A tensor containing the sorted indices of tokens, repeated topk times and arranged by the expert index they are assigned to.
-    - expert_ids: A tensor containing the indices of the expert for each token. It determines which expert matrix from B should be used for each token in A.
+    - expert_ids: A tensor containing the indices of the expert for each block. It determines which expert matrix from B should be used for each block in A.
     This kernel performs the multiplication of a token by its corresponding expert matrix as determined by `expert_ids`. The sorting of `sorted_token_ids`
     by expert index and padding ensures divisibility by BLOCK_SIZE_M, which is necessary to maintain consistency in block matrix multiplication across different blocks processed by the same expert.
     """
@@ -87,7 +87,7 @@ def fused_moe_kernel(
                       offs_k[None, :] * stride_ak)
 
     #
-    off_experts = tl.load(expert_ids_ptr + pid_m * BLOCK_SIZE_M) * stride_be
+    off_experts = tl.load(expert_ids_ptr + pid_m) * stride_be
     b_ptrs = b_ptr + off_experts + (offs_k[:, None] * stride_bk +
                                     offs_bn[None, :] * stride_bn)
 
@@ -156,7 +156,7 @@ def alig_block_size(
     - First, flatten topk_ids to [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3].
     - Then append padding tokens [1, 2, 3, 4] at the end, resulting in [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3 | 1, 2, 3, 4].
     - After sorting by expert index, we obtain token_ids [3, 6, 9, 12, 0, 4, 10, 13, 1, 7, 11, 14, 2, 5, 8, 15]. 
-        Tokens 12-14 are non-existent (padding) and are ignored in the subsequent matrix multiplication.
+        Tokens 12-15 are non-existent (padding) and are ignored in the subsequent matrix multiplication.
     - The padding ensures that the total number of tokens is now divisible by block_size for proper block matrix operations.
     """
     cnts = torch.zeros(topk_ids.shape[0],
@@ -168,16 +168,20 @@ def alig_block_size(
     tokens_per_expert_post_alig = torch.floor_divide(
         tokens_per_expert + block_size - 1, block_size) * block_size
 
-    cumsum = tokens_per_expert_post_alig.cumsum(0)
-    num_tokens_post_padded = cumsum[-1]
+    cumsum  = tokens_per_expert_post_alig.cumsum(0)
+    num_tokens_post_padded = cumsum[-1].clone()
     max_tokens_post_padded = (topk_ids.numel() + num_experts *
-                              (block_size - 1))
-    expert_ids = torch.zeros(max_tokens_post_padded,
+                              (block_size - 1)) if topk_ids.numel() > num_experts else (topk_ids.numel() + 1) * block_size
+    
+    # we just store the expert id of each single block but each token, 
+    # as each token in the same block will be process by the same expert.
+    expert_ids = torch.zeros(max((max_tokens_post_padded + block_size - 1) // block_size + 1, num_experts),
                              dtype=topk_ids.dtype,
                              device=topk_ids.device)
-    # expert_ids[cumsum[:-1]] = 1
+    
+    cumsum.div_(block_size, rounding_mode="floor")
     ones = torch.ones_like(expert_ids)
-    expert_ids.scatter_add_(0, cumsum[:-1], ones)
+    expert_ids.scatter_add_(0, cumsum, ones)
     expert_ids = expert_ids.cumsum(0)
 
     cumsum = (tokens_per_expert_post_alig - tokens_per_expert).cumsum(0)
@@ -211,8 +215,7 @@ def fused_moe(hidden_states: torch.Tensor,
     - topk_weights (torch.Tensor): The weights for the top-k selected experts.
     - topk_ids (torch.Tensor): The indices of the top-k selected experts.
     - inplace (bool): If True, perform the operation in-place. Defaults to False.
-    - use_static_cache (bool): If True, perform the operation using pre-allocated cache. Defaults to True.
-
+    
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
@@ -225,11 +228,19 @@ def fused_moe(hidden_states: torch.Tensor,
     E, N, K = w1.shape
 
     config = {
-        'BLOCK_SIZE_M': 32,
+        'BLOCK_SIZE_M': 64,
         'BLOCK_SIZE_N': 64,
         'BLOCK_SIZE_K': 32,
         'GROUP_SIZE_M': 8
     }
+
+    if topk_ids.numel() <= w1.shape[0]:
+        config = {
+            'BLOCK_SIZE_M': 16,
+            'BLOCK_SIZE_N': 32,
+            'BLOCK_SIZE_K': 64,
+            'GROUP_SIZE_M': 1
+        }
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,
