@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -26,6 +28,7 @@ class MoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
+        params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         tp_size = get_tensor_model_parallel_world_size()
@@ -34,21 +37,28 @@ class MoE(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // tp_size
 
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
+
         self.gate = ReplicatedLinear(self.hidden_size,
                                      self.num_total_experts,
                                      bias=False,
+                                     params_dtype=self.params_dtype,
                                      linear_method=None)
 
         self.ws = nn.Parameter(
             torch.empty(self.num_total_experts,
                         2 * self.intermediate_size,
                         self.hidden_size,
-                        device="cuda"))
+                        device="cuda",
+                        dtype=self.params_dtype))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
-                        device="cuda"))
+                        device="cuda",
+                        dtype=self.params_dtype))
 
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
