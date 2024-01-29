@@ -24,6 +24,7 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
+        kv_cache_dtype=args.kv_cache_dtype,
     )
 
     sampling_params = SamplingParams(
@@ -65,7 +66,9 @@ def main(args: argparse.Namespace):
     if args.profile:
         profile_dir = args.profile_result_dir
         if not profile_dir:
-            profile_dir = Path(".") / "vllm_benchmark_result" / f"latency_result_{time.time()}"
+            profile_dir = Path(
+                "."
+            ) / "vllm_benchmark_result" / f"latency_result_{time.time()}"
         print(f"Profiling (results will be saved to '{profile_dir}')...")
         run_to_completion(profile_dir=args.profile_result_dir)
         return
@@ -116,6 +119,13 @@ if __name__ == '__main__':
                         action='store_true',
                         help='enforce eager mode and disable CUDA graph')
     parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        choices=['auto', 'fp8_e5m2'],
+        default='auto',
+        help=
+        'Data type for kv cache storage. If "auto", will use model data type.')
+    parser.add_argument(
         '--profile',
         action='store_true',
         help='profile the generation process of a single batch')
@@ -123,9 +133,7 @@ if __name__ == '__main__':
         '--profile-result-dir',
         type=str,
         default=None,
-        help=(
-            'path to save the pytorch profiler output. Can be visualized '
-            'with ui.perfetto.dev or Tensorboard.'
-        ))
+        help=('path to save the pytorch profiler output. Can be visualized '
+              'with ui.perfetto.dev or Tensorboard.'))
     args = parser.parse_args()
     main(args)

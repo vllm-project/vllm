@@ -159,8 +159,6 @@ def prepare_hf_model_weights(
             matching = fnmatch.filter(file_list, pattern)
             if len(matching) > 0:
                 allow_patterns = [pattern]
-                if pattern == "*.safetensors":
-                    use_safetensors = True
                 break
 
         logger.info(f"Using model weights format {allow_patterns}")
@@ -178,6 +176,8 @@ def prepare_hf_model_weights(
     for pattern in allow_patterns:
         hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
         if len(hf_weights_files) > 0:
+            if pattern == "*.safetensors":
+                use_safetensors = True
             break
     if not use_safetensors:
         # Exclude files that are not needed for inference.
