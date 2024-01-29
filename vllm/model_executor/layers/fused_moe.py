@@ -168,17 +168,21 @@ def alig_block_size(
     tokens_per_expert_post_alig = torch.floor_divide(
         tokens_per_expert + block_size - 1, block_size) * block_size
 
-    cumsum  = tokens_per_expert_post_alig.cumsum(0)
+    cumsum = tokens_per_expert_post_alig.cumsum(0)
     num_tokens_post_padded = cumsum[-1].clone()
-    max_tokens_post_padded = (topk_ids.numel() + num_experts *
-                              (block_size - 1)) if topk_ids.numel() > num_experts else (topk_ids.numel() + 1) * block_size
-    
-    # we just store the expert id of each single block but each token, 
+    max_tokens_post_padded = (
+        topk_ids.numel() + num_experts *
+        (block_size - 1)) if topk_ids.numel() > num_experts else (
+            topk_ids.numel() + 1) * block_size
+
+    # we just store the expert id of each single block but each token,
     # as each token in the same block will be process by the same expert.
-    expert_ids = torch.zeros(max((max_tokens_post_padded + block_size - 1) // block_size + 1, num_experts),
+    expert_ids = torch.zeros(max(
+        (max_tokens_post_padded + block_size - 1) // block_size + 1,
+        num_experts),
                              dtype=topk_ids.dtype,
                              device=topk_ids.device)
-    
+
     cumsum.div_(block_size, rounding_mode="floor")
     ones = torch.ones_like(expert_ids)
     expert_ids.scatter_add_(0, cumsum, ones)
