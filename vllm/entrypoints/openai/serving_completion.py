@@ -280,6 +280,12 @@ class OpenAIServingCompletion(OpenAIServing):
         request_id = f"cmpl-{random_uuid()}"
         created_time = int(time.monotonic())
 
+        # find prefix_pos for the given prefix
+        prefix_pos = request.prefix_pos
+        prefix = request.prefix or ''
+        if prefix:
+            prefix_pos = len(self.tokenizer.encode(prefix)) - 1
+
         # Schedule the request and get the result generator.
         generators = []
         try:
@@ -292,13 +298,14 @@ class OpenAIServingCompletion(OpenAIServing):
                         request, prompt_ids=prompt)
                 else:
                     input_ids = self._validate_prompt_and_tokenize(
-                        request, prompt=prompt)
+                        request, prompt=prefix+prompt)
 
                 generators.append(
                     self.engine.generate(None,
                                          sampling_params,
                                          f"{request_id}-{i}",
-                                         prompt_token_ids=input_ids))
+                                         prompt_token_ids=input_ids,
+                                         prefix_pos=prefix_pos))
         except ValueError as e:
             return self.create_error_response(str(e))
 

@@ -108,8 +108,6 @@ class CompletionRequest(BaseModel):
     model: str
     # a string, array of strings, array of tokens, or array of token arrays
     prompt: Union[List[int], List[List[int]], str, List[str]]
-    prefix: Optional[str] = None
-    prefix_pos: Optional[int] = None
     suffix: Optional[str] = None
     max_tokens: Optional[int] = 16
     temperature: Optional[float] = 1.0
@@ -126,6 +124,8 @@ class CompletionRequest(BaseModel):
     user: Optional[str] = None
     # Additional parameters supported by vLLM
     top_k: Optional[int] = -1
+    prefix: Optional[str] = None
+    prefix_pos: Optional[int] = None
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
