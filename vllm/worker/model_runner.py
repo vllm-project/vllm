@@ -36,6 +36,7 @@ class ModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         lora_config: Optional[LoRAConfig],
+        kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ):
         self.model_config = model_config
@@ -68,6 +69,7 @@ class ModelRunner:
         self.graph_block_tables = None  # Set after initial profiling.
         # cache in_wsl result
         self.in_wsl = in_wsl()
+        self.kv_cache_dtype = kv_cache_dtype
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config, self.lora_config)
@@ -223,6 +225,7 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
@@ -350,6 +353,7 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
         return input_tokens, input_positions, input_metadata, lora_index_mapping, lora_prompt_mapping, lora_requests
 
@@ -473,6 +477,7 @@ class ModelRunner:
                 "context_lens": input_metadata.context_lens,
                 "block_tables": input_metadata.block_tables,
                 "use_cuda_graph": input_metadata.use_cuda_graph,
+                "kv_cache_dtype": input_metadata.kv_cache_dtype,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
@@ -495,6 +500,7 @@ class ModelRunner:
                 context_lens=metadata_dict["context_lens"],
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
+                kv_cache_dtype=metadata_dict["kv_cache_dtype"],
             )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -665,6 +671,7 @@ class ModelRunner:
                     context_lens=context_lens[:batch_size],
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
+                    kv_cache_dtype=self.kv_cache_dtype,
                 )
 
                 if self.lora_config:
