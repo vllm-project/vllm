@@ -98,7 +98,7 @@ void gptq_shuffle(
   torch::Tensor q_weight,
   torch::Tensor q_perm);
 
-void moe_alig_block_size(
+void moe_align_block_size(
   torch::Tensor topk_ids,
   int num_experts,
   int block_size,
