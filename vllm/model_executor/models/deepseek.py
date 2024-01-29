@@ -64,6 +64,7 @@ class DeepseekMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         linear_method: Optional[LinearMethodBase] = None,
+        reduce_results=True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -73,7 +74,38 @@ class DeepseekMLP(nn.Module):
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
-                                           linear_method=linear_method)
+                                           linear_method=linear_method,
+                                           reduce_results=reduce_results)
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class DeepseekExpertMLP(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        linear_method: Optional[LinearMethodBase] = None,
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = ReplicatedLinear(hidden_size,
+                                             intermediate_size * 2,
+                                             bias=False,
+                                             linear_method=linear_method)
+        self.down_proj = ReplicatedLinear(intermediate_size,
+                                          hidden_size,
+                                          bias=False,
+                                          linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -111,7 +143,7 @@ class DeepseekMoE(nn.Module):
                 f"Rank {self.rank} has no experts assigned to it.")
 
         self.experts = nn.ModuleList([
-            DeepseekMLP(
+            DeepseekExpertMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
                 hidden_act=config.hidden_act,
@@ -131,6 +163,7 @@ class DeepseekMoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 linear_method=linear_method,
+                reduce_results=False,
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -143,7 +176,8 @@ class DeepseekMoE(nn.Module):
         routing_weights, selected_experts = torch.topk(routing_weights,
                                                        self.top_k,
                                                        dim=-1)
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        if self.config.norm_topk_prob:
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
         final_hidden_states = None
         for expert_idx in self.expert_indicies:
@@ -159,12 +193,14 @@ class DeepseekMoE(nn.Module):
             else:
                 final_hidden_states.add_(current_hidden_states)
 
-        y = tensor_model_parallel_all_reduce(final_hidden_states)
-
         if self.config.n_shared_experts is not None:
-            y = y + self.shared_experts(hidden_states)
+            final_hidden_states = final_hidden_states + self.shared_experts(
+                hidden_states)
+        final_hidden_states = tensor_model_parallel_all_reduce(
+            final_hidden_states)
 
-        return y.view(batch_size, sequence_length, hidden_dim)
+        return final_hidden_states.view(batch_size, sequence_length,
+                                        hidden_dim)
 
 
 class DeepseekAttention(nn.Module):
@@ -210,6 +246,7 @@ class DeepseekAttention(nn.Module):
             bias=False,
             linear_method=linear_method,
         )
+
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -400,6 +437,13 @@ class DeepseekForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        def merged_replicated_linear_loader(param, loaded_weight, shard_id):
+            assert isinstance(shard_id, int)
+            dim_out, din_in = param.shape
+            slice_size = dim_out // 2
+            param = param[shard_id * slice_size:(shard_id + 1) * slice_size]
+            param.copy_(loaded_weight)
+
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path,
@@ -421,7 +465,8 @@ class DeepseekForCausalLM(nn.Module):
                         and name not in params_dict):
                     continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader",
+                                        merged_replicated_linear_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
