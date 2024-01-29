@@ -37,6 +37,7 @@ class Worker:
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
+        kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -54,6 +55,7 @@ class Worker:
                                         parallel_config,
                                         scheduler_config,
                                         lora_config=self.lora_config,
+                                        kv_cache_dtype=kv_cache_dtype,
                                         is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
@@ -95,6 +97,7 @@ class Worker:
         block_size: int,
         gpu_memory_utilization: float,
         cpu_swap_space: int,
+        cache_dtype: str,
     ) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model and returns the maximum
         number of GPU and CPU cache blocks that can be allocated.
@@ -119,7 +122,7 @@ class Worker:
         peak_memory = total_gpu_memory - free_gpu_memory
 
         cache_block_size = CacheEngine.get_cache_block_size(
-            block_size, self.model_config, self.parallel_config)
+            block_size, cache_dtype, self.model_config, self.parallel_config)
         num_gpu_blocks = int(
             (total_gpu_memory * gpu_memory_utilization - peak_memory) //
             cache_block_size)
