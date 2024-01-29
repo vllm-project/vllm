@@ -66,7 +66,7 @@ def fused_moe_kernel(
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + (
-        (pid - first_pid_m * num_pid_in_group) % group_size_m)
+        (pid - group_id * num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     # ----------------------------------------------------------
