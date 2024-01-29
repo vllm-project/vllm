@@ -65,7 +65,7 @@ def fused_moe_kernel(
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid - first_pid_m) % group_size_m)
+    pid_m = first_pid_m + ((pid - first_pid_m * num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     # ----------------------------------------------------------
@@ -176,7 +176,8 @@ def alig_block_size(
                              dtype=topk_ids.dtype,
                              device=topk_ids.device)
     # expert_ids[cumsum[:-1]] = 1
-    expert_ids.scatter_(0, cumsum[:-1], 1)
+    ones = torch.ones_like(expert_ids)
+    expert_ids.scatter_add_(0, cumsum[:-1], ones)
     expert_ids = expert_ids.cumsum(0)
 
     cumsum = (tokens_per_expert_post_alig - tokens_per_expert).cumsum(0)
@@ -184,7 +185,8 @@ def alig_block_size(
     padded_tokens = torch.zeros(max_tokens_post_padded - topk_ids.numel(),
                                 dtype=topk_ids.dtype,
                                 device=topk_ids.device)
-    padded_tokens.scatter_(0, cumsum[:-1], 1)
+    ones = torch.ones_like(padded_tokens)
+    padded_tokens.scatter_add_(0, cumsum[:-1], ones)
     padded_tokens = padded_tokens.cumsum(0)
 
     sorted_token_ids = torch.cat([topk_ids.view(-1), padded_tokens]).argsort()
@@ -294,7 +296,7 @@ def fused_moe(hidden_states: torch.Tensor,
         **config,
     )
 
-    ops.silu_and_mul(cache2, cache1[:intermediate_cache1.numel()].view(-1, N))
+    ops.silu_and_mul(cache2[:intermediate_cache2.numel()].view(*intermediate_cache2.shape), cache1[:intermediate_cache1.numel()].view(-1, N))
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(w2.shape[1], META['BLOCK_SIZE_N']), )
