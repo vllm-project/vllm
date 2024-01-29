@@ -11,12 +11,16 @@ from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils import custom_all_reduce
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_group,
+)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.utils import in_wsl
+
 
 logger = init_logger(__name__)
 
@@ -45,6 +49,7 @@ class ModelRunner:
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
         self.is_driver_worker = is_driver_worker
+        self.driver_rank = 0
 
         # model_config can be None in tests/samplers/test_sampler.py.
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
@@ -497,9 +502,9 @@ class ModelRunner:
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
             }
-            broadcast_tensor_dict(metadata_dict, src=0)
+            broadcast_tensor_dict(metadata_dict, src=self.driver_rank, group=get_tensor_model_parallel_group())
         else:
-            metadata_dict = broadcast_tensor_dict(src=0)
+            metadata_dict = broadcast_tensor_dict(src=self.driver_rank, group=get_tensor_model_parallel_group())
             input_tokens = metadata_dict["input_tokens"]
             input_positions = metadata_dict["input_positions"]
             lora_mapping = metadata_dict["lora_mapping"]
@@ -558,6 +563,7 @@ class ModelRunner:
         output = self.model.sample(
             hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
+            dst_rank=self.driver_rank
         )
         return output
 

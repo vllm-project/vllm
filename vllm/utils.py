@@ -7,6 +7,7 @@ from platform import uname
 from typing import List, Tuple, Union
 from packaging.version import parse, Version
 
+import GPUtil
 import psutil
 import torch
 import asyncio
@@ -35,6 +36,12 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
+
+
+class WorkerType(enum.Enum):
+    PROMPT = enum.auto()
+    TOKEN = enum.auto()
+    MIXED = enum.auto()
 
 
 class Counter:
@@ -276,3 +283,7 @@ def create_kv_caches_with_random(
             _generate_random_fp8_e5m2(value_cache, -scale, scale)
         value_caches.append(value_cache)
     return key_caches, value_caches
+
+
+def get_total_num_gpus() -> int:
+    return len(GPUtil.getGPUs())

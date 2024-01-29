@@ -310,9 +310,10 @@ class LlamaForCausalLM(nn.Module):
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        dst_rank: Optional[int] = None,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   sampling_metadata)
+                                   sampling_metadata, dst_rank)
         return next_tokens
 
     def load_weights(self,
