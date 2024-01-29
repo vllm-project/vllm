@@ -10,7 +10,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # run benchmarks and upload the result to buildkite
 kv_cache_dtypes=("auto" "fp8_e5m2")
-do cache_dtype in "${kv_cache_dtypes[@]}"; do
+for cache_dtype in "${kv_cache_dtypes[@]}"; do
     python3 benchmarks/benchmark_latency.py --kv-cache-dtype ${cache_dtype} 2>&1 | tee -a benchmark_latency.txt
     bench_latency_exit_code=$?
 
