@@ -65,7 +65,8 @@ def fused_moe_kernel(
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid - first_pid_m * num_pid_in_group) % group_size_m)
+    pid_m = first_pid_m + (
+        (pid - first_pid_m * num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     # ----------------------------------------------------------
@@ -226,6 +227,7 @@ def fused_moe(hidden_states: torch.Tensor,
     assert hidden_states.shape[1] == w1.shape[2], "Incompatible dimensions"
     assert hidden_states.is_contiguous(), "Matrix A must be contiguous"
     assert w1.is_contiguous(), "Matrix B must be contiguous"
+    assert hidden_states.dtype in [torch.float16, torch.bfloat16]
     M, K = hidden_states.shape
     E, N, K = w1.shape
 
@@ -292,11 +294,14 @@ def fused_moe(hidden_states: torch.Tensor,
         sorted_token_ids.stride(0),
         MUL_ROUTED_WEIGHT=False,
         top_k=topk_ids.shape[1],
-        compute_type=tl.bfloat16,
+        compute_type=tl.bfloat16
+        if hidden_states.dtype == torch.bfloat16 else tl.float16,
         **config,
     )
 
-    ops.silu_and_mul(cache2[:intermediate_cache2.numel()].view(*intermediate_cache2.shape), cache1[:intermediate_cache1.numel()].view(-1, N))
+    ops.silu_and_mul(
+        cache2[:intermediate_cache2.numel()].view(*intermediate_cache2.shape),
+        cache1[:intermediate_cache1.numel()].view(-1, N))
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(w2.shape[1], META['BLOCK_SIZE_N']), )
@@ -324,7 +329,8 @@ def fused_moe(hidden_states: torch.Tensor,
         sorted_token_ids.stride(0),
         MUL_ROUTED_WEIGHT=True,
         top_k=1,  #
-        compute_type=tl.bfloat16,
+        compute_type=tl.bfloat16
+        if hidden_states.dtype == torch.bfloat16 else tl.float16,
         **config,
     )
     if inplace:
