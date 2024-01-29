@@ -65,8 +65,7 @@ def fused_moe_kernel(
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + (
-        (pid - group_id * num_pid_in_group) % group_size_m)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     # ----------------------------------------------------------
@@ -195,18 +194,12 @@ def alig_block_size(
     return sorted_token_ids, expert_ids, num_tokens_post_padded
 
 
-cache1 = None
-cache2 = None
-cache3 = None
-
-
 def fused_moe(hidden_states: torch.Tensor,
               w1: torch.Tensor,
               w2: torch.Tensor,
               topk_weights: torch.Tensor,
               topk_ids: torch.Tensor,
-              inplace=False,
-              use_static_cache=True):
+              inplace=False):
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
     We used three shared cache variables across all layers to save gpu memory, which is more effective in a static graph context.
@@ -237,32 +230,23 @@ def fused_moe(hidden_states: torch.Tensor,
         'BLOCK_SIZE_K': 32,
         'GROUP_SIZE_M': 8
     }
-    # Allocates memeory.
 
-    global cache1
-    global cache2
-    global cache3
-    if not use_static_cache or cache1 is None or \
-        cache1.numel() < M * topk_ids.shape[1] * N:
-        cache1 = torch.empty((M * topk_ids.shape[1] * N),
-                             device=hidden_states.device,
-                             dtype=hidden_states.dtype)
-        cache2 = torch.empty((M * topk_ids.shape[1] * N // 2, ),
-                             device=hidden_states.device,
-                             dtype=hidden_states.dtype)
-        cache3 = torch.empty((M * topk_ids.shape[1] * w2.shape[1]),
-                             device=hidden_states.device,
-                             dtype=hidden_states.dtype)
-
-    intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
-                                      device="meta",
+    intermediate_cache1 = torch.empty((
+        M,
+        topk_ids.shape[1],
+        N,
+    ),
+                                      device=hidden_states.device,
                                       dtype=hidden_states.dtype)
-    intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
-                                      device="meta",
+    intermediate_cache2 = torch.empty((
+        M * topk_ids.shape[1],
+        N // 2,
+    ),
+                                      device=hidden_states.device,
                                       dtype=hidden_states.dtype)
-    final_out = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
-                            device="meta",
-                            dtype=hidden_states.dtype)
+    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = alig_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
@@ -273,7 +257,7 @@ def fused_moe(hidden_states: torch.Tensor,
     fused_moe_kernel[grid](
         hidden_states,
         w1,
-        cache1,
+        intermediate_cache1,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -299,16 +283,14 @@ def fused_moe(hidden_states: torch.Tensor,
         **config,
     )
 
-    ops.silu_and_mul(
-        cache2[:intermediate_cache2.numel()].view(*intermediate_cache2.shape),
-        cache1[:intermediate_cache1.numel()].view(-1, N))
+    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(w2.shape[1], META['BLOCK_SIZE_N']), )
     fused_moe_kernel[grid](
-        cache2,
+        intermediate_cache2,
         w2,
-        cache3,
+        intermediate_cache3,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -323,8 +305,8 @@ def fused_moe(hidden_states: torch.Tensor,
         w2.stride(0),
         w2.stride(2),
         w2.stride(1),
-        final_out.stride(1),
-        final_out.stride(2),
+        intermediate_cache3.stride(1),
+        intermediate_cache3.stride(2),
         topk_weights.stride(1),
         sorted_token_ids.stride(0),
         MUL_ROUTED_WEIGHT=True,
@@ -334,7 +316,8 @@ def fused_moe(hidden_states: torch.Tensor,
         **config,
     )
     if inplace:
-        return torch.sum(cache3[:final_out.numel()].view(*final_out.shape),
+        return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                          dim=1,
                          out=hidden_states)
-    return torch.sum(cache3[:final_out.numel()].view(*final_out.shape), dim=1)
+    return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                     dim=1)
