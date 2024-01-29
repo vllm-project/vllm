@@ -13,7 +13,8 @@ void paged_attention_v1(
   torch::Tensor& context_lens,
   int block_size,
   int max_context_len,
-  const c10::optional<torch::Tensor>& alibi_slopes);
+  const c10::optional<torch::Tensor>& alibi_slopes,
+  const std::string& kv_cache_dtype);
 
 void paged_attention_v2(
   torch::Tensor& out,
@@ -29,7 +30,8 @@ void paged_attention_v2(
   torch::Tensor& context_lens,
   int block_size,
   int max_context_len,
-  const c10::optional<torch::Tensor>& alibi_slopes);
+  const c10::optional<torch::Tensor>& alibi_slopes,
+  const std::string& kv_cache_dtype);
 
 void rms_norm(
   torch::Tensor& out,
