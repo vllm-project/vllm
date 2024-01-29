@@ -4,7 +4,9 @@
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
+#ifdef ENABLE_FP8_E5M2
 #include "quantization/fp8_e5m2_kvcache/quant_utils.cuh"
+#endif
 
 #include <algorithm>
 #include <cassert>
