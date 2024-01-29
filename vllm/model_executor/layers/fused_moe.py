@@ -143,7 +143,7 @@ def alig_block_size(
 
     Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according to their allocated expert.
-    - expert_ids: A tensor indicating the assigned expert index for each token.
+    - expert_ids: A tensor indicating the assigned expert index for each block.
     - num_tokens_post_padded: The total number of tokens after padding, ensuring divisibility by block_size.
 
     This function pads the number of tokens that each expert needs to process so that it is divisible by block_size. 
