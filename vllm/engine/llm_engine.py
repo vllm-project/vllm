@@ -252,7 +252,7 @@ class LLMEngine:
                     rank,
                     distributed_init_method,
                     lora_config=self.lora_config,
-                    cache_config=cache_config,
+                    # cache_config=cache_config,
                 ))
 
         driver_rank = 0
@@ -265,7 +265,7 @@ class LLMEngine:
             driver_rank,
             distributed_init_method,
             lora_config=self.lora_config,
-            cache_config=cache_config,
+            # cache_config=cache_config,
             is_driver_worker=True,
         )
 
