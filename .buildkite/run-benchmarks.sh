@@ -11,10 +11,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # run benchmarks and upload the result to buildkite
 kv_cache_dtypes=("auto" "fp8_e5m2")
 do cache_dtype in "${kv_cache_dtypes[@]}"; do
-    python3 benchmarks/benchmark_latency.py --kv-cache-dtype ${cache_dtype} 2>&1 | tee benchmark_latency.txt
+    python3 benchmarks/benchmark_latency.py --kv-cache-dtype ${cache_dtype} 2>&1 | tee -a benchmark_latency.txt
     bench_latency_exit_code=$?
 
-    python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --kv-cache-dtype ${cache_dtype} 2>&1 | tee benchmark_throughput.txt
+    python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --kv-cache-dtype ${cache_dtype} 2>&1 | tee -a benchmark_throughput.txt
     bench_throughput_exit_code=$?
 
     python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf --kv-cache-dtype ${cache_dtype} &
@@ -32,26 +32,26 @@ do cache_dtype in "${kv_cache_dtypes[@]}"; do
         --num-prompts 20 \
         --endpoint /v1/completions \
         --kv-cache-dtype ${cache_dtype} \
-        --tokenizer meta-llama/Llama-2-7b-chat-hf 2>&1 | tee benchmark_serving.txt
+        --tokenizer meta-llama/Llama-2-7b-chat-hf 2>&1 | tee -a benchmark_serving.txt
     bench_serving_exit_code=$?
     kill $server_pid
 done
 
 # write the results into a markdown file
 echo "### Latency Benchmarks" >> benchmark_results.md
-sed -n '1p' benchmark_latency.txt >> benchmark_results.md # first line
+sed -n '/Namespace/p' benchmark_latency.txt >> benchmark_results.md # config info
 echo "" >> benchmark_results.md
-sed -n '$p' benchmark_latency.txt >> benchmark_results.md # last line
+sed -n '/latency:/p' benchmark_latency.txt >> benchmark_results.md # results
 
 echo "### Throughput Benchmarks" >> benchmark_results.md
-sed -n '1p' benchmark_throughput.txt >> benchmark_results.md # first line
+sed -n '/Namespace/p' benchmark_throughput.txt >> benchmark_results.md # config info
 echo "" >> benchmark_results.md
-sed -n '$p' benchmark_throughput.txt >> benchmark_results.md # last line
+sed -n '/Throughput:/p' benchmark_throughput.txt >> benchmark_results.md # results
 
 echo "### Serving Benchmarks" >> benchmark_results.md
-sed -n '1p' benchmark_serving.txt >> benchmark_results.md # first line
+sed -n '/Namespace/p' benchmark_serving.txt >> benchmark_results.md # config info
 echo "" >> benchmark_results.md
-tail -n 5 benchmark_serving.txt >> benchmark_results.md # last 5 lines
+sed -n '/Total time:/,+4p' benchmark_serving.txt >> benchmark_results.md # last 5 lines
 
 # upload the results to buildkite
 /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < benchmark_results.md
