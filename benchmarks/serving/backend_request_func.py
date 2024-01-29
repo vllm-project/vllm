@@ -5,6 +5,8 @@ from typing import Dict, Union
 
 import aiohttp
 
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
+
 
 async def async_request_tgi(
     prompt: str,
@@ -15,11 +17,9 @@ async def async_request_tgi(
     use_beam_search: bool,
     **kwargs,
 ) -> Dict[str, Union[str, bool, float]]:
-    timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
-
     assert api_url.endswith("generate_stream")
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not use_beam_search
         params = {
             "best_of": best_of,
@@ -66,11 +66,9 @@ async def async_request_vllm(
     use_beam_search: bool,
     **kwargs,
 ) -> Dict[str, Union[str, bool, float]]:
-    timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
-
     assert api_url.endswith("generate")
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         payload = {
             "prompt": prompt,
             "n": 1,
@@ -117,11 +115,9 @@ async def async_request_trt_llm(
     use_beam_search: bool,
     **kwargs,
 ) -> Dict[str, Union[str, bool, float]]:
-    timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
-
     assert api_url.endswith("generate_stream")
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not use_beam_search
         assert best_of == 1
         payload = {
@@ -164,10 +160,8 @@ async def async_request_deepspeed_mii(
     best_of: int,
     use_beam_search: bool,
     **kwargs,
-):
-    timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
-
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+) -> Dict[str, Union[str, bool, float]]:
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert best_of == 1
         assert not use_beam_search
 
@@ -182,8 +176,11 @@ async def async_request_deepspeed_mii(
         output = {}
         output["prompt_len"] = prompt_len
 
-        # TODO - Check how to enable steaming on deepspeed-mii
         st = time.perf_counter()
+
+        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024
+        # https://github.com/microsoft/DeepSpeed-MII/pull/311
+        output["ttft"] = "N/A"
         async with session.post(url=api_url, json=payload) as resp:
             if resp.status == 200:
                 parsed_resp = await resp.json()
@@ -207,12 +204,10 @@ async def async_request_openai_completions(
     best_of: int,
     use_beam_search: bool,
     **kwargs,
-):  
-    
+) -> Dict[str, Union[str, bool, float]]:
     assert api_url.endswith("v1/completions")
-    timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not use_beam_search
         payload = {
             "model": model,
