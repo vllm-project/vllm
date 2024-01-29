@@ -23,8 +23,6 @@
 """Inference-only Deepseek model."""
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-
 import torch
 import torch.nn.functional as F
 
@@ -52,6 +50,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.model_executor.layers.fused_moe import fused_moe
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -88,36 +87,6 @@ class DeepseekMLP(nn.Module):
         return x
 
 
-class DeepseekExpertMLP(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-        linear_method: Optional[LinearMethodBase] = None,
-    ) -> None:
-        super().__init__()
-        self.gate_up_proj = ReplicatedLinear(hidden_size,
-                                             intermediate_size * 2,
-                                             bias=False,
-                                             linear_method=linear_method)
-        self.down_proj = ReplicatedLinear(intermediate_size,
-                                          hidden_size,
-                                          bias=False,
-                                          linear_method=linear_method)
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
-
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
-
-
 class DeepseekMoE(nn.Module):
 
     def __init__(
@@ -135,22 +104,17 @@ class DeepseekMoE(nn.Module):
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {self.n_routed_experts}.")
-        # Split experts equally between ranks
-        self.expert_indicies = np.array_split(range(
-            self.n_routed_experts), self.tp_size)[self.rank].tolist()
-        if not self.expert_indicies:
-            raise ValueError(
-                f"Rank {self.rank} has no experts assigned to it.")
 
         self.experts = nn.ModuleList([
-            DeepseekExpertMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                hidden_act=config.hidden_act,
-                linear_method=linear_method,
-            ) if idx in self.expert_indicies else None
+            DeepseekMLP(hidden_size=config.hidden_size,
+                        intermediate_size=config.moe_intermediate_size,
+                        hidden_act=config.hidden_act,
+                        linear_method=linear_method,
+                        reduce_results=False)
             for idx in range(self.n_routed_experts)
         ])
+        self.pack_params()
+
         self.gate = ReplicatedLinear(config.hidden_size,
                                      self.n_routed_experts,
                                      bias=False,
@@ -166,9 +130,40 @@ class DeepseekMoE(nn.Module):
                 reduce_results=False,
             )
 
+    def pack_params(self):
+        w1 = []
+        w2 = []
+        for expert in self.experts:
+            w1.append(expert.gate_up_proj.weight)
+            w2.append(expert.down_proj.weight)
+        self.w1 = torch._utils._flatten_dense_tensors(w1)
+        w1s = torch._utils._unflatten_dense_tensors(self.w1, w1)
+        for data, param in zip(w1s, w1):
+            param.data = data
+        self.w1 = self.w1.view(len(w1), *w1s[0].shape)
+
+        self.w2 = torch._utils._flatten_dense_tensors(w2)
+        w2s = torch._utils._unflatten_dense_tensors(self.w2, w2)
+        for data, param in zip(w2s, w2):
+            param.data = data
+
+        self.w2 = self.w2.view(len(w2), *w2s[0].shape)
+
+    def fused_moe_infer(self, hidden_states: torch.Tensor,
+                        selected_experts: torch.Tensor,
+                        routing_weights: torch.Tensor) -> torch.Tensor:
+        return fused_moe(hidden_states,
+                         self.w1,
+                         self.w2,
+                         routing_weights,
+                         selected_experts,
+                         inplace=True)
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if self.config.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
@@ -176,26 +171,16 @@ class DeepseekMoE(nn.Module):
         routing_weights, selected_experts = torch.topk(routing_weights,
                                                        self.top_k,
                                                        dim=-1)
+
         if self.config.norm_topk_prob:
             routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        final_hidden_states = None
-        for expert_idx in self.expert_indicies:
-            expert_layer = self.experts[expert_idx]
-            expert_mask = (selected_experts == expert_idx)
-            expert_weights = (routing_weights * expert_mask).sum(dim=-1,
-                                                                 keepdim=True)
-
-            current_hidden_states = expert_layer(hidden_states).mul_(
-                expert_weights)
-            if final_hidden_states is None:
-                final_hidden_states = current_hidden_states
-            else:
-                final_hidden_states.add_(current_hidden_states)
+        final_hidden_states = self.fused_moe_infer(hidden_states,
+                                                   selected_experts,
+                                                   routing_weights)
 
         if self.config.n_shared_experts is not None:
-            final_hidden_states = final_hidden_states + self.shared_experts(
-                hidden_states)
+            final_hidden_states = final_hidden_states + shared_output
         final_hidden_states = tensor_model_parallel_all_reduce(
             final_hidden_states)
 
@@ -437,13 +422,6 @@ class DeepseekForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        def merged_replicated_linear_loader(param, loaded_weight, shard_id):
-            assert isinstance(shard_id, int)
-            dim_out, din_in = param.shape
-            slice_size = dim_out // 2
-            param = param[shard_id * slice_size:(shard_id + 1) * slice_size]
-            param.copy_(loaded_weight)
-
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path,
@@ -465,8 +443,7 @@ class DeepseekForCausalLM(nn.Module):
                         and name not in params_dict):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        merged_replicated_linear_loader)
+                weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
