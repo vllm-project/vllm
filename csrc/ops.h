@@ -13,7 +13,8 @@ void paged_attention_v1(
   torch::Tensor& context_lens,
   int block_size,
   int max_context_len,
-  const c10::optional<torch::Tensor>& alibi_slopes);
+  const c10::optional<torch::Tensor>& alibi_slopes,
+  const std::string& kv_cache_dtype);
 
 void paged_attention_v2(
   torch::Tensor& out,
@@ -29,7 +30,8 @@ void paged_attention_v2(
   torch::Tensor& context_lens,
   int block_size,
   int max_context_len,
-  const c10::optional<torch::Tensor>& alibi_slopes);
+  const c10::optional<torch::Tensor>& alibi_slopes,
+  const std::string& kv_cache_dtype);
 
 void rms_norm(
   torch::Tensor& out,
@@ -98,6 +100,13 @@ void gptq_shuffle(
   torch::Tensor q_weight,
   torch::Tensor q_perm);
 
+void moe_align_block_size(
+  torch::Tensor topk_ids,
+  int num_experts,
+  int block_size,
+  torch::Tensor sorted_token_ids,
+  torch::Tensor experts_ids,
+  torch::Tensor num_tokens_post_pad);
 
 #ifndef USE_ROCM
 using fptr_t = uint64_t;
