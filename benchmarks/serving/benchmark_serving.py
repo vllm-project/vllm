@@ -47,8 +47,9 @@ def sample_requests(
     ]
 
     # some of these will be filtered out, so sample more than we need
-    sampled_indices = random.sample(range(len(dataset)),
-                                    int(num_requests * 1.2))
+    sampled_indices = random.sample(
+        range(len(dataset)), int(num_requests * 1.2)
+    )
     dataset = [dataset[i] for i in sampled_indices]
 
     # Tokenize the prompts and completions.
@@ -107,17 +108,22 @@ def calculate_metrics(
     total_input = 0
     completed = 0
     per_token_latencies = []
+    ttfts = []
     for i in range(len(outputs)):
         if outputs[i]["success"]:
             output_len = len(tokenizer.encode(outputs[i]["generated_text"]))
             total_output += output_len
             total_input += input_requests[i][1]
             per_token_latencies.append(outputs[i]["latency"] / output_len)
+            ttfts.append(outputs[i]["ttft"])
             completed += 1
 
     request_throughput = completed / dur_s
     input_throughput = total_input / dur_s
     output_throughput = total_output / dur_s
+    mean_ttft_ms = np.mean(ttfts) * 1000
+    median_ttft_ms = np.median(ttfts) * 1000
+    p99_ttft_ms = np.percentile(ttfts, 99) * 1000
     mean_tpot_ms = np.mean(per_token_latencies) * 1000
     median_tpot_ms = np.median(per_token_latencies) * 1000
     p99_tpot_ms = np.percentile(per_token_latencies, 99) * 1000
@@ -129,6 +135,9 @@ def calculate_metrics(
         request_throughput,
         input_throughput,
         output_throughput,
+        mean_ttft_ms,
+        median_ttft_ms,
+        p99_ttft_ms,
         mean_tpot_ms,
         median_tpot_ms,
         p99_tpot_ms,
@@ -176,6 +185,9 @@ async def throughput_benchmark(
         request_throughput,
         input_throughput,
         output_throughput,
+        mean_ttft_ms,
+        median_ttft_ms,
+        p99_ttft_ms,
         mean_tpot_ms,
         median_tpot_ms,
         p99_tpot_ms,
@@ -190,9 +202,12 @@ async def throughput_benchmark(
     print(f"Reuqest throughput: {request_throughput:.2f} requests/s")
     print(f"Input token throughput: {input_throughput:.2f} tokens/s")
     print(f"Output token throughput: {output_throughput:.2f} tokens/s")
-    print(f"Mean latency per output token: {mean_tpot_ms:.2f} ms")
-    print(f"Median latency per output token: {median_tpot_ms:.2f} ms")
-    print(f"P99 latency per output token: {p99_tpot_ms:.2f} ms")
+    print(f"Mean TTFT: {mean_ttft_ms:.2f} ms")
+    print(f"Median TTFT: {median_ttft_ms:.2f} ms")
+    print(f"P99 TTFT: {p99_ttft_ms:.2f} ms")
+    print(f"Mean TPOT: {mean_tpot_ms:.2f} ms")
+    print(f"Median TPOT: {median_tpot_ms:.2f} ms")
+    print(f"P99 TPOT: {p99_tpot_ms:.2f} ms")
 
     result = {}
     result["completed"] = completed
@@ -202,6 +217,9 @@ async def throughput_benchmark(
     result["input_throughput"] = input_throughput
     result["output_throughput"] = output_throughput
     result["duration"] = benchmark_duration
+    result["mean_ttft_ms"] = mean_ttft_ms
+    result["median_ttft_ms"] = median_ttft_ms
+    result["p99_ttft_ms"] = p99_ttft_ms
     result["mean_tpot_ms"] = mean_tpot_ms
     result["median_tpot_ms"] = median_tpot_ms
     result["p99_tpot_ms"] = p99_tpot_ms

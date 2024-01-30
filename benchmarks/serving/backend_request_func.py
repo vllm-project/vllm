@@ -176,11 +176,11 @@ async def async_request_deepspeed_mii(
         output = {}
         output["prompt_len"] = prompt_len
 
-        st = time.perf_counter()
-
-        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024
+        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024, will use 0 as placeholder.
         # https://github.com/microsoft/DeepSpeed-MII/pull/311
-        output["ttft"] = "N/A"
+        output["ttft"] = 0
+
+        st = time.perf_counter()
         async with session.post(url=api_url, json=payload) as resp:
             if resp.status == 200:
                 parsed_resp = await resp.json()
