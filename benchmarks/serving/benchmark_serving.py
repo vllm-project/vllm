@@ -236,8 +236,8 @@ def main(args: argparse.Namespace):
     model_id = args.model
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
 
-    if args.api_url is not None:
-        api_url = f"{args.api_url}{args.endpoint}"
+    if args.base_url is not None:
+        api_url = f"{args.base_url}{args.endpoint}"
     else:
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
 
@@ -299,19 +299,23 @@ if __name__ == "__main__":
         default="vllm",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
     )
-    parser.add_argument("--version", type=str, default="N/A")
     parser.add_argument(
-        "--api-url",
+        "--version",
+        type=str,
+        default="N/A",
+        description="Version of the serving backend/engine.",
+    )
+    parser.add_argument(
+        "--base-url",
         type=str,
         default=None,
-        help="Server url or api base if not using host and port.",
+        help="Server or API base url if not using host and port.",
     )
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--endpoint",
         type=str,
-        required=True,
         default="/generate",
         help="API endpoint.",
     )

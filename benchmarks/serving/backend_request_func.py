@@ -130,6 +130,7 @@ async def async_request_trt_llm(
         }
         output = {}
         output["prompt_len"] = prompt_len
+        ttft = 0
 
         st = time.perf_counter()
         async with session.post(url=api_url, json=payload) as resp:
@@ -218,7 +219,7 @@ async def async_request_openai_completions(
             "stream": True,
         }
         headers = {
-            f"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
         }
 
         output = {}
