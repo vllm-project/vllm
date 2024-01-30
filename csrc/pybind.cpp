@@ -51,6 +51,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifndef USE_ROCM
   // Quantization ops
   ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
+  ops.def("awq_dequantize", &awq_dequantize, "Dequantization for AWQ");
 #endif
   ops.def("gptq_gemm", &gptq_gemm, "Quantized GEMM for GPTQ");
   ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
@@ -74,6 +75,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "gather_cached_kv",
     &gather_cached_kv,
     "Gather key and value from the cache into contiguous QKV tensors");
+  cache_ops.def(
+    "convert_fp8_e5m2",
+    &convert_fp8_e5m2,
+    "Convert the key and value cache to fp8_e5m2 data type");
 
   // Cuda utils
   pybind11::module cuda_utils = m.def_submodule("cuda_utils", "vLLM cuda utils");
@@ -81,4 +86,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "get_device_attribute",
     &get_device_attribute,
     "Gets the specified device attribute.");
+
+  cuda_utils.def(
+    "get_max_shared_memory_per_block_device_attribute",
+    &get_max_shared_memory_per_block_device_attribute,
+    "Gets the maximum shared memory per block device attribute.");
+
+#ifndef USE_ROCM
+  // Custom all-reduce kernels
+  pybind11::module custom_ar = m.def_submodule("custom_ar", "custom allreduce");
+  custom_ar.def("init_custom_ar", &init_custom_ar, "init_custom_ar");
+  custom_ar.def("should_custom_ar", &should_custom_ar, "should_custom_ar");
+  custom_ar.def("all_reduce_reg", &all_reduce_reg, "all_reduce_reg");
+  custom_ar.def("all_reduce_unreg", &all_reduce_unreg, "all_reduce_unreg");
+  custom_ar.def("dispose", &dispose, "dispose");
+  custom_ar.def("meta_size", &meta_size, "meta_size");
+  custom_ar.def("register_buffer", &register_buffer, "register_buffer");
+  custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta,
+                "get_graph_buffer_ipc_meta");
+  custom_ar.def("register_graph_buffers", &register_graph_buffers,
+                "register_graph_buffers");
+#endif
+
 }

@@ -13,4 +13,9 @@ types-setuptools
 pytest
 pytest-forked
 pytest-asyncio
-
+httpx
+einops # required for MPT
+flash_attn # required for HuggingFace's llama implementation
+openai
+requests
+ray
