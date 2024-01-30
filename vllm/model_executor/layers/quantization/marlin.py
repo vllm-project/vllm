@@ -75,7 +75,7 @@ class MarlinConfig(QuantizationConfig):
 class MarlinWorkspace:
 
     def __init__(self, out_features):
-        max_parallel = 8
+        max_parallel = 16
         min_n_threads = 128
 
         assert (
