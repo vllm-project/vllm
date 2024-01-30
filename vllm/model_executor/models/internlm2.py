@@ -5,12 +5,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-try:
-    from einops import rearrange
-except ImportError as e:
-    raise ImportError(
-        "einops is not installed. Please install einops to load model.") from e
-
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
@@ -310,16 +304,17 @@ class InternLM2ForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 if "wqkv" in name:
-                    loaded_weight = rearrange(
-                        loaded_weight,
-                        "(h gs d) dim -> h gs d dim",
-                        gs=2 + 4,
-                        d=128,
-                    )
-                    wq, wk, wv = torch.split(loaded_weight, [4, 1, 1], dim=1)
-                    wq = rearrange(wq, "h gs d dim -> (h gs d) dim")
-                    wk = rearrange(wk, "h gs d dim -> (h gs d) dim")
-                    wv = rearrange(wv, "h gs d dim -> (h gs d) dim")
+                    config = self.config
+                    kv_groups = config.num_attention_heads // config.num_key_value_heads
+                    head_dim = config.hidden_size // config.num_attention_heads
+                    loaded_weight = loaded_weight.view(-1, 2 + kv_groups,
+                                                       head_dim,
+                                                       loaded_weight.shape[-1])
+                    wq, wk, wv = torch.split(loaded_weight, [kv_groups, 1, 1],
+                                             dim=1)
+                    wq = wq.reshape(-1, wq.shape[-1])
+                    wk = wk.reshape(-1, wk.shape[-1])
+                    wv = wv.reshape(-1, wv.shape[-1])
                     weight_loader = param.weight_loader
                     weight_loader(param, wq, 'q')
                     weight_loader(param, wk, 'k')
