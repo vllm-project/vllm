@@ -207,7 +207,7 @@ def test_swap_blocks(
     src_key_caches_clone = src_key_caches[0].clone()
     src_value_caches_clone = src_value_caches[0].clone()
 
-    # # Call the swap_blocks kernel.
+    # Call the swap_blocks kernel.
     cache_ops.swap_blocks(src_key_caches[0], dist_key_caches[0], block_mapping)
     cache_ops.swap_blocks(src_value_caches[0], dist_value_caches[0],
                           block_mapping)
