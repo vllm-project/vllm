@@ -455,7 +455,7 @@ class AsyncLLMEngine:
                 prompt_token_ids=prompt_token_ids,
                 lora_request=lora_request)
         else:
-            prompt_token_ids = await self.encode_request_async(
+            prompt_token_ids = await self.engine.encode_request_async(
                 request_id=request_id,
                 prompt=prompt,
                 prompt_token_ids=prompt_token_ids,
