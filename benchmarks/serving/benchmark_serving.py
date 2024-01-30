@@ -199,7 +199,7 @@ async def throughput_benchmark(
     print(f"Benchmark duration: {benchmark_duration:2f} s")
     print(f"Total input tokens: {total_input}")
     print(f"Total generated tokens: {total_output}")
-    print(f"Reuqest throughput: {request_throughput:.2f} requests/s")
+    print(f"Request throughput: {request_throughput:.2f} requests/s")
     print(f"Input token throughput: {input_throughput:.2f} tokens/s")
     print(f"Output token throughput: {output_throughput:.2f} tokens/s")
     print(f"Mean TTFT: {mean_ttft_ms:.2f} ms")
