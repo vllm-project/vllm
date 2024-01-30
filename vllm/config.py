@@ -279,15 +279,13 @@ class CacheConfig:
         cache_dtype: Data type for kv cache storage.
     """
 
-    def __init__(
-        self,
-        block_size: int,
-        gpu_memory_utilization: float,
-        swap_space: int,
-        cache_dtype: str,
-        sliding_window: Optional[int] = None,
-        prefix_pool_memory_utilization: float = 0
-    ) -> None:
+    def __init__(self,
+                 block_size: int,
+                 gpu_memory_utilization: float,
+                 swap_space: int,
+                 cache_dtype: str,
+                 sliding_window: Optional[int] = None,
+                 prefix_pool_memory_utilization: float = 0) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
