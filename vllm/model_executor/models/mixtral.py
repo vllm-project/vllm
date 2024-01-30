@@ -24,6 +24,7 @@
 from typing import List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 from torch import nn
 from transformers import MixtralConfig
