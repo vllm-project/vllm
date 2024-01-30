@@ -1,7 +1,8 @@
+import pytest
 import torch
+
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.activation import SiluAndMul
-import pytest
 
 
 def torch_moe(a, w1, w2, topk_weight, topk_ids):

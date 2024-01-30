@@ -22,16 +22,16 @@
 # limitations under the License.
 """Inference-only Deepseek model."""
 from typing import Any, Dict, List, Optional, Tuple
-from transformers import PretrainedConfig
 
 import torch
-import torch.nn.functional as F
-
 from torch import nn
+import torch.nn.functional as F
+from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
@@ -50,7 +50,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.model_executor.layers.fused_moe import fused_moe
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
