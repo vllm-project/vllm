@@ -303,7 +303,7 @@ if __name__ == "__main__":
         "--version",
         type=str,
         default="N/A",
-        description="Version of the serving backend/engine.",
+        help="Version of the serving backend/engine.",
     )
     parser.add_argument(
         "--base-url",
@@ -360,12 +360,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--trust-remote-code",
         action="store_true",
-        help="trust remote code from huggingface",
+        help="Trust remote code from huggingface",
     )
     parser.add_argument(
         "--save-result",
         action="store_true",
-        help="save benchmark results to a json file",
+        help="Specify to save benchmark results to a json file",
     )
 
     args = parser.parse_args()
