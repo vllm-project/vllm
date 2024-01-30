@@ -117,7 +117,7 @@ def model_parallel_is_initialized():
 def get_tensor_model_parallel_group():
     """Get the tensor model parallel group the caller rank belongs to."""
     assert _TENSOR_MODEL_PARALLEL_GROUP is not None, (
-        "tenosr model parallel group is not initialized")
+        "tensor model parallel group is not initialized")
     return _TENSOR_MODEL_PARALLEL_GROUP
 
 
