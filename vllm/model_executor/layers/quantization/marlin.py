@@ -4,10 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 # Essentially all reasonable GPUs have less than 256 SMs so this should be safe for now
 MAX_SMS = 256
@@ -43,7 +41,7 @@ class MarlinConfig(QuantizationConfig):
                 f"but got {self.group_size} bits.")
 
     def __repr__(self) -> str:
-        return (f"MarlinConfig(group_size={self.group_size}")
+        return f"MarlinConfig(group_size={self.group_size}"
 
     @classmethod
     def get_name(cls) -> str:
@@ -74,6 +72,23 @@ class MarlinConfig(QuantizationConfig):
         return []
 
 
+class MarlinWorkspace:
+
+    def __init__(self, out_features):
+        max_parallel = 8
+        min_n_threads = 128
+
+        assert (
+            out_features % min_n_threads == 0
+        ), "out_features = {out_features} is not divisible by min_n_threads = {min_n_threads}"
+
+        max_workspace_size = (out_features // min_n_threads) * max_parallel
+
+        self.scratch = torch.zeros(max_workspace_size,
+                                   dtype=torch.int,
+                                   device="cuda")
+
+
 class MarlinLinearMethod(LinearMethodBase):
     """Linear method for Marlin.
 
@@ -93,7 +108,7 @@ class MarlinLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
-        del output_size  # Unused.
+        # del output_size  # Unused.
         if params_dtype != torch.float16:
             raise ValueError(
                 f"The params dtype must be float16, but got {params_dtype}")
@@ -130,17 +145,20 @@ class MarlinLinearMethod(LinearMethodBase):
                 output_size_per_partition * self.quant_config.tile_size //
                 self.quant_config.pack_factor,
                 device="cuda",
-                dtype=torch.int32),
+                dtype=torch.int32,
+            ),
             requires_grad=False,
         )
         set_weight_attrs(
-            qweight, {
+            qweight,
+            {
                 "input_dim": 0,
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
                 "marlin_tile_size": TILE_SIZE,
-            })
+            },
+        )
 
         # Scales in Float16.
         scales = Parameter(
@@ -153,36 +171,41 @@ class MarlinLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         set_weight_attrs(
-            scales, {
+            scales,
+            {
                 "input_dim":
                 None if input_size == input_size_per_partition else 0,
                 "output_dim": 1,
-            })
-
-        # Alloc workspace (shared across invocations of this layer)
-        self.workspace = torch.zeros(self.quant_config.max_workspace_size,
-                                     dtype=torch.int,
-                                     device="cuda")
+            },
+        )
 
         return {
             "B": qweight,
             "s": scales,
+            "workspace": MarlinWorkspace(output_size_per_partition),
         }
 
-    def apply_weights(self,
-                      weights: Dict[str, Any],
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply_weights(
+        self,
+        weights: Dict[str, Any],
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         qweight = weights["B"]
         scales = weights["s"]
+        workspace = weights["workspace"]
 
         output = torch.empty(x.shape[:-1] + (scales.shape[1], ),
                              dtype=x.dtype,
                              device=x.device)
 
-        ops.marlin_gemm(x.view(-1, x.shape[-1]), qweight,
-                        output.view(-1, output.shape[-1]), scales,
-                        self.workspace)
+        ops.marlin_gemm(
+            x.view(-1, x.shape[-1]),
+            qweight,
+            output.view(-1, output.shape[-1]),
+            scales,
+            workspace.scratch,
+        )
 
         if bias is not None:
             output.add_(bias)
