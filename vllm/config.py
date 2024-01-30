@@ -75,6 +75,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        hf_kwargs: Optional[dict] = None
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -100,7 +101,7 @@ class ModelConfig:
             self.download_dir = model_path
             self.tokenizer = model_path
 
-        self.hf_config = get_config(self.model, trust_remote_code, revision)
+        self.hf_config = get_config(self.model, trust_remote_code, revision, **hf_kwargs)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_config,
                                                      max_model_len)

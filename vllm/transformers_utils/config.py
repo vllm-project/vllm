@@ -18,10 +18,11 @@ _CONFIG_REGISTRY = {
 
 def get_config(model: str,
                trust_remote_code: bool,
-               revision: Optional[str] = None) -> PretrainedConfig:
+               revision: Optional[str] = None,
+               **hf_kwargs) -> PretrainedConfig:
     try:
         config = AutoConfig.from_pretrained(
-            model, trust_remote_code=trust_remote_code, revision=revision)
+            model, hf_kwargs, trust_remote_code=trust_remote_code, revision=revision)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
