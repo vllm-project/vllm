@@ -82,8 +82,10 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
+            f"disable_custom_all_reduce={parallel_config.disable_custom_all_reduce}, "
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
+            f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -143,6 +145,7 @@ class LLMEngine:
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
         self._run_workers("init_model")
@@ -248,6 +251,7 @@ class LLMEngine:
                     rank,
                     distributed_init_method,
                     lora_config=self.lora_config,
+                    kv_cache_dtype=self.cache_config.cache_dtype,
                 ))
 
         driver_rank = 0
@@ -260,6 +264,7 @@ class LLMEngine:
             driver_rank,
             distributed_init_method,
             lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
 
@@ -305,6 +310,7 @@ class LLMEngine:
             block_size=self.cache_config.block_size,
             gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
             cpu_swap_space=self.cache_config.swap_space_bytes,
+            cache_dtype=self.cache_config.cache_dtype,
         )
 
         # Since we use a shared centralized controller, we take the minimum

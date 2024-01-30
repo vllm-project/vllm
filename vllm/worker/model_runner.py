@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
+from vllm.model_executor.parallel_utils import custom_all_reduce
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -35,6 +36,7 @@ class ModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         lora_config: Optional[LoRAConfig],
+        kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ):
         self.model_config = model_config
@@ -67,6 +69,7 @@ class ModelRunner:
         self.graph_block_tables = None  # Set after initial profiling.
         # cache in_wsl result
         self.in_wsl = in_wsl()
+        self.kv_cache_dtype = kv_cache_dtype
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config, self.lora_config)
@@ -222,6 +225,7 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
@@ -349,6 +353,7 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
         return input_tokens, input_positions, input_metadata, lora_index_mapping, lora_prompt_mapping, lora_requests
 
@@ -472,6 +477,7 @@ class ModelRunner:
                 "context_lens": input_metadata.context_lens,
                 "block_tables": input_metadata.block_tables,
                 "use_cuda_graph": input_metadata.use_cuda_graph,
+                "kv_cache_dtype": input_metadata.kv_cache_dtype,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
@@ -494,6 +500,7 @@ class ModelRunner:
                 context_lens=metadata_dict["context_lens"],
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
+                kv_cache_dtype=metadata_dict["kv_cache_dtype"],
             )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -651,37 +658,39 @@ class ModelRunner:
 
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
-        for batch_size in reversed(batch_size_capture_list):
-            # Create dummy input_metadata.
-            input_metadata = InputMetadata(
-                is_prompt=False,
-                slot_mapping=slot_mapping[:batch_size],
-                prompt_lens=None,
-                max_seq_len=None,
-                start_loc=None,
-                max_context_len=self.max_context_len_to_capture,
-                context_lens=context_lens[:batch_size],
-                block_tables=block_tables[:batch_size],
-                use_cuda_graph=True,
-            )
-
-            if self.lora_config:
-                lora_mapping = LoRAMapping(
-                    [0] * batch_size,
-                    [0] * batch_size,
+        with custom_all_reduce.capture():
+            for batch_size in reversed(batch_size_capture_list):
+                # Create dummy input_metadata.
+                input_metadata = InputMetadata(
+                    is_prompt=False,
+                    slot_mapping=slot_mapping[:batch_size],
+                    prompt_lens=None,
+                    max_seq_len=None,
+                    start_loc=None,
+                    max_context_len=self.max_context_len_to_capture,
+                    context_lens=context_lens[:batch_size],
+                    block_tables=block_tables[:batch_size],
+                    use_cuda_graph=True,
+                    kv_cache_dtype=self.kv_cache_dtype,
                 )
-                self.set_active_loras(set(), lora_mapping)
 
-            graph_runner = CUDAGraphRunner(self.model)
-            graph_runner.capture(
-                input_tokens[:batch_size],
-                input_positions[:batch_size],
-                kv_caches,
-                input_metadata,
-                memory_pool=self.graph_memory_pool,
-            )
-            self.graph_memory_pool = graph_runner.graph.pool()
-            self.graph_runners[batch_size] = graph_runner
+                if self.lora_config:
+                    lora_mapping = LoRAMapping(
+                        [0] * batch_size,
+                        [0] * batch_size,
+                    )
+                    self.set_active_loras(set(), lora_mapping)
+
+                graph_runner = CUDAGraphRunner(self.model)
+                graph_runner.capture(
+                    input_tokens[:batch_size],
+                    input_positions[:batch_size],
+                    kv_caches,
+                    input_metadata,
+                    memory_pool=self.graph_memory_pool,
+                )
+                self.graph_memory_pool = graph_runner.graph.pool()
+                self.graph_runners[batch_size] = graph_runner
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
