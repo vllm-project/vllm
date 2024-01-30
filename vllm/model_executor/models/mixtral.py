@@ -134,10 +134,13 @@ class MixtralMoE(nn.Module):
                                                        dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        final_hidden_states = fused_moe(
-            hidden_states, self.ws, self.w2s,
-            routing_weights, selected_experts,
-            routing_weights, inplace=True)
+        final_hidden_states = fused_moe(hidden_states,
+                                        self.ws,
+                                        self.w2s,
+                                        routing_weights,
+                                        selected_experts,
+                                        routing_weights,
+                                        inplace=True)
 
         final_hidden_states = tensor_model_parallel_all_reduce(
             final_hidden_states)
