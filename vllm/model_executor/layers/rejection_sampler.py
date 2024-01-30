@@ -305,8 +305,9 @@ class RejectionSampler(nn.Module):
         output.mul_(~after_false_mask).add_(
             recovered_token_ids.mul(after_false_mask))
 
-        self.num_accepted_tokens += accepted.sum()
-        self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
+        num_emitted_tokens = (output_with_bonus_tokens != -1).sum()
+        self.num_emitted_tokens += num_emitted_tokens
+        self.num_accepted_tokens += num_emitted_tokens - batch_size
         self.num_draft_tokens += batch_size * k
 
         return output_with_bonus_tokens
