@@ -23,6 +23,11 @@ def _set_default_torch_dtype(dtype: torch.dtype):
 
 def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
+    # Special handling for quantized Mixtral.
+    # FIXME(woosuk): This is a temporary hack.
+    if "MixtralForCausalLM" in architectures:
+        architectures = ["QuantMixtralForCausalLM"]
+
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch)
         if model_cls is not None:
