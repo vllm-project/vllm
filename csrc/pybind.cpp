@@ -57,9 +57,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
   ops.def(
-      "moe_align_block_size",
-      &moe_align_block_size,
-      "Aligning the number of tokens to be processed by each expert such that it is divisible by the block size.");
+    "moe_align_block_size",
+    &moe_align_block_size,
+    "Aligning the number of tokens to be processed by each expert such that it is divisible by the block size.");
 
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
