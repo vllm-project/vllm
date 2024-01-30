@@ -314,7 +314,9 @@ class ModelRunner:
                                                   max_len=1,
                                                   pad=_PAD_SLOT_ID,
                                                   dtype=torch.long)
-        context_lens = torch.tensor(context_lens, dtype=torch.int)
+        context_lens = torch.tensor(context_lens,
+                                    dtype=torch.int,
+                                    device=self.device_config.device)
 
         if use_captured_graph:
             # The shape of graph_block_tables is

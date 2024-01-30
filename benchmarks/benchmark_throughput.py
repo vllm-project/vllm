@@ -211,8 +211,7 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype,
-                                args.device)
+                                args.kv_cache_dtype, args.device)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,

@@ -64,9 +64,14 @@ def main(
     block_tables = torch.tensor(block_tables, dtype=torch.int, device=device)
 
     # Create the KV cache.
-    key_caches, value_caches = create_kv_caches_with_random(
-        NUM_BLOCKS, block_size, 1, num_kv_heads, head_size, kv_cache_dtype,
-        dtype, device=device)
+    key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
+                                                            block_size,
+                                                            1,
+                                                            num_kv_heads,
+                                                            head_size,
+                                                            kv_cache_dtype,
+                                                            dtype,
+                                                            device=device)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
