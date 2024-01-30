@@ -396,8 +396,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         output_dim = getattr(param, "output_dim", None)
 
         if loaded_shard_id is None:
-            print("--------- HERE 2")
-
             # Loaded weight is already packed.
             if output_dim is None:
                 assert param_data.shape == loaded_weight.shape
