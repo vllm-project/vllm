@@ -29,6 +29,10 @@ def init_custom_ar() -> None:
         return
     rank = get_tensor_model_parallel_rank()
     world_size = get_tensor_model_parallel_world_size()
+    if world_size == 1:
+        # No need to initialize custom allreduce for single GPU case.
+        return
+
     if world_size not in _SUPPORTED_WORLD_SIZES:
         logger.warn(
             "Custom allreduce is disabled due to an unsupported world size: "
