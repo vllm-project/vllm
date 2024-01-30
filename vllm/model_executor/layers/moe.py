@@ -81,16 +81,6 @@ class MoE(nn.Module):
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
 
-    def fused_moe_infer(self, hidden_states: torch.Tensor,
-                        selected_experts: torch.Tensor,
-                        routing_weights: torch.Tensor) -> torch.Tensor:
-        return fused_moe(hidden_states,
-                         self.ws,
-                         self.w2s,
-                         routing_weights,
-                         selected_experts,
-                         inplace=True)
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
@@ -103,9 +93,10 @@ class MoE(nn.Module):
                                                        dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        final_hidden_states = self.fused_moe_infer(hidden_states,
-                                                   selected_experts,
-                                                   routing_weights)
+        final_hidden_states = fused_moe(
+            hidden_states, self.ws, self.w2s,
+            routing_weights, selected_experts,
+            routing_weights, inplace=True)
 
         final_hidden_states = tensor_model_parallel_all_reduce(
             final_hidden_states)
