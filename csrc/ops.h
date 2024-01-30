@@ -106,8 +106,7 @@ void moe_align_block_size(
   int block_size,
   torch::Tensor sorted_token_ids,
   torch::Tensor experts_ids,
-  torch::Tensor num_tokens_post_pad
-  );
+  torch::Tensor num_tokens_post_pad);
 
 #ifndef USE_ROCM
 using fptr_t = uint64_t;
