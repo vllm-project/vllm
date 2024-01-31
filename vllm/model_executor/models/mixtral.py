@@ -70,13 +70,14 @@ class MixtralMoE(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
+        tp_size: Optional[int] = None,
     ):
         super().__init__()
-        tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = tp_size or get_tensor_model_parallel_world_size()
         self.num_total_experts = num_experts
         self.top_k = top_k
         self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size // tp_size
+        self.intermediate_size = intermediate_size // self.tp_size
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -141,8 +142,9 @@ class MixtralMoE(nn.Module):
                                         selected_experts,
                                         inplace=True)
 
-        final_hidden_states = tensor_model_parallel_all_reduce(
-            final_hidden_states)
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
         return final_hidden_states.view(batch_size, sequence_length,
                                         hidden_size)
