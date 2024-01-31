@@ -51,6 +51,8 @@ if _is_hip():
             "Cannot find ROCM_HOME. ROCm must be available to build the package."
         )
     NVCC_FLAGS += ["-DUSE_ROCM"]
+    NVCC_FLAGS += ["-U__HIP_NO_HALF_CONVERSIONS__"]
+    NVCC_FLAGS += ["-U__HIP_NO_HALF_OPERATORS__"]
 
 if _is_cuda() and CUDA_HOME is None:
     raise RuntimeError(
@@ -251,6 +253,9 @@ if _is_cuda():
         num_threads = min(os.cpu_count(), nvcc_threads)
         NVCC_FLAGS += ["--threads", str(num_threads)]
 
+    if nvcc_cuda_version >= Version("11.8"):
+        NVCC_FLAGS += ["-DENABLE_FP8_E5M2"]
+
     # changes for punica kernels
     NVCC_FLAGS += torch_cpp_ext.COMMON_NVCC_FLAGS
     REMOVE_NVCC_FLAGS = [
@@ -263,7 +268,7 @@ if _is_cuda():
         with contextlib.suppress(ValueError):
             torch_cpp_ext.COMMON_NVCC_FLAGS.remove(flag)
 
-    install_punica = bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "1")))
+    install_punica = bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
     device_count = torch.cuda.device_count()
     for i in range(device_count):
         major, minor = torch.cuda.get_device_capability(i)
@@ -282,11 +287,15 @@ if _is_cuda():
                 },
             ))
 elif _is_hip():
-    amd_arch = get_amdgpu_offload_arch()
-    if amd_arch not in ROCM_SUPPORTED_ARCHS:
-        raise RuntimeError(
-            f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
-            f"amdgpu_arch_found: {amd_arch}")
+    amd_archs = os.getenv("GPU_ARCHS")
+    if amd_archs is None:
+        amd_archs = get_amdgpu_offload_arch()
+    for arch in amd_archs.split(";"):
+        if arch not in ROCM_SUPPORTED_ARCHS:
+            raise RuntimeError(
+                f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
+                f"amdgpu_arch_found: {arch}")
+        NVCC_FLAGS += [f"--offload-arch={arch}"]
 
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
@@ -300,11 +309,13 @@ vllm_extension_sources = [
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     "csrc/quantization/gptq/q_gemm.cu",
     "csrc/cuda_utils_kernels.cu",
+    "csrc/moe_align_block_size_kernels.cu",
     "csrc/pybind.cpp",
 ]
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
 if not _is_neuron():
     vllm_extension = CUDAExtension(
@@ -314,6 +325,7 @@ if not _is_neuron():
             "cxx": CXX_FLAGS,
             "nvcc": NVCC_FLAGS,
         },
+        libraries=["cuda"] if _is_cuda() else [],
     )
     ext_modules.append(vllm_extension)
 
