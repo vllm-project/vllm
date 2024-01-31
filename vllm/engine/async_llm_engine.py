@@ -447,11 +447,19 @@ class AsyncLLMEngine:
 
         if arrival_time is None:
             arrival_time = time.time()
-        prompt_token_ids = await self.engine.encode_request_async(
-            request_id=request_id,
-            prompt=prompt,
-            prompt_token_ids=prompt_token_ids,
-            lora_request=lora_request)
+
+        if self.engine_use_ray:
+            prompt_token_ids = await self.engine.encode_request_async.remote(
+                request_id=request_id,
+                prompt=prompt,
+                prompt_token_ids=prompt_token_ids,
+                lora_request=lora_request)
+        else:
+            prompt_token_ids = await self.engine.encode_request_async(
+                request_id=request_id,
+                prompt=prompt,
+                prompt_token_ids=prompt_token_ids,
+                lora_request=lora_request)
 
         stream = self._request_tracker.add_request(
             request_id,
