@@ -287,11 +287,15 @@ if _is_cuda():
                 },
             ))
 elif _is_hip():
-    amd_arch = get_amdgpu_offload_arch()
-    if amd_arch not in ROCM_SUPPORTED_ARCHS:
-        raise RuntimeError(
-            f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
-            f"amdgpu_arch_found: {amd_arch}")
+    amd_archs = os.getenv("GPU_ARCHS")
+    if amd_archs is None:
+        amd_archs = get_amdgpu_offload_arch()
+    for arch in amd_archs.split(";"):
+        if arch not in ROCM_SUPPORTED_ARCHS:
+            raise RuntimeError(
+                f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
+                f"amdgpu_arch_found: {arch}")
+        NVCC_FLAGS += [f"--offload-arch={arch}"]
 
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
@@ -305,6 +309,7 @@ vllm_extension_sources = [
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     "csrc/quantization/gptq/q_gemm.cu",
     "csrc/cuda_utils_kernels.cu",
+    "csrc/moe_align_block_size_kernels.cu",
     "csrc/pybind.cpp",
 ]
 
