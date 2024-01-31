@@ -70,9 +70,11 @@ class MixtralMoE(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
+        tp_size: Optional[int] = None,
     ):
         super().__init__()
-        tp_size = get_tensor_model_parallel_world_size()
+        if not tp_size:
+            tp_size = get_tensor_model_parallel_world_size()
         self.num_total_experts = num_experts
         self.top_k = top_k
         self.hidden_size = hidden_size
