@@ -5,6 +5,7 @@ import time
 import numpy as np
 from typing import List
 from dataclasses import dataclass
+from collections import Counter as CollectionsCounter
 
 logger = init_logger(__name__)
 
@@ -28,6 +29,8 @@ counter_prompt_tokens = Counter("vllm:prompt_tokens_total",
                                 "Number of prefill tokens processed.")
 counter_generation_tokens = Counter("vllm:generation_tokens_total",
                                     "Number of generation tokens processed.")
+counter_request_success = Counter("vllm:request_success",
+                                  "Count of successfully processed requests.")
 
 gauge_scheduler_running = Gauge(
     "vllm:num_requests_running",
@@ -86,6 +89,7 @@ class Stats:
     cpu_cache_usage: float
 
     # Raw stats from last model iteration.
+    finished_reason_counter: CollectionsCounter[str, int]
     num_prompt_tokens: int
     num_generation_tokens: int
     max_tokens: List[int]
@@ -124,6 +128,13 @@ class StatLogger:
         # Add to token counters.
         counter_prompt_tokens.add(labels, stats.num_prompt_tokens)
         counter_generation_tokens.add(labels, stats.num_generation_tokens)
+
+        for finished_reason, count in stats.finished_reason_counter.items():
+            counter_request_success.add(
+                {
+                    **labels,
+                    "finished_reason": finished_reason,
+                }, count)
 
         # Observe request level latencies in histograms.
         for val in stats.max_tokens:

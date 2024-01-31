@@ -1,5 +1,5 @@
 import copy
-from collections import defaultdict
+from collections import defaultdict, Counter as CollectionsCounter
 import os
 import time
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
@@ -849,6 +849,7 @@ class LLMEngine:
         time_to_first_tokens = []
         time_per_output_tokens = []
         time_e2e_requests = []
+        finished_reason_counter = CollectionsCounter()
         if scheduler_outputs is not None:
             prompt_run = scheduler_outputs.prompt_run
 
@@ -877,6 +878,15 @@ class LLMEngine:
             time_to_first_tokens = time_last_iters if prompt_run else []
             time_per_output_tokens = [] if prompt_run else time_last_iters
 
+            # Finished Requests
+            for seq_group in scheduler_outputs.scheduled_seq_groups:
+                if not seq_group.is_finished():
+                    continue
+                finished_reason_counter += CollectionsCounter([
+                    SequenceStatus.get_finished_reason(seq.status)
+                    for seq in seq_group.get_finished_seqs()
+                ])
+
         return Stats(
             now=now,
             num_running=num_running,
@@ -884,6 +894,7 @@ class LLMEngine:
             num_waiting=num_waiting,
             gpu_cache_usage=gpu_cache_usage,
             cpu_cache_usage=cpu_cache_usage,
+            finished_reason_counter=finished_reason_counter,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=num_generation_tokens,
             max_tokens=max_tokens,
