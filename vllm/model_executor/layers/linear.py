@@ -576,8 +576,7 @@ class SQRowParallelLinear(RowParallelLinear):
             self.linear_weights, input_parallel)
         if self.tp_size > 1 and scale is not None:
             out = torch.empty_like(output_parallel, dtype=self.params_dtype)
-            scale = self.dequant_scale.item() * scale
-            ops.dequant(out, output_parallel, scale)
+            ops.dequant(out, output_parallel, scale, self.dequant_scale.item())
             output_parallel = out
         if self.reduce_results and self.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
