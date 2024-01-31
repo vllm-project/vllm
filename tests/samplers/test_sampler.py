@@ -6,7 +6,7 @@ import pytest
 import torch
 from transformers import GenerationConfig, GenerationMixin
 
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, _cal_probs_sum
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
@@ -314,3 +314,25 @@ def test_sampler_top_k_top_p(seed: int):
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
 
     del model_runner
+
+
+DTYPE = [torch.float16, torch.float32]
+VOCAB_SIZE = [640, 1280, 5120]
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
+@pytest.mark.parametrize("dtype", DTYPE)
+def test_optimized_cumsum(seed: int, vocab_size: int, dtype: torch.dtype):
+    set_random_seed(seed)
+    batch_size = random.randint(1, 256)
+    matmul_size = random.randint(1, 1024)
+    fake_logits = torch.randn(batch_size,
+                              vocab_size,
+                              device="cuda",
+                              dtype=dtype)
+    probs = torch.softmax(fake_logits, dim=-1, dtype=dtype)
+    probs, _ = probs.sort(dim=-1, descending=True)
+    probs1 = torch.cumsum(probs, dim=-1, dtype=dtype)
+    probs2 = _cal_probs_sum(probs, matmul_size=matmul_size)
+    assert torch.allclose(probs1, probs2, atol=1e-2)
