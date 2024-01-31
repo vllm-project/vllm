@@ -200,13 +200,13 @@ def test_swap_blocks(
 
     # Create the KV caches on the first device.
     src_key_caches, src_value_caches = kv_cache_factory(
-        num_blocks, block_size, 1, num_heads, head_size, dtype, seed,
-        src_device)
+        num_blocks, block_size, 1, num_heads, head_size, dtype, None,
+        seed, src_device)
 
     # Create the KV caches on the second device.
     dist_key_caches, dist_value_caches = kv_cache_factory(
-        num_blocks, block_size, 1, num_heads, head_size, dtype, seed,
-        dst_device)
+        num_blocks, block_size, 1, num_heads, head_size, dtype, None,
+        seed, dst_device)
 
     src_key_caches_clone = src_key_caches[0].clone()
     src_value_caches_clone = src_value_caches[0].clone()
