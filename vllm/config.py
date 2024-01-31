@@ -355,6 +355,9 @@ class ParallelConfig:
         worker_use_ray: Whether to use Ray for model workers. Will be set to
             True if either pipeline_parallel_size or tensor_parallel_size is
             greater than 1.
+        max_parallel_loading_workers: Maximum number of multiple batches
+            when load model sequentially. To avoid RAM OOM when using tensor
+            parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
     """
@@ -470,7 +473,7 @@ class LoRAConfig:
         elif self.max_cpu_loras < self.max_loras:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
-                f"max_num_seqs ({self.max_loras})")
+                f"max_loras ({self.max_loras})")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
