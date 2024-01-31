@@ -1,8 +1,4 @@
-"""Compare the outputs of HF and vLLM for the Mixtral model.
-
-Currently we only compare the MoE layer because of GPU memory limits,
-once a smaller version of Mixtral is available we should also run an
-end-to-end tests.
+"""Test the MOE layer of the Mixtral model.
 
 Run `pytest tests/models/test_mixtral.py`.
 """
