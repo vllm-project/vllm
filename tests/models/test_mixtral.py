@@ -1,5 +1,3 @@
-from unittest.mock import patch
-
 import torch
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
