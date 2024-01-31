@@ -21,10 +21,6 @@
 #include <math.h>
 #include <sstream>
 
-// Ignore CUTLASS warnings about type punning
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
-
 #include "cutlass/array.h"
 #include "cutlass/epilogue/thread/activation.h"
 #include "cutlass/numeric_conversion.h"
@@ -36,20 +32,14 @@
 #include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/kernels/mixtureOfExperts/moe_kernels.h"
 
-#ifndef CUDART_VERSION
-#error CUDART_VERSION Undefined!
-#elif (CUDART_VERSION >= 11050)
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/util_type.cuh>
-#else
-#include "3rdparty/cub/cub.cuh"
-#include "3rdparty/cub/device/device_radix_sort.cuh"
-#include "3rdparty/cub/util_type.cuh"
-#endif
 
-using namespace tensorrt_llm::kernels;
-using namespace tensorrt_llm::common;
+// FIXME(woosuk)
+#ifndef ENABLE_BF16
+#define ENABLE_BF16
+#endif
 
 namespace tensorrt_llm::kernels
 {
@@ -1045,68 +1035,17 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::computeTotalRowsBeforeExpert(con
         sorted_indices, total_indices, num_experts, total_rows_before_expert);
 }
 
-// ==================== Helper for getting load balanced routing for profiling ==================================
-
-template <class T>
-__global__ void initRoutingKernelDiagonal(void* data_void, int num_experts, int num_tokens, int k, int stride)
-{
-    assert(k == 1 || (stride % num_experts) != 0);
-    int token = blockIdx.x * blockDim.x + threadIdx.x;
-    if (token >= num_tokens)
-    {
-        return;
-    }
-    T* data = (T*) data_void + token * num_experts;
-    int start = token % num_experts;
-    for (int i = 0; i < k; i++)
-    {
-        data[start] = T{1.f};
-        start += stride;
-        if (start >= num_experts) // Wrap
-            start -= num_experts;
-    }
-}
-
-void makeLoadBalancedRoutingConfiguration(
-    void* data_void, int num_experts, int num_tokens, int k, nvinfer1::DataType type, cudaStream_t stream)
-{
-    size_t item_size = sizeof(float);
-    auto* func = &initRoutingKernelDiagonal<float>;
-    if (type == nvinfer1::DataType::kHALF)
-    {
-        func = &initRoutingKernelDiagonal<half>;
-        item_size = sizeof(half);
-    }
-#ifdef ENABLE_BF16
-    else if (type == nvinfer1::DataType::kBF16)
-    {
-        func = &initRoutingKernelDiagonal<__nv_bfloat16>;
-        item_size = sizeof(__nv_bfloat16);
-    }
-#endif
-
-    check_cuda_error(cudaMemsetAsync(data_void, 0x0, num_experts * num_tokens * item_size, stream));
-
-    int stride = tensorrt_llm::common::ceilDiv(num_experts, k);
-
-    int blockDim = 256;
-    int gridDim = tensorrt_llm::common::ceilDiv(num_tokens, blockDim);
-    func<<<gridDim, blockDim, 0, stream>>>(data_void, num_experts, num_tokens, k, stride);
-
-    sync_check_cuda_error();
-}
-
 // ==================== Variable batched GEMM specializations ==================================
 template class CutlassMoeFCRunner<float, float>;
 
 #ifdef ENABLE_BF16
 template class CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16>;
-template class CutlassMoeFCRunner<__nv_bfloat16, uint8_t>;
-template class CutlassMoeFCRunner<__nv_bfloat16, cutlass::uint4b_t>;
+// template class CutlassMoeFCRunner<__nv_bfloat16, uint8_t>;
+// template class CutlassMoeFCRunner<__nv_bfloat16, cutlass::uint4b_t>;
 #endif
 
 template class CutlassMoeFCRunner<half, half>;
-template class CutlassMoeFCRunner<half, uint8_t>;
-template class CutlassMoeFCRunner<half, cutlass::uint4b_t>;
+// template class CutlassMoeFCRunner<half, uint8_t>;
+// template class CutlassMoeFCRunner<half, cutlass::uint4b_t>;
 
 } // namespace tensorrt_llm::kernels
