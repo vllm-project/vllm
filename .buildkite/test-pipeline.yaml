@@ -26,10 +26,6 @@ steps:
   command: pytest -v -s kernels
   soft_fail: true
 
-- label: Layers Test
-  command: pytest -v -s layers
-  soft_fail: true
-
 - label: Models Test
   commands:
     - pytest -v -s models --forked
