@@ -852,20 +852,20 @@ class LLMEngine:
         if scheduler_outputs is not None:
             prompt_run = scheduler_outputs.prompt_run
 
-            # Number of Tokens.
+            # Number of Tokens
             if prompt_run:
                 num_prompt_tokens = scheduler_outputs.num_batched_tokens
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
 
-            # Sampling Params.
+            # Sampling Params
             if prompt_run:
                 max_tokens = [
                     seq_group.sampling_params.max_tokens
                     for seq_group in scheduler_outputs.scheduled_seq_groups
                 ]
 
-            # Latency Timings.
+            # Latency Timings
             time_last_iters = []
             for seq_group in scheduler_outputs.scheduled_seq_groups:
                 # Time since last token. (n.b. updates seq_group.last_token_time)
