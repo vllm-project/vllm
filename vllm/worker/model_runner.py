@@ -142,10 +142,10 @@ class ModelRunner:
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping.append([lora_id] * prompt_len)
+            lora_index_mapping.append([lora_id] * (prompt_len - prefix_len))
             lora_prompt_mapping.extend(
                 [lora_id] *
-                (prompt_len
+                (prompt_len - prefix_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             if seq_group_metadata.block_tables is None:

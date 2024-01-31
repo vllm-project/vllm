@@ -296,6 +296,8 @@ class AsyncLLMEngine:
             async frontend will be executed in a separate process as the
             model workers.
         log_requests: Whether to log the requests.
+        max_log_len: Maximum number of prompt characters or prompt ID numbers
+            being printed in log.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
         *args: Arguments for LLMEngine.
@@ -431,8 +433,8 @@ class AsyncLLMEngine:
             logger.info(f"Received request {request_id}: "
                         f"prompt: {shortened_prompt!r}, "
                         f"prefix_pos: {prefix_pos},"
-                        f"sampling params: {sampling_params}, "
-                        f"prompt token ids: {shortened_token_ids}, "
+                        f"sampling_params: {sampling_params}, "
+                        f"prompt_token_ids: {shortened_token_ids}, "
                         f"lora_request: {lora_request}.")
 
         if not self.is_running:
