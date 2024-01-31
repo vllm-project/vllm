@@ -118,6 +118,10 @@ def parse_args():
         "If a function is provided, vLLM will add it to the server using @app.middleware('http'). "
         "If a class is provided, vLLM will add it to the server using app.add_middleware(). "
     )
+    parser.add_argument("--default-model-template",
+                        type=str,
+                        default=None,
+                        help="model template")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
