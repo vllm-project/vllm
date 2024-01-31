@@ -7,6 +7,10 @@ FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 RUN apt-get update -y \
     && apt-get install -y python3-pip git
 
+# Workaround for https://github.com/openai/triton/issues/2507 and
+# https://github.com/pytorch/pytorch/issues/107960
+RUN ldconfig /usr/lib64-nvidia
+
 WORKDIR /workspace
 
 # install build and runtime dependencies

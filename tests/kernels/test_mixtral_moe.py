@@ -1,6 +1,6 @@
 """Test the MOE layer of the Mixtral model.
 
-Run `pytest tests/layers/test_mixtral_moe.py`.
+Run `pytest tests/kernels/test_mixtral_moe.py`.
 """
 
 import torch
