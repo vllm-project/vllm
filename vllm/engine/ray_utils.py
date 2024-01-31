@@ -19,6 +19,11 @@ try:
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
             self.worker = None
+            # Since the compiled DAG runs a main execution
+            # in a different thread that calls cuda.set_device.
+            # The flag indicates is set_device is called on
+            # that thread.
+            self.compiled_dag_cuda_device_set = False
 
         def init_worker(self, worker_init_fn):
             self.worker = worker_init_fn()
@@ -44,7 +49,10 @@ try:
         def execute_model_compiled_dag_remote(self, ignored):
             """Used only when compiled DAG is enabled."""
             import torch
-            torch.cuda.set_device(self.worker.device)
+            if not self.compiled_dag_cuda_device_set:
+                torch.cuda.set_device(self.worker.device)
+                self.compiled_dag_cuda_device_set = True
+
             output = self.worker.execute_model()
             output = pickle.dumps(output)
             return output

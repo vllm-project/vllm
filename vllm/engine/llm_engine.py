@@ -32,6 +32,11 @@ logger = init_logger(__name__)
 
 _LOGGING_INTERVAL_SEC = 5
 
+# If the env var is set, it uses the Ray's compiled DAG API
+# which optimizes the control plane overhead.
+# Run VLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
+USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
+
 
 class LLMEngine:
     """An LLM engine that receives requests and generates texts.
@@ -121,9 +126,11 @@ class LLMEngine:
         self.num_prompt_tokens: List[Tuple[float, int]] = []
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
-        # Only used for compiled DAG.
-        self.forward_dag = self._compiled_dag_init_dag()
-        # self.forward_dag = None
+        # Only used when USE_RAY_COMPILED_DAG is enabled.
+        # Stores the DAG definition to run VLLM workers.
+        self.forward_dag = None
+        if USE_RAY_COMPILED_DAG:
+            self.forward_dag = self._compiled_dag_init_dag()
 
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
@@ -799,7 +806,7 @@ class LLMEngine:
                     "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
                 },
-                use_ray_compiled_dag=True)
+                use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
             # Only the driver worker returns the sampling results.
             output = all_outputs[0]
@@ -991,7 +998,8 @@ class LLMEngine:
             if use_ray_compiled_dag:
                 try:
                     ray_worker_outputs = [
-                        pickle.loads(chan.begin_read()) for chan in output_channels
+                        pickle.loads(chan.begin_read())
+                        for chan in output_channels
                     ]
                 finally:
                     # Has to call end_read in order to reuse the DAG.
@@ -1002,11 +1010,12 @@ class LLMEngine:
 
         return [driver_worker_output] + ray_worker_outputs
 
-
     def _compiled_dag_init_dag(self):
         from ray.dag import MultiOutputNode, InputNode
         assert self.parallel_config.worker_use_ray
 
+        # Right now, compiled DAG requires at least 1 arg. We send
+        # a dummy value for now. It will be fixed soon.
         with InputNode() as input_data:
             forward_dag = MultiOutputNode([
                 worker.execute_model_compiled_dag_remote.bind(input_data)
