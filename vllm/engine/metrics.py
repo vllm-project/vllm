@@ -73,6 +73,11 @@ histogram_max_tokens = Histogram(
         20_000, 50_000, 100_000
     ],
 )
+histogram_request_n = Histogram(
+    "vllm:request_n",
+    "Histogram of the n request parameter.",
+    buckets=[1, 2, 5, 10, 20],
+)
 # end-metrics-definitions
 
 
@@ -93,6 +98,7 @@ class Stats:
     num_prompt_tokens: int
     num_generation_tokens: int
     max_tokens: List[int]
+    request_n: List[int]
     time_to_first_tokens: List[float]
     time_per_output_tokens: List[float]
     time_e2e_requests: List[float]
@@ -139,6 +145,8 @@ class StatLogger:
         # Observe request level latencies in histograms.
         for val in stats.max_tokens:
             histogram_max_tokens.observe(labels, val)
+        for n in stats.request_n:
+            histogram_request_n.observe(labels, n)
         for ttft in stats.time_to_first_tokens:
             histogram_time_to_first_token.observe(labels, ttft)
         for tpot in stats.time_per_output_tokens:
