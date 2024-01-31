@@ -23,9 +23,8 @@ def test_mixtral_moe():
         # Load the weights
         vllm_moe.gate.linear_weights["weight"][:] = hf_moe.gate.weight.data
         for i in range(config.num_local_experts):
-            vllm_moe.ws[i][:] = torch.cat(
-                (hf_moe.experts[i].w1.weight.data, hf_moe.experts[i].w3.weight.data,),
-                dim=0).to("cuda")
+            weights = (hf_moe.experts[i].w1.weight.data, hf_moe.experts[i].w3.weight.data)
+            vllm_moe.ws[i][:] = torch.cat(weights, dim=0).to("cuda")
             vllm_moe.w2s[i][:] = hf_moe.experts[i].w2.weight.data
 
         # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
