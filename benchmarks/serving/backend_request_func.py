@@ -37,22 +37,24 @@ async def async_request_tgi(
 
         ttft = 0
         st = time.perf_counter()
-        async with session.post(url=api_url, json=payload) as response:
-            if response.status == 200:
-                async for data in response.content.iter_any():
-                    if ttft == 0:
-                        ttft = time.perf_counter() - st
-                        output["ttft"] = ttft
-                latency = time.perf_counter() - st
+        try:
+            async with session.post(url=api_url, json=payload) as response:
+                if response.status == 200:
+                    async for data in response.content.iter_any():
+                        if ttft == 0:
+                            ttft = time.perf_counter() - st
+                            output["ttft"] = ttft
+                    latency = time.perf_counter() - st
 
-                body = data.decode("utf-8").lstrip("data:")
-                generated_text = json.loads(body)["generated_text"]
-                output["generated_text"] = generated_text
-                output["success"] = True
-                output["latency"] = latency
-            else:
-                output["generated_text"] = ""
-                output["success"] = False
+                    body = data.decode("utf-8").lstrip("data:")
+                    generated_text = json.loads(body)["generated_text"]
+                    output["generated_text"] = generated_text
+                    output["success"] = True
+                    output["latency"] = latency
+                else:
+                    output["success"] = False
+        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+            output["success"] = False
 
         return output
 
@@ -85,23 +87,25 @@ async def async_request_vllm(
 
         ttft = 0
         st = time.perf_counter()
-        async with session.post(url=api_url, json=payload) as response:
-            if response.status == 200:
-                async for data in response.content.iter_any():
-                    if ttft == 0:
-                        ttft = time.perf_counter() - st
-                        output["ttft"] = ttft
-                latency = time.perf_counter() - st
+        try:
+            async with session.post(url=api_url, json=payload) as response:
+                if response.status == 200:
+                    async for data in response.content.iter_any():
+                        if ttft == 0:
+                            ttft = time.perf_counter() - st
+                            output["ttft"] = ttft
+                    latency = time.perf_counter() - st
 
-                # When streaming, '\0' is appended to the end of the response.
-                body = data.decode("utf-8").strip("\0")
-                generated_text = json.loads(body)["text"][0][len(prompt) :]
-                output["generated_text"] = generated_text
-                output["success"] = True
-                output["latency"] = latency
-            else:
-                output["generated_text"] = ""
-                output["success"] = False
+                    # When streaming, '\0' is appended to the end of the response.
+                    body = data.decode("utf-8").strip("\0")
+                    generated_text = json.loads(body)["text"][0][len(prompt) :]
+                    output["generated_text"] = generated_text
+                    output["success"] = True
+                    output["latency"] = latency
+                else:
+                    output["success"] = False
+        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+            output["success"] = False
 
         return output
 
@@ -133,22 +137,24 @@ async def async_request_trt_llm(
         ttft = 0
 
         st = time.perf_counter()
-        async with session.post(url=api_url, json=payload) as resp:
-            if resp.status == 200:
-                async for data in resp.content.iter_any():
-                    if ttft == 0:
-                        ttft = time.perf_counter() - st
-                        output["ttft"] = ttft
-                latency = time.perf_counter() - st
+        try:
+            async with session.post(url=api_url, json=payload) as resp:
+                if resp.status == 200:
+                    async for data in resp.content.iter_any():
+                        if ttft == 0:
+                            ttft = time.perf_counter() - st
+                            output["ttft"] = ttft
+                    latency = time.perf_counter() - st
 
-                body = data.decode("utf-8").lstrip("data:")
-                generated_text = json.loads(body)["text_output"]
-                output["generated_text"] = generated_text
-                output["success"] = True
-                output["latency"] = latency
-            else:
-                output["generated_text"] = ""
-                output["success"] = False
+                    body = data.decode("utf-8").lstrip("data:")
+                    generated_text = json.loads(body)["text_output"]
+                    output["generated_text"] = generated_text
+                    output["success"] = True
+                    output["latency"] = latency
+                else:
+                    output["success"] = False
+        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+            output["success"] = False
 
         return output
 
@@ -167,7 +173,7 @@ async def async_request_deepspeed_mii(
         assert not use_beam_search
 
         payload = {
-            "prompt": prompt,
+            "prompts": prompt,
             "max_new_tokens": output_len,
             "ignore_eos": True,
             "do_sample": True,
@@ -182,16 +188,18 @@ async def async_request_deepspeed_mii(
         output["ttft"] = 0
 
         st = time.perf_counter()
-        async with session.post(url=api_url, json=payload) as resp:
-            if resp.status == 200:
-                parsed_resp = await resp.json()
-                latency = time.perf_counter() - st
-                output["generated_text"] = parsed_resp[0]["generated_text"]
-                output["success"] = True
-                output["latency"] = latency
-            else:
-                output["generated_text"] = ""
-                output["success"] = False
+        try:
+            async with session.post(url=api_url, json=payload) as resp:
+                if resp.status == 200:
+                    parsed_resp = await resp.json()
+                    latency = time.perf_counter() - st
+                    output["generated_text"] = parsed_resp[0]["generated_text"]
+                    output["success"] = True
+                    output["latency"] = latency
+                else:
+                    output["success"] = False
+        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+            output["success"] = False
 
         return output
 
@@ -228,32 +236,34 @@ async def async_request_openai_completions(
         generated_text = ""
         ttft = 0
         st = time.perf_counter()
-        async with session.post(
-            url=api_url, json=payload, headers=headers
-        ) as response:
-            if response.status == 200:
-                async for chunk in response.content:
-                    if ttft == 0:
-                        ttft = time.perf_counter() - st
-                        output["ttft"] = ttft
+        try:
+            async with session.post(
+                url=api_url, json=payload, headers=headers
+            ) as response:
+                if response.status == 200:
+                    async for chunk in response.content:
+                        if ttft == 0:
+                            ttft = time.perf_counter() - st
+                            output["ttft"] = ttft
 
-                    chunk = chunk.strip()
-                    if not chunk:
-                        continue
+                        chunk = chunk.strip()
+                        if not chunk:
+                            continue
 
-                    chunk = chunk.decode("utf-8").lstrip("data: ")
-                    if chunk == "[DONE]":
-                        latency = time.perf_counter() - st
-                    else:
-                        body = json.loads(chunk)
-                        generated_text += body["choices"][0]["text"]
+                        chunk = chunk.decode("utf-8").lstrip("data: ")
+                        if chunk == "[DONE]":
+                            latency = time.perf_counter() - st
+                        else:
+                            body = json.loads(chunk)
+                            generated_text += body["choices"][0]["text"]
 
-                output["generated_text"] = generated_text
-                output["success"] = True
-                output["latency"] = latency
-            else:
-                output["generated_text"] = ""
-                output["success"] = False
+                    output["generated_text"] = generated_text
+                    output["success"] = True
+                    output["latency"] = latency
+                else:
+                    output["success"] = False
+        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+            output["success"] = False
 
     return output
 
