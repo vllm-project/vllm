@@ -8,8 +8,10 @@ RUN apt-get update -y \
     && apt-get install -y python3-pip git
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
-# https://github.com/pytorch/pytorch/issues/107960
-RUN ldconfig /usr/lib64-nvidia
+# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
+# this won't be needed for future versions of this docker image
+# or future versions of triton.
+RUN ldconfig /usr/local/cuda-12.1/compat/
 
 WORKDIR /workspace
 
