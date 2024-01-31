@@ -10,7 +10,7 @@ from vllm.model_executor.models.mixtral import MixtralMoE
 def test_mixtral_moe():
     "Make sure our Mixtral MoE implementation agrees with the one from huggingface."
 
-    with patch("vllm.model_executor.parallel_utils.get_tensor_model_parallel_world_size", lambda: 1):
+    with patch("vllm.model_executor.parallel_utils.parallel_state.get_tensor_model_parallel_world_size", lambda: 1):
 
         # Instantiate our and huggingface's MoE blocks
         config = MixtralConfig()
