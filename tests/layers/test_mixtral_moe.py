@@ -9,7 +9,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 from vllm.model_executor.models.mixtral import MixtralMoE
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def test_mixtral_moe():
     "Make sure our Mixtral MoE implementation agrees with the one from huggingface."
 
