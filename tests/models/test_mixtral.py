@@ -17,6 +17,7 @@ def test_mixtral_moe():
         top_k=config.num_experts_per_tok,
         hidden_size=config.hidden_size,
         intermediate_size=config.intermediate_size,
+        tp_size=1,
     )
 
     # Load the weights
