@@ -59,7 +59,8 @@ def test_fused_moe(
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype",
+                         [torch.float32, torch.float16, torch.bfloat16])
 @torch.inference_mode()
 def test_mixtral_moe(dtype: torch.dtype):
     "Make sure our Mixtral MoE implementation agrees with the one from huggingface."
@@ -91,10 +92,13 @@ def test_mixtral_moe(dtype: torch.dtype):
     hf_states, _ = hf_moe.forward(inputs)
     vllm_states = vllm_moe.forward(inputs)
 
-    tol = {
+    mixtral_moe_tol = {
         torch.float32: 1e-3,
         torch.float16: 1e-3,
         torch.bfloat16: 1e-2,
     }
 
-    assert torch.allclose(hf_states, vllm_states, rtol=tol[dtype], atol=tol[dtype])
+    assert torch.allclose(hf_states,
+                          vllm_states,
+                          rtol=mixtral_moe_tol[dtype],
+                          atol=mixtral_moe_tol[dtype])
