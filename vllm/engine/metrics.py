@@ -61,6 +61,15 @@ histogram_e2e_request_latency = Histogram(
     "vllm:e2e_request_latency_seconds",
     "Histogram of end to end request latency in seconds.",
     buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+
+histogram_max_tokens = Histogram(
+    "vllm:request_max_tokens",
+    "Histogram of the max_tokens request parameter.",
+    buckets=[
+        1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000,
+        20_000, 50_000, 100_000
+    ],
+)
 # end-metrics-definitions
 
 
@@ -79,6 +88,7 @@ class Stats:
     # Raw stats from last model iteration.
     num_prompt_tokens: int
     num_generation_tokens: int
+    max_tokens: List[int]
     time_to_first_tokens: List[float]
     time_per_output_tokens: List[float]
     time_e2e_requests: List[float]
@@ -116,6 +126,8 @@ class StatLogger:
         counter_generation_tokens.add(labels, stats.num_generation_tokens)
 
         # Observe request level latencies in histograms.
+        for val in stats.max_tokens:
+            histogram_max_tokens.observe(labels, val)
         for ttft in stats.time_to_first_tokens:
             histogram_time_to_first_token.observe(labels, ttft)
         for tpot in stats.time_per_output_tokens:

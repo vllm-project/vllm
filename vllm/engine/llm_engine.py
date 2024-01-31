@@ -845,6 +845,7 @@ class LLMEngine:
         # Iteration stats if we have scheduler output.
         num_prompt_tokens = 0
         num_generation_tokens = 0
+        max_tokens = []
         time_to_first_tokens = []
         time_per_output_tokens = []
         time_e2e_requests = []
@@ -856,6 +857,13 @@ class LLMEngine:
                 num_prompt_tokens = scheduler_outputs.num_batched_tokens
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
+
+            # Sampling Params.
+            if prompt_run:
+                max_tokens = [
+                    seq_group.sampling_params.max_tokens
+                    for seq_group in scheduler_outputs.scheduled_seq_groups
+                ]
 
             # Latency Timings.
             time_last_iters = []
@@ -878,6 +886,7 @@ class LLMEngine:
             cpu_cache_usage=cpu_cache_usage,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=num_generation_tokens,
+            max_tokens=max_tokens,
             time_to_first_tokens=time_to_first_tokens,
             time_per_output_tokens=time_per_output_tokens,
             time_e2e_requests=time_e2e_requests,
