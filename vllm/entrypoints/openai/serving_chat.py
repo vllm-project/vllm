@@ -6,10 +6,16 @@ from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest, ChatCompletionResponse,
-    ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    UsageInfo)
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse,
+    ChatMessage,
+    DeltaMessage,
+    ErrorResponse,
+    UsageInfo,
+)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 
@@ -18,11 +24,13 @@ logger = init_logger(__name__)
 
 class OpenAIServingChat(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model: str,
-                 response_role: str,
-                 chat_template=None):
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        served_model: str,
+        response_role: str,
+        chat_template=None,
+    ):
         super().__init__(engine=engine, served_model=served_model)
         self.response_role = response_role
         self._load_chat_template(chat_template)
@@ -49,23 +57,38 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(
                 "logit_bias is not currently supported")
 
-        try:
-            prompt = self.tokenizer.apply_chat_template(
-                conversation=request.messages,
-                tokenize=False,
-                add_generation_prompt=request.add_generation_prompt)
-        except Exception as e:
-            logger.error(
-                f"Error in applying chat template from request: {str(e)}")
-            return self.create_error_response(str(e))
+        if "chatglm3" in request.model:
+            [*history, query] = request.messages
+            query = query["content"]
+            prompt_ids = (self.tokenizer.build_chat_input(
+                query=query, history=history,
+                role="user").input_ids.squeeze().tolist())
+            prompt = self.tokenizer.decode(prompt_ids)
+            try:
+                token_ids = self._validate_prompt_and_tokenize(
+                    request, prompt_ids=prompt_ids)
+            except ValueError as e:
+                return self.create_error_response(str(e))
+        else:
+            try:
+                prompt = self.tokenizer.apply_chat_template(
+                    conversation=request.messages,
+                    tokenize=False,
+                    add_generation_prompt=request.add_generation_prompt,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error in applying chat template from request: {str(e)}")
+                return self.create_error_response(str(e))
 
+            try:
+                token_ids = self._validate_prompt_and_tokenize(request,
+                                                               prompt=prompt)
+            except ValueError as e:
+                return self.create_error_response(str(e))
+
+        sampling_params = request.to_sampling_params()
         request_id = f"cmpl-{random_uuid()}"
-        try:
-            token_ids = self._validate_prompt_and_tokenize(request,
-                                                           prompt=prompt)
-            sampling_params = request.to_sampling_params()
-        except ValueError as e:
-            return self.create_error_response(str(e))
 
         result_generator = self.engine.generate(prompt, sampling_params,
                                                 request_id, token_ids)
@@ -84,10 +107,11 @@ class OpenAIServingChat(OpenAIServing):
             return request.messages[-1].role
 
     async def chat_completion_stream_generator(
-            self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput], request_id: str
+        self,
+        request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
-
         model_name = request.model
         created_time = int(time.monotonic())
         chunk_object_type = "chat.completion.chunk"
@@ -97,34 +121,37 @@ class OpenAIServingChat(OpenAIServing):
         for i in range(request.n):
             choice_data = ChatCompletionResponseStreamChoice(
                 index=i, delta=DeltaMessage(role=role), finish_reason=None)
-            chunk = ChatCompletionStreamResponse(id=request_id,
-                                                 object=chunk_object_type,
-                                                 created=created_time,
-                                                 choices=[choice_data],
-                                                 model=model_name)
+            chunk = ChatCompletionStreamResponse(
+                id=request_id,
+                object=chunk_object_type,
+                created=created_time,
+                choices=[choice_data],
+                model=model_name,
+            )
             data = chunk.model_dump_json(exclude_unset=True)
             yield f"data: {data}\n\n"
 
         # Send response to echo the input portion of the last message
         if request.echo:
             last_msg_content = ""
-            if request.messages and isinstance(
-                    request.messages, list) and request.messages[-1].get(
-                        "content") and request.messages[-1].get(
-                            "role") == role:
+            if (request.messages and isinstance(request.messages, list)
+                    and request.messages[-1].get("content")
+                    and request.messages[-1].get("role") == role):
                 last_msg_content = request.messages[-1]["content"]
             if last_msg_content:
                 for i in range(request.n):
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=last_msg_content),
-                        finish_reason=None)
+                        finish_reason=None,
+                    )
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
                         created=created_time,
                         choices=[choice_data],
-                        model=model_name)
+                        model=model_name,
+                    )
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
@@ -149,13 +176,15 @@ class OpenAIServingChat(OpenAIServing):
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=delta_text),
-                        finish_reason=None)
+                        finish_reason=None,
+                    )
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
                         created=created_time,
                         choices=[choice_data],
-                        model=model_name)
+                        model=model_name,
+                    )
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
                 else:
@@ -169,13 +198,15 @@ class OpenAIServingChat(OpenAIServing):
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=delta_text),
-                        finish_reason=output.finish_reason)
+                        finish_reason=output.finish_reason,
+                    )
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
                         created=created_time,
                         choices=[choice_data],
-                        model=model_name)
+                        model=model_name,
+                    )
                     if final_usage is not None:
                         chunk.usage = final_usage
                     data = chunk.model_dump_json(exclude_unset=True,
@@ -186,10 +217,12 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-            self, request: ChatCompletionRequest, raw_request: Request,
-            result_generator: AsyncIterator[RequestOutput],
-            request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
-
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request,
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
+    ) -> Union[ErrorResponse, ChatCompletionResponse]:
         model_name = request.model
         created_time = int(time.monotonic())
         final_res: RequestOutput = None
@@ -214,10 +247,9 @@ class OpenAIServingChat(OpenAIServing):
 
         if request.echo:
             last_msg_content = ""
-            if request.messages and isinstance(
-                    request.messages, list) and request.messages[-1].get(
-                        "content") and request.messages[-1].get(
-                            "role") == role:
+            if (request.messages and isinstance(request.messages, list)
+                    and request.messages[-1].get("content")
+                    and request.messages[-1].get("role") == role):
                 last_msg_content = request.messages[-1]["content"]
 
             for choice in choices:
