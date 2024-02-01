@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from vllm.utils import random_uuid
 from vllm.sampling_params import SamplingParams
+from vllm.lora.request import LoRARequest
 
 
 class ErrorResponse(BaseModel):
@@ -80,6 +81,16 @@ class ChatCompletionRequest(BaseModel):
     min_p: Optional[float] = 0.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
+    lora_request: Optional[dict] = Field(default_factory=dict)
+
+    def to_lora_params(self) -> Union[LoRARequest, None]:
+        if not self.lora_request:
+            return None
+        return LoRARequest(
+            lora_name=self.lora_request["lora_name"],
+            lora_int_id=self.lora_request["lora_int_id"],
+            lora_local_path=self.lora_request["lora_local_path"],
+        )
 
     def to_sampling_params(self) -> SamplingParams:
         return SamplingParams(
@@ -133,6 +144,16 @@ class CompletionRequest(BaseModel):
     min_p: Optional[float] = 0.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
+    lora_request: Optional[dict] = Field(default_factory=dict)
+
+    def to_lora_params(self) -> Union[LoRARequest, None]:
+        if not self.lora_request:
+            return None
+        return LoRARequest(
+            lora_name=self.lora_request["lora_name"],
+            lora_int_id=self.lora_request["lora_int_id"],
+            lora_local_path=self.lora_request["lora_local_path"],
+        )
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0

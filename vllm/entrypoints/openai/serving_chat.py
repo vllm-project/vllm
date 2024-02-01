@@ -64,11 +64,12 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = self._validate_prompt_and_tokenize(request,
                                                            prompt=prompt)
             sampling_params = request.to_sampling_params()
+            lora_params = request.to_lora_params()
         except ValueError as e:
             return self.create_error_response(str(e))
 
         result_generator = self.engine.generate(prompt, sampling_params,
-                                                request_id, token_ids)
+                                                request_id, token_ids, lora_request=lora_params)
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(

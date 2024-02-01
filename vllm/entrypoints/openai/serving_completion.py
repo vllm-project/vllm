@@ -284,6 +284,7 @@ class OpenAIServingCompletion(OpenAIServing):
         generators = []
         try:
             sampling_params = request.to_sampling_params()
+            lora_params = request.to_lora_params()
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
             for i, prompt in enumerate(prompts):
@@ -298,7 +299,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     self.engine.generate(None,
                                          sampling_params,
                                          f"{request_id}-{i}",
-                                         prompt_token_ids=input_ids))
+                                         prompt_token_ids=input_ids,
+                                         lora_request=lora_params))
         except ValueError as e:
             return self.create_error_response(str(e))
 
