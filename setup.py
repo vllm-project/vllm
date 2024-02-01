@@ -19,7 +19,7 @@ MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
-ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030", "gfx1100"}
+ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030", "gfx1100", "gfx942"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
@@ -61,6 +61,7 @@ if _is_cuda() and CUDA_HOME is None:
 ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
+NVCC_FLAGS_PUNICA = NVCC_FLAGS.copy()
 
 
 def get_amdgpu_offload_arch():
@@ -267,25 +268,7 @@ if _is_cuda():
     for flag in REMOVE_NVCC_FLAGS:
         with contextlib.suppress(ValueError):
             torch_cpp_ext.COMMON_NVCC_FLAGS.remove(flag)
-
-    install_punica = bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
-    device_count = torch.cuda.device_count()
-    for i in range(device_count):
-        major, minor = torch.cuda.get_device_capability(i)
-        if major < 8:
-            install_punica = False
-            break
-    if install_punica:
-        ext_modules.append(
-            CUDAExtension(
-                name="vllm._punica_C",
-                sources=["csrc/punica/punica_ops.cc"] +
-                glob("csrc/punica/bgmv/*.cu"),
-                extra_compile_args={
-                    "cxx": CXX_FLAGS,
-                    "nvcc": NVCC_FLAGS_PUNICA,
-                },
-            ))
+            
 elif _is_hip():
     amd_archs = os.getenv("GPU_ARCHS")
     if amd_archs is None:
@@ -316,6 +299,29 @@ vllm_extension_sources = [
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
+
+install_punica = bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "1"))) # engineering
+
+if _is_cuda():
+    device_count = torch.cuda.device_count()
+    for i in range(device_count):
+        major, minor = torch.cuda.get_device_capability(i)
+        if major < 8:
+            install_punica = False
+            break
+
+if install_punica:
+    ext_modules.append(
+        CUDAExtension(
+            name="vllm._punica_C",
+            sources=["csrc/punica/punica_ops.cu",
+                     "csrc/punica/punica_pybind.cpp"] +
+            glob("csrc/punica/bgmv/*.cu"),
+            extra_compile_args={
+                "cxx": CXX_FLAGS,
+                "nvcc": NVCC_FLAGS_PUNICA,
+            },
+        ))
 
 if not _is_neuron():
     vllm_extension = CUDAExtension(

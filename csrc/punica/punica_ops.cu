@@ -1,12 +1,12 @@
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
 #include <torch/extension.h>
 
 #include <cstdint>
 
+#include "type_convert.h"
+#include "../cuda_compat.h"
 #include "bgmv/bgmv_config.h"
 
-namespace {
+// namespace {
 
 //====== utils ======
 
@@ -550,14 +550,14 @@ void dispatch_bgmv_low_level(torch::Tensor y, torch::Tensor x, torch::Tensor w,
               " dtype=", x.scalar_type(), " out_dtype=", y.scalar_type());
 }
 
-} // namespace
-
-//====== pybind ======
-
-#define DEFINE_pybind(name) m.def(#name, &name, #name);
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("dispatch_bgmv", &dispatch_bgmv, "dispatch_bgmv");
-  m.def("dispatch_bgmv_low_level", &dispatch_bgmv_low_level,
-        "dispatch_bgmv_low_level");
-}
+// } // namespace
+// 
+// //====== pybind ======
+// 
+// #define DEFINE_pybind(name) m.def(#name, &name, #name);
+// 
+// PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+//   m.def("dispatch_bgmv", &dispatch_bgmv, "dispatch_bgmv");
+//   m.def("dispatch_bgmv_low_level", &dispatch_bgmv_low_level,
+//         "dispatch_bgmv_low_level");
+// }
