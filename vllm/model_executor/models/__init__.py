@@ -25,6 +25,7 @@ _MODELS = {
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
     "InternLMForCausalLM": ("internlm", "InternLMForCausalLM"),
+    "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
