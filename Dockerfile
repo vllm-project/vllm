@@ -4,7 +4,9 @@
 #################### BASE BUILD IMAGE ####################
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
-RUN add-apt-repository ppa:deadsnakes/ppa -y \
+RUN apt-get update -y \
+    && apt-get install -y software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
     && apt-get update -y \
     && apt-get install -y python3.8 python3.8-dev python3.8-venv python3-pip git \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1
