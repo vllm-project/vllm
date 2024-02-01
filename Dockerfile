@@ -4,6 +4,13 @@
 #################### BASE BUILD IMAGE ####################
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
+# Set the DEBIAN_FRONTEND variable to noninteractive to avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Preconfigure tzdata for US Central Time (build running in us-central-1 but this really doesn't matter.)
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Chicago' | debconf-set-selections
+
 RUN apt-get update -y \
     && apt-get install -y software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa -y \
