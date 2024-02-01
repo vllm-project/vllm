@@ -52,7 +52,6 @@ class SequenceStatus(enum.Enum):
 class SequenceData:
     """Data associated with a sequence.
 
-
     Args:
         prompt_token_ids: The token IDs of the prompt.
 
@@ -254,6 +253,7 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
         self.arrival_time = arrival_time
+        self.last_token_time = arrival_time
         self.lora_request = lora_request
         self.prefix: Optional[Prefix] = prefix
         self.prompt_logprobs: Optional[PromptLogprobs] = None
@@ -273,6 +273,12 @@ class SequenceGroup:
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+
+    def get_last_latency(self, now: float) -> float:
+        """Gets last token latency for Request level timings."""
+        latency = now - self.last_token_time
+        self.last_token_time = now
+        return latency
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
