@@ -17,7 +17,9 @@ BLOCK_SIZES = [8, 16, 32]
 NUM_BLOCKS = [1024, 3600]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
-CUDA_DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
 
 
@@ -163,7 +165,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_swap_blocks(
     kv_cache_factory,
@@ -179,7 +181,8 @@ def test_swap_blocks(
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
     src_device = f"{direction[0]}:{device}" if direction[
         0] == "cuda" else direction[0]
     dst_device = f"{direction[1]}:{device}" if direction[
