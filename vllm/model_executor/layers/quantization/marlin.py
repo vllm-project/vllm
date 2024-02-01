@@ -7,14 +7,6 @@ from vllm._C import ops
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
-# Essentially all reasonable GPUs have less than 256 SMs so this should be safe for now
-MAX_SMS = 256
-# Tile size used by Marlin Kernels
-TILE_SIZE = 16
-# 4 Bits Packed Into 32 Bit Dtype
-PACK_FACTOR = 32 // 4
-
-
 class MarlinConfig(QuantizationConfig):
     """Config class for Marlin.
 
@@ -25,20 +17,22 @@ class MarlinConfig(QuantizationConfig):
         self,
         group_size: int,
     ) -> None:
+        # Group size for the quantization.
         self.group_size = group_size
-        # 4Bits packed into Int32.
-        self.pack_factor = 32 // 4
-        # Tile size of 16 used by Marlin.
-        self.tile_size = 16
-
-        # Maximum workspace (>= than the number of GPU SMs => so 512 is safe)
-        self.max_workspace_size = 512
-
-        # todo(rib-2): add channelwise support (-1).
-        if self.group_size != 128:
+        if self.group_size != 128 and self.group_size != -1:
             raise ValueError(
-                "Currently, only group size 128 is supported for Marlin "
-                f"but got {self.group_size} bits.")
+                 "Currently, only group size 128 and -1 (channelwise) is supported for "
+                f"Marlin, but got group_size of {self.group_size}")
+
+        # 4 Bits packed into 32 bit datatype.
+        self.pack_factor = 32 // 4
+        # Tile size used by marlin kernels.
+        self.tile_size = 16
+        # Data for workspace.
+        self.max_parallel = 16
+        self.min_n_threads = 128
+        # Permutation length use by the marlin kernels.
+        self.perm_len = 1024
 
     def __repr__(self) -> str:
         return f"MarlinConfig(group_size={self.group_size}"
@@ -54,7 +48,7 @@ class MarlinConfig(QuantizationConfig):
     @classmethod
     # Need to figure it out
     def get_min_capability(cls) -> int:
-        return 60
+        return 80
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -71,24 +65,6 @@ class MarlinConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
-
-class MarlinWorkspace:
-
-    def __init__(self, out_features):
-        max_parallel = 16
-        min_n_threads = 128
-
-        assert (
-            out_features % min_n_threads == 0
-        ), "out_features = {out_features} is not divisible by min_n_threads = {min_n_threads}"
-
-        max_workspace_size = (out_features // min_n_threads) * max_parallel
-
-        self.scratch = torch.zeros(max_workspace_size,
-                                   dtype=torch.int,
-                                   device="cuda")
-
-
 class MarlinLinearMethod(LinearMethodBase):
     """Linear method for Marlin.
 
@@ -98,7 +74,6 @@ class MarlinLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: MarlinConfig):
         self.quant_config = quant_config
-        self._perm_len = 1024
 
     def create_weights(
         self,
@@ -126,14 +101,18 @@ class MarlinLinearMethod(LinearMethodBase):
             raise ValueError(
                 "The input_size_per_partition must be divisible by 128, "
                 f"but got {input_size_per_partition}")
-
         if output_size_per_partition % 256 != 0:
             raise ValueError(
                 "The output_size_per_partition must be divisible by 256, "
                 f"but got {output_size_per_partition}")
+        if output_size_per_partition % self.quant_config.min_n_threads != 0:
+            raise ValueError(
+                "The output_size per partition must be divisible by the minimum "
+                f"number of threads {self.quant_config.min_n_threads}, but got {output_size_per_partition}"
+            )
 
         # check that we have at least 4 tiles horizontally in the shard
-        num_tiles_per_perm = self._perm_len // (self.quant_config.tile_size**2)
+        num_tiles_per_perm = self.quant_config.perm_len // (self.quant_config.tile_size**2)
         if output_size_per_partition % num_tiles_per_perm != 0:
             raise ValueError(
                 "Each permutation group must reside on the same gpu")
@@ -156,14 +135,17 @@ class MarlinLinearMethod(LinearMethodBase):
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                "marlin_tile_size": TILE_SIZE,
+                "marlin_tile_size": self.quant_config.tile_size,
             },
         )
 
         # Scales in Float16.
+        group_size = self.quant_config.group_size
+        if group_size == -1:
+            group_size = input_size
         scales = Parameter(
             torch.empty(
-                input_size_per_partition // self.quant_config.group_size,
+                input_size_per_partition // group_size,
                 output_size_per_partition,
                 device="cuda",
                 dtype=params_dtype,
@@ -179,10 +161,20 @@ class MarlinLinearMethod(LinearMethodBase):
             },
         )
 
+        max_workspace_size = (output_size_per_partition // self.quant_config.min_n_threads) * self.quant_config.max_parallel
+        workspace = Parameter(
+            torch.zeros(
+                max_workspace_size,
+                device="cuda",
+                dtype=torch.int
+            ),
+            requires_grad=False
+        )
+
         return {
             "B": qweight,
             "s": scales,
-            "workspace": MarlinWorkspace(output_size_per_partition),
+            "workspace": workspace,
         }
 
     def apply_weights(
@@ -204,7 +196,7 @@ class MarlinLinearMethod(LinearMethodBase):
             qweight,
             output.view(-1, output.shape[-1]),
             scales,
-            workspace.scratch,
+            workspace,
         )
 
         if bias is not None:
