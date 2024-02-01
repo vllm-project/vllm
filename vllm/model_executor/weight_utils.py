@@ -86,7 +86,8 @@ def convert_bin_to_safetensor_file(
 def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
     quant_cls = get_quantization_config(model_config.quantization)
     # Read the quantization config from the HF model config, if available.
-    hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
+    hf_quant_config = getattr(model_config.hf_config, "quantization_config",
+                              None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
     model_name_or_path = model_config.model
@@ -108,10 +109,12 @@ def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
             f.endswith(x) for x in quant_cls.get_config_filenames())
     ]
     if len(quant_config_files) == 0:
-        raise ValueError(f"Cannot find the config file for {model_config.quantization}")
+        raise ValueError(
+            f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
-        raise ValueError(f"Found multiple config files for {model_config.quantization}: "
-                         f"{quant_config_files}")
+        raise ValueError(
+            f"Found multiple config files for {model_config.quantization}: "
+            f"{quant_config_files}")
 
     quant_config_file = quant_config_files[0]
     with open(quant_config_file, "r") as f:
