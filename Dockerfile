@@ -11,6 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Chicago' | debconf-set-selections
 
+# We install an older version of python here for testing to make sure vllm works with older versions of Python.
+# For the actual openai compatible server, we will use the latest version of Python.
 RUN apt-get update -y \
     && apt-get install -y software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa -y \
