@@ -35,13 +35,15 @@ async def generate(request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     prefix_pos = request_dict.pop("prefix_pos", None)
     stream = request_dict.pop("stream", False)
+    lora_request = request_dict.pop("lora_request", None)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
     results_generator = engine.generate(prompt,
                                         sampling_params,
                                         request_id,
-                                        prefix_pos=prefix_pos)
+                                        prefix_pos=prefix_pos,
+                                        lora_request=lora_request)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
