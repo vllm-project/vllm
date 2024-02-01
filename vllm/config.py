@@ -15,12 +15,6 @@ logger = init_logger(__name__)
 _GB = 1 << 30
 
 
-class DeviceConfig:
-
-    def __init__(self, device: str = "cuda") -> None:
-        self.device = torch.device(device)
-
-
 class ModelConfig:
     """Configuration for the model.
 
@@ -448,6 +442,12 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+
+
+class DeviceConfig:
+
+    def __init__(self, device: str = "cuda") -> None:
+        self.device = torch.device(device)
 
 
 @dataclass
