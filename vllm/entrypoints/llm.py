@@ -43,6 +43,11 @@ class LLM:
             the `quantization_config` attribute in the model config file. If
             that is None, we assume the model weights are not quantized and use
             `dtype` to determine the data type of the weights.
+        sparsity: The format of the sparse model weights. Currently,
+            we support "sparse_w16a16". If None, we first check the `sparsity` 
+            attribute in the model config file. If that is None, we assume the 
+            model weights are dense and use `dtype` to determine the data 
+            type of the weights.
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id.
         tokenizer_revision: The specific tokenizer version to use. It can be a
@@ -76,6 +81,7 @@ class LLM:
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         quantization: Optional[str] = None,
+        sparsity: Optional[str] = None,
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         seed: int = 0,
@@ -96,6 +102,7 @@ class LLM:
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             quantization=quantization,
+            sparsity=sparsity,
             revision=revision,
             tokenizer_revision=tokenizer_revision,
             seed=seed,
