@@ -9,6 +9,7 @@ import uvicorn
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
+from vllm.lora.request import LoRARequest
 from vllm.utils import random_uuid
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
@@ -36,6 +37,7 @@ async def generate(request: Request) -> Response:
     prefix_pos = request_dict.pop("prefix_pos", None)
     stream = request_dict.pop("stream", False)
     lora_request = request_dict.pop("lora_request", None)
+    lora_params = LoRARequest(**lora_request) if lora_request else None
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
@@ -43,7 +45,7 @@ async def generate(request: Request) -> Response:
                                         sampling_params,
                                         request_id,
                                         prefix_pos=prefix_pos,
-                                        lora_request=lora_request)
+                                        lora_request=lora_params)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
