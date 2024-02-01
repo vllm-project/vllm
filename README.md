@@ -82,29 +82,35 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):
 
 ```bash
-pip install vllm
+git clone https://github.com/neuralmagic/magic_wand.git
+cd magic_wand
+export TORCH_CUDA_ARCH_LIST=8.6
+pip install -e .
 ```
 
-## Getting Started
+Install:
+```bash
+cd ../
+pip install -e .
+```
 
-Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to get started.
-- [Installation](https://vllm.readthedocs.io/en/latest/getting_started/installation.html)
-- [Quickstart](https://vllm.readthedocs.io/en/latest/getting_started/quickstart.html)
-- [Supported Models](https://vllm.readthedocs.io/en/latest/models/supported_models.html)
+### Run Sample
 
-## Contributing
+Run a 50% sparse model:
 
-We welcome and value any contributions and collaborations.
-Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
+```bash
+from vllm import LLM, SamplingParams
 
-## Citation
+model = LLM(
+    "nm-testing/Llama-2-7b-pruned50-retrained", 
+    sparsity="sparse_w16a16",   # If left off, model will be loaded as dense
+    enforce_eager=True,         # Does not work with cudagraphs yet
+    dtype="float16",
+    tensor_parallel_size=1,
+    max_model_len=1024
+)
 
-If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
-```bibtex
-@inproceedings{kwon2023efficient,
-  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
-  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
-  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
-  year={2023}
-}
+sampling_params = SamplingParams(max_tokens=100, temperature=0)
+outputs = model.generate("Hello my name is", sampling_params=sampling_params)
+outputs[0].outputs[0].text
 ```

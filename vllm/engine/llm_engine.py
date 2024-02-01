@@ -91,6 +91,7 @@ class LLMEngine:
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"disable_custom_all_reduce={parallel_config.disable_custom_all_reduce}, "
             f"quantization={model_config.quantization}, "
+            f"sparsity={model_config.sparsity}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"device_config={device_config.device}, "

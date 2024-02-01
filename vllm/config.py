@@ -77,6 +77,7 @@ class ModelConfig:
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        sparsity: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
     ) -> None:
@@ -91,6 +92,7 @@ class ModelConfig:
         self.code_revision = code_revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
+        self.sparsity = sparsity
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
 
@@ -116,6 +118,7 @@ class ModelConfig:
         self._verify_load_format()
         self._verify_tokenizer_mode()
         self._verify_quantization()
+        self._verify_sparsity()
         self._verify_cuda_graph()
 
     def _verify_load_format(self) -> None:
@@ -153,6 +156,30 @@ class ModelConfig:
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
+
+    def _verify_sparsity(self) -> None:
+        supported_sparsity = ["sparse_w16a16"]
+
+        if self.quantization is not None:
+            raise ValueError("Both sparsity and quantization detected. Only "
+                             "one or the other is supported at a time.")
+
+        if self.sparsity is not None and self.sparsity not in supported_sparsity:
+            raise ValueError(f"Unknown sparse method: {self.sparsity}. Must "
+                             f"be one of {supported_sparsity}.")
+
+        hf_sparsity_config = getattr(self.hf_config, "sparsity_config", None)
+        if hf_sparsity_config is not None:
+            hf_sparsity_method = str(
+                hf_sparsity_config["sparse_method"]).lower()
+            if self.sparsity is None:
+                self.sparsity = hf_sparsity_method
+            elif self.sparsity != hf_sparsity_method:
+                raise ValueError(
+                    "Sparsity method specified in the model config "
+                    f"({hf_sparsity_method}) does not match the sparsity "
+                    f"method specified in the `sparsity` argument "
+                    f"({self.sparsity}).")
 
     def _verify_quantization(self) -> None:
         supported_quantization = ["awq", "gptq", "squeezellm"]
