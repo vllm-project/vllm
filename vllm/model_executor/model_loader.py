@@ -5,7 +5,7 @@ from typing import Optional, Type
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, LoRAConfig
+from vllm.config import DeviceConfig, ModelConfig, LoRAConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
@@ -38,6 +38,7 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
 
 
 def get_model(model_config: ModelConfig,
+              device_config: DeviceConfig,
               lora_config: Optional[LoRAConfig] = None) -> nn.Module:
     model_class = _get_model_architecture(model_config)
 
@@ -64,7 +65,7 @@ def get_model(model_config: ModelConfig,
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        with torch.device("cuda"):
+        with torch.device(device_config.device):
             if getattr(model_class, "supports_lora", False):
                 model = model_class(model_config.hf_config, linear_method,
                                     lora_config)

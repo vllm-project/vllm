@@ -25,6 +25,7 @@ def main(args: argparse.Namespace):
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
+        device=args.device,
     )
 
     sampling_params = SamplingParams(
@@ -135,5 +136,11 @@ if __name__ == '__main__':
         default=None,
         help=('path to save the pytorch profiler output. Can be visualized '
               'with ui.perfetto.dev or Tensorboard.'))
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda"],
+        help='device type for vLLM execution, supporting CUDA only currently.')
     args = parser.parse_args()
     main(args)

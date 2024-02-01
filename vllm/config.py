@@ -444,6 +444,12 @@ class SchedulerConfig:
                 f"({self.max_num_seqs}).")
 
 
+class DeviceConfig:
+
+    def __init__(self, device: str = "cuda") -> None:
+        self.device = torch.device(device)
+
+
 @dataclass
 class LoRAConfig:
     max_lora_rank: int
