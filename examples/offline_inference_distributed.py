@@ -19,7 +19,7 @@ ray.init(
             "numpy<1.24",  # remove when mlflow updates beyond 2.2
             "torch",
         ]
-})
+    })
 
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
