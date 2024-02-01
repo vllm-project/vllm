@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig, LoRAConfig, DeviceConfig
+from vllm.config import (ModelConfig, ParallelConfig, SchedulerConfig,
+                         DeviceConfig, LoRAConfig)
 from vllm.worker.worker import Worker
 
 
