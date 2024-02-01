@@ -305,7 +305,8 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
-        return model_config, cache_config, parallel_config, scheduler_config, device_config, lora_config
+        return (model_config, cache_config, parallel_config, scheduler_config,
+                device_config, lora_config)
 
 
 @dataclass
