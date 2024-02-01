@@ -128,13 +128,13 @@ class EngineArgs:
             '--kv-cache-dtype',
             type=str,
             choices=['auto', 'fp8_e5m2'],
-            default='auto',
+            default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. Note FP8 is not supported when cuda version is '
             'lower than 11.8.')
         parser.add_argument('--max-model-len',
                             type=int,
-                            default=None,
+                            default=EngineArgs.max_model_len,
                             help='model context length. If unspecified, '
                             'will be automatically derived from the model.')
         # Parallel arguments
@@ -155,6 +155,7 @@ class EngineArgs:
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
+            default=EngineArgs.max_parallel_loading_workers,
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
@@ -201,7 +202,7 @@ class EngineArgs:
                             '-q',
                             type=str,
                             choices=['awq', 'gptq', 'squeezellm', None],
-                            default=None,
+                            default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
                             'None, we first check the `quantization_config` '
                             'attribute in the model config file. If that is '
@@ -259,10 +260,10 @@ class EngineArgs:
         parser.add_argument(
             "--device",
             type=str,
-            default="cuda",
+            default=EngineArgs.device,
             choices=["cuda"],
-            help=
-            'device type for vLLM execution, supporting CUDA only currently.')
+            help=('Device type for vLLM execution. '
+                  'Currently, only CUDA-compatible devices are supported.'))
         return parser
 
     @classmethod
