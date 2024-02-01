@@ -228,7 +228,8 @@ def create_kv_caches_with_random(
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":

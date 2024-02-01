@@ -25,18 +25,20 @@ def main(
     dtype: torch.dtype,
     seed: int,
     do_profile: bool,
+    device: str = "cuda",
     kv_cache_dtype: Optional[str] = None,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
     scale = float(1.0 / (head_size**0.5))
     query = torch.empty(num_seqs,
                         num_query_heads,
                         head_size,
                         dtype=dtype,
-                        device="cuda")
+                        device=device)
     query.uniform_(-scale, scale)
 
     assert num_query_heads % num_kv_heads == 0
@@ -44,11 +46,11 @@ def main(
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads,
                                    dtype=torch.float,
-                                   device="cuda")
+                                   device=device)
 
     context_lens = [context_len for _ in range(num_seqs)]
     max_context_len = max(context_lens)
-    context_lens = torch.tensor(context_lens, dtype=torch.int, device="cuda")
+    context_lens = torch.tensor(context_lens, dtype=torch.int, device=device)
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
@@ -59,12 +61,17 @@ def main(
             for _ in range(max_num_blocks_per_seq)
         ]
         block_tables.append(block_table)
-    block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
+    block_tables = torch.tensor(block_tables, dtype=torch.int, device=device)
 
     # Create the KV cache.
-    key_caches, value_caches = create_kv_caches_with_random(
-        NUM_BLOCKS, block_size, 1, num_kv_heads, head_size, kv_cache_dtype,
-        dtype)
+    key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
+                                                            block_size,
+                                                            1,
+                                                            num_kv_heads,
+                                                            head_size,
+                                                            kv_cache_dtype,
+                                                            dtype,
+                                                            device=device)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
@@ -84,7 +91,7 @@ def main(
         )
         max_logits = torch.empty_like(exp_sums)
 
-    def run_benchmark(num_iters: int, profile: bool = False) -> float:
+    def run_cuda_benchmark(num_iters: int, profile: bool = False) -> float:
         torch.cuda.synchronize()
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
@@ -135,6 +142,7 @@ def main(
 
     # Warmup.
     print("Warming up...")
+    run_benchmark = run_cuda_benchmark
     run_benchmark(num_iters=3, profile=False)
 
     # Benchmark.
@@ -175,6 +183,7 @@ if __name__ == '__main__':
         default="auto",
         help=
         'Data type for kv cache storage. If "auto", will use model data type.')
+    parser.add_argument("--device", type=str, choices=["cuda"], default="cuda")
     args = parser.parse_args()
     print(args)
 

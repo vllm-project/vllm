@@ -6,7 +6,7 @@ from vllm.worker.model_runner import ModelRunner
 
 
 def test_prepare_prompt():
-    model_runner = ModelRunner(None, None, None, None)
+    model_runner = ModelRunner(None, None, None, None, None)
     model_runner.set_block_size(16)
 
     batch_size = random.randint(1, 256)

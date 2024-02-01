@@ -96,7 +96,6 @@ class AWQLinearMethod(LinearMethodBase):
             torch.empty(
                 input_size_per_partition,
                 output_size_per_partition // self.quant_config.pack_factor,
-                device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -112,7 +111,6 @@ class AWQLinearMethod(LinearMethodBase):
             torch.empty(
                 input_size_per_partition // self.quant_config.group_size,
                 output_size_per_partition // self.quant_config.pack_factor,
-                device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -128,7 +126,6 @@ class AWQLinearMethod(LinearMethodBase):
             torch.empty(
                 input_size_per_partition // self.quant_config.group_size,
                 output_size_per_partition,
-                device="cuda",
                 dtype=params_dtype,
             ),
             requires_grad=False,
