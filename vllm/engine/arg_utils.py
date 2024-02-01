@@ -1,13 +1,108 @@
 import argparse
 import dataclasses
+import torch
+import io
+import os
+import typing
+
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple, Union, Callable, Any
 
 from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig,
                          VisionLanguageConfig)
 from vllm.utils import str_to_int_tuple
+
+
+@dataclass
+class TensorizerArgs:
+    download_dir: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO, str,
+                        bytes, os.PathLike, int, ]
+    device: Optional[Union[torch.device, str]] = None
+    dtype: Optional[torch.dtype] = None
+    ## Commenting out serializer_encryption until I work out how I want to implement it
+    # serializer_encryption: Optional[bool] = False
+    lazy_load: bool = False
+    plaid_mode: bool = False
+    plaid_mode_buffers: Optional[int] = None
+    verify_hash: bool = False
+    filter_func: Optional[Callable[[str], Union[bool, Any]]] = None
+    deserializer_encryption_key: Optional[str] = None
+
+    def __post_init__(self):
+        self.file_obj = self.download_dir
+        self.serializer_params = {
+            #    "encryption": self.serializer_encryption
+        }
+
+        # Omitting self.dtype and self.device as this behaves weirdly
+        self.deserializer_params = {
+            "filter_func": self.filter_func,
+            "lazy_load": self.lazy_load,
+            "plaid_mode": self.plaid_mode,
+            "plaid_mode_buffers": self.plaid_mode_buffers,
+            "verify_hash": self.verify_hash,
+            "encryption": self.deserializer_encryption_key,
+            # "dtype":self.dtype,
+            # "device":self.device,
+        }
+
+    @staticmethod
+    def add_cli_args(
+            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Tensorizer CLI arguments"""
+        # TODO: Add support for encryption -- CLI args can be base64 encoded
+        #       key/password for --serializer-encryption. Need to revist
+        parser.add_argument(
+            "--serializer-encryption",
+            action='store_true',
+            help="An `EncryptionParams` object holding a password or key"
+            "to use for encryption. If None, no encryption will be used.")
+        parser.add_argument(
+            "--lazy-load",
+            action='store_true',
+            help="If True, tensors will be loaded and cached when keys are"
+            "accessed. If False, all tensors will be loaded into memory up"
+            "front.")
+        parser.add_argument(
+            "--plaid-mode",
+            action='store_true',
+            help="If True, tensors will be loaded extremely fast into the"
+            "target device. This is only supported on CUDA devices,"
+            "and the buffers are going to be inconsistent due to the extreme"
+            "naughtiness of reusing a backing buffer. This is only recommended"
+            "for use with inference, and not training.")
+        parser.add_argument(
+            "--plaid-mode-buffers",
+            default=None,
+            help="The number of buffers to use in plaid mode."
+            "This is only used if ``plaid_mode=True``. These buffers"
+            "are used to pipeline the loading and processing of tensors.")
+        parser.add_argument(
+            "--verify-hash",
+            action='store_true',
+            help="If True, the hashes of each tensor will be verified"
+            "against the hashes stored in the metadata. A `HashMismatchError`"
+            "will be raised if any of the hashes do not match.")
+        parser.add_argument(
+            "--deserializer-encryption-key",
+            default=None,
+            help="A `DecryptionParams` object holding a password or key"
+            "to use for decryption. ``None`` (the default) means no decryption."
+        )
+        return parser
+
+    @classmethod
+    def from_cli_args(cls, args: argparse.Namespace) -> 'TensorizerArgs':
+        # Get the list of attributes of this dataclass.
+        attrs = [attr.name for attr in dataclasses.fields(cls)]
+        # Set the attributes from the parsed arguments.
+        tensorizer_args = cls(**{
+            attr: getattr(args, attr)
+            for attr in attrs if hasattr(args, attr)
+        })
+        return tensorizer_args
 
 
 @dataclass
@@ -53,6 +148,7 @@ class EngineArgs:
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
+    tensorizer_args: Optional[TensorizerArgs] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
     forced_num_gpu_blocks: Optional[int] = None
@@ -135,7 +231,9 @@ class EngineArgs:
             '--load-format',
             type=str,
             default=EngineArgs.load_format,
-            choices=['auto', 'pt', 'safetensors', 'npcache', 'dummy'],
+            choices=[
+                'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer'
+            ],
             help='The format of the model weights to load. '
             '"auto" will try to load the weights in the safetensors format '
             'and fall back to the pytorch bin format if safetensors format '
@@ -145,7 +243,10 @@ class EngineArgs:
             '"npcache" will load the weights in pytorch format and store '
             'a numpy cache to speed up the loading. '
             '"dummy" will initialize the weights with random values, '
-            'which is mainly for profiling.')
+            'which is mainly for profiling.'
+            '"tensorizer" will load the weights using tensorizer from CoreWeave,'
+            'which assumes tensorizer_path is set to the location of the serialized weights.'
+        )
         parser.add_argument(
             '--dtype',
             type=str,
@@ -411,7 +512,14 @@ class EngineArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        engine_args = cls(**{
+            attr: getattr(args, attr)
+            for attr in attrs if hasattr(args, attr)
+        })
+        # Check if the tensorizer_args is in the CLI arguments
+        if args.load_format == "tensorizer":
+            # Create an instance of TensorizerArgs using the from_cli_args method
+            engine_args.tensorizer_args = TensorizerArgs.from_cli_args(args)
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
@@ -421,8 +529,8 @@ class EngineArgs:
             self.trust_remote_code, self.download_dir, self.load_format,
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
-            self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.max_logprobs)
+            self.quantization_param_path,self.enforce_eager, self.max_context_len_to_capture, self.tensorizer_args,
+            self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

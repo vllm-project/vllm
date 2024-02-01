@@ -3,9 +3,10 @@ import contextlib
 from typing import Tuple, Type
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from vllm.config import DeviceConfig, ModelConfig
+from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
@@ -98,6 +99,13 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
             initialize_dummy_weights(model)
         else:
             # Load the weights from the cached or downloaded files.
-            model.load_weights(model_config.model, model_config.download_dir,
-                               model_config.load_format, model_config.revision)
+            if model_config.load_format == "tensorizer":
+                # Provide a dynamic load format for `model.load_weights` to retain tensorizer args from CLI.
+                model_config.load_format = ("tensorizer", model_config.tensorizer_args)
+            model.load_weights(
+                model_config.model,
+                model_config.download_dir,
+                model_config.load_format,
+                model_config.revision,
+            )
     return model.eval()

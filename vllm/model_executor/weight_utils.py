@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 from collections import defaultdict
-from typing import Any, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Iterable, Iterator, List, Optional, Tuple, Union
 
 import filelock
 import huggingface_hub.constants
@@ -14,6 +14,7 @@ import torch
 from huggingface_hub import HfFileSystem, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from tensorizer.serialization import TensorDeserializer
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -161,7 +162,8 @@ def prepare_hf_model_weights(
     revision: Optional[str] = None,
 ) -> Tuple[str, List[str], bool]:
     # Download model weights from huggingface.
-    is_local = os.path.isdir(model_name_or_path)
+    is_local = os.path.isdir(
+        model_name_or_path) and load_format != "tensorizer"
     use_safetensors = False
     # Some quantized models use .pt files for storing the weights.
     if load_format == "auto":
@@ -173,6 +175,8 @@ def prepare_hf_model_weights(
         allow_patterns = ["*.pt"]
     elif load_format == "npcache":
         allow_patterns = ["*.bin"]
+    elif load_format == "tensorizer":
+        allow_patterns = ["*.tensors"]
     else:
         raise ValueError(f"Unknown load_format: {load_format}")
 
@@ -224,6 +228,9 @@ def prepare_hf_model_weights(
             if not any(f.endswith(x) for x in blacklist)
         ]
 
+    if load_format == "tensorizer":
+        return hf_folder, hf_weights_files, use_safetensors
+
     if len(hf_weights_files) == 0:
         raise RuntimeError(
             f"Cannot find any model weights with `{model_name_or_path}`")
@@ -234,10 +241,15 @@ def prepare_hf_model_weights(
 def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
-    load_format: str = "auto",
+    dynamic_load_format: Union[Tuple, str] = "auto",
     revision: Optional[str] = None,
     fall_back_to_pt: Optional[bool] = True,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
+    if isinstance(dynamic_load_format, tuple):
+        load_format, tensorizer_args = dynamic_load_format
+    else:
+        load_format = dynamic_load_format
+        tensorizer_args = None
     hf_folder, hf_weights_files, use_safetensors = prepare_hf_model_weights(
         model_name_or_path,
         cache_dir=cache_dir,
@@ -277,6 +289,12 @@ def hf_model_weights_iterator(
             with open(param_path, "rb") as f:
                 param = np.load(f)
             yield name, torch.from_numpy(param)
+    elif load_format == "tensorizer":
+        deserializer_args = tensorizer_args.deserializer_params
+        with TensorDeserializer(cache_dir, **deserializer_args) as state:
+            for name, param in state.items():
+                yield name, param
+        del state
     elif use_safetensors:
         for st_file in hf_weights_files:
             with safe_open(st_file, framework="pt") as f:
