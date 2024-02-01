@@ -235,7 +235,9 @@ def fused_moe(hidden_states: torch.Tensor,
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
-    assert hidden_states.dtype in [torch.float16, torch.bfloat16]
+    assert hidden_states.dtype in [
+        torch.float32, torch.float16, torch.bfloat16
+    ]
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
 
