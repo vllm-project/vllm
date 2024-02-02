@@ -65,6 +65,24 @@ class MarlinConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+
+class MarlinWorkspace:
+
+    def __init__(self, out_features):
+        max_parallel = 16
+        min_n_threads = 64
+
+        assert (
+            out_features % min_n_threads == 0
+        ), "out_features = {out_features} is not divisible by min_n_threads = {min_n_threads}"
+
+        max_workspace_size = (out_features // min_n_threads) * max_parallel
+
+        self.scratch = torch.zeros(max_workspace_size,
+                                   dtype=torch.int,
+                                   device="cuda")
+
+
 class MarlinLinearMethod(LinearMethodBase):
     """Linear method for Marlin.
 
@@ -187,19 +205,18 @@ class MarlinLinearMethod(LinearMethodBase):
         scales = weights["s"]
         workspace = weights["workspace"]
 
-        output = torch.empty(x.shape[:-1] + (scales.shape[1], ),
-                             dtype=x.dtype,
-                             device=x.device)
+        x_2d = x.view(-1, x.shape[-1])
 
-        ops.marlin_gemm(
-            x.view(-1, x.shape[-1]),
-            qweight,
-            output.view(-1, output.shape[-1]),
-            scales,
-            workspace,
-        )
+        size_m = x_2d.shape[0]
+        size_k = x_2d.shape[1]
+        size_n = scales.shape[1]
+
+        output_2d = ops.marlin_gemm(x_2d, qweight, scales, workspace.scratch,
+                                    size_m, size_n, size_k)
+
+        output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 
         if bias is not None:
-            output.add_(bias)
+            output.add_(bias)  # In-place add
 
         return output
