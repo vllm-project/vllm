@@ -57,7 +57,7 @@ class Metrics:
                 0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
                 0.75, 1.0, 2.5, 5.0, 7.5, 10.0
             ])
-        self.histogram_time_per_output_tokens = Histogram(
+        self.histogram_time_per_output_token = Histogram(
             name="vllm:time_per_output_token_seconds",
             documentation="Histogram of time per output token in seconds.",
             labelnames=labelnames,
@@ -154,7 +154,7 @@ class StatLogger:
             self.metrics.histogram_time_to_first_token.labels(
                 **self.labels).observe(ttft)
         for tpot in stats.time_per_output_tokens:
-            self.metrics.histogram_time_per_output_tokens.labels(
+            self.metrics.histogram_time_per_output_token.labels(
                 **self.labels).observe(tpot)
         for e2e in stats.time_e2e_requests:
             self.metrics.histogram_e2e_request_latency.labels(
