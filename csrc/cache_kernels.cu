@@ -4,12 +4,19 @@
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
+#ifdef ENABLE_FP8_E5M2
 #include "quantization/fp8_e5m2_kvcache/quant_utils.cuh"
+#endif
 
 #include <algorithm>
 #include <cassert>
 #include <map>
 #include <vector>
+
+#ifdef USE_ROCM
+  #include <hip/hip_bf16.h>
+  typedef __hip_bfloat16 __nv_bfloat16;
+#endif
 
 void swap_blocks(
   torch::Tensor& src,

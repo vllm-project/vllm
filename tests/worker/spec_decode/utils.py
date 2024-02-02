@@ -84,7 +84,7 @@ def create_worker(cls: type,
     )
 
     (model_config, cache_config, parallel_config, scheduler_config,
-     _) = engine_args.create_engine_configs()
+     device_config, _) = engine_args.create_engine_configs()
 
     distributed_init_method = get_distributed_init_method(
         get_ip(), get_open_port())
@@ -93,6 +93,7 @@ def create_worker(cls: type,
         model_config=model_config,
         parallel_config=parallel_config,
         scheduler_config=scheduler_config,
+        device_config=device_config,
         local_rank=0,
         rank=0,
         distributed_init_method=distributed_init_method,
