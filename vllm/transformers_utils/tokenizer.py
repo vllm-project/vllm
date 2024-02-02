@@ -27,12 +27,20 @@ def get_tokenizer(
         kwargs["use_fast"] = False
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            tokenizer_revision=tokenizer_revision,
-            **kwargs)
+        if 'Baichuan' in tokenizer_name:
+            tokenizer = BaichuanTokenizer(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                tokenizer_revision=tokenizer_revision,
+                **kwargs)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                tokenizer_revision=tokenizer_revision,
+                **kwargs)
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -45,18 +53,6 @@ def get_tokenizer(
                 "library, consider setting `trust_remote_code=True` in LLM "
                 "or using the `--trust-remote-code` flag in the CLI.")
             raise RuntimeError(err_msg) from e
-        else:
-            raise e
-    except AttributeError as e:
-        if "BaichuanTokenizer" in str(e):
-            # This is for the error "'BaichuanTokenizer' object has no
-            # attribute 'sp_model'".
-            tokenizer = BaichuanTokenizer.from_pretrained(
-                tokenizer_name,
-                *args,
-                trust_remote_code=trust_remote_code,
-                tokenizer_revision=tokenizer_revision,
-                **kwargs)
         else:
             raise e
 
