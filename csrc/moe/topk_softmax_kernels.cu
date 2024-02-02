@@ -475,8 +475,8 @@ void topk_softmax(
     const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(gating_output));
-    torch::Tensor softmax_workspace = torch::empty({workspace_size}, gating_output.options());
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    torch::Tensor softmax_workspace = torch::empty({workspace_size}, gating_output.options());
     vllm::moe::topkGatingSoftmaxKernelLauncher(
         gating_output.data_ptr<float>(),
         topk_weights.data_ptr<float>(),
