@@ -29,6 +29,7 @@
 #include <cub/util_type.cuh>
 
 namespace vllm {
+namespace moe {
 
 static constexpr int WARP_SIZE = 32;
 
@@ -456,6 +457,7 @@ void topkGatingSoftmaxKernelLauncher(
     }
 }
 
+} // namespace moe
 } // namespace vllm
 
 void topk_softmax(
@@ -475,7 +477,7 @@ void topk_softmax(
     const at::cuda::OptionalCUDAGuard device_guard(device_of(gating_output));
     torch::Tensor softmax_workspace = torch::empty({workspace_size}, gating_output.options());
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    vllm::topkGatingSoftmaxKernelLauncher(
+    vllm::moe::topkGatingSoftmaxKernelLauncher(
         gating_output.data_ptr<float>(),
         topk_weights.data_ptr<float>(),
         topk_indices.data_ptr<int>(),
