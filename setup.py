@@ -317,6 +317,18 @@ if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
+    abs_root_dir = os.path.abspath(ROOT_DIR)
+    ext_modules.append(
+        CUDAExtension(
+            name="vllm._moe_C",
+            sources=["csrc/moe/moe_ops.cc"] + glob("csrc/moe/*.cu"),
+            include_dirs=[os.path.join(abs_root_dir, "third_party/cutlass/include/")],
+            extra_compile_args={
+                "cxx": CXX_FLAGS,
+                "nvcc": NVCC_FLAGS_PUNICA, # FIXME
+            },
+        ))
+
 if not _is_neuron():
     vllm_extension = CUDAExtension(
         name="vllm._C",
