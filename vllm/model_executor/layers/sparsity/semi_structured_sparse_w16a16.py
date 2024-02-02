@@ -1,37 +1,32 @@
-from typing import Any, Dict, List, Type
-
 import torch
 
+from typing import Any, Dict, List, Type
 from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
-
 from .sparse_w16a16_linear_method import SparseW16A16LinearMethod
-from magic_wand import (CompressedStorageFormat, SparseBitmaskStorageFormat)
+from magic_wand import (CompressedStorageFormat,
+                        SparseSemiStructuredStorageFormat)
 
 
-class SparseW16A16Config(SparsityConfig):
-    """Config class for SparseW16A16.
-
-    TODO: Add based on need
-    """
+class SemiStructuredSparseW16A16Config(SparsityConfig):
+    """Config class for SemiStructuredSparseW16A16."""
 
     def __init__(self) -> None:
-        # TODO: Add new configs here
         pass
 
     def __repr__(self) -> str:
-        return "SparseW16A16Config()"
+        return "SemiStructuredSparseW16A16Config()"
 
     @classmethod
     def get_storage_format_cls(cls) -> Type[CompressedStorageFormat]:
-        return SparseBitmaskStorageFormat
+        return SparseSemiStructuredStorageFormat
 
     @classmethod
     def get_name(cls) -> str:
-        return "sparse_w16a16"
+        return "semi_structured_sparse_w16a16"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.half]
+        return [torch.float16, torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -43,7 +38,8 @@ class SparseW16A16Config(SparsityConfig):
         return ["sparsity_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "SparseW16A16Config":
+    def from_config(
+            cls, config: Dict[str, Any]) -> "SemiStructuredSparseW16A16Config":
         return cls()
 
     def get_linear_method(self) -> "SparseW16A16LinearMethod":
