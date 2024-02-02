@@ -69,6 +69,14 @@ class OpenAIServingChat(OpenAIServing):
                     request, prompt_ids=prompt_ids)
             except ValueError as e:
                 return self.create_error_response(str(e))
+        elif "Baichuan" in request.model:
+            prompt_ids = self.tokenizer.build_chat_input(request.messages)
+            prompt = self.tokenizer.decode(prompt_ids)
+            try:
+                token_ids = self._validate_prompt_and_tokenize(
+                    request, prompt_ids=prompt_ids)
+            except ValueError as e:
+                return self.create_error_response(str(e))
         else:
             try:
                 prompt = self.tokenizer.apply_chat_template(
