@@ -7,6 +7,7 @@ from vllm._C import ops
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
+
 class MarlinConfig(QuantizationConfig):
     """Config class for Marlin.
 
@@ -21,17 +22,25 @@ class MarlinConfig(QuantizationConfig):
         self.group_size = group_size
         if self.group_size != 128 and self.group_size != -1:
             raise ValueError(
-                 "Currently, only group size 128 and -1 (channelwise) is supported for "
+                "Currently, only group size 128 and -1 (channelwise) is supported for "
                 f"Marlin, but got group_size of {self.group_size}")
 
         # 4 Bits packed into 32 bit datatype.
         self.pack_factor = 32 // 4
+
         # Tile size used by marlin kernels.
         self.tile_size = 16
-        # Data for workspace.
+
+        # Min out_features dim
+        self.min_n_threads = 64
+
+        # Min in_features dim
+        self.min_k_threads = 128
+
+        # Max parallel problems to solve at once (improves large batch performance)
         self.max_parallel = 16
-        self.min_n_threads = 128
-        # Permutation length use by the marlin kernels.
+
+        # Permutation length used by the marlin kernels.
         self.perm_len = 1024
 
     def __repr__(self) -> str:
@@ -66,23 +75,6 @@ class MarlinConfig(QuantizationConfig):
         return []
 
 
-class MarlinWorkspace:
-
-    def __init__(self, out_features):
-        max_parallel = 16
-        min_n_threads = 64
-
-        assert (
-            out_features % min_n_threads == 0
-        ), "out_features = {out_features} is not divisible by min_n_threads = {min_n_threads}"
-
-        max_workspace_size = (out_features // min_n_threads) * max_parallel
-
-        self.scratch = torch.zeros(max_workspace_size,
-                                   dtype=torch.int,
-                                   device="cuda")
-
-
 class MarlinLinearMethod(LinearMethodBase):
     """Linear method for Marlin.
 
@@ -101,36 +93,36 @@ class MarlinLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
-        # del output_size  # Unused.
+        del output_size  # Unused.
+
         if params_dtype != torch.float16:
             raise ValueError(
                 f"The params dtype must be float16, but got {params_dtype}")
-        if input_size_per_partition % self.quant_config.group_size != 0:
-            raise ValueError(
-                "The input size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size.")
-        if output_size_per_partition % self.quant_config.pack_factor != 0:
-            raise ValueError(
-                "The output size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size.")
-        if input_size_per_partition % 128 != 0:
-            raise ValueError(
-                "The input_size_per_partition must be divisible by 128, "
-                f"but got {input_size_per_partition}")
-        if output_size_per_partition % 256 != 0:
-            raise ValueError(
-                "The output_size_per_partition must be divisible by 256, "
-                f"but got {output_size_per_partition}")
+
+        # Validate output_size_per_partition
         if output_size_per_partition % self.quant_config.min_n_threads != 0:
             raise ValueError(
-                "The output_size per partition must be divisible by the minimum "
-                f"number of threads {self.quant_config.min_n_threads}, but got {output_size_per_partition}"
+                f"Weight output_size_per_partition = {output_size_per_partition} is not divisible by min_n_threads = {self.quant_config.min_n_threads}."
+            )
+        if output_size_per_partition % self.quant_config.pack_factor != 0:
+            raise ValueError(
+                f"Weight output_size_per_partition = {output_size_per_partition} is not divisible by pack_factor = {self.quant_config.pack_factor}."
             )
 
-        # check that we have at least 4 tiles horizontally in the shard
-        num_tiles_per_perm = self.quant_config.perm_len // (self.quant_config.tile_size**2)
+        # Validate input_size_per_partition
+        if input_size_per_partition % self.quant_config.min_k_threads != 0:
+            raise ValueError(
+                f"Weight input_size_per_partition = {input_size_per_partition} is not divisible by min_k_threads = {self.quant_config.min_k_threads}."
+            )
+        if self.quant_config.group_size != -1:
+            if input_size_per_partition % self.quant_config.group_size != 0:
+                raise ValueError(
+                    f"Weight input_size_per_partition = f{input_size_per_partition} is not divisible by group_size = {self.quant_config.group_size}."
+                )
+
+        # Check that we have at least 4 tiles horizontally in the shard
+        num_tiles_per_perm = self.quant_config.perm_len // (
+            self.quant_config.tile_size**2)
         if output_size_per_partition % num_tiles_per_perm != 0:
             raise ValueError(
                 "Each permutation group must reside on the same gpu")
@@ -179,15 +171,14 @@ class MarlinLinearMethod(LinearMethodBase):
             },
         )
 
-        max_workspace_size = (output_size_per_partition // self.quant_config.min_n_threads) * self.quant_config.max_parallel
-        workspace = Parameter(
-            torch.zeros(
-                max_workspace_size,
-                device="cuda",
-                dtype=torch.int
-            ),
-            requires_grad=False
-        )
+        # Allocate workspace (Used for internal locking mechanism)
+        max_workspace_size = (
+            output_size_per_partition //
+            self.quant_config.min_n_threads) * self.quant_config.max_parallel
+        workspace = Parameter(torch.zeros(max_workspace_size,
+                                          device="cuda",
+                                          dtype=torch.int),
+                              requires_grad=False)
 
         return {
             "B": qweight,
@@ -211,8 +202,8 @@ class MarlinLinearMethod(LinearMethodBase):
         size_k = x_2d.shape[1]
         size_n = scales.shape[1]
 
-        output_2d = ops.marlin_gemm(x_2d, qweight, scales, workspace.scratch,
-                                    size_m, size_n, size_k)
+        output_2d = ops.marlin_gemm(x_2d, qweight, scales, workspace, size_m,
+                                    size_n, size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 
