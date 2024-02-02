@@ -5,8 +5,18 @@ name: Create Release
 
 on:
   push:
-    tags:
-      - v*
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string   
 
 # Needed to create release and upload assets
 permissions:
