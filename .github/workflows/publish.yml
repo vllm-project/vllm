@@ -60,7 +60,7 @@ jobs:
           os: ['ubuntu-22.04']
           python-version: ['3.10', '3.11']
           pytorch-version: ['2.2.0']  # Must be the most recent version that meets requirements.txt.
-          cuda-version: ['12.1', '12.2']
+          cuda-version: ['12.1']
 
     steps:
       - name: Checkout
