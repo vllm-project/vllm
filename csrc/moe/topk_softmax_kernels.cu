@@ -25,14 +25,8 @@
 #include <sstream>
 
 #include "cutlass/array.h"
-
 #include <cub/cub.cuh>
 #include <cub/util_type.cuh>
-
-// FIXME(woosuk)
-#ifndef ENABLE_BF16
-#define ENABLE_BF16
-#endif
 
 namespace vllm {
 
