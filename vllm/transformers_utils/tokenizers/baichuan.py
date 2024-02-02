@@ -2,10 +2,8 @@
 # https://huggingface.co/baichuan-inc/Baichuan2-13B-Chat/blob/99fe8c0fb8bfb8e821d281c4302eb98999e50761/generation_utils.py
 
 from typing import List
-from queue import Queue
 import types
 
-import torch
 from transformers import AutoTokenizer
 
 BAI_CHUAN_CONFIG = {
