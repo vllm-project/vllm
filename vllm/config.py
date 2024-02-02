@@ -158,7 +158,7 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
 
     def _verify_sparsity(self) -> None:
-        supported_sparsity = ["sparse_w16a16"]
+        supported_sparsity = ["sparse_w16a16", "semi_structured_sparse_w16a16"]
 
         if self.quantization is not None:
             raise ValueError("Both sparsity and quantization detected. Only "
