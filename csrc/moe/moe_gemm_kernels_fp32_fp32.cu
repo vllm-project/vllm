@@ -14,11 +14,9 @@
  * limitations under the License.
  */
 
-#include "tensorrt_llm/kernels/cutlass_kernels/moe_gemm/moe_gemm_kernels_template.h"
+#include "moe_gemm_kernels_template.h"
 
 namespace tensorrt_llm
 {
-#ifdef ENABLE_BF16
-template class MoeGemmRunner<__nv_bfloat16, uint8_t>;
-#endif
-} // namespace tensorrt_llm
+template class MoeGemmRunner<float, float>;
+}

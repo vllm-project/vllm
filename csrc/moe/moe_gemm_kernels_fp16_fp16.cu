@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-#include "tensorrt_llm/kernels/cutlass_kernels/moe_gemm/moe_gemm_kernels_template.h"
+#include "moe_gemm_kernels_template.h"
 
 namespace tensorrt_llm
 {
-template class MoeGemmRunner<half, cutlass::uint4b_t>;
+template class MoeGemmRunner<half, half>;
 }
