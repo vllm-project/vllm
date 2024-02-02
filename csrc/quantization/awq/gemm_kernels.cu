@@ -193,7 +193,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16nXk32(
           __asm__ __volatile__(
             "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, addr; }\n"
             : "=r"(addr)
-            : "l"((void *)((&(B_shared[(((k_0_1 * (N * 16 + 128)) + (((int)threadIdx.y) * (N / 2)))) + (ax1_0 * 16))])) + (((((int)threadIdx.x) & 15) * (N + 8)) + ((((int)threadIdx.x) >> 4) * 8))))
+            : "l"((void *)((&(B_shared[(((k_0_1 * (N * 16 + 128)) + (((int)threadIdx.y) * (N / 2))) + (ax1_0 * 16))])) + (((((int)threadIdx.x) & 15) * (N + 8)) + ((((int)threadIdx.x) >> 4) * 8))))
           );
           __asm__ __volatile__(
             "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
