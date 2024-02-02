@@ -33,9 +33,10 @@ class OpenAIServingChat(OpenAIServing):
 
         if event_loop is not None and event_loop.is_running(
         ):  # If the current is instanced by Ray Serve, there is already a running event loop
-            event_loop.create_task(self._load_chat_template(chat_template))
+            event_loop.create_task(
+                self._load_chat_template_async(chat_template))
         else:  # When using single vLLM without engine_use_ray
-            asyncio.run(self._load_chat_template(chat_template))
+            self._load_chat_template(chat_template)
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -252,10 +253,7 @@ class OpenAIServingChat(OpenAIServing):
 
         return response
 
-    async def _load_chat_template(self, chat_template):
-        while self.tokenizer is None:
-            # Give the parent class time to laod the tokenizer
-            await asyncio.sleep(0.1)
+    def _load_chat_template(self, chat_template):
         if chat_template is not None:
             try:
                 with open(chat_template, "r") as f:
@@ -276,3 +274,9 @@ class OpenAIServingChat(OpenAIServing):
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
+
+    async def _load_chat_template_async(self, chat_template):
+        while self.tokenizer is None:
+            # Give the parent class time to laod the tokenizer
+            await asyncio.sleep(0.1)
+        self._load_chat_template(chat_template)
