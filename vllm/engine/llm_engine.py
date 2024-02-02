@@ -122,7 +122,8 @@ class LLMEngine:
         # Metric Logging.
         if self.log_stats:
             self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC)
+                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                labels=dict(model_name=model_config.model))
 
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
