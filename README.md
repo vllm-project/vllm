@@ -23,7 +23,7 @@ pip install -e .
 
 Run a 50% sparse model:
 
-```bash
+```python
 from vllm import LLM, SamplingParams
 
 model = LLM(
