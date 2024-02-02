@@ -79,6 +79,7 @@ RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
     && bash patch_xformers.rocm.sh \
+    && bash patch_rocm.rocm.sh \
     && python3 setup.py install \
     && cd ..
 
