@@ -117,13 +117,7 @@ class ModelRunner:
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             prefix_len = 0
-            prefix = seq_group_metadata.prefix
-            if prefix is not None and prefix.computed:
-                prefix_len = prefix.get_length()
-                prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_tables.append(prefix.get_block_numbers())
-            else:
-                prefix_block_tables.append([])
+            prefix_block_tables.append([])
             # actual prompt lens
             context_lens.append(prefix_len)
             subquery_lens.append(prompt_len - prefix_len)

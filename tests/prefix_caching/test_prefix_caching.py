@@ -38,4 +38,3 @@ def test_prefix_caching(
             outputs_without_prefix, outputs_with_prefix):
         assert (output_without_prefix.outputs[0].token_ids ==
                 output_with_prefix.outputs[0].token_ids)
-    assert len(llm.llm_engine.scheduler.prefix_pool.prefixes) == 1

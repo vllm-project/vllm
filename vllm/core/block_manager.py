@@ -1,6 +1,7 @@
 """A block manager that manages token blocks."""
 import enum
-from typing import Dict, List, Optional, Set, Tuple
+from collections import deque
+from typing import Dict, List, Optional, Set, Tuple, Deque
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
@@ -25,22 +26,38 @@ class BlockAllocator:
         self.block_size = block_size
         self.num_blocks = num_blocks
 
+        self.current_num_blocks = 0
+        self.table: Dict[int, PhysicalTokenBlock] = {}
         # Initialize the free blocks.
-        self.free_blocks: BlockTable = []
-        for i in range(num_blocks):
-            block = PhysicalTokenBlock(device=device,
-                                       block_number=i,
-                                       block_size=block_size)
-            self.free_blocks.append(block)
+        self.free_blocks: Deque[PhysicalTokenBlock] = deque()
 
-    def allocate(self) -> PhysicalTokenBlock:
-        if not self.free_blocks:
-            raise ValueError("Out of memory! No free blocks are available.")
+    def evict(self) -> PhysicalTokenBlock:
+        assert (len(self.free_blocks))
+        # Find the block in the main hash table
         block = self.free_blocks.pop()
-        block.ref_count = 1
+        key = list(self.table.keys())[list(self.table.values()).index()]
+        del self.table[key]
+        return block
+
+    def allocate_block(self) -> PhysicalTokenBlock:
+        if self.current_num_blocks == self.num_blocks:
+            return self.evict()
+        block = PhysicalTokenBlock(device=self.device,
+                                   block_number=self.current_num_blocks,
+                                   block_size=self.block_size)
+        self.current_num_blocks += 1
+        return block
+
+    def allocate(self, i: int) -> PhysicalTokenBlock:
+        if i not in self.table:
+            self.table[i] = self.allocate_block()
+        block = self.table[i]
+        block.ref_count += 1
+        # print(f"REFCOUNT ON ALLOCTION: {block}")
         return block
 
     def free(self, block: PhysicalTokenBlock) -> None:
+        # print(f"FREEING: {block}")
         if block.ref_count == 0:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
@@ -48,7 +65,7 @@ class BlockAllocator:
             self.free_blocks.append(block)
 
     def get_num_free_blocks(self) -> int:
-        return len(self.free_blocks)
+        return self.num_blocks - self.current_num_blocks
 
 
 class AllocStatus(enum.Enum):
@@ -103,9 +120,6 @@ class BlockSpaceManager:
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = len(seq.logical_token_blocks)
 
-        if seq_group.prefix is not None and seq_group.prefix.allocated:
-            num_required_blocks -= seq_group.prefix.get_num_blocks()
-
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
@@ -129,35 +143,16 @@ class BlockSpaceManager:
         num_prompt_blocks = len(seq.logical_token_blocks)
 
         block_table: BlockTable = []
-        prefix_block_table: BlockTable = []
-        num_prefix_blocks = 0
-
-        prefix = seq_group.prefix
-        if prefix is not None and prefix.allocated:
-            # Prefix has already been allocated. Use the existing block table.
-            num_prompt_blocks -= prefix.get_num_blocks()
-            for block in prefix.block_table:
-                block.ref_count += seq_group.num_seqs()
-                block_table.append(block)
 
         for logical_idx in range(num_prompt_blocks):
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
             else:
-                block = self.gpu_allocator.allocate()
+                block = self.gpu_allocator.allocate(seq.hash(logical_idx))
             # Set the reference counts of the token blocks.
-            block.ref_count = seq_group.num_seqs()
+            # block.ref_count = seq_group.num_seqs()
             block_table.append(block)
-
-        if prefix is not None and not prefix.allocated:
-            # Allocate blocks for the prefix, we will compute the prefix's
-            # KV cache in this run.
-            num_prefix_blocks = prefix.get_num_blocks()
-            prefix_block_table = block_table[:num_prefix_blocks]
-            for block in prefix_block_table:
-                block.ref_count += 1
-            prefix.set_block_table(prefix_block_table)
 
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
@@ -184,7 +179,8 @@ class BlockSpaceManager:
             else:
                 # The sequence has a new logical block.
                 # Allocate a new physical block.
-                block = self.gpu_allocator.allocate()
+                block = self.gpu_allocator.allocate(
+                    seq.hash(len(logical_blocks) - 1))
                 block_table.append(block)
                 return None
 
@@ -197,7 +193,8 @@ class BlockSpaceManager:
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
-            new_block = self.gpu_allocator.allocate()
+            new_block = self.gpu_allocator.allocate(
+                seq.hash(len(logical_blocks) - 1))
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
             return last_block.block_number, new_block.block_number
@@ -251,7 +248,8 @@ class BlockSpaceManager:
                     gpu_block = mapping[cpu_block]
                     gpu_block.ref_count += 1
                 else:
-                    gpu_block = self.gpu_allocator.allocate()
+                    gpu_block = self.gpu_allocator.allocate(
+                        seq.hash(len(seq.logical_blocks) - 1))
                     mapping[cpu_block] = gpu_block
                 new_block_table.append(gpu_block)
                 # Free the CPU block swapped in to GPU.
@@ -286,7 +284,8 @@ class BlockSpaceManager:
                     cpu_block = mapping[gpu_block]
                     cpu_block.ref_count += 1
                 else:
-                    cpu_block = self.cpu_allocator.allocate()
+                    cpu_block = self.cpu_allocator.allocate(
+                        seq.hash(len(seq.logical_blocks) - 1))
                     mapping[gpu_block] = cpu_block
                 new_block_table.append(cpu_block)
                 # Free the GPU block swapped out to CPU.
