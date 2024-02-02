@@ -114,11 +114,10 @@ class MarlinLinearMethod(LinearMethodBase):
             raise ValueError(
                 f"Weight input_size_per_partition = {input_size_per_partition} is not divisible by min_k_threads = {self.quant_config.min_k_threads}."
             )
-        if self.quant_config.group_size != -1:
-            if input_size_per_partition % self.quant_config.group_size != 0:
-                raise ValueError(
-                    f"Weight input_size_per_partition = f{input_size_per_partition} is not divisible by group_size = {self.quant_config.group_size}."
-                )
+        if self.quant_config.group_size != -1 and input_size_per_partition % self.quant_config.group_size != 0:
+            raise ValueError(
+                f"Weight input_size_per_partition = f{input_size_per_partition} is not divisible by group_size = {self.quant_config.group_size}."
+            )
 
         # Check that we have at least 4 tiles horizontally in the shard
         num_tiles_per_perm = self.quant_config.perm_len // (

@@ -180,14 +180,12 @@ class ModelConfig:
         # Parse quantization method from the HF model config, if available.
         hf_quant_config = getattr(self.hf_config, "quantization_config", None)
         if hf_quant_config is not None:
-            
+
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
             # If the GPTQ model is serialized in marlin format, use marlin.
-            if (
-                hf_quant_method == "gptq" and
-                "is_marlin_format" in hf_quant_config and
-                hf_quant_config["is_marlin_format"]
-            ):
+            if (hf_quant_method == "gptq"
+                    and "is_marlin_format" in hf_quant_config
+                    and hf_quant_config["is_marlin_format"]):
                 hf_quant_method = "marlin"
             if self.quantization is None:
                 self.quantization = hf_quant_method
