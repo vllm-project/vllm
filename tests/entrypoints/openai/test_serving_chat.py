@@ -4,7 +4,7 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"  # any model with a chat template should work here
+MODEL_NAME = "openai-community/gpt2"  
 CHAT_TEMPLATE = "Dummy chat template for testing"
 
 
