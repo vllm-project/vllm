@@ -19,10 +19,11 @@ class MockLogitsSampler(Sampler):
         self.fake_logits = fake_logits
 
     def forward(self, *args, **kwargs):
-        with patch("vllm.model_executor.layers.sampler._prune_hidden_states",
-                   lambda x, y: x), patch(
-                       "vllm.model_executor.layers.sampler._get_logits",
-                       lambda *args, **kwargs: self.fake_logits):
+        with patch(
+                "vllm.model_executor.layers.sampler._prune_hidden_states",
+                lambda x, y: x), patch(
+                    "vllm.model_executor.layers.sampler.Sampler._get_logits",
+                    lambda *args, **kwargs: self.fake_logits):
             return super().forward(*args, **kwargs)
 
 
@@ -38,7 +39,7 @@ def _prepare_test(
                              device=input_tensor.device,
                              dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(32000, fake_logits)
-    model_runner = ModelRunner(None, None, None)
+    model_runner = ModelRunner(None, None, None, None)
     return input_tensor, fake_logits, sampler, model_runner
 
 
@@ -66,7 +67,8 @@ def test_sampler_all_greedy(seed: int):
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
+                                                     prompt_lens,
+                                                     subquery_lens=prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              sampling_metadata=sampling_metadata)
@@ -105,7 +107,8 @@ def test_sampler_all_random(seed: int):
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
+                                                     prompt_lens,
+                                                     subquery_lens=prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              sampling_metadata=sampling_metadata)
@@ -140,7 +143,8 @@ def test_sampler_all_beam(seed: int):
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
+                                                     prompt_lens,
+                                                     subquery_lens=prompt_lens)
     sampler(embedding=None,
             hidden_states=input_tensor,
             sampling_metadata=sampling_metadata)
@@ -193,7 +197,8 @@ def test_sampler_mixed(seed: int):
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
+                                                     prompt_lens,
+                                                     subquery_lens=prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              sampling_metadata=sampling_metadata)
@@ -234,7 +239,8 @@ def test_sampler_logits_processors(seed: int):
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
+                                                     prompt_lens,
+                                                     subquery_lens=prompt_lens)
     sampler_output = sampler(embedding=None,
                              hidden_states=input_tensor,
                              sampling_metadata=sampling_metadata)
@@ -261,7 +267,7 @@ def test_sampler_top_k_top_p(seed: int):
                                device=input_tensor.device,
                                dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(32000, fake_logits)
-    model_runner = ModelRunner(None, None, None)
+    model_runner = ModelRunner(None, None, None, None)
 
     generation_model = GenerationMixin()
     generation_config = GenerationConfig(top_k=top_k,
@@ -288,7 +294,8 @@ def test_sampler_top_k_top_p(seed: int):
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
+                                                     prompt_lens,
+                                                     subquery_lens=prompt_lens)
 
     sample_probs = None
 

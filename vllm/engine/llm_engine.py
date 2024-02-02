@@ -5,11 +5,12 @@ import time
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Union)
 
+from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, LoRAConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import record_metrics
+from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -17,8 +18,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               get_tokenizer)
-from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port
+                                               TokenizerGroup)
+from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
 
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -27,8 +28,7 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
-
-_LOGGING_INTERVAL_SEC = 5
+_LOCAL_LOGGING_INTERVAL_SEC = 5
 
 
 class LLMEngine:
@@ -64,6 +64,7 @@ class LLMEngine:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        lora_config: Optional[LoRAConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
@@ -80,25 +81,23 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
+            f"disable_custom_all_reduce={parallel_config.disable_custom_all_reduce}, "
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
+            f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"use_flash_attn={model_config.use_flash_attn}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
         self.cache_config = cache_config
+        self.lora_config = lora_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.log_stats = log_stats
         self._verify_args()
 
-        self.tokenizer = get_tokenizer(
-            model_config.tokenizer,
-            tokenizer_mode=model_config.tokenizer_mode,
-            trust_remote_code=model_config.trust_remote_code,
-            tokenizer_revision=model_config.tokenizer_revision,
-            revision=model_config.revision)
+        self._init_tokenizer()
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -115,14 +114,15 @@ class LLMEngine:
         self._init_cache()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config)
+        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
 
-        # Logging.
-        self.last_logging_time = 0.0
-        # List of (timestamp, num_tokens)
-        self.num_prompt_tokens: List[Tuple[float, int]] = []
-        # List of (timestamp, num_tokens)
-        self.num_generation_tokens: List[Tuple[float, int]] = []
+        # Metric Logging.
+        if self.log_stats:
+            self.stat_logger = StatLogger(
+                local_interval=_LOCAL_LOGGING_INTERVAL_SEC)
+
+    def get_tokenizer_for_seq(self, sequence: Sequence):
+        return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -133,7 +133,8 @@ class LLMEngine:
             "Ray is required if parallel_config.world_size > 1.")
 
         self.workers: List[Worker] = []
-        distributed_init_method = f"tcp://{get_ip()}:{get_open_port()}"
+        distributed_init_method = get_distributed_init_method(
+            get_ip(), get_open_port())
         self.driver_worker = Worker(
             self.model_config,
             self.parallel_config,
@@ -141,10 +142,24 @@ class LLMEngine:
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method,
+            lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
         self._run_workers("init_model")
         self._run_workers("load_model")
+
+    def _init_tokenizer(self, **tokenizer_init_kwargs):
+        init_kwargs = dict(
+            enable_lora=bool(self.lora_config),
+            max_num_seqs=self.scheduler_config.max_num_seqs,
+            max_input_length=None,
+            tokenizer_mode=self.model_config.tokenizer_mode,
+            trust_remote_code=self.model_config.trust_remote_code,
+            revision=self.model_config.tokenizer_revision)
+        init_kwargs.update(tokenizer_init_kwargs)
+        self.tokenizer: TokenizerGroup = TokenizerGroup(
+            self.model_config.tokenizer, **init_kwargs)
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -208,7 +223,8 @@ class LLMEngine:
         for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
             worker.set_cuda_visible_devices.remote(node_gpus[node_id])
 
-        distributed_init_method = f"tcp://{driver_ip}:{get_open_port()}"
+        distributed_init_method = get_distributed_init_method(
+            driver_ip, get_open_port())
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
@@ -232,6 +248,8 @@ class LLMEngine:
                     local_rank,
                     rank,
                     distributed_init_method,
+                    lora_config=self.lora_config,
+                    kv_cache_dtype=self.cache_config.cache_dtype,
                 ))
 
         driver_rank = 0
@@ -243,6 +261,8 @@ class LLMEngine:
             driver_local_rank,
             driver_rank,
             distributed_init_method,
+            lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
 
@@ -256,6 +276,10 @@ class LLMEngine:
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
+        if self.lora_config:
+            self.lora_config.verify_with_model_config(self.model_config)
+            self.lora_config.verify_with_scheduler_config(
+                self.scheduler_config)
 
     def _init_cache(self) -> None:
         """Profiles the memory usage and initializes the KV cache.
@@ -284,6 +308,7 @@ class LLMEngine:
             block_size=self.cache_config.block_size,
             gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
             cpu_swap_space=self.cache_config.swap_space_bytes,
+            cache_dtype=self.cache_config.cache_dtype,
         )
 
         # Since we use a shared centralized controller, we take the minimum
@@ -331,6 +356,20 @@ class LLMEngine:
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
+    def encode_request(
+        self,
+        request_id: str,  # pylint: disable=unused-argument
+        prompt: Optional[str],
+        prompt_token_ids: Optional[List[int]] = None,
+        lora_request: Optional[LoRARequest] = None,
+    ):
+        if prompt_token_ids is None:
+            assert prompt is not None
+            prompt_token_ids = self.tokenizer.encode(request_id=request_id,
+                                                     prompt=prompt,
+                                                     lora_request=lora_request)
+        return prompt_token_ids
+
     def add_request(
         self,
         request_id: str,
@@ -338,6 +377,8 @@ class LLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        prefix_pos: Optional[int] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -354,6 +395,11 @@ class LLMEngine:
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            prefix_pos: If not None, we use the given position as the prefix
+                position for each prompt. We will cache the prefix's KV
+                cache and reuse it for the next request with the same prefix.
+                This is an experimental feature, and may be replaced with
+                automatic prefix caching in the future.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -379,20 +425,31 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+        if lora_request is not None and not self.lora_config:
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
         if arrival_time is None:
             arrival_time = time.monotonic()
-        if prompt_token_ids is None:
-            assert prompt is not None
-            prompt_token_ids = self.tokenizer.encode(prompt)
+        prompt_token_ids = self.encode_request(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            lora_request=lora_request)
 
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
-        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
+        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
+                       lora_request)
+
+        # Check whether the input specifies prefix
+        prefix = self.scheduler.prefix_pool.add_or_get_prefix(
+            prompt_token_ids[:prefix_pos], lora_request.lora_int_id
+            if lora_request else 0) if prefix_pos is not None else None
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time)
+                                  arrival_time, lora_request, prefix)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
@@ -442,11 +499,13 @@ class LLMEngine:
 
         current_worst_score = (current_worst_seq.get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id))
+            eos_token_id=self.get_tokenizer_for_seq(
+                current_worst_seq).eos_token_id))
         if early_stopping is False:
             highest_attainable_score = (best_running_seq.get_beam_search_score(
                 length_penalty=length_penalty,
-                eos_token_id=self.tokenizer.eos_token_id))
+                eos_token_id=self.get_tokenizer_for_seq(
+                    best_running_seq).eos_token_id))
         else:
             assert early_stopping == "never"
             if length_penalty > 0.0:
@@ -460,7 +519,8 @@ class LLMEngine:
                 highest_attainable_score = (
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
-                        eos_token_id=self.tokenizer.eos_token_id,
+                        eos_token_id=self.get_tokenizer_for_seq(
+                            best_running_seq).eos_token_id,
                         seq_len=max_possible_length))
             else:
                 # Otherwise, beam search will prefer shorter sequences. The
@@ -469,11 +529,13 @@ class LLMEngine:
                 highest_attainable_score = (
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
-                        eos_token_id=self.tokenizer.eos_token_id))
+                        eos_token_id=self.get_tokenizer_for_seq(
+                            best_running_seq).eos_token_id))
         return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
+
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
@@ -560,7 +622,7 @@ class LLMEngine:
         # Sort the finished sequences by their scores.
         all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id),
+            eos_token_id=self.get_tokenizer_for_seq(x[0]).eos_token_id),
                                reverse=True)
         for seq, parent, is_new in all_finished_seqs[:beam_width]:
             if is_new:
@@ -588,7 +650,7 @@ class LLMEngine:
         # Sort the running sequences by their scores.
         running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.tokenizer.eos_token_id),
+            eos_token_id=self.get_tokenizer_for_seq(x[0]).eos_token_id),
                                 reverse=True)
 
         # Check if we can stop the beam search.
@@ -663,10 +725,16 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
 
+        # Update prefix state, now all the uncomputed prefixes are computed.
+        for seq_group in scheduled_seq_groups:
+            if (seq_group.prefix is not None and seq_group.prefix.allocated
+                    and not seq_group.prefix.computed):
+                seq_group.prefix.computed = True
+
+        # Log stats.
         if self.log_stats:
-            # Log the system stats.
-            self._log_system_stats(scheduler_outputs.prompt_run,
-                                   scheduler_outputs.num_batched_tokens)
+            self.stat_logger.log(self._get_stats(scheduler_outputs))
+
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -741,86 +809,78 @@ class LLMEngine:
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
-        self._log_system_stats(False, 0)
+        """Forced log when no requests active."""
+        if self.log_stats:
+            self.stat_logger.log(self._get_stats(scheduler_outputs=None))
 
-    def _log_system_stats(
-        self,
-        prompt_run: bool,
-        num_batched_tokens: int,
-    ) -> None:
+    def _get_stats(self,
+                   scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
+        """Get Stats to be Logged to Prometheus."""
         now = time.monotonic()
-        # Log the number of batched input tokens.
-        if prompt_run:
-            self.num_prompt_tokens.append((now, num_batched_tokens))
-        else:
-            self.num_generation_tokens.append((now, num_batched_tokens))
 
-        should_log = now - self.last_logging_time >= _LOGGING_INTERVAL_SEC
-        if not should_log:
-            return
+        # KV Cache Usage in %.
+        num_total_gpu = self.cache_config.num_gpu_blocks
+        num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
+        gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
 
-        # Discard the old stats.
-        self.num_prompt_tokens = [(t, n) for t, n in self.num_prompt_tokens
-                                  if now - t < _LOGGING_INTERVAL_SEC]
-        self.num_generation_tokens = [(t, n)
-                                      for t, n in self.num_generation_tokens
-                                      if now - t < _LOGGING_INTERVAL_SEC]
+        num_total_cpu = self.cache_config.num_cpu_blocks
+        cpu_cache_usage = 0.
+        if num_total_cpu > 0:
+            num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
+            )
+            cpu_cache_usage = 1.0 - (num_free_cpu / num_total_cpu)
 
-        if len(self.num_prompt_tokens) > 1:
-            total_num_tokens = sum(n for _, n in self.num_prompt_tokens[:-1])
-            window = now - self.num_prompt_tokens[0][0]
-            avg_prompt_throughput = total_num_tokens / window
-        else:
-            avg_prompt_throughput = 0.0
-        if len(self.num_generation_tokens) > 1:
-            total_num_tokens = sum(n
-                                   for _, n in self.num_generation_tokens[:-1])
-            window = now - self.num_generation_tokens[0][0]
-            avg_generation_throughput = total_num_tokens / window
-        else:
-            avg_generation_throughput = 0.0
+        # Scheduler State
+        num_running = len(self.scheduler.running)
+        num_swapped = len(self.scheduler.swapped)
+        num_waiting = len(self.scheduler.waiting)
 
-        total_num_gpu_blocks = self.cache_config.num_gpu_blocks
-        num_free_gpu_blocks = (
-            self.scheduler.block_manager.get_num_free_gpu_blocks())
-        num_used_gpu_blocks = total_num_gpu_blocks - num_free_gpu_blocks
-        gpu_cache_usage = num_used_gpu_blocks / total_num_gpu_blocks
+        # Iteration stats if we have scheduler output.
+        num_prompt_tokens = 0
+        num_generation_tokens = 0
+        time_to_first_tokens = []
+        time_per_output_tokens = []
+        time_e2e_requests = []
+        if scheduler_outputs is not None:
+            prompt_run = scheduler_outputs.prompt_run
 
-        total_num_cpu_blocks = self.cache_config.num_cpu_blocks
-        if total_num_cpu_blocks > 0:
-            num_free_cpu_blocks = (
-                self.scheduler.block_manager.get_num_free_cpu_blocks())
-            num_used_cpu_blocks = total_num_cpu_blocks - num_free_cpu_blocks
-            cpu_cache_usage = num_used_cpu_blocks / total_num_cpu_blocks
-        else:
-            cpu_cache_usage = 0.0
+            # Number of Tokens.
+            if prompt_run:
+                num_prompt_tokens = scheduler_outputs.num_batched_tokens
+            else:
+                num_generation_tokens = scheduler_outputs.num_batched_tokens
 
-        record_metrics(
-            avg_prompt_throughput=avg_prompt_throughput,
-            avg_generation_throughput=avg_generation_throughput,
-            scheduler_running=len(self.scheduler.running),
-            scheduler_swapped=len(self.scheduler.swapped),
-            scheduler_waiting=len(self.scheduler.waiting),
+            # Latency Timings.
+            time_last_iters = []
+            for seq_group in scheduler_outputs.scheduled_seq_groups:
+                # Time since last token. (n.b. updates seq_group.last_token_time)
+                time_last_iters.append(seq_group.get_last_latency(now))
+                # Time since arrival for all finished requests.
+                if seq_group.is_finished():
+                    time_e2e_requests.append(now - seq_group.arrival_time)
+
+            time_to_first_tokens = time_last_iters if prompt_run else []
+            time_per_output_tokens = [] if prompt_run else time_last_iters
+
+        return Stats(
+            now=now,
+            num_running=num_running,
+            num_swapped=num_swapped,
+            num_waiting=num_waiting,
             gpu_cache_usage=gpu_cache_usage,
             cpu_cache_usage=cpu_cache_usage,
+            num_prompt_tokens=num_prompt_tokens,
+            num_generation_tokens=num_generation_tokens,
+            time_to_first_tokens=time_to_first_tokens,
+            time_per_output_tokens=time_per_output_tokens,
+            time_e2e_requests=time_e2e_requests,
         )
-
-        logger.info("Avg prompt throughput: "
-                    f"{avg_prompt_throughput:.1f} tokens/s, "
-                    "Avg generation throughput: "
-                    f"{avg_generation_throughput:.1f} tokens/s, "
-                    f"Running: {len(self.scheduler.running)} reqs, "
-                    f"Swapped: {len(self.scheduler.swapped)} reqs, "
-                    f"Pending: {len(self.scheduler.waiting)} reqs, "
-                    f"GPU KV cache usage: {gpu_cache_usage * 100:.1f}%, "
-                    f"CPU KV cache usage: {cpu_cache_usage * 100:.1f}%")
-        self.last_logging_time = now
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
-             self.tokenizer,
+             self.get_tokenizer_for_seq(seq),
              all_input_ids=seq.get_token_ids(),
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
@@ -862,10 +922,27 @@ class LLMEngine:
             return
 
         # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == self.tokenizer.eos_token_id):
+        if ((not sampling_params.ignore_eos) and seq.get_last_token_id()
+                == self.get_tokenizer_for_seq(seq).eos_token_id):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
+        return self._run_workers(
+            "add_lora",
+            lora_request=lora_request,
+        )
+
+    def remove_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self._run_workers(
+            "remove_lora",
+            lora_id=lora_id,
+        )
+
+    def list_loras(self) -> List[int]:
+        return self._run_workers("list_loras")
 
     def _run_workers(
         self,
