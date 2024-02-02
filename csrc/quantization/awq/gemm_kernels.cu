@@ -27,8 +27,8 @@ __pack_half2(const half x, const half y) {
   return (v1 << 16) | v0;
 }
 
+template<int N>
 __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16nXk32(
-  int N,
   int G,
   int split_k_iters,
   half* __restrict__ A,
@@ -426,8 +426,8 @@ torch::Tensor awq_gemm(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        vllm::awq::gemm_forward_4bit_cuda_m16nXk32<<<num_blocks, threads_per_block, 0, stream>>>(
-            128, group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels,
+        vllm::awq::gemm_forward_4bit_cuda_m16nXk32<128><<<num_blocks, threads_per_block, 0, stream>>>(
+            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels,
             num_out_channels, out_feats);
     }
     else if (num_out_channels % 64 == 0)
@@ -438,8 +438,8 @@ torch::Tensor awq_gemm(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        vllm::awq::gemm_forward_4bit_cuda_m16nXk32<<<num_blocks, threads_per_block, 0, stream>>>(
-            64, group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels,
+        vllm::awq::gemm_forward_4bit_cuda_m16nXk32<64><<<num_blocks, threads_per_block, 0, stream>>>(
+            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels,
             num_out_channels, out_feats);
     }
     return _out_feats.sum(0);
