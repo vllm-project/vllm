@@ -34,8 +34,8 @@
 
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaUtils.h"
-#include "tensorrt_llm/kernels/cutlass_kernels/cutlass_heuristic.h"
-#include "tensorrt_llm/kernels/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
+#include "../cutlass_kernels/cutlass_heuristic.h"
+#include "../cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <math.h>
