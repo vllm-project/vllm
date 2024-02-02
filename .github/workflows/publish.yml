@@ -10,11 +10,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
+        description: 'build vllm'
+        default: '0.3.0'
         required: true
         type: string
   workflow_call:
     inputs:
       version:
+        description: 'build vllm'
+        default: '0.3.0'
         required: true
         type: string   
 
