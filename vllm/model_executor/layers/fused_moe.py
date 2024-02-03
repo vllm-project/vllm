@@ -287,3 +287,95 @@ def fused_moe(hidden_states: torch.Tensor,
                          out=hidden_states)
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1)
+
+
+def fused_moe_cuda(hidden_states: torch.Tensor,
+                   w1: torch.Tensor,
+                   w2: torch.Tensor,
+                   topk_weights: torch.Tensor,
+                   topk_ids: torch.Tensor,
+                   inplace=False):
+    """
+    This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
+    
+    Parameters:
+    - hidden_states (torch.Tensor): The input tensor to the MoE layer.
+    - w1 (torch.Tensor): The first set of expert weights.
+    - w2 (torch.Tensor): The second set of expert weights.
+    - topk_weights (torch.Tensor): The weights for the top-k selected experts.
+    - topk_ids (torch.Tensor): The indices of the top-k selected experts.
+    - inplace (bool): If True, perform the operation in-place. Defaults to False.
+    
+    Returns:
+    - torch.Tensor: The output tensor after applying the MoE layer.
+    """
+    # Check constraints.
+    assert hidden_states.shape[1] == w1.shape[2], "Incompatible dimensions"
+    assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
+    assert w1.is_contiguous(), "Expert weights1 must be contiguous"
+    assert w2.is_contiguous(), "Expert weights2 must be contiguous"
+    assert hidden_states.dtype in [
+        torch.float32, torch.float16, torch.bfloat16
+    ]
+    M, _ = hidden_states.shape
+    E, N, _ = w1.shape
+
+    intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+    intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+
+    # sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+    #     topk_ids, config['BLOCK_SIZE_M'], E)
+
+    permutation = torch.zeros(M * topk_ids.shape[1], device=hidden_states.device, dtype=torch.int32)
+    batch_sizes = torch.tensor([M//4, M//4, M//4, M//4, M//4, M//4, M//4, M//4], dtype=torch.int64)
+
+    intermediate_cache0 = hidden_states[permutation,:]
+
+    ops.fused_moe(
+        intermediate_cache0,
+        # hidden_states,
+        w1,
+        intermediate_cache1,
+        # topk_weights,
+        batch_sizes,
+        #
+        topk_ids,
+        # sorted_token_ids,
+        # expert_ids,
+        # num_tokens_post_padded,
+        # False,
+        # topk_ids.shape[1],
+        # parallelism
+    )
+
+    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+
+    ops.fused_moe(
+        intermediate_cache2,
+        w2,
+        intermediate_cache3,
+        # topk_weights,
+        batch_sizes,
+        # 
+        topk_ids,
+        # sorted_token_ids,
+        # expert_ids,
+        # num_tokens_post_padded,
+        # True,
+        # 1,
+        # parallelism
+    )
+
+    if inplace:
+        return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                         dim=1,
+                         out=hidden_states)
+    return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                     dim=1)

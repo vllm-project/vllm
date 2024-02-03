@@ -31,7 +31,7 @@ from transformers import MixtralConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_moe, fused_moe_cuda
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                QKVParallelLinear,
@@ -135,12 +135,12 @@ class MixtralMoE(nn.Module):
                                                        dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        final_hidden_states = fused_moe(hidden_states,
-                                        self.ws,
-                                        self.w2s,
-                                        routing_weights,
-                                        selected_experts,
-                                        inplace=True)
+        final_hidden_states = fused_moe_cuda(hidden_states,
+                                             self.ws,
+                                             self.w2s,
+                                             routing_weights,
+                                             selected_experts,
+                                             inplace=True)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(

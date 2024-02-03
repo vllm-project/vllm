@@ -128,3 +128,17 @@ std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string> &handles,
                             const std::vector<std::vector<int64_t>> &offsets);
 #endif
+
+void fused_moe(
+  torch::Tensor A,
+  torch::Tensor B,
+  torch::Tensor C,
+  torch::Tensor topk_weights,
+  torch::Tensor topk_ids,
+  // torch::Tensor sorted_token_ids,
+  // torch::Tensor expert_ids,
+  // torch::Tensor num_tokens_post_padded,
+  // bool MUL_ROUTED_WEIGHT,
+  // int top_k,
+  // int parallelism
+);
