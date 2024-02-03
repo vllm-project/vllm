@@ -10,7 +10,7 @@ logger = init_logger(__name__)
 
 # Architecture -> (module, class).
 _MODELS = {
-    "AquilaModel": ("aquila", "AquilaForCausalLM"),
+    "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("aquila", "AquilaForCausalLM"),  # AquilaChat2
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
@@ -41,7 +41,6 @@ _MODELS = {
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
-    "YiForCausalLM": ("yi", "LlamaForCausalLM")
 }
 
 # Models not supported by ROCm.
