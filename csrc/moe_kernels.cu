@@ -29,7 +29,7 @@ namespace vllm {
 #define GROUPED_GEMM_STRINGIFY(x) \
   GROUPED_GEMM_STRINGIFY_HELPER(x)
 
-using DefaultConfig = ::cutlass::gemm::device::DefaultGemmConfiguration<::cutlass::arch::OpClassTensorOp, ::cutlass::arch::Sm80, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, float>;
+using DefaultConfig = ::cutlass::gemm::device::DefaultGemmConfiguration<::cutlass::arch::OpClassTensorOp, ::cutlass::arch::Sm90, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, float>;
 
 
 // TODO(tgale): Update this for SM90 when it's supported by CUTLASS.
