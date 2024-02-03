@@ -98,6 +98,7 @@ class PagedAttention(nn.Module):
                 key_cache,
                 value_cache,
                 input_metadata.slot_mapping.flatten(),
+                input_metadata.kv_cache_dtype,
             )
 
         if input_metadata.is_prompt:
@@ -199,7 +200,7 @@ def _make_alibi_bias(
     seq_len: int,
     dtype: torch.dtype,
 ) -> LowerTriangularMaskWithTensorBias:
-    bias = torch.arange(seq_len, dtype=dtype, device="cuda")
+    bias = torch.arange(seq_len, dtype=dtype)
     # NOTE(zhuohan): HF uses
     #     `bias = bias[None, :].repeat(prompt_len, 1)`
     # here. We find that both biases give the same results, but
@@ -265,6 +266,7 @@ def _paged_attention(
             block_size,
             input_metadata.max_context_len,
             alibi_slopes,
+            input_metadata.kv_cache_dtype,
         )
     else:
         # Run PagedAttention V2.
@@ -295,5 +297,6 @@ def _paged_attention(
             block_size,
             input_metadata.max_context_len,
             alibi_slopes,
+            input_metadata.kv_cache_dtype,
         )
     return output
