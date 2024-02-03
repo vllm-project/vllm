@@ -2,12 +2,19 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
 import torch
+from typing import Type
 
 from vllm.model_executor.layers.linear import LinearMethodBase
-
+from magic_wand import CompressedStorageFormat
 
 class SparsityConfig(ABC):
     """Base class for sparsity configs."""
+    # storage_format_cls: Type[CompressedStorageFormat] = CompressedStorageFormat
+
+    @abstractmethod
+    def get_storage_format_cls(self) -> Type[CompressedStorageFormat]:
+        """Sparse representation format"""
+        raise NotImplementedError
 
     @abstractmethod
     def get_name(self) -> str:

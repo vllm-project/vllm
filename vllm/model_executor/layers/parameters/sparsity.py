@@ -1,6 +1,7 @@
 import torch
 
-from magic_wand import SparseTensor, SparseBitmaskStorageFormat
+from typing import Type
+from magic_wand import SparseTensor, CompressedStorageFormat
 
 
 class SparseParameter(SparseTensor):
@@ -10,6 +11,7 @@ class SparseParameter(SparseTensor):
         cls,
         shape: torch.Size,
         dtype: torch.dtype,
+        storage_format_cls: Type[CompressedStorageFormat]
     ):
         assert torch.__version__ > (1,
                                     10), "SparseTensor requires PyTorch 1.11+"
@@ -17,7 +19,7 @@ class SparseParameter(SparseTensor):
                                                    size=shape,
                                                    dtype=dtype,
                                                    requires_grad=False)
-        self.storage_format_cls = SparseBitmaskStorageFormat
+        self.storage_format_cls = storage_format_cls
         self.compressed_data = None
         self.dense_data = None
         self._is_param = True
